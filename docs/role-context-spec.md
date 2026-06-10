@@ -77,6 +77,7 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 - **サマリ保存義務（必須）**: 終了・中断の前に、議論の結論・未解決の論点・admin への起票候補を相談サマリとしてまとめ、doobidoo へ保存する（会話履歴に依存させない）。
 - **モデル規約**: 基本 **opus**（ユーザー指定時のみ fable）。consult は admin と同じ main-loop 系統ゆえ fable 起動が許される例外（WF agent への fable 投入とは無関係）。
   - 起動は `cld-spawn --model opus "<テンプレ本文>"` を直接呼ぶ（`/session:spawn` の NLU は `--model` を解析せず新規既定 `claude-fable-5` を継承するため、基本 opus にできない）。
+- **暫定運用（un-sl9 検証完了まで）**: working memory の session-scoped 化（un-gcu）は実装・live 済みで compact 跨ぎ復元（PostCompact restore）は検証済みだが、anchor 同居 2 セッション同時運用の live e2e（un-sl9 検証点(2) = working-memory 衝突非発生）が未消化のため、それが消化されるまで consult は **compaction 系スキル（ready-compaction 等）の使用を控える**。検証完了後は un-sl9 が一次出典 3 文書と本条項を撤去する（撤去は un-sl9 の仕事）。一次出典: bd un-tao 確定 5 点(2)・CLAUDE.md 開発トポロジー節・session-orchestration-strategy.md §6・現状の検証状態は bd un-sl9/un-gcu notes。
 
 > 一次出典: ubuntu-note-system `docs/session-orchestration-strategy.md` §6（外部・本リポ未同梱。consult 起動テンプレ・read-only 規律・記憶系のみ write・サマリ保存義務・モデル opus 規約。本文の SSOT は上記 §2.3 にインライン移設済み）/ bd un-tao（consult 規約 SSOT）/ scribe-design.md §14（consult = 第 3 role・docs §6 テンプレを scribe plugin へ移設）。
 
