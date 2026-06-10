@@ -1,0 +1,3 @@
+# worker cell の self-test は untracked(コミットしない・docs/protocol.md §2)
+*.local.sh
+selftest-*.local.sh
