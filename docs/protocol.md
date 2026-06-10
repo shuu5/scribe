@@ -88,7 +88,7 @@ worker↔beads = **B/hybrid で確定**（scribe-design.md §8）。台帳は an
 
 - issue 作成・依存グラフ・assignment・最終判断・**`bd dolt push` / remote 同期点**を所有する（§5 末で push）。
 
-> 一次出典: scribe-design.md §8（B/hybrid 確定）/ scripts/bdw（flock 直列化の WHY・un-gmq 実測）/ doobidoo `13447a54`（role 別 PRIME 分割 = worker bd create 逸脱の構造原因の発見／`verified`）/ bd un-cbi notes（worker が follow-up を bd create せず notes 提案した実例）。
+> 一次出典: scribe-design.md §8（B/hybrid 確定）/ anchor リポの `scripts/bdw`（scribe 出荷物ではない substrate・flock 直列化の WHY・un-gmq 実測）/ doobidoo `13447a54`（role 別 PRIME 分割 = worker bd create 逸脱の構造原因の発見／`verified`）/ bd un-cbi notes（worker が follow-up を bd create せず notes 提案した実例）。
 
 ---
 
@@ -152,7 +152,7 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 - worker が idle に落ちた（prompt で停止した・queue exhausted）場合、cc-session の `session-comm` で操舵注入して復旧する: `wait-ready`（input-waiting を待つ）→ `inject-file`（flock で確実配送）。
 - inject は worker の pane で起き、**admin の context には載らない**（PUSH チャネル・scribe-design.md §9）。`-t` 参照は window ID（`@N`）か `session:index` で行う（§1 の dotted id 衝突回避）。
 
-> 一次出典: doobidoo `6d11...`(un-8q5 pilot 横断 GOTCHA: session-state が WF 実行中に input-waiting を返す false-DONE／`verified`)・bd un-jax 引き継ぎ / scribe-design.md §9 通信モデル（PUSH=操舵注入）/ docs/session-orchestration-strategy.md §3.2（session-comm wait-ready→inject）。
+> 一次出典: doobidoo `6d11f667`(un-8q5 pilot 横断 GOTCHA: session-state が WF 実行中に input-waiting を返す false-DONE／`verified`)・bd un-jax 引き継ぎ / scribe-design.md §9 通信モデル（PUSH=操舵注入）/ ubuntu-note-system `docs/session-orchestration-strategy.md` §3.2（外部・本リポ未同梱・session-comm wait-ready→inject）。
 
 ---
 
@@ -164,7 +164,7 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 | doobidoo `e2addec8` | ミニ grill 2 点確定（PRIME 重複 = 案 A 責務分割 / consult 識別 = `SCRIBE_ROLE` env 一次・anchor 無印 = admin 既定） |
 | doobidoo `ac9022d8` | Wave1 手動プロトコル実測 |
 | doobidoo `3b838167` | Wave2 完了（gate funnel 実証値・errata 規約初運用・consult 規約・snapshot 合成で diff 供給不要・argshim 退役） |
-| doobidoo `6d11…`（un-8q5 pilot N=3） | spawn-latency 2-3s・bdw lost-update ゼロ・errata 規約・WF args false-clean・session-state false-DONE・N=funnel 律速 |
+| doobidoo `6d11f667`（un-8q5 pilot N=3） | spawn-latency 2-3s・bdw lost-update ゼロ・errata 規約・WF args false-clean・session-state false-DONE・N=funnel 律速 |
 | bd un-3v9 notes | grill 議事（7 論点全確定） |
 | bd un-it7 notes | v0 実装 epic（5 cell 分解・spawn ヘルパー設計引き継ぎ） |
 | bd un-cbi notes | spawn 命名規約 producer 追従・dotted id の tmux -t 衝突 live finding・worker receivedArgs 報告実例 |

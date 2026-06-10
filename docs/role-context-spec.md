@@ -67,7 +67,7 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 
 ### 2.3 consult（anchor 同居可・read-only セッション）
 
-**伝える**: 設計議論・grill 専用の第 2 対話相手。admin/worker とは別系統で、オーケストレーション・gate 代行・実装はしない。以下は session-orchestration-strategy.md §6 の起動テンプレ（規約 SSOT = bd un-tao）を scribe plugin 側へ**移設**したもの:
+**伝える**: 設計議論・grill 専用の第 2 対話相手。admin/worker とは別系統で、オーケストレーション・gate 代行・実装はしない。以下は ubuntu-note-system `docs/session-orchestration-strategy.md` §6（外部・本リポ未同梱）の起動テンプレ（規約 SSOT = bd un-tao）を scribe plugin 側へ**移設**したもの（移設後は本書 §2.3 の本文が内容の SSOT・外部パスは原典トレース用）:
 
 - **役割と禁止**:
   - 用途は設計議論・grill のみ。オーケストレーション・gate 代行・実装はしない。
@@ -78,7 +78,7 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 - **モデル規約**: 基本 **opus**（ユーザー指定時のみ fable）。consult は admin と同じ main-loop 系統ゆえ fable 起動が許される例外（WF agent への fable 投入とは無関係）。
   - 起動は `cld-spawn --model opus "<テンプレ本文>"` を直接呼ぶ（`/session:spawn` の NLU は `--model` を解析せず新規既定 `claude-fable-5` を継承するため、基本 opus にできない）。
 
-> 一次出典: docs/session-orchestration-strategy.md §6（consult 起動テンプレ・read-only 規律・記憶系のみ write・サマリ保存義務・モデル opus 規約）/ bd un-tao（consult 規約 SSOT）/ scribe-design.md §14（consult = 第 3 role・docs §6 テンプレを scribe plugin へ移設）。
+> 一次出典: ubuntu-note-system `docs/session-orchestration-strategy.md` §6（外部・本リポ未同梱。consult 起動テンプレ・read-only 規律・記憶系のみ write・サマリ保存義務・モデル opus 規約。本文の SSOT は上記 §2.3 にインライン移設済み）/ bd un-tao（consult 規約 SSOT）/ scribe-design.md §14（consult = 第 3 role・docs §6 テンプレを scribe plugin へ移設）。
 
 ---
 
@@ -88,3 +88,4 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 - §1 の判定で role を解決し、§2 の role 別内容を `docs/protocol.md` から引いて SessionStart 出力（additionalContext）として注入する。**規約本文は protocol.md を SSOT とし、注入 script は「どの節を出すか」だけを持つ**（本文を script に二重化しない）。
 - PRIME 重複の解消（案 A 責務分割・PRIME を bd 基礎へ縮小）は注入 live 後・別 cell（C4 = bd un-0c6）。それまでは注入順序で worker の create 禁止が後勝ちになるよう配置する。
 - v0 は堀 OFF。PostToolUse diagnostics hook（scribe-design.md §11）は配線しない（v1+）。
+- **C2 着手時の selftest 強化（C1 gate からの引き継ぎ）**: C1 の `selftest-<id>.local.sh` は hooks.json の安全性を「ガード idiom（`[ -x`/`test -x`）の存在」の部分一致で検査する。これは見せかけガード + 末尾無条件実行（`[ -x "$S" ] && "$S"; evil.sh` 等）を false-PASS しうる脆い判定（C1 gate finding・出荷物 hooks.json 自体は真に no-op で安全のため C1 では minor 据置）。C2 が `session-start-role-inject.sh` を実装して wire を編集する際は、selftest の hook 検査を「各 command を `;`/`&&`/`||` で分割し、`${CLAUDE_PLUGIN_ROOT}` script 参照を含む実行 token が必ず直前ガードに支配される」or「`CLAUDE_PLUGIN_ROOT` を未存在パスにして実行し副作用ゼロ・exit 0 をドライラン観測」する dynamic assertion へ強化すること。
