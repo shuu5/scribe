@@ -1,0 +1,5 @@
+{
+  "name": "scribe",
+  "version": "0.1.0",
+  "description": "per-project・Claude Code ネイティブの実装 administrator(ユーザー代理 AI)プラグイン。substrate(cc-session/beads/doobidoo)を compose し、spawn/監視/gate/role 別文脈注入を担う orchestration 層。v0 = 堀なし軽量モード(成文化 + 道具 + 3 role SessionStart 注入)。"
+}
