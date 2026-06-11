@@ -125,27 +125,33 @@ setup() {
   [[ "$output" != *"[plan]"* ]]
 }
 
-@test "spawn: consult は cld-spawn に --window-name consult を渡す（汎用命名落ち防止・un-01h）" {
+@test "spawn: consult は cld-spawn に --window-name consult-HHMMSS と --force-new を渡す（reuse 偽成功防止・un-01h gate）" {
   run "$SPAWN" --dry-run --consult un-consult
   [ "$status" -eq 0 ]
-  # cld-spawn 起動行に --window-name consult が含まれる（--bd-id 不在の consult を fleet-monitor で識別）。
   cld_line="$(echo "$output" | grep -E 'cld-spawn --cd')"
-  [[ "$cld_line" == *"--window-name consult"* ]]
+  # window 名は consult-<6 桁時刻>（固定 `consult` は cld-spawn の完全一致 reuse で偽成功 fail-open する）。
+  re='--window-name consult-[0-9]{6}'
+  [[ "$cld_line" =~ $re ]]
+  # reuse 経路を構造的に封鎖（必ず新セッションを立てる）。
+  [[ "$cld_line" == *"--force-new"* ]]
   # window 名を持ち込んでも --bd-id は依然渡さない（consult 設計）。
   [[ "$cld_line" != *"--bd-id"* ]]
 }
 
-@test "spawn: consult は bd id 省略でも --window-name consult を渡す" {
+@test "spawn: consult は bd id 省略でも --window-name consult-HHMMSS と --force-new を渡す" {
   run "$SPAWN" --dry-run --consult
   [ "$status" -eq 0 ]
   cld_line="$(echo "$output" | grep -E 'cld-spawn --cd')"
-  [[ "$cld_line" == *"--window-name consult"* ]]
+  re='--window-name consult-[0-9]{6}'
+  [[ "$cld_line" =~ $re ]]
+  [[ "$cld_line" == *"--force-new"* ]]
 }
 
-@test "spawn: worker（非 consult）は consult window 名を持ち込まない（wt-<id> 命名規約を保つ）" {
+@test "spawn: worker（非 consult）は consult window 名も --force-new も持ち込まない（wt-<id> 命名規約を保つ）" {
   run "$SPAWN" --dry-run un-4nm
   [ "$status" -eq 0 ]
   [[ "$output" != *"--window-name consult"* ]]
+  [[ "$output" != *"--force-new"* ]]
 }
 
 @test "spawn: 非 consult では env-file を注入しない" {
