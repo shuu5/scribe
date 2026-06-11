@@ -1,3 +1,7 @@
 # worker cell の self-test は untracked(コミットしない・docs/protocol.md §2)
 *.local.sh
 selftest-*.local.sh
+
+# consult 起動の env-file（道具は anchor 外 /tmp に出すが、万一 anchor で生成されても
+# 誤コミットしない defense-in-depth・scribe-spawn.sh --consult）
+.scribe-consult.env
