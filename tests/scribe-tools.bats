@@ -228,3 +228,21 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"wt-un-4nm"* ]]
 }
+
+# real モードでの「安全失敗→チェックリスト継続→終了コード非 0」を検証する。
+# 非 git ディレクトリを --repo に渡すと step1(worktree remove)/step2(branch -d) が安全失敗する。
+# window は存在しない名前を渡して kill を確実に skip させる（実 window を kill しない）。
+@test "cleanup: step1 が安全失敗しても後続 step を出力し終了コード非 0（set -e で中断しない）" {
+  tmpdir="$(mktemp -d)"   # 非 git ディレクトリ
+  run "$CLEANUP" --yes --repo "$tmpdir" --worktree "$tmpdir/nope" \
+      --branch "spawn/no-such-$$" --window "wt-no-such-window-$$" un-4nm
+  rm -rf "$tmpdir"
+  # step1 が失敗しても、後続の window checklist / dolt push リマインドまで歩き切る
+  [[ "$output" == *"warn:"* ]]
+  [[ "$output" == *"dolt push"* ]]
+  # 失敗があったので終了コードは非 0（fail-closed）
+  [ "$status" -ne 0 ]
+  # force 系は依然 dry-run/real とも出さない
+  [[ "$output" != *"branch -D"* ]]
+  [[ "$output" != *"kill-server"* ]]
+}

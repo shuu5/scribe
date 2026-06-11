@@ -89,12 +89,20 @@ run_step() {
   fi
   if confirm "$label"; then
     echo "→ $label: $*"
-    "$@"
+    # set -euo pipefail 下でも 1 step の失敗でチェックリストを中断させない。
+    # 例: force 無しの `git worktree remove` は dirty で安全失敗するのが意図だが、bare 実行だと
+    # その非 0 で script 全体が中断し、後続 step（window kill / dolt push リマインド）が出ない。
+    # → 失敗を握って集計し、最後に終了コードへ反映する（fail-safe だが歩き切る）。force 系は導入しない。
+    if ! "$@"; then
+      echo "  warn: $label が失敗（安全失敗の可能性・手動対応を確認）"
+      FAILED=$((FAILED + 1))
+    fi
   else
     echo "  skip: $label"
   fi
 }
 
+FAILED=0   # run_step が握った失敗の件数（最後に終了コードへ反映）
 echo "[cleanup] issue=$ID（破壊操作は確認プロンプト付き・force 系は使わない）"
 
 # --- 1. worktree remove（worktree 解決後）---
@@ -129,4 +137,9 @@ fi
 # --- 4. dolt push 同期点（admin 専用＝自動実行しない・リマインドのみ・protocol.md §3/§5）---
 echo "[checklist] 同期点: 一連の funnel が片付いたら admin が手動で 'bd dolt push'（worker/自動は push しない）"
 
+# チェックリストは最後まで歩いた上で、握った失敗があれば終了コードに反映する（fail-closed）。
+if [[ "$FAILED" -gt 0 ]]; then
+  echo "[cleanup] done（issue=$ID・$FAILED 件の step が失敗＝手動確認が必要）"
+  exit 1
+fi
 echo "[cleanup] done（issue=$ID）"
