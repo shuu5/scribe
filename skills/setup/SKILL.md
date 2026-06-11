@@ -1,0 +1,143 @@
+---
+name: setup
+description: |
+  scribe を使い始めるプロジェクトの beads(bd) セットアップを「我々の正しい構成」へ冪等に収束させ、
+  scribe role 別 SessionStart 注入を opt-in 成立させる reconciler（旧 ubuntu-note-system beads-init を移管）。
+  正しく入っていれば何もせず、間違って入っていれば（bd 既定の汚染・二重発火・旧役割入り PRIME）修正し、未導入なら正しく入れる。
+  bd 既定の init は CLAUDE.md/AGENTS.md を方針と正反対のポリシー（bd remember 推奨・git push 必須）で汚染し、
+  project-local settings.json を生成してグローバル hook と二重発火する。本スキルはそれを検出・是正する。
+
+  Use when user wants to: このプロジェクトで scribe を使い始める / beads を入れる・直す / bd を初期化 / issue 追跡を始める,
+  says 「scribe をこのリポに入れる」「beads入れて」「bd init して」「beads のセットアップを直して」「このリポで scribe/bd 使いたい」。
+---
+
+# scribe:setup Skill（冪等 reconciler — beads 導入 + scribe opt-in）
+
+scribe を使い始めるプロジェクトの beads セットアップを**我々の正しい構成へ収束**させ、**scribe role 別
+SessionStart 注入が opt-in で発火する状態**にする。各次元を独立に「検出 → 正しければ skip / 違えば修正 /
+無ければ追加」する。**何度実行しても安全（冪等）**。
+
+> **scribe opt-in の意味**: scribe は per-project の opt-in plugin。プロジェクトに `.beads/`（永続タスク台帳）が
+> でき、PRIME が role 中立版になると、scribe の role 別 SessionStart 注入（admin / worker / consult）が矛盾なく
+> 機能する。旧・役割入り PRIME（「着手前に bd create」「終了に bd dolt push」を全セッションへ一律注入）は scribe
+> 注入と二重・矛盾するため、本 skill は PRIME を role 中立版へ同期する。
+
+## 正しい構成（収束ゴール）
+1. `bd` が **v1.0.4**（v1.0.5+ は #4259 で禁止）
+2. `.beads/` が存在（embedded Dolt）
+3. `bd config` の `backup.git-push = false`
+4. Dolt remote `origin = git+https://...`（マルチPC同期）
+5. `.beads/PRIME.md` が**我々の役割中立版**（役割分担・bd remember 禁止・役割規約は scribe role 注入へ委譲）
+6. CLAUDE.md/AGENTS.md に **bd 既定の汚染ブロックが無い**（`bd remember` 推奨/`git push` MANDATORY 等）
+7. project-local `.claude/settings.json` に **bd の `bd prime` hook が無い**（グローバル hook と二重発火しない）
+8. `.gitignore` が `issues.jsonl`/`interactions.jsonl`/`embeddeddolt/` を除外（Dolt が SSOT）
+9. プロジェクト CLAUDE.md に**矯正済みポインタ節**（bd マーカー無し・役割規約は scribe role 注入が SSOT）
+10. **scribe role 注入が opt-in 成立**: `.beads/` が在り（= scribe で管理する意思表示）、PRIME が role 中立版で
+    scribe role 別 SessionStart 注入（admin/worker/consult）と矛盾しない。scribe plugin 登録済みなら、これで
+    worktree=worker / `SCRIBE_ROLE=consult`=consult / anchor=admin の注入が矛盾なく発火する状態になる。
+
+## Step 0: 状態検出（read-only。まず現状を一覧化して報告）
+
+git root で以下を実行し、各次元の状態を把握する:
+```bash
+root=$(git rev-parse --show-toplevel) && cd "$root"
+bd --version 2>/dev/null                                   # → 1.0.4 か
+test -d .beads && echo "BEADS:yes" || echo "BEADS:no"
+bd config get backup.git-push 2>/dev/null                  # → false か
+bd dolt remote list 2>/dev/null | grep -q '://' && echo "REMOTE:yes" || echo "REMOTE:no"
+# PRIME.md が我々の版か（sentinel: 役割分担 + bd remember 禁止）
+if test -f .beads/PRIME.md && { grep -q 'beads-init-template v:' .beads/PRIME.md || { grep -q '役割分担（最重要）' .beads/PRIME.md && grep -q 'memories` は使わない' .beads/PRIME.md; }; }; then echo "PRIME:ours"; else echo "PRIME:missing/wrong"; fi   # marker か役割分担 sentinel で判定（既存の marker 無し正版も救済＝移行安全）
+# PRIME が旧・役割入り版でないか（scribe 注入と矛盾する一律注入）。我々版でも旧版だと scribe opt-in 未成立。
+if test -f .beads/PRIME.md && grep -qE 'セッション終了プロトコル|着手前に .?bd create' .beads/PRIME.md; then echo "PRIME:role-laden(旧版・要同期)"; else echo "PRIME:role-neutral"; fi
+# CLAUDE.md/AGENTS.md の bd 既定汚染（英語既定の特徴句）
+for f in CLAUDE.md AGENTS.md; do grep -qE 'Use `bd remember`|do NOT use MEMORY\.md|PUSH TO REMOTE' "$f" 2>/dev/null && echo "POLLUTED:$f" || true; done
+# project-local settings.json の bd prime hook（二重発火）。bd が書く正規 command はラッパ形
+# `command -v bd >/dev/null 2>&1 && bd prime || true`（引用符で囲まれない）なので、リテラル `"bd prime"` を
+# 探すと NO MATCH で fail-open する。引用符を外した部分一致 `bd prime` で検出する。
+test -f .claude/settings.json && grep -q 'bd prime' .claude/settings.json && echo "DOUBLEFIRE:yes" || echo "DOUBLEFIRE:no"
+grep -q 'issues.jsonl' .gitignore 2>/dev/null && echo "GITIGNORE:yes" || echo "GITIGNORE:no"
+```
+結果を「✅正しい / ⚠️要修正 / ➕要追加」で表にして報告してから収束に進む。**変更が一切不要なら「既に正しい構成」と報告して終了**。
+
+## Step 1〜: 各次元を収束（必要な次元だけ実行）
+
+### bd v1.0.4（#1）
+未導入/別バージョンなら案内: `npm install -g @beads/bd@1.0.4`。v1.0.5+ を見つけたら**ダウングレード**を促す（#4259）。
+
+### .beads（#2）— 無いときだけ init
+```bash
+bd init --prefix <PREFIX> --non-interactive --skip-agents --skip-hooks
+```
+`--skip-agents`(CLAUDE.md/AGENTS.md/settings 生成抑止) と `--skip-hooks` は**必須**。
+**既に `.beads/` が有れば re-init しない**（`bd init --force/--reinit-local/--destroy-token` は PreToolUse guard がブロック＝データ消失防止）。prefix はプロジェクト名から導出しユーザー確認。
+
+### backup.git-push（#3）/ Dolt remote（#4）
+```bash
+bd config get backup.git-push 2>/dev/null | grep -qx false || bd config set backup.git-push false
+bd dolt remote list 2>/dev/null | grep -q '://' || {
+  url=$(git remote get-url origin); case "$url" in git@github.com:*) url="https://github.com/${url#git@github.com:}";; /*) url="file://$url";; esac  # ssh→https / ローカル絶対パス→file://（git+ は URL scheme 必須。scheme 無しは bd が拒否）
+  bd dolt remote add origin "git+${url%.git}.git"; }
+```
+origin remote が無い場合もスキップし「後で `bd dolt remote add origin git+<url>` を」と案内（安全・再 init はしない）。
+
+### PRIME.md（#5）— missing/wrong または旧・役割入り版のときだけ配置
+テンプレ（**この skill に同梱** `${CLAUDE_PLUGIN_ROOT}/skills/setup/PRIME.template.md`）を置換コピー:
+```bash
+proj=$(basename "$(git rev-parse --show-toplevel)")
+sed "s|{{PROJECT}}|${proj}|g" "${CLAUDE_PLUGIN_ROOT}/skills/setup/PRIME.template.md" > .beads/PRIME.md
+```
+`|` 区切りで `/` を含むパスに耐える。proj 名に `|`/`&`/`\` を含む稀なケースは sed が壊れ得るので、その時は Read+Write で手動置換する。
+判定は marker `beads-init-template v:` か役割分担 sentinel で行う。**旧・役割入り版（`セッション終了プロトコル` / `着手前に bd create` を含む）を検出したら、scribe 注入と矛盾するので役割中立版へ同期する**（marker があっても旧版なら上書き対象）。既存 PRIME.md が「our でなく独自カスタム」の場合は**上書きせずユーザーに確認**（意図的カスタムを尊重）。
+
+### 汚染除去（#6）— POLLUTED:<file> のときだけ
+CLAUDE.md/AGENTS.md を Read し、`<!-- BEGIN BEADS INTEGRATION -->` 〜 `<!-- END BEADS INTEGRATION -->` の **bd 既定汚染ブロックを丸ごと削除**（Edit）。bd 既定の特徴句（`Use bd remember`/`do NOT use MEMORY.md`/`PUSH TO REMOTE ... MANDATORY`）を含む版のみが対象。我々の矯正済み内容なら触らない。
+
+### 二重発火除去（#7）— DOUBLEFIRE:yes のときだけ
+project-local `.claude/settings.json` から `bd prime` を含む hook **だけ**を削除（他の project-local hook は保持）。`del(.hooks.SessionStart)` のような event 丸ごと削除は正規 hook を巻き込むため**禁止**。
+**構造に注意**: settings.json の hooks は `event名 → [{matcher, hooks:[{command,type}]}]` の**ネスト**（各 group が `hooks` 配列を持つ）。下の jq の内側 `.hooks` はこの **group の hooks 配列**を指し正しい（`event → [{command}]` のフラットと誤読して `.command` を group 直下で探さないこと）。
+**完全一致比較は禁止**: bd が書く正規 command はラッパ形 `command -v bd >/dev/null 2>&1 && bd prime || true` であり、リテラル `"bd prime"` とは等しくない。完全一致 `!= "bd prime"` だと bd 既定の hook が除去されず fail-open する。`contains("bd prime")` の**部分一致**で判定し、ラッパ形も確実に剥がす。以下の jq は `bd prime` を含むコマンドのみ除去し、空になった hook group / event を刈り込む:
+```bash
+jq '.hooks |= (to_entries | map(.value |= (map(.hooks |= map(select(((.command // "") | contains("bd prime")) | not))) | map(select(.hooks|length>0)))) | map(select(.value|length>0)) | from_entries)' .claude/settings.json > .claude/settings.json.tmp && mv .claude/settings.json.tmp .claude/settings.json
+jq empty .claude/settings.json   # JSON 妥当性確認
+```
+グローバル `~/.claude/settings.json` の hook が SSOT。
+
+### gitignore（#8）
+`.gitignore` に冪等追記（無い行だけ）: `.beads/issues.jsonl` / `.beads/interactions.jsonl` / `embeddeddolt/`。bd init は `interactions.jsonl` を git 追跡するため**必ず** untrack する。ただし `issues.jsonl` は init 直後は未生成のことが多く、pathspec 不一致で `git rm` が **atomic 失敗**（present 側の `interactions.jsonl` も untrack されない）するため **`--ignore-unmatch` 必須**:
+```bash
+git rm --cached --ignore-unmatch .beads/issues.jsonl .beads/interactions.jsonl
+```
+
+### CLAUDE.md ポインタ（#9）— 無いときだけ追加（bd マーカー無し）
+```markdown
+## Beads Issue Tracker (bd) + scribe
+
+タスク追跡は **bd (beads)**。SessionStart hook が `bd prime` で bd 基礎の文脈を毎セッション注入する（SSOT = `.beads/PRIME.md`）。本節は bd 未導入時のフォールバック。
+
+- **タスク = beads / 知識 = doobidoo**: 永続・横断の作業は bd issue で追跡。知見は doobidoo に保存し、**`bd remember/recall/memories` は使わない**。
+- **役割を帯びた規約（誰が create/dep/close/dolt push するか・終了プロトコル）の SSOT は scribe plugin の role 別 SessionStart 注入**（admin / worker / consult）。PRIME は role 中立な基礎のみを持つ。
+```
+
+## Step 末: 同期＋検証＋コミット
+```bash
+bd dolt push          # remote 設定済みなら
+bd ready              # 動作確認
+grep -L 'BEGIN BEADS INTEGRATION' CLAUDE.md AGENTS.md   # 汚染が消えたか
+# 二重発火是正の確認（#7）: project-local settings.json に bd prime hook が残っていないか fail-loud 再 grep
+# （検出・除去が部分一致 `bd prime` ゆえ、bd ラッパ形 `... && bd prime || true` も剥がれているはず）
+test -f .claude/settings.json && grep -q 'bd prime' .claude/settings.json && echo "⚠ #7 未是正（settings.json に bd prime hook 残存）" || echo "二重発火なし（#7）✅"
+# scribe opt-in 成立の確認（#10）: PRIME が role 中立版（旧・役割入り句が無い）
+test -d .beads && ! grep -qE 'セッション終了プロトコル|着手前に .?bd create' .beads/PRIME.md && echo "scribe opt-in: role 中立 PRIME ✅" || echo "⚠ PRIME 未同期（旧・役割入り版）"
+git status --short
+```
+変更を**標準 git ワークフロー**でコミット（`main` 直 push 禁止のプロジェクトは feature branch → PR）。最後に「何を skip し何を修正/追加したか」を要約報告。
+
+## 禁止事項（MUST NOT）
+- `--skip-agents` 省略の `bd init`（汚染・二重発火）。
+- 既存 `.beads/` への `bd init --force`/`--reinit-local`/`--destroy-token`（guard がブロック、データ消失）。
+- 既存の「正しい」次元への不要な再書き込み（冪等性を壊す）。
+- `bd remember`/`bd recall`/`bd memories` の使用、v1.0.5+ の導入。
+
+## 注意
+- グローバル hook（SessionStart `bd prime` / SessionEnd 自動 push / 破壊的 bd guard）は machine 全体で有効。本スキルは**プロジェクト側**のみ収束させる。
+- **役割を帯びた規約本文の SSOT は scribe plugin**（`docs/protocol.md` / `docs/role-context-spec.md`）。本 skill は bd 基礎の収束と PRIME の role 中立同期までを担い、role 別の振る舞いは scribe の SessionStart 注入に委ねる。

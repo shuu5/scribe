@@ -144,15 +144,23 @@ PROMPT
   # 起動器なのに anchor を汚す非対称を避ける）。cld-spawn は env-file を launcher へ source 済みなので
   # spawn 後に rm して消える＝anchor に何も残さない。dry-run は実ファイルを作らずパスだけ案内する。
   ENV_LINE="export SCRIBE_ROLE=consult"
+  # consult は --bd-id を渡さない設計のため、放置すると cld-spawn の window 名が汎用命名（git 状態由来の
+  # wt-<repo>-<branch>-…）へ落ち、fleet-monitor/人間が consult を判別できない（admin C5 live finding・un-01h）。
+  # window 名は consult-HHMMSS（毎回新規）にし prefix `consult-` で識別する。固定 `consult` は cld-spawn の
+  # find_existing_window が完全一致で既存 window を reuse → exit 0（偽成功・env-file 非 source で
+  # SCRIBE_ROLE=consult 未注入）する fail-open を招く（gate wf_d3777d26 CONFIRMED）。あわせて --force-new で
+  # reuse 経路を構造的に封鎖し、能動起動の入口が必ず新セッションを立てることを保証する。
+  CONSULT_WINDOW="consult-$(date +%H%M%S)"
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "[plan] scribe-spawn(consult): anchor=$ANCHOR${TOPIC:+ 議題参照=$TOPIC（read-only）}"
     echo "[plan] env-file（anchor 外＝anchor リポを汚さない・spawn 後 rm）:"
     echo "         ENV_FILE=\$(mktemp /tmp/scribe-consult-XXXXXX.env)"
     echo "         printf '%s\\n' '$ENV_LINE' > \"\$ENV_FILE\""
-    echo "[plan] $CLD_SPAWN --cd $ANCHOR --model $MODEL --env-file \"\$ENV_FILE\" \"<consult テンプレ本文>\""
+    echo "[plan] $CLD_SPAWN --cd $ANCHOR --model $MODEL --window-name $CONSULT_WINDOW --force-new --env-file \"\$ENV_FILE\" \"<consult テンプレ本文>\""
     echo "[plan] rm -f \"\$ENV_FILE\"   # source 済みなので spawn 後に消す（anchor に残さない）"
     echo "[plan] (consult は worktree を作らない / --bd-id を渡さない / worker prompt を出さない＝role 契約)"
+    echo "[plan] window 名 = --window-name $CONSULT_WINDOW（毎回新規・prefix consult- で識別）+ --force-new（reuse 経路封鎖=偽成功/SCRIBE_ROLE 未注入防止・un-01h gate）"
     echo "[plan] --- consult テンプレ（role-context-spec §2.3）---"
     build_consult_prompt | sed 's/^/         | /'
     exit 0
@@ -163,8 +171,8 @@ PROMPT
   trap 'rm -f "$ENV_FILE"' EXIT   # 異常終了でも /tmp に残さない
   printf '%s\n' "$ENV_LINE" > "$ENV_FILE"
   CONSULT_PROMPT="$(build_consult_prompt)"
-  "$CLD_SPAWN" --cd "$ANCHOR" --model "$MODEL" --env-file "$ENV_FILE" "$CONSULT_PROMPT"
-  echo "spawned(consult): anchor=$ANCHOR model=$MODEL${TOPIC:+ 議題参照=$TOPIC}"
+  "$CLD_SPAWN" --cd "$ANCHOR" --model "$MODEL" --window-name "$CONSULT_WINDOW" --force-new --env-file "$ENV_FILE" "$CONSULT_PROMPT"
+  echo "spawned(consult): anchor=$ANCHOR model=$MODEL window=$CONSULT_WINDOW${TOPIC:+ 議題参照=$TOPIC}"
   exit 0
 fi
 
