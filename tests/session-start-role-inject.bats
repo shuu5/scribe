@@ -129,6 +129,51 @@ inject() {
     [[ "$output" == *"cwd .worktrees/"* ]]
 }
 
+# ---- 本文抽出器(awk)不在: worker/consult は明示 warning で degrade・admin は無傷 ----
+# awk を PATH から外し本文抽出(_scribe_emit_*)を不能にする。worker/consult が「header のみの
+# サイレント部分注入」に陥らず、exit 0 を維持しつつ stderr へ明示 warning を出して degrade する
+# ことを assert(規約本文の silent drop 防止・errata wf_f51949b7)。
+_link_bin_without_awk() {
+    local bindir="$1" b
+    mkdir -p "$bindir"
+    for b in bash env dirname cat sed head jq; do
+        ln -sf "$(command -v "$b")" "$bindir/$b"
+    done
+    # awk は意図的にリンクしない → command -v awk が失敗
+}
+
+@test "awk 不在(restricted PATH): worker は exit 0 維持で degrade・stderr に明示 warning" {
+    local bindir="$BATS_TEST_TMPDIR/noawk-worker"
+    _link_bin_without_awk "$bindir"
+    run --separate-stderr env -i PATH="$bindir" SCRIBE_ROLE= CLAUDE_PLUGIN_ROOT="$REPO" \
+        bash -c "printf '%s' '$WT_JSON' | '$SCRIPT'"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [[ "$stderr" == *"awk not found"* ]]
+    [[ "$stderr" == *"worker"* ]]
+}
+
+@test "awk 不在(restricted PATH): consult は exit 0 維持で degrade・stderr に明示 warning" {
+    local bindir="$BATS_TEST_TMPDIR/noawk-consult"
+    _link_bin_without_awk "$bindir"
+    run --separate-stderr env -i PATH="$bindir" SCRIBE_ROLE=consult CLAUDE_PLUGIN_ROOT="$REPO" \
+        bash -c "printf '%s' '$ANCHOR_JSON' | '$SCRIPT'"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [[ "$stderr" == *"awk not found"* ]]
+    [[ "$stderr" == *"consult"* ]]
+}
+
+@test "awk 不在(restricted PATH): admin は cat 経路で無傷(本文を注入する)" {
+    local bindir="$BATS_TEST_TMPDIR/noawk-admin"
+    _link_bin_without_awk "$bindir"
+    run --separate-stderr env -i PATH="$bindir" SCRIBE_ROLE=admin CLAUDE_PLUGIN_ROOT="$REPO" \
+        bash -c "printf '%s' '$ANCHOR_JSON' | '$SCRIPT'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gate funnel"* ]]
+    [[ "$output" == *"dolt push 同期点"* ]]
+}
+
 # ---- role 別注入内容の必須キーワード(spec §2.1-2.3) ----
 @test "注入(admin): gate funnel / errata / dolt push 同期点 を含む" {
     run --separate-stderr inject admin "$REPO" "$ANCHOR_JSON"

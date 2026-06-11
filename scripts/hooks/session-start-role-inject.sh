@@ -21,8 +21,10 @@
 #             ※ consult の規約 SSOT は protocol.md ではなく role-context-spec.md §2.3 にインライン
 #               移設済み（un-tao テンプレ移設版）。
 #
-# fail-safe: 判定不能・doc 不在でもセッションを壊さない。set -e は使わず常に exit 0(degrade)、
-#            警告は stderr。これは「全セッション破壊の防止」の核心。
+# fail-safe: 判定不能・doc 不在・本文抽出器(awk)不在でもセッションを壊さない。set -e は使わず
+#            常に exit 0(degrade)、警告は stderr。これは「全セッション破壊の防止」の核心。
+#            awk 不在時(worker/consult)は header のみのサイレント部分注入を避け、明示 warning を
+#            出して何も注入しない(admin は cat 経路で awk 非依存=無傷)。
 
 # --- plugin root / doc パス解決（CLAUDE_PLUGIN_ROOT 優先・無ければ script 位置から導出） ---
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
@@ -121,6 +123,12 @@ case "$role" in
             echo "[scribe/SessionStart] warning: protocol.md 不在($PROTOCOL_DOC)・worker 文脈注入を skip(degrade)" >&2
             exit 0
         fi
+        # 本文抽出は awk 単一依存(フォールバック非実装はスコープ判断)。awk 不在ホストでは
+        # 「header のみ・規約本文ゼロ」のサイレント部分注入を避け、明示 warning を出して degrade する。
+        if ! command -v awk >/dev/null 2>&1; then
+            echo "[scribe/SessionStart] warning: awk not found — worker 規約本文(protocol.md §2-4)を注入できません。SSOT: docs/protocol.md §2-4 を手動参照" >&2
+            exit 0
+        fi
         _scribe_header
         echo "あなたは scribe worker(worktree セッション)です。自 issue の write だけを行い graph は触りません(B/hybrid)。bd create / bd dep / bd dolt push は禁止、follow-up は notes で提案します。以下は protocol.md の worker 関連節(§2 prompt 規約 / §3 役割境界 / §4 close→gate→errata)です。"
         echo ""
@@ -129,6 +137,11 @@ case "$role" in
     consult)
         if [ ! -r "$SPEC_DOC" ]; then
             echo "[scribe/SessionStart] warning: role-context-spec.md 不在($SPEC_DOC)・consult 文脈注入を skip(degrade)" >&2
+            exit 0
+        fi
+        # 本文抽出は awk 単一依存。awk 不在ホストではサイレント部分注入を避け明示 warning で degrade。
+        if ! command -v awk >/dev/null 2>&1; then
+            echo "[scribe/SessionStart] warning: awk not found — consult 規約本文(role-context-spec.md §2.3)を注入できません。SSOT: docs/role-context-spec.md §2.3 を手動参照" >&2
             exit 0
         fi
         _scribe_header
