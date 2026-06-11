@@ -143,6 +143,10 @@ setup() {
   run "$SPAWN" --dry-run --model claude-fable-5 un-4nm
   [ "$status" -ne 0 ]
   [[ "$output" != *"[plan]"* ]]
+  # case-insensitive: 大文字混在（CLAUDE-FABLE-5 等）も取りこぼさず die する。
+  run "$SPAWN" --dry-run --model CLAUDE-FABLE-5 un-4nm
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"[plan]"* ]]
 }
 
 @test "spawn: consult は --model fable を許容する（role-context-spec §2.3 の例外・worker との非対称）" {

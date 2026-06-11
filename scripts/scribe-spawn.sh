@@ -16,7 +16,8 @@
 #   consult は **anchor 同居・read-only セッション**（設計議論・grill 専用）。worker とは別系統で、
 #   worktree 仕事・実装・bd write をしない（design §14 は consult に対し worktree spawn を禁止）。
 #   よって consult モードでは:
-#     - **worktree を作らない / worker prompt を出さない / --bd-id・--cd を渡さない**（role 契約遵守）。
+#     - **worktree を作らない / worker prompt を出さない / --bd-id を渡さない**（role 契約遵守）。
+#       `--cd` は anchor（cwd）を指す＝worktree ではない（consult は anchor 同居）。
 #     - anchor（cwd）で `cld-spawn --model opus --env-file <SCRIBE_ROLE=consult> "<consult テンプレ本文>"`。
 #       consult テンプレは read-only 規律・記憶系のみ write・サマリ保存義務のみ（bdw/selftest/cell-quality を含まない）。
 #     - SCRIBE_ROLE=consult を --env-file で注入（C2 の role 判定が最優先で読む side）。env-file は
@@ -100,8 +101,9 @@ if [[ -z "$BD_ID" && $# -gt 0 ]]; then BD_ID="$1"; fi
 
 # ===========================================================================
 # consult モード（--consult）: role-context-spec §2.3 / design §14 の契約どおりに分岐。
-#   worktree 作成・worker prompt 生成・--bd-id/--cd を **一切しない**（consult に spawn worktree は禁止）。
-#   anchor で `cld-spawn --model opus --env-file <SCRIBE_ROLE=consult> "<consult テンプレ>"` を出す。
+#   worktree 作成・worker prompt 生成・--bd-id を **一切しない**（consult に spawn worktree は禁止）。
+#   anchor で `cld-spawn --cd <anchor> --model opus --env-file <SCRIBE_ROLE=consult> "<consult テンプレ>"` を出す
+#   （--cd は anchor=cwd を指す＝worktree ではない）。
 #   bd id は consult では任意の議題参照（read-only な実在検証のみ・worktree/branch には焼かない）。
 # ===========================================================================
 if [[ "$CONSULT" -eq 1 ]]; then
@@ -171,7 +173,8 @@ fi
 # ===========================================================================
 # worker は fable 厳禁（protocol.md §1: opus 必須＝コスト爆発防止）。consult は上で既に分岐済みなので
 # ここに来るのは worker のみ＝この die は consult の fable 例外（role-context-spec §2.3）を塞がない。
-case "$MODEL" in
+# ${MODEL,,} で小文字化＝FABLE/Fable 等の大文字混在も取りこぼさない（case-insensitive）。
+case "${MODEL,,}" in
   *fable*) scribe_die "--model に fable 系は使えません（worker は opus 必須・protocol.md §1）" ;;
 esac
 
@@ -241,6 +244,8 @@ PROMPT_TEXT="$(build_prompt)"
 "$CLD_SPAWN" --cd "$WORKTREE" --bd-id "$ID" --model "$MODEL" "$PROMPT_TEXT"
 
 # monitor: window 名 → window_id(@N) を解決し、以後の -t は ID で行う（protocol.md §1）。
-WID="$(tmux list-windows -F '#{window_id} #{window_name}' 2>/dev/null | awk -v n="$WINDOW" '$2==n{print $1; exit}')"
+# cld-spawn 成功後の monitor 案内用。tmux 不在/失敗でも spawn は済んでいるので set -e で落とさず
+# 空 WID へ degrade させる（|| true）。空なら下の ${WID:-$WINDOW} が window 名へフォールバック。
+WID="$(tmux list-windows -F '#{window_id} #{window_name}' 2>/dev/null | awk -v n="$WINDOW" '$2==n{print $1; exit}' || true)"
 echo "spawned: issue=$ID window=$WINDOW window_id=${WID:-?} worktree=$WORKTREE"
 echo "monitor: tmux capture-pane -p -t \"${WID:-$WINDOW}\" | tail -n 3"
