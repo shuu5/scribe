@@ -125,6 +125,29 @@ setup() {
   [[ "$output" != *"[plan]"* ]]
 }
 
+@test "spawn: consult は cld-spawn に --window-name consult を渡す（汎用命名落ち防止・un-01h）" {
+  run "$SPAWN" --dry-run --consult un-consult
+  [ "$status" -eq 0 ]
+  # cld-spawn 起動行に --window-name consult が含まれる（--bd-id 不在の consult を fleet-monitor で識別）。
+  cld_line="$(echo "$output" | grep -E 'cld-spawn --cd')"
+  [[ "$cld_line" == *"--window-name consult"* ]]
+  # window 名を持ち込んでも --bd-id は依然渡さない（consult 設計）。
+  [[ "$cld_line" != *"--bd-id"* ]]
+}
+
+@test "spawn: consult は bd id 省略でも --window-name consult を渡す" {
+  run "$SPAWN" --dry-run --consult
+  [ "$status" -eq 0 ]
+  cld_line="$(echo "$output" | grep -E 'cld-spawn --cd')"
+  [[ "$cld_line" == *"--window-name consult"* ]]
+}
+
+@test "spawn: worker（非 consult）は consult window 名を持ち込まない（wt-<id> 命名規約を保つ）" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"--window-name consult"* ]]
+}
+
 @test "spawn: 非 consult では env-file を注入しない" {
   run "$SPAWN" --dry-run un-4nm
   [ "$status" -eq 0 ]

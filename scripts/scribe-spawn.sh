@@ -144,15 +144,20 @@ PROMPT
   # 起動器なのに anchor を汚す非対称を避ける）。cld-spawn は env-file を launcher へ source 済みなので
   # spawn 後に rm して消える＝anchor に何も残さない。dry-run は実ファイルを作らずパスだけ案内する。
   ENV_LINE="export SCRIBE_ROLE=consult"
+  # consult は --bd-id を渡さない設計のため、放置すると cld-spawn の window 名が汎用命名（git 状態由来の
+  # wt-<repo>-<branch>-…）へ落ち、fleet-monitor/人間が consult を判別できない（admin C5 live finding・un-01h）。
+  # 固定 window 名 `consult` を cld-spawn の最優先指定 --window-name で渡し、consult を一目で識別できるようにする。
+  CONSULT_WINDOW="consult"
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "[plan] scribe-spawn(consult): anchor=$ANCHOR${TOPIC:+ 議題参照=$TOPIC（read-only）}"
     echo "[plan] env-file（anchor 外＝anchor リポを汚さない・spawn 後 rm）:"
     echo "         ENV_FILE=\$(mktemp /tmp/scribe-consult-XXXXXX.env)"
     echo "         printf '%s\\n' '$ENV_LINE' > \"\$ENV_FILE\""
-    echo "[plan] $CLD_SPAWN --cd $ANCHOR --model $MODEL --env-file \"\$ENV_FILE\" \"<consult テンプレ本文>\""
+    echo "[plan] $CLD_SPAWN --cd $ANCHOR --model $MODEL --window-name $CONSULT_WINDOW --env-file \"\$ENV_FILE\" \"<consult テンプレ本文>\""
     echo "[plan] rm -f \"\$ENV_FILE\"   # source 済みなので spawn 後に消す（anchor に残さない）"
     echo "[plan] (consult は worktree を作らない / --bd-id を渡さない / worker prompt を出さない＝role 契約)"
+    echo "[plan] window 名 = --window-name $CONSULT_WINDOW（--bd-id 不在の consult を fleet-monitor で識別・un-01h）"
     echo "[plan] --- consult テンプレ（role-context-spec §2.3）---"
     build_consult_prompt | sed 's/^/         | /'
     exit 0
@@ -163,8 +168,8 @@ PROMPT
   trap 'rm -f "$ENV_FILE"' EXIT   # 異常終了でも /tmp に残さない
   printf '%s\n' "$ENV_LINE" > "$ENV_FILE"
   CONSULT_PROMPT="$(build_consult_prompt)"
-  "$CLD_SPAWN" --cd "$ANCHOR" --model "$MODEL" --env-file "$ENV_FILE" "$CONSULT_PROMPT"
-  echo "spawned(consult): anchor=$ANCHOR model=$MODEL${TOPIC:+ 議題参照=$TOPIC}"
+  "$CLD_SPAWN" --cd "$ANCHOR" --model "$MODEL" --window-name "$CONSULT_WINDOW" --env-file "$ENV_FILE" "$CONSULT_PROMPT"
+  echo "spawned(consult): anchor=$ANCHOR model=$MODEL window=$CONSULT_WINDOW${TOPIC:+ 議題参照=$TOPIC}"
   exit 0
 fi
 
