@@ -196,6 +196,57 @@ setup() {
   [[ "$output" == *"bd create"* ]]
 }
 
+# ---------- spawn: worker prompt に anchor 絶対パスを焼き込む（un-gjr）----------
+# anchor は worker 実行コマンド（cd "$ANCHOR" && bd show / bdw）へ補間されるため、空白を含む
+# パスでも 1 引数に収まるよう **ダブルクォート付き**で焼き込む（quote 漏れは空白 anchor で cd 破綻）。
+@test "spawn: worker prompt の契約参照行に anchor 絶対パス付き bd show が焼き込まれる（un-gjr）" {
+  run "$SPAWN" --dry-run --anchor "$REPO_ROOT" un-4nm
+  [ "$status" -eq 0 ]
+  # 契約参照: anchor へ cd してから bd show（worktree からは bd graph が解決しないため）。クォート付き。
+  [[ "$output" == *"cd \"$REPO_ROOT\" && bd show un-4nm"* ]]
+  # 旧プレースホルダ（裸の `bd show <id>`・cd なし）に退行していない。
+  [[ "$output" != *"description: \`bd show un-4nm\`"* ]]
+}
+
+@test "spawn: worker prompt の bdw 規律行が <anchor> プレースホルダでなく絶対パスになる（un-gjr）" {
+  run "$SPAWN" --dry-run --anchor "$REPO_ROOT" un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cd \"$REPO_ROOT\" && scripts/bdw"* ]]
+  # 旧プレースホルダ `cd <anchor>` が残っていない（リグレッション防止）。
+  [[ "$output" != *"cd <anchor>"* ]]
+}
+
+@test "spawn: 相対 --anchor も絶対パスへ正規化して焼き込む（worker の cwd は worktree・un-gjr）" {
+  # REPO_ROOT を親ディレクトリからの相対パスで渡す → prompt には絶対パスが出る。
+  parent="$(dirname "$REPO_ROOT")"
+  rel="$(basename "$REPO_ROOT")"
+  run bash -c "cd '$parent' && '$SPAWN' --dry-run --anchor '$rel' un-4nm"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cd \"$REPO_ROOT\" && bd show un-4nm"* ]]
+  [[ "$output" == *"cd \"$REPO_ROOT\" && scripts/bdw"* ]]
+  # 相対パスのまま焼き込んでいない（worker から解決できない）。
+  [[ "$output" != *"cd \"$rel\" && bd show"* ]]
+}
+
+@test "spawn: 空白を含む --anchor でも cd が 1 引数に収まる（クォート焼き込み・un-gjr gate finding）" {
+  spacedir="$(mktemp -d)/sp ace"
+  mkdir -p "$spacedir"
+  run "$SPAWN" --dry-run --anchor "$spacedir" un-4nm
+  rm -rf "$(dirname "$spacedir")"
+  [ "$status" -eq 0 ]
+  # 空白入り anchor がダブルクォートされ、worker の cd が単一引数を受け取る。
+  [[ "$output" == *"cd \"$spacedir\" && bd show un-4nm"* ]]
+  [[ "$output" == *"cd \"$spacedir\" && scripts/bdw"* ]]
+  # 未クォート（cd /…/sp ace && …）に退行していない＝空白で cd が 2 引数化しない。
+  [[ "$output" != *"cd $spacedir && bd show"* ]]
+}
+
+@test "spawn: 存在しない --anchor は fail-loud（絶対パス解決不能を上流で塞ぐ・un-gjr）" {
+  run "$SPAWN" --dry-run --anchor /no/such/anchor/dir un-4nm
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"[plan]"* ]]
+}
+
 # ---------- gate 支援 ----------
 @test "gate-args: 出力 JSON が valid で doImplement:false / autoFix:false / doPlan:false 固定" {
   run "$GATE" --dry-run --worktree /tmp/wt un-4nm
