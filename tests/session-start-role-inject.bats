@@ -183,6 +183,20 @@ inject() {
     [ -z "$output" ]
 }
 
+@test "guard(git env 隔離): GIT_DIR/GIT_WORK_TREE leak でも無関係 cwd は過剰注入しない(gate self-check)" {
+    # .beads を持つ別 repo の GIT_DIR/GIT_WORK_TREE を export した状態で、.beads 無しの
+    # 無関係 cwd から実行。env 隔離が無いと toplevel がリーク先 repo に解決し過剰注入する
+    # → 隔離済み(_scribe_has_beads の env -u)なら無出力 exit 0(bd un-7hx・#1 堅牢化の回帰ネット)。
+    local leak="$BATS_TEST_TMPDIR/leakrepo"
+    mkdir -p "$leak/.beads"
+    git -C "$leak" init -q
+    local unrel="$BATS_TEST_TMPDIR/unrelated"
+    mkdir -p "$unrel"
+    run --separate-stderr bash -c "cd '$unrel' && printf '%s' '{\"cwd\":\"$unrel\"}' | env -u SCRIBE_ROLE GIT_DIR='$leak/.git' GIT_WORK_TREE='$leak' CLAUDE_PLUGIN_ROOT='$REPO' '$SCRIPT'"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 # ---- cwd ソース: stdin 無し → $PWD フォールバック ----
 @test "cwd ソース: stdin JSON に cwd 無し → \$PWD フォールバック(worktree から実行→worker)" {
     # $PWD を worktree っぽいパスにして実行(cwd 抽出が空 → PWD フォールバック検証)。
@@ -192,6 +206,16 @@ inject() {
     run --separate-stderr bash -c "cd '$d' && printf '%s' '$EMPTY_JSON' | env -u SCRIBE_ROLE CLAUDE_PLUGIN_ROOT='$REPO' '$SCRIPT'"
     [ "$status" -eq 0 ]
     [[ "$output" == *"role=worker"* ]]
+}
+
+@test "guard(\$PWD フォールバック × .beads 無し): 注入ゼロ(acceptance #2 を両 cwd ソースで実証・gate self-check)" {
+    # 実 paper-leak 経路 = JSON に cwd が無く $PWD へ倒れるケース。$PWD が .beads を
+    # 持たない非 worktree なら無出力 exit 0(test 21 の negative 対・bd un-7hx)。
+    local d="$BATS_TEST_TMPDIR/pwd-nobeads"
+    mkdir -p "$d"
+    run --separate-stderr bash -c "cd '$d' && printf '%s' '$EMPTY_JSON' | env -u SCRIBE_ROLE CLAUDE_PLUGIN_ROOT='$REPO' '$SCRIPT'"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }
 
 # ---- cwd 抽出: jq 不在環境で sed フォールバック分岐を強制(回帰ネット) ----

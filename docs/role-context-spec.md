@@ -29,6 +29,7 @@
 - **git toplevel フォールバックの理由**: cwd が repo のサブディレクトリ（例 `anchor/docs/`）のとき `.beads/` は直下に無いが toplevel にはある。これを拾うため `git rev-parse --show-toplevel` で補う（git 不在・非 repo では無害に失敗し「`.beads` 無し」へ倒れる＝fail-safe）。
 - **ガード不成立時の挙動**: role 判定すら行わず、**stdout/stderr とも無出力で `exit 0`**（現行 fail-safe を維持し、無関係セッションを一切汚さない）。
 - **適用順**: このガードは `SCRIBE_ROLE` env 明示より**外側**（最優先）。明示 role があっても `.beads/` が無ければ注入しない（scribe 管轄外で role を騙る誤注入を防ぐ。正規の consult/admin は `.beads` を持つ anchor で動くため実害なし）。
+- **既知の副作用（scribe 自己抑制）**: scribe repo 自身は issue を ubuntu-note-system 側の beads で管理し `.beads/` を持たない。ゆえに本ガード後、**素の scribe checkout を直接開いたセッション（scribe-code worktree 含む）は SessionStart 注入がゼロ**になる。これは「`.beads` 無し = scribe 管轄外」判定の素直な帰結であり意図どおり（scribe-code worker の役割文脈は `scribe-spawn.sh` 生成の spawn prompt が主担体）。scribe 開発の admin anchor は通常 ubuntu-note-system（`.beads` あり）側なので admin 注入は従来どおり効く。注入を残したい satellite repo があれば、その repo に `.beads/`（redirect でも可）を置けば opt-in できる。
 
 > 一次出典: bd un-7hx（grill 確定: doobidoo `2ad028a2` + 2026-06-11 設計議論。背景＝ガード無しで全ホストへ admin 注入が漏れる）。実装は `scripts/hooks/session-start-role-inject.sh` の `_scribe_has_beads()`。
 

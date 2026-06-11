@@ -91,12 +91,16 @@ _scribe_emit_consult_section() {
 # の opt-in 代理判定に使う。cwd 直下に無くても、cwd が repo のサブディレクトリなら
 # git toplevel に .beads/ がありうるためフォールバック確認する（git 不在/非 repo は無害に
 # 失敗し false を返す＝fail-safe）。実体は anchor/worktree とも .beads ディレクトリ。
+# 堅牢化（gate self-check・bd un-7hx）: 本 script はホスト全 SessionStart で発火するため、
+# 親プロセスが GIT_DIR/GIT_WORK_TREE を export していると `rev-parse --show-toplevel` が
+# 継承 env に従って無関係 repo の toplevel を解決し**過剰注入**しうる（実測再現・過剰注入は
+# 本ガードの設計目的に反する UNSAFE 方向）。toplevel 解決を継承 git env から隔離する。
 _scribe_has_beads() {
     local dir="$1"
     [ -n "$dir" ] || return 1
     [ -d "$dir/.beads" ] && return 0
     local top
-    top="$(cd "$dir" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)"
+    top="$(cd "$dir" 2>/dev/null && env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --show-toplevel 2>/dev/null)"
     [ -n "$top" ] && [ -d "$top/.beads" ] && return 0
     return 1
 }
