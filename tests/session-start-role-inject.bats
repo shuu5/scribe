@@ -3,6 +3,8 @@
 #
 # カバレッジ:
 #   - 構文(bash -n)
+#   - .beads opt-in guard(bd un-7hx): .beads 有/無 × admin/worker/consult / git toplevel
+#     フォールバック / ガードは role 明示より外側(.beads 無しなら明示 role でも注入ゼロ)
 #   - role 判定マトリクス: env SCRIBE_ROLE(admin/worker/consult) / cwd .worktrees(worker) /
 #     既定(admin) / 優先順(env > cwd > 既定) / 未知 env の degrade
 #   - role 別注入内容の必須キーワード存在(spec §2.1-2.3)
@@ -16,9 +18,23 @@ setup() {
     REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
     SCRIPT="$REPO/scripts/hooks/session-start-role-inject.sh"
     HOOKS_JSON="$REPO/hooks/hooks.json"
-    WT_JSON='{"cwd":"/home/u/proj/.worktrees/spawn/x-1"}'
-    ANCHOR_JSON='{"cwd":"/home/u/proj"}'
+
+    # --- .beads opt-in guard(bd un-7hx)を通すため、実在する cwd を temp に用意する ---
+    # 既定 cwd(anchor 相当・.beads あり・非 worktree)と worker cwd(.worktrees/ 配下・.beads
+    # あり=redirect 相当)。本物の anchor/worktree とも .beads は実ディレクトリ。
+    ANCHOR_DIR="$BATS_TEST_TMPDIR/proj"
+    WT_DIR="$BATS_TEST_TMPDIR/proj/.worktrees/spawn/x-1"
+    mkdir -p "$ANCHOR_DIR/.beads" "$WT_DIR/.beads"
+    WT_JSON="{\"cwd\":\"$WT_DIR\"}"
+    ANCHOR_JSON="{\"cwd\":\"$ANCHOR_DIR\"}"
     EMPTY_JSON='{}'
+
+    # --- .beads 無し cwd(注入ゼロ検証用・scribe 管轄外プロジェクト相当) ---
+    NOBEADS_DIR="$BATS_TEST_TMPDIR/nobeads"
+    NOBEADS_WT="$BATS_TEST_TMPDIR/nobeads/.worktrees/spawn/y-1"
+    mkdir -p "$NOBEADS_WT"
+    NOBEADS_ANCHOR_JSON="{\"cwd\":\"$NOBEADS_DIR\"}"
+    NOBEADS_WT_JSON="{\"cwd\":\"$NOBEADS_WT\"}"
 }
 
 # inject <role|-> <plugin_root> <stdin_json>
@@ -101,11 +117,78 @@ inject() {
     [[ "$output" == *"role=admin"* ]]
 }
 
+# ---- .beads opt-in guard(bd un-7hx): .beads 有/無 × role ----
+# .beads 無し = scribe 管轄外 → 無出力で exit 0(注入ゼロ)。.beads 有り = 従来どおり注入。
+@test "guard(.beads 無・非 worktree): admin 注入を漏らさず無出力 exit 0" {
+    run --separate-stderr inject - "$REPO" "$NOBEADS_ANCHOR_JSON"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "guard(.beads 無・worktree): worker 注入を漏らさず無出力 exit 0" {
+    run --separate-stderr inject - "$REPO" "$NOBEADS_WT_JSON"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "guard(.beads 無): env SCRIBE_ROLE=consult 明示でも注入ゼロ(ガードは role 明示より外側)" {
+    run --separate-stderr inject consult "$REPO" "$NOBEADS_ANCHOR_JSON"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "guard(.beads 無): env SCRIBE_ROLE=admin 明示でも注入ゼロ" {
+    run --separate-stderr inject admin "$REPO" "$NOBEADS_ANCHOR_JSON"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "guard(.beads 有・非 worktree): admin は従来どおり注入する" {
+    run --separate-stderr inject - "$REPO" "$ANCHOR_JSON"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=admin"* ]]
+    [[ "$output" == *"gate funnel"* ]]
+}
+
+@test "guard(.beads 有・worktree): worker は従来どおり注入する" {
+    run --separate-stderr inject - "$REPO" "$WT_JSON"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=worker"* ]]
+}
+
+@test "guard(.beads 有): consult は従来どおり注入する" {
+    run --separate-stderr inject consult "$REPO" "$ANCHOR_JSON"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=consult"* ]]
+}
+
+@test "guard(git toplevel フォールバック): cwd 直下に .beads 無くても toplevel にあれば注入" {
+    # repo を git init し toplevel に .beads を置く。cwd は subdir(直下 .beads 無し)。
+    local repo="$BATS_TEST_TMPDIR/gitrepo"
+    mkdir -p "$repo/sub" "$repo/.beads"
+    git -C "$repo" init -q
+    local sub_json="{\"cwd\":\"$repo/sub\"}"
+    run --separate-stderr inject - "$REPO" "$sub_json"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=admin"* ]]
+}
+
+@test "guard(git repo だが .beads 無): toplevel にも .beads 無ければ無出力 exit 0" {
+    local repo="$BATS_TEST_TMPDIR/gitrepo-nobeads"
+    mkdir -p "$repo/sub"
+    git -C "$repo" init -q
+    local sub_json="{\"cwd\":\"$repo/sub\"}"
+    run --separate-stderr inject - "$REPO" "$sub_json"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 # ---- cwd ソース: stdin 無し → $PWD フォールバック ----
 @test "cwd ソース: stdin JSON に cwd 無し → \$PWD フォールバック(worktree から実行→worker)" {
-    # $PWD を worktree っぽいパスにして実行(cwd 抽出が空 → PWD フォールバック検証)
+    # $PWD を worktree っぽいパスにして実行(cwd 抽出が空 → PWD フォールバック検証)。
+    # .beads opt-in guard を通すため .beads も置く(bd un-7hx)。
     local d="$BATS_TEST_TMPDIR/.worktrees/spawn/z-1"
-    mkdir -p "$d"
+    mkdir -p "$d/.beads"
     run --separate-stderr bash -c "cd '$d' && printf '%s' '$EMPTY_JSON' | env -u SCRIBE_ROLE CLAUDE_PLUGIN_ROOT='$REPO' '$SCRIPT'"
     [ "$status" -eq 0 ]
     [[ "$output" == *"role=worker"* ]]

@@ -5,6 +5,13 @@
 #       規約文脈を stdout へ注入する。SessionStart hook は stdout を session の context へ
 #       注入する仕様（Claude Code）に従うため、ここでは plain stdout に出力する。
 #
+# opt-in ガード（docs/role-context-spec.md §1.0・bd un-7hx）:
+#   本 script はグローバル hook として**ホストの全 SessionStart で発火**する。scribe を
+#   使わないプロジェクト（paper 等）へ規約を注入しないよう、cwd（または git toplevel）に
+#   `.beads/` が存在するときだけ注入する。`.beads` = scribe opt-in の代理マーカー（beads は
+#   scribe の前提 substrate ゆえ「.beads あり ⇔ scribe 管轄」が一致する）。無ければ role
+#   判定すら行わず無出力で exit 0（現行 fail-safe を維持）。
+#
 # role 判定（docs/role-context-spec.md §1 と整合・優先順は上から最初に当たったもの）:
 #   1. env SCRIBE_ROLE が認識可能な role(admin|worker|consult) → それを採用
 #      （一次は consult の明示焼き込み=C3 ヘルパーが --env-file で行う。worker の
@@ -79,9 +86,33 @@ _scribe_emit_consult_section() {
     ' "$file"
 }
 
+# --- .beads opt-in マーカー検出（cwd 直下 → git toplevel フォールバック・bd un-7hx） ---
+# scribe は beads を前提 substrate とするため、.beads/ の存在を「この cwd は scribe 管轄」
+# の opt-in 代理判定に使う。cwd 直下に無くても、cwd が repo のサブディレクトリなら
+# git toplevel に .beads/ がありうるためフォールバック確認する（git 不在/非 repo は無害に
+# 失敗し false を返す＝fail-safe）。実体は anchor/worktree とも .beads ディレクトリ。
+_scribe_has_beads() {
+    local dir="$1"
+    [ -n "$dir" ] || return 1
+    [ -d "$dir/.beads" ] && return 0
+    local top
+    top="$(cd "$dir" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)"
+    [ -n "$top" ] && [ -d "$top/.beads" ] && return 0
+    return 1
+}
+
 # === role 判定 ===
 hook_cwd="$(_scribe_extract_cwd)"
 [ -z "$hook_cwd" ] && hook_cwd="$PWD"
+
+# === .beads opt-in guard（scribe 管轄外セッションには何も注入しない・bd un-7hx） ===
+# cwd（または git toplevel）に .beads/ が無ければ scribe を使っていないプロジェクトと
+# みなし、role 判定すら行わず無出力で exit 0 する。これがグローバル hook の規約注入を
+# scribe opt-in したプロジェクトに限定し、無関係セッション（paper 等）への漏洩を塞ぐ。
+# 注入漏れ防止が目的ゆえ stderr 警告も出さない（無関係セッションを汚さない）。
+if ! _scribe_has_beads "$hook_cwd"; then
+    exit 0
+fi
 
 role=""
 detect_basis=""
