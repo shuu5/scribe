@@ -52,3 +52,23 @@ scribe_branch_name() {
   [[ -z "$hhmmss" ]] && hhmmss=$(date +%H%M%S)
   printf 'spawn/%s-%s' "$id" "$hhmmss"
 }
+
+# scribe_owning_repo <worktree-path> → その worktree が属する main worktree（primary repo root）。
+#   cross-repo cleanup の安全失敗（bd un-c4s）対策。cwd 文脈に依存せず worktree 自身に
+#   「どのリポに属すか」を git へ問う。`git worktree list` の先頭行は常に main worktree であり、
+#   linked worktree から問うても同じ main を返す（verified: git 2.43）。
+#   worktree remove / branch -d は linked worktree 自身からは走らせられない（自分自身は消せない・
+#   checked-out branch は -d 不可）ため、main worktree を操作の基点にするのが正しい。
+#   継承 GIT_DIR/GIT_WORK_TREE から隔離する（session-start-role-inject.sh と同系の過剰解決防止）。
+#   解決できた絶対パスを echo。worktree でない／git 不在なら空 + 非 0（呼び出し側が cwd 等へフォールバック）。
+scribe_owning_repo() {
+  local wt="${1:-}"
+  [[ -n "$wt" ]] || return 1
+  local main
+  # porcelain の 1 行目は常に `worktree <main path>`。1 行目だけ前置詞を剥がして即 quit する
+  # （`head` を挟まず pipefail+SIGPIPE の相互作用を避ける）。空白入りパスもそのまま通す。
+  main="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$wt" worktree list --porcelain 2>/dev/null \
+            | sed -n '1{s/^worktree //p;q;}')" || true
+  [[ -n "$main" ]] || return 1
+  printf '%s' "$main"
+}
