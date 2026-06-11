@@ -92,6 +92,17 @@ done
 # `--` で break した残り（あれば bd id として採用）
 if [[ -z "$BD_ID" && $# -gt 0 ]]; then BD_ID="$1"; fi
 
+# --- ANCHOR を絶対パスへ正規化（un-gjr）---
+# anchor（bd graph 所在）は worker/consult 双方の経路で使う: worker は build_prompt が
+# \`cd "$ANCHOR" && bd show / bdw\` として **prompt に焼き込み**、consult は cld-spawn を
+# \`--cd "$ANCHOR"\`（cwd=anchor 同居起動）に渡す。worker の cwd は **worktree** であり
+# spawn 起動時の相対パスは worker から解決できないため、両経路で使う前に絶対パスへ正規化する。
+# 存在しなければ fail-loud で bd graph 所在の typo を上流で塞ぐ（誤った anchor は下流の
+# scribe_bd_id_exists で cd 失敗→短絡し「issue 不在」という誤診断に化けるため、ここで先に
+# 明確なエラーへ倒す）。
+ANCHOR="$(cd "$ANCHOR" 2>/dev/null && pwd)" \
+  || scribe_die "--anchor のパスが存在しません（bd graph 所在を絶対パスで解決できない）"
+
 # fable の許否は role で非対称（道具は規約を変えない）:
 #   - worker: fable 厳禁（protocol.md §1: worker は opus 必須＝コスト爆発防止）。worker 分岐内で die する。
 #   - consult: fable は **許容**（role-context-spec §2.3: 基本 opus・ユーザー指定時のみ fable。
@@ -205,15 +216,15 @@ build_prompt() {
 あなたは scribe worker cell（issue $ID）。この issue を end-to-end で完遂する。応答は日本語。
 
 ## 契約（SSOT）
-- 契約 = bd issue の description: \`bd show $ID\`（着手前に必ず読む）。
-- 配置: worktree（= cwd）$WORKTREE — **ここから出ない**。branch=$BRANCH / window=$WINDOW。
+- 契約 = bd issue の description: \`cd "$ANCHOR" && bd show $ID\`（着手前に必ず読む。bd graph 所在 = anchor $ANCHOR・worktree からは解決しない）。
+- 配置: worktree（= cwd）$WORKTREE — **ここから出ない**（bd graph 参照のための anchor への一時 cd は除く）。branch=$BRANCH / window=$WINDOW。
 
 ## 規律（docs/protocol.md §2/§3）
 - **test-first**: 実装に対する self-test を自分で用意し worktree 直下に置く
   （\`selftest-$ID.local.sh\`・untracked・コミットしない・**fail-closed**＝assert 1 つでも落ちたら非 0）。
 - **cell-quality WF を直接呼出**（named-WF 明示・scriptPath 直指定）で gate review/verify を 1 回回す。
 - **報告に WF 返り値 JSON + \`receivedArgs\` を必須**で含める（args 解決の成否を admin が一次監査できるように）。
-- bd write は必ず \`bdw\` 経由で直列化: \`cd <anchor> && scripts/bdw <subcmd>\`（自 issue の進捗のみ）。
+- bd write は必ず \`bdw\` 経由で直列化: \`cd "$ANCHOR" && scripts/bdw <subcmd>\`（自 issue の進捗のみ）。
 
 ## 禁止（protocol.md §2/§3）
 - \`bd create\` / \`bd dep\` / assignment / \`bd dolt push\`（graph・同期点は admin の所有物）。
