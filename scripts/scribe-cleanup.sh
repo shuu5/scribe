@@ -14,7 +14,8 @@
 # Usage:
 #   scribe-cleanup.sh [options] <bd-id>
 # Options:
-#   --repo PATH      git リポジトリ（worktree/branch 操作の対象・既定: cwd）
+#   --repo PATH      git リポジトリ（worktree/branch 操作の対象・
+#                    既定: --worktree の所属リポを導出→無ければ cwd・bd un-c4s）
 #   --worktree PATH  remove する worktree（既定: <repo>/.worktrees/spawn/<id>-* を案内）
 #   --branch NAME    削除する branch（安全削除のみ・既定: 案内のみ）
 #   --window NAME    kill する window 名（既定: wt-<id>）
@@ -31,7 +32,8 @@ usage() {
   cat <<'EOF'
 Usage: scribe-cleanup.sh [options] <bd-id>
 Options:
-  --repo PATH      git リポジトリ（worktree/branch 操作の対象・既定: cwd）
+  --repo PATH      git リポジトリ（worktree/branch 操作の対象・
+                   既定: --worktree の所属リポを導出→無ければ cwd）
   --worktree PATH  remove する worktree
   --branch NAME    削除する branch（安全削除のみ）
   --window NAME    kill する window 名（既定: wt-<id>）
@@ -42,7 +44,8 @@ EOF
   exit "${1:-0}"
 }
 
-REPO="$(pwd)"
+REPO=""
+REPO_EXPLICIT=0     # --repo が明示指定されたか（明示は導出より優先・least-surprise）
 WORKTREE=""
 BRANCH=""
 WINDOW=""
@@ -52,7 +55,7 @@ BD_ID=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --repo)     [[ -n "${2:-}" ]] || scribe_die "--repo にパスを指定してください"; REPO="$2"; shift 2 ;;
+    --repo)     [[ -n "${2:-}" ]] || scribe_die "--repo にパスを指定してください"; REPO="$2"; REPO_EXPLICIT=1; shift 2 ;;
     --worktree) [[ -n "${2:-}" ]] || scribe_die "--worktree にパスを指定してください"; WORKTREE="$2"; shift 2 ;;
     --branch)   [[ -n "${2:-}" ]] || scribe_die "--branch に名前を指定してください"; BRANCH="$2"; shift 2 ;;
     --window)   [[ -n "${2:-}" ]] || scribe_die "--window に名前を指定してください"; WINDOW="$2"; shift 2 ;;
@@ -70,6 +73,24 @@ if [[ -z "$BD_ID" && $# -gt 0 ]]; then BD_ID="$1"; fi
 ID="$(scribe_normalize_bd_id "$BD_ID")" || scribe_die "bd id の形式が不正です: '$BD_ID'"
 
 [[ -n "$WINDOW" ]] || WINDOW="$(scribe_window_name "$ID")"   # 既定 wt-<id>
+
+# --- REPO 解決（bd un-c4s: cross-repo cleanup の cwd 文脈依存バグ修正）---
+# 優先順位: 明示 --repo > --worktree の所属リポ導出 > cwd。
+# 既定を cwd 固定にすると、anchor cwd から別リポの worktree を掃除したとき
+# git worktree remove / branch -d が anchor(cwd)に対して走り 'branch not found' で安全失敗する。
+# --worktree が指定されていれば、そのパスが属するリポ（main worktree）を権威として導出する。
+if [[ "$REPO_EXPLICIT" -eq 1 ]]; then
+  :   # 明示指定を尊重（導出しない）
+elif [[ -n "$WORKTREE" ]]; then
+  if REPO="$(scribe_owning_repo "$WORKTREE")"; then
+    echo "[cleanup] --repo 未指定 → --worktree の所属リポを導出: $REPO"
+  else
+    REPO="$(pwd)"
+    echo "[cleanup] warn: --worktree '$WORKTREE' の所属リポを導出できず cwd を使用: $REPO（手動で --repo 指定を検討）"
+  fi
+else
+  REPO="$(pwd)"
+fi
 
 # confirm <prompt> — DRY_RUN/--yes を尊重しつつ破壊操作の確認を取る。承認なら 0。
 confirm() {
