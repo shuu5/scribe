@@ -326,3 +326,120 @@ setup() {
   [[ "$output" != *"branch -D"* ]]
   [[ "$output" != *"kill-server"* ]]
 }
+
+# ---------- cleanup: cross-repo（bd un-c4s）----------
+# --repo 未指定で別リポの worktree を別 cwd から掃除しても、--worktree の所属リポを導出して
+# git -C <owning-repo> で実行する（cwd 誤標的で 'branch not found' 安全失敗しない）。
+@test "cleanup(un-c4s): --repo 無し+別 cwd でも --worktree の所属リポを導出して掃除する" {
+  # owner は git 正準パスへ正準化する（scribe_owning_repo は porcelain の正準絶対パスを返すため、
+  # symlink された TMPDIR/-/tmp 環境=macOS/一部 CI で生 mktemp パスと差異が出て偽陽性 fail するのを防ぐ）。
+  owner="$(cd "$(mktemp -d)" && pwd -P)"   # 掃除対象 worktree の所属リポ
+  other="$(mktemp -d)"   # 実行時 cwd（旧コードはここを誤標的にした別リポ）
+  git -C "$owner" -c init.defaultBranch=main init -q
+  git -C "$owner" config user.email t@e; git -C "$owner" config user.name t
+  git -C "$owner" commit -q --allow-empty -m init
+  git -C "$other" -c init.defaultBranch=main init -q
+  git -C "$other" config user.email t@e; git -C "$other" config user.name t
+  git -C "$other" commit -q --allow-empty -m init
+  br="spawn/un-4nm-101010"; wt="$owner/.worktrees/spawn/un-4nm-101010"
+  git -C "$owner" worktree add -q -b "$br" "$wt" >/dev/null
+
+  run bash -c 'cd "$1" && "$2" --yes --worktree "$3" --branch "$4" --window "wt-no-such-$$" un-4nm' \
+      _ "$other" "$CLEANUP" "$wt" "$br"
+
+  # 所属リポを導出した旨を出し、git -C は owner を標的にしている
+  [[ "$output" == *"所属リポを導出"* ]]
+  [[ "$output" == *"git -C $owner"* ]]
+  [[ "$output" != *"git -C $other"* ]]
+  # worktree は実際に消え、branch も安全削除され、終了コードは 0
+  [ ! -e "$wt" ]
+  ! git -C "$owner" rev-parse --verify -q "refs/heads/$br" >/dev/null 2>&1
+  [ "$status" -eq 0 ]
+  rm -rf "$owner" "$other"
+}
+
+# 明示 --repo は導出より優先される（least-surprise）。明示した非 git ディレクトリを標的に
+# 安全失敗することで「導出に上書きされていない」ことを検証する。
+@test "cleanup(un-c4s): 明示 --repo は --worktree 導出より優先される" {
+  owner="$(mktemp -d)"; explicit="$(mktemp -d)"   # explicit=非 git ディレクトリ
+  git -C "$owner" -c init.defaultBranch=main init -q
+  git -C "$owner" config user.email t@e; git -C "$owner" config user.name t
+  git -C "$owner" commit -q --allow-empty -m init
+  br="spawn/un-4nm-202020"; wt="$owner/.worktrees/spawn/un-4nm-202020"
+  git -C "$owner" worktree add -q -b "$br" "$wt" >/dev/null
+
+  run "$CLEANUP" --yes --repo "$explicit" --worktree "$wt" --branch "$br" \
+      --window "wt-no-such-$$" un-4nm
+
+  # 明示 --repo(explicit)を標的にしているので worktree remove が安全失敗（warn）し WT は残る
+  [[ "$output" == *"git -C $explicit"* ]]
+  [[ "$output" != *"所属リポを導出"* ]]
+  [[ "$output" == *"warn:"* ]]
+  [ -e "$wt" ]
+  [ "$status" -ne 0 ]
+  git -C "$owner" worktree remove --force "$wt" 2>/dev/null || true
+  rm -rf "$owner" "$explicit"
+}
+
+# 受入基準(2)の核心: scribe_owning_repo は **継承 GIT_DIR/GIT_WORK_TREE から隔離して**
+# main worktree を導出する。別リポの .git を GIT_DIR/GIT_WORK_TREE へ export した状態で
+# linked worktree を問い合わせ、汚染リポではなく当該 worktree の所属 main repo を返すことを assert。
+# env -u が外れると `git worktree list --porcelain` がリーク先 repo を返し誤導出する（実証済）。
+# session-start-role-inject.bats:186 と同系の leak modality を新ヘルパーへ移植した fail-closed ゲート。
+@test "cleanup(un-c4s): scribe_owning_repo は継承 GIT_DIR/GIT_WORK_TREE から隔離して導出する" {
+  owner="$(mktemp -d)"   # 掃除対象 worktree の所属リポ（正しい導出先）
+  poison="$(mktemp -d)"  # GIT_DIR/GIT_WORK_TREE をここへ leak させる汚染リポ
+  git -C "$owner" -c init.defaultBranch=main init -q
+  git -C "$owner" config user.email t@e; git -C "$owner" config user.name t
+  git -C "$owner" commit -q --allow-empty -m init
+  git -C "$poison" -c init.defaultBranch=main init -q
+  git -C "$poison" config user.email t@e; git -C "$poison" config user.name t
+  git -C "$poison" commit -q --allow-empty -m init
+  br="spawn/un-4nm-303030"; wt="$owner/.worktrees/spawn/un-4nm-303030"
+  git -C "$owner" worktree add -q -b "$br" "$wt" >/dev/null
+
+  want="$(cd "$owner" && pwd -P)"
+  # poison の GIT_DIR/GIT_WORK_TREE を export した状態で wt の所属リポを問う。
+  run bash -c '
+    source "$1"
+    export GIT_DIR="$2/.git" GIT_WORK_TREE="$2"
+    got="$(scribe_owning_repo "$3")" || exit 9
+    cd "$got" && pwd -P
+  ' _ "$REPO_ROOT/scripts/lib/scribe-lib.sh" "$poison" "$wt"
+
+  [ "$status" -eq 0 ]
+  # 汚染リポではなく当該 worktree の所属 main repo を返す（env -u 隔離が効いている）。
+  [[ "$output" == "$want" ]]
+  [[ "$output" != *"$poison"* ]]
+  rm -rf "$owner" "$poison"
+}
+
+# 受入基準(2)後半: worktree でない/git 不在のパスでは空 + 非0 を返す（呼び出し側のフォールバック契約）。
+@test "cleanup(un-c4s): scribe_owning_repo は非 git/非 worktree パスで空 + 非0 を返す" {
+  nongit="$(mktemp -d)"   # git リポでないただのディレクトリ（/tmp 配下は git 管理外）
+  run bash -c 'source "$1"; scribe_owning_repo "$2"' _ "$REPO_ROOT/scripts/lib/scribe-lib.sh" "$nongit"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  # 引数欠落（空文字列）も非0 + 空で弾く。
+  run bash -c 'source "$1"; scribe_owning_repo ""' _ "$REPO_ROOT/scripts/lib/scribe-lib.sh"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  rm -rf "$nongit"
+}
+
+# 導出失敗時（--worktree が非 git 等で所属リポ不明）は cwd へ安全縮退し warn を surface する。
+# fail-open ではなく「破壊操作は cwd で安全失敗 + 手動 --repo を促す」記録経路を fail-closed に固定する。
+@test "cleanup(un-c4s): --worktree 導出失敗時は cwd フォールバック + warn を出す" {
+  cwd="$(cd "$(mktemp -d)" && pwd -P)"   # 実行 cwd（非 git＝導出も remove も安全失敗する）
+  nongit="$(mktemp -d)"                   # 非 git の --worktree（所属リポ導出不能）
+  run bash -c 'cd "$1" && "$2" --yes --worktree "$3" --branch "spawn/no-such-$$" --window "wt-no-such-$$" un-4nm' \
+      _ "$cwd" "$CLEANUP" "$nongit"
+  # 導出できず cwd を使用する warn が surface され、git -C は cwd を標的にする
+  [[ "$output" == *"所属リポを導出できず cwd を使用"* ]]
+  [[ "$output" == *"git -C $cwd"* ]]
+  # 破壊操作は cwd(非 git)で安全失敗し終了コード非0（fail-closed・force 系は依然出さない）
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"branch -D"* ]]
+  [[ "$output" != *"kill-server"* ]]
+  rm -rf "$cwd" "$nongit"
+}
