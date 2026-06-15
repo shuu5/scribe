@@ -61,6 +61,7 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 - errata 規約（§4）: close 後 findings は notes-append・closed のまま追補・substantive のみ reopen。
 - `bd dolt push` = 同期点（§3・§5 末）。**push できるのは admin だけ**。
 - spawn 規約（§1）・監視（§6）。
+- **方法論ポインタ（薄い）**: multi-agent fan-out（cell-quality gate review / 調査 sweep 等）を **orchestrate する前に `docs/methodology.md` を確認する**（強度キャリブレーション = 規模×不確実性×リスク・quality patterns・D1-D7 運用方法論）。注入は本文転記でなく**ポインタ 1 行**に留める（方法論 SSOT は methodology.md・規約 how は protocol.md）。
 
 **禁止**: 特になし（admin は full 権限）。ただし「merge 前ユーザー確認」（規約/全ホスト影響/outward）は admin の義務として注入する。
 

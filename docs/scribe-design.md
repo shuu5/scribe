@@ -429,4 +429,61 @@ grill-me 一周で確定、実コード調査で grounding 済み:
 
 参考: `a47de93a`（Beads feasibility・Pattern X'）/ `4af8d45a`（twl2 clean-slate 計画）/ `d0afa13b`（code-intelligence 研究 differential）。
 
+### 戦術層 D1-D7（§18）= 2026-06-15 grill
+
+| hash | 内容 |
+|---|---|
+| `e5d79cc9` | worker/workflow モデル設計確定（戦術層 D1-D7・2 層モデル〔背骨層 = 独立セッション+プロンプト+beads / 戦術層 = 設計余地〕）+ project CLAUDE.md 整理方針。**§18 の決定全文の一次 SSOT**。運用方法論は `docs/methodology.md` §3、強度キャリブレーション = 規模×不確実性×リスクは同 §1 |
+
+> bd の一次記録: 本 doc 化セル（D1-D7 を scribe へ記録 + methodology.md 新設）= bd un-av0 / 実装セル（D2 cap + D3 + D4 worker 側ラッパー）= S2。
+
 > 設計の細部に疑義が出たら、本書ではなく上記 doobidoo の原典を recall して確認すること（本書は統合・整形版）。
+
+---
+
+## 18. 戦術層（tactical layer）の設計判断 — D1-D7（2026-06-15 grill）
+
+> §12（worker substrate / dynamic-workflow の位置づけ）と §14（v0 スコープ）が引いた **2 層**を、戦術層の具体設計まで掘り下げて確定したのが本節。決定全文の一次 SSOT は doobidoo `e5d79cc9`（§17）、**運用方法論（how to operate）は `docs/methodology.md` §3**、本節は **設計 why（なぜその選択か・何を却下したか・構造的理由）** を担う（why ↔ how ↔ 方法論 の三分の規律は `docs/protocol.md` 前文・`docs/methodology.md` 前文が SSOT＝protocol.md ↔ scribe-design.md と同じ関心分離）。**本記録セル（bd un-av0）は決定の doc 化のみ**で、D2 cap・D3 dimensions 分業・D4 worker 側ラッパーの**実装は後続 S2 セル**に属する。
+
+### 18.0 前提訂正 — 2 層で考える（why）
+
+grill で最初に正した誤解: scribe worker は「workflow ファイルを渡される agent」ではない。**worker = 独立した完全な対話 CC セッション + persona/契約プロンプト + beads**（§3/§12 verified）であり、**worker 自身が実装する**。cell-quality WF は worker が自己点検で 1 回呼ぶ**戦術ツール**にすぎない。
+
+→ ゆえに設計は **2 層に分けて**考える: **背骨層**（独立セッション + プロンプト + beads＝§3/§12/§14 で確定済・設計余地なし）と **戦術層**（worker タスク内の bounded fan-out をどう組むか＝設計余地）。**動的 ultracode は禁止ではないが背骨でもない**（§12 の「dynamic workflow = bounded 戦術 fan-out 専用・背骨ではない」の再確認）。D1-D7 はすべて**戦術層の中**の判断であり、背骨層を揺らさない。
+
+### 18.1 D1 戦術層の背骨 = ハイブリッド（why）
+
+**決定**: 不変骨格（cell-quality.workflow.js）+ worker が args 供給。動的 ultracode は bounded 戦術 fan-out のみ。
+**why**: 骨格を毎回書き下ろすと収束硬化（loop-until-dry・escalate）や read-only 不変条件が worker の自由記述に溶けて再現性を失う。一方で全要件を骨格に焼くと固有物のたびに骨格分岐が増える。**「不変な品質構造は骨格・固有物は args」**の分担が、再現性（骨格）と柔軟性（args）を両取りする。`~/.claude/CLAUDE.md`「Workflow 骨格の再利用」（骨格を二度書かない・固有物は args で差す）と同じ思想。
+
+### 18.2 D2 opus 並列 cap = args 化（why）
+
+**決定**: `A.maxConcurrency` + 安全既定で渡せるようにする（実装 = S2）。
+**why**: 現状 opus 経路は**無 cap**で、harness の `min(16, cores-2)` が実効上限になっているだけ（rate 逼迫時に絞る制御点が無い）。`makeLimiter` は既に max 引数の汎用セマフォとして存在する（fable ≤2 cap で使用中）ので、**新規機構でなく既存セマフォへ opus 経路を通すだけ**で cap が入る（低新規性 = §0「新規性の低い既存資産の合成を優先」と整合）。cap を**ハードコードでなく args** にするのは、rate 予算が案件ごとに違う（強度キャリブレーション §1）ため。
+
+### 18.3 D3 dimensions 権限 = 枠分業（why）
+
+**決定**: `dimensions` = `{key, focus}` 配列（長さ = review agent 数）。**admin gate = 必須 4 観点固定**（correctness / robustness-security / integration-ops / completeness-critic）+ 上限固定 / **worker 自己点検 = 4 必須 + focus 調整 + 追加観点可**。
+**why**: admin の gate は**一次監査の最低保証**ゆえ観点が worker 任せで揺らいではいけない（固定 4 で監査の床を保証）。一方 worker の自己点検は**タスク特性を一番知っている主体**ゆえ focus を寄せ追加レンズを足せる方が検出力が上がる。**「監査の床は admin が固定・検出力の上積みは worker が調整」**の非対称が、gate の信頼性と self-check の鋭さを両立する。完全 admin 固定（worker に裁量なし）は worker の文脈知識を捨て、完全 worker 任せは gate の床を崩すため両端を却下。
+
+### 18.4 D4 固定/可変境界 = 両方（why）
+
+**決定**: **絶対不変**（read-only な doPlan/doImplement/autoFix・収束硬化・demoteFable）は **WF 本体にハードコード維持**、**固有合成**は**外部ラッパー**（`scripts/scribe-gate-args.sh` 型）。
+**why**: 一次監査の安全条件（admin gate が実装/autoFix に化けない・review/verify が fable で走らない・loop が収束する）は**ラッパーから上書きされては困る**ので骨格本体に固定する（fail-safe を外部化しない）。逆に「どの worktree・どの selfTestCmd・追加 dimensions」のような**固有合成はラッパーで吸収**すれば骨格を触らずに済む。**「安全の核は内・固有合成は外」**の二分が、改竄耐性（内）と再利用性（外）を分離する。protocol.md §5 の `scribe-gate-args.sh`（doPlan/doImplement/autoFix を read-only にハードコード）がこの型の実例。
+
+### 18.5 D5 汎用/固有の写像（why）
+
+**決定**: 骨格（cell-quality.workflow.js）+ 汎用ラッパー（gate-args）= **scribe**（`~/.claude/workflows`・全 project 共有）/ 固有「**データ**」（selfTestCmd・追加 dimensions・probe）= **project**（CLAUDE.md or project 設定）。
+**why**: **ラッパーの「ロジック」は汎用で、固有なのは「データ」だけ**という見極めが肝。固有データを骨格やラッパーの**ロジック**へ混ぜると、project ごとに WF/ラッパーが fork して保守が割れる（§0「安全に長期メンテ」が硬い制約）。データ（何をテストするか・どの観点を足すか）を外から注げば、汎用ロジックは 1 本で全 project を回せる。配置の境界は「全 project 共有か = scribe / その project 固有か = project」で決まる。
+
+### 18.6 D6 per-project WF ファイル = 不要（why）
+
+**決定**: 汎用 1 本 + args/ラッパーで吸収。骨格自体（フェーズ順序・ループ流れ）が違う要件が出たら作る留保。
+**why**: D1-D5 の帰結として、固有物が args とラッパー（データ）で吸収できる限り **project 専用 WF を切る理由が無い**（per-project ファイルは骨格の重複 = ドリフト源）。例外は「骨格の形そのもの（phase 順序 / loop 構造）が違う」要件だが、それは未だ現れていないので**作らない**（YAGNI）。現れたら昇格（汎用化）か二層化を**その時**判断する留保を残す。
+
+### 18.7 D7 ready-compaction = run 固有 WF 呼出を参照保持（why）
+
+**決定**: run 固有の WF 呼び出し（`scriptPath` + args）は Working Memory「命令・制約」節に `[auto]` 参照として残す（新 carrier を足さない）。durable な project 固有は CLAUDE.md carrier、骨格は git carrier。
+**why**: ready-compaction は carrier 別に責務が分かれている（effort 一時層 = Working Memory / 恒久命令 = CLAUDE.md / 横断事実 = doobidoo / 骨格 = git）。run 固有の WF 呼出は**その run 限りの effort 状態**なので Working Memory が正しい carrier であり、**新 carrier を作ると責務境界が壊れる**。骨格・durable 固有は既存 carrier（git / CLAUDE.md）に既に乗るので二重持ちしない。
+
+> 一次出典: doobidoo `e5d79cc9`（§17・D1-D7 決定全文・2 層モデル）/ scribe-design.md §3・§12・§14（背骨層の確定）/ `docs/methodology.md` §3（D1-D7 運用方法論）・§1（強度キャリブレーション）/ `~/.claude/CLAUDE.md`「Workflow 骨格の再利用」「Workflow モデル階層ルーティング」/ `~/.claude/workflows/cell-quality.workflow.js`（`makeLimiter`/`demoteFable`/`dimensions`/read-only gate の実体・verified）。
