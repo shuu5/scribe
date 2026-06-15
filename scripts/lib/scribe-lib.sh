@@ -72,3 +72,21 @@ scribe_owning_repo() {
   [[ -n "$main" ]] || return 1
   printf '%s' "$main"
 }
+
+# scribe_linked_worktree_main <path> → <path> が linked（副）worktree のとき所属 main worktree の絶対パスを
+#   echo + exit 0。main worktree 自身／非 worktree／git 不在なら空 + 非 0（呼び出し側はガード不発火）。
+#   既定 anchor/repo が副 worktree のときの誤認（worktree ネスト・誤 base）を上流で塞ぐ判定（bd un-ag7）。
+#   検出は **git plumbing のみ**（naming 規約 /.worktrees/ には依存しない）:
+#     scribe_owning_repo（porcelain 先頭行 = main worktree）と `git rev-parse --show-toplevel`（当該 worktree
+#     root）の差分。git はどちらも canonical 絶対パスを返すため、linked なら show-toplevel != main で判定できる。
+#   継承 GIT_DIR/GIT_WORK_TREE から隔離する（scribe_owning_repo と同系の過剰解決防止）。
+scribe_linked_worktree_main() {
+  local path="${1:-}"
+  [[ -n "$path" ]] || return 1
+  local main top
+  main="$(scribe_owning_repo "$path")" || return 1
+  top="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$path" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  [[ -n "$top" ]] || return 1
+  [[ "$top" != "$main" ]] || return 1   # show-toplevel == main → main worktree 自身（linked ではない）
+  printf '%s' "$main"
+}
