@@ -254,6 +254,8 @@ build_prompt() {
 - **test-first**: 実装に対する self-test を自分で用意し worktree 直下に置く
   （\`selftest-$ID.local.sh\`・untracked・コミットしない・**fail-closed**＝assert 1 つでも落ちたら非 0）。
 - **cell-quality WF を直接呼出**（named-WF 明示・scriptPath 直指定）で gate review/verify を 1 回回す。
+  自己点検 args は \`scripts/scribe-selftest-args.sh --worktree "$WORKTREE" --self-test <selfTestCmd> $ID\` で 1 コマンド化済み
+  （\`doImplement\`/\`doPlan\`=false・\`autoFix\`=true・\`selfTestCmd\` 必須を固定。手作業で args を組まない・anchor=$ANCHOR）。
 - **報告に WF 返り値 JSON + \`receivedArgs\` を必須**で含める（args 解決の成否を admin が一次監査できるように）。
 - bd write は必ず \`bdw\` 経由で直列化: \`cd "$ANCHOR" && scripts/bdw <subcmd>\`（自 issue の進捗のみ）。
 
