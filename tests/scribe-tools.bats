@@ -10,12 +10,39 @@ setup() {
   SPAWN="$SCRIPTS/scribe-spawn.sh"
   GATE="$SCRIPTS/scribe-gate-args.sh"
   CLEANUP="$SCRIPTS/scribe-cleanup.sh"
+  LIB="$SCRIPTS/lib/scribe-lib.sh"
   # bd を実在検証スタブへ差し替え（実 graph 不要）。
   export SCRIBE_BD="$FIXTURES/bd-stub.sh"
   export BD_STUB_OK_IDS="un-4nm un-consult un-3sh.3.5"
   # cld-spawn は dry-run では実行されない。echo を決定論化するため固定値を入れる。
   export SCRIBE_CLD_SPAWN="cld-spawn"
   chmod +x "$FIXTURES/bd-stub.sh" 2>/dev/null || true
+  # 既定 REPO/ANCHOR は cwd。テストの cwd が linked worktree（このリポ自身の .worktrees/ 配下で
+  # 走らせた場合など）だと un-ag7 ガードが発火して既定パスのテストを汚す。cwd を安定した
+  # main worktree（temp git repo）に固定し、テスト実行場所（main/linked のいずれか）に依存させない。
+  SCRIBE_TEST_CWD="$(cd "$(mktemp -d)" && pwd -P)"
+  git -C "$SCRIBE_TEST_CWD" -c init.defaultBranch=main init -q
+  git -C "$SCRIBE_TEST_CWD" config user.email t@e; git -C "$SCRIBE_TEST_CWD" config user.name t
+  git -C "$SCRIBE_TEST_CWD" commit -q --allow-empty -m init
+  cd "$SCRIBE_TEST_CWD"
+}
+
+teardown() {
+  [[ -n "${SCRIBE_TEST_CWD:-}" ]] && rm -rf "$SCRIBE_TEST_CWD"
+  return 0
+}
+
+# テスト用に main worktree（temp git repo）+ linked worktree を 1 組作る。
+# stdout に "<main>\t<linked>" を返す（呼び出し側で cut して使う）。
+_mk_main_and_linked() {
+  local main linked
+  main="$(cd "$(mktemp -d)" && pwd -P)"
+  git -C "$main" -c init.defaultBranch=main init -q
+  git -C "$main" config user.email t@e; git -C "$main" config user.name t
+  git -C "$main" commit -q --allow-empty -m init
+  linked="$main/.worktrees/spawn/un-4nm-101010"
+  git -C "$main" worktree add -q -b spawn/un-4nm-101010 "$linked" >/dev/null
+  printf '%s\t%s\n' "$main" "$linked"
 }
 
 # ---------- bash -n（全 script 構文）----------
@@ -245,6 +272,110 @@ setup() {
   run "$SPAWN" --dry-run --anchor /no/such/anchor/dir un-4nm
   [ "$status" -ne 0 ]
   [[ "$output" != *"[plan]"* ]]
+}
+
+# ---------- spawn: anchor/repo 誤認ガード（un-ag7）----------
+# 既定 REPO/ANCHOR（= cwd）が linked（副）worktree のとき fail-loud。検出は git plumbing
+# （scribe_owning_repo の porcelain 先頭=main と show-toplevel の差分）— naming 規約には依存しない。
+
+@test "spawn(un-ag7): scribe_linked_worktree_main は linked で main を返し main/非worktree で空+非0" {
+  IFS=$'\t' read -r main linked < <(_mk_main_and_linked)
+  # linked worktree → 所属 main を返す（exit 0）
+  run bash -c 'source "$1"; scribe_linked_worktree_main "$2"' _ "$LIB" "$linked"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "$main" ]]
+  # main worktree 自身 → 空 + 非0（show-toplevel == main）
+  run bash -c 'source "$1"; scribe_linked_worktree_main "$2"' _ "$LIB" "$main"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  # 非 git/非 worktree → 空 + 非0
+  nongit="$(mktemp -d)"
+  run bash -c 'source "$1"; scribe_linked_worktree_main "$2"' _ "$LIB" "$nongit"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  rm -rf "$nongit"
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+# 検出が naming でなく git plumbing である証拠: 継承 GIT_DIR/GIT_WORK_TREE を別リポへ leak させても
+# 当該 worktree の所属 main を返す（env -u 隔離が効く）。session-start-role-inject と同系の leak modality。
+@test "spawn(un-ag7): scribe_linked_worktree_main は継承 GIT_DIR/GIT_WORK_TREE から隔離する（AC4）" {
+  IFS=$'\t' read -r main linked < <(_mk_main_and_linked)
+  poison="$(mktemp -d)"
+  git -C "$poison" -c init.defaultBranch=main init -q
+  git -C "$poison" config user.email t@e; git -C "$poison" config user.name t
+  git -C "$poison" commit -q --allow-empty -m init
+  run bash -c '
+    source "$1"
+    export GIT_DIR="$2/.git" GIT_WORK_TREE="$2"
+    scribe_linked_worktree_main "$3"
+  ' _ "$LIB" "$poison" "$linked"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "$main" ]]
+  [[ "$output" != *"$poison"* ]]
+  rm -rf "$poison"
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "spawn(un-ag7): 既定 REPO/ANCHOR を linked worktree から実行→非0+真の anchor 案内（AC1/AC5）" {
+  IFS=$'\t' read -r main linked < <(_mk_main_and_linked)
+  run bash -c 'cd "$1" && "$2" --dry-run un-4nm' _ "$linked" "$SPAWN"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"[plan]"* ]]            # plan を出す前に止まる（AC5）
+  [[ "$output" == *"linked worktree"* ]]   # 検出を明示
+  [[ "$output" == *"$main"* ]]             # 真の main worktree を案内
+  # AC6: ガード発火で worktree add(=ネスト・誤 base 経路)に到達しない＝副 worktree 配下に
+  # .worktrees/spawn/... が物理的に作られないことを直接確認（2026-06-12 実害の transitive 阻止）。
+  [ ! -e "$linked/.worktrees" ]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "spawn(un-ag7): consult も既定 anchor が linked worktree なら fail-loud（AC1 両モード）" {
+  IFS=$'\t' read -r main linked < <(_mk_main_and_linked)
+  run bash -c 'cd "$1" && "$2" --dry-run --consult un-consult' _ "$linked" "$SPAWN"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"[plan]"* ]]
+  [[ "$output" == *"linked worktree"* ]]
+  [[ "$output" == *"$main"* ]]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "spawn(un-ag7): --repo/--anchor 明示なら linked worktree から実行してもガード不発火（AC3）" {
+  IFS=$'\t' read -r main linked < <(_mk_main_and_linked)
+  # 明示 main を anchor/repo に指定（cross-repo / 意図的 override の許可）。
+  run bash -c 'cd "$1" && "$2" --dry-run --repo "$3" --anchor "$3" un-4nm' _ "$linked" "$SPAWN" "$main"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[plan]"* ]]            # plan まで到達する
+  [[ "$output" != *"linked worktree"* ]]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "spawn(un-ag7): --anchor 明示でも --repo 既定が linked worktree なら REPO ガード発火（AC4 独立判定）" {
+  IFS=$'\t' read -r main linked < <(_mk_main_and_linked)
+  # anchor は明示 main（ANCHOR ガード不発火）だが、repo は既定 cwd=linked → REPO ガードが止める。
+  run bash -c 'cd "$1" && "$2" --dry-run --anchor "$3" un-4nm' _ "$linked" "$SPAWN" "$main"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"[plan]"* ]]
+  [[ "$output" == *"linked worktree"* ]]
+  [[ "$output" == *"$main"* ]]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "spawn(un-ag7): 通常 main worktree から既定実行→ガード不発火（偽陽性なし）" {
+  IFS=$'\t' read -r main linked < <(_mk_main_and_linked)
+  # linked worktree が存在しても、main から既定実行する限り発火しない。
+  run bash -c 'cd "$1" && "$2" --dry-run un-4nm' _ "$main" "$SPAWN"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[plan]"* ]]
+  [[ "$output" != *"linked worktree"* ]]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
 }
 
 # ---------- gate 支援 ----------

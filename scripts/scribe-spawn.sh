@@ -74,12 +74,16 @@ CONSULT=0
 MODEL="opus"
 DRY_RUN=0
 BD_ID=""
+# REPO/ANCHOR が「既定（cwd）」か「明示指定」かを独立に追う（un-ag7・AC3/AC4）。
+# 明示時は linked-worktree ガードを不発火にし、cross-repo cell の意図的 override を壊さない。
+REPO_EXPLICIT=0
+ANCHOR_EXPLICIT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --repo)    [[ -n "${2:-}" ]] || scribe_die "--repo にパスを指定してください"; REPO="$2"; shift 2 ;;
+    --repo)    [[ -n "${2:-}" ]] || scribe_die "--repo にパスを指定してください"; REPO="$2"; REPO_EXPLICIT=1; shift 2 ;;
     --base)    [[ -n "${2:-}" ]] || scribe_die "--base に ref を指定してください"; BASE="$2"; shift 2 ;;
-    --anchor)  [[ -n "${2:-}" ]] || scribe_die "--anchor にパスを指定してください"; ANCHOR="$2"; shift 2 ;;
+    --anchor)  [[ -n "${2:-}" ]] || scribe_die "--anchor にパスを指定してください"; ANCHOR="$2"; ANCHOR_EXPLICIT=1; shift 2 ;;
     --consult) CONSULT=1; shift ;;
     --model)   [[ -n "${2:-}" ]] || scribe_die "--model にモデル名を指定してください"; MODEL="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -102,6 +106,20 @@ if [[ -z "$BD_ID" && $# -gt 0 ]]; then BD_ID="$1"; fi
 # 明確なエラーへ倒す）。
 ANCHOR="$(cd "$ANCHOR" 2>/dev/null && pwd)" \
   || scribe_die "--anchor のパスが存在しません（bd graph 所在を絶対パスで解決できない）"
+
+# --- AC1: 既定 anchor が linked（副）worktree のとき fail-loud（un-ag7）---
+# `--anchor` 未指定（= cwd 既定）で cwd が副 worktree のとき、bd graph は main worktree 側にあり、
+# 副 worktree を anchor にすると `bd show`/`bdw` の解決が破綻する（誤診断「issue 不在」に化ける）。
+# worktree 作成・worker prompt・consult 起動・--dry-run の plan いずれの前にもここで停止する（AC5）。
+# consult/worker 双方の経路へ効くよう **両分岐の手前**（ANCHOR 正規化直後）に置く（AC1）。
+# 明示 `--anchor` 時は cross-repo cell の意図的 override を壊さないため不発火（AC3）。
+# 検出は git plumbing（main worktree と show-toplevel の差分）— naming 規約に依存しない（AC4）。
+if [[ "$ANCHOR_EXPLICIT" -eq 0 ]] && _anchor_main="$(scribe_linked_worktree_main "$ANCHOR")"; then
+  scribe_die "既定 anchor が linked worktree です: $ANCHOR
+  bd graph は main worktree 側にあり、副 worktree を anchor にすると bd 参照解決に失敗します。
+  真の anchor（main worktree）: $_anchor_main
+  → そこへ cd するか、--anchor '$_anchor_main' を明示してください。"
+fi
 
 # fable の許否は role で非対称（道具は規約を変えない）:
 #   - worker: fable 厳禁（protocol.md §1: worker は opus 必須＝コスト爆発防止）。worker 分岐内で die する。
@@ -196,6 +214,19 @@ fi
 case "${MODEL,,}" in
   *fable*) scribe_die "--model に fable 系は使えません（worker は opus 必須・protocol.md §1）" ;;
 esac
+
+# --- AC2: 既定 repo が linked（副）worktree のとき fail-loud（un-ag7）---
+# `--repo` 未指定（= cwd 既定）で cwd が副 worktree のとき、`git worktree add` が
+# <linked-wt>/.worktrees/spawn/... へネストし、base=HEAD も origin/main でなく副 branch HEAD になる
+# （2026-06-12 実害）。worktree add（および --dry-run の emit_plan）の前にここで停止する（AC2/AC5）。
+# REPO と ANCHOR は独立判定（AC4）: --anchor 明示でここまで来ても --repo 既定が副 worktree なら止める。
+# 明示 `--repo` 時は不発火（AC3）。検出は git plumbing（naming 規約に依存しない・AC4）。
+if [[ "$REPO_EXPLICIT" -eq 0 ]] && _repo_main="$(scribe_linked_worktree_main "$REPO")"; then
+  scribe_die "既定 repo が linked worktree です: $REPO
+  ここで git worktree add すると .worktrees がネストし base も誤り（HEAD=副 branch）になります。
+  真の main worktree: $_repo_main
+  → そこへ cd するか、--repo '$_repo_main' を明示してください。"
+fi
 
 [[ -n "$BD_ID" ]] || scribe_die "bd id（worker モードの必須引数）がありません。Usage は --help。"
 
