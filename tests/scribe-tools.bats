@@ -11,6 +11,7 @@ setup() {
   GATE="$SCRIPTS/scribe-gate-args.sh"
   SELFTEST="$SCRIPTS/scribe-selftest-args.sh"
   CLEANUP="$SCRIPTS/scribe-cleanup.sh"
+  GUARD="$SCRIPTS/scribe-origin-guard.sh"
   LIB="$SCRIPTS/lib/scribe-lib.sh"
   # bd を実在検証スタブへ差し替え（実 graph 不要）。
   export SCRIBE_BD="$FIXTURES/bd-stub.sh"
@@ -48,7 +49,7 @@ _mk_main_and_linked() {
 
 # ---------- bash -n（全 script 構文）----------
 @test "bash -n: 全 script が構文 OK" {
-  for f in "$SPAWN" "$GATE" "$CLEANUP" "$SCRIPTS/lib/scribe-lib.sh"; do
+  for f in "$SPAWN" "$GATE" "$SELFTEST" "$CLEANUP" "$GUARD" "$SCRIPTS/lib/scribe-lib.sh"; do
     run bash -n "$f"
     [ "$status" -eq 0 ]
   done
@@ -222,6 +223,31 @@ _mk_main_and_linked() {
   [[ "$output" == *"receivedArgs"* ]]
   [[ "$output" == *"bdw"* ]]
   [[ "$output" == *"bd create"* ]]
+}
+
+# ---------- spawn: 共有 .git/config mutate 禁止（un-1n1 ①）----------
+@test "spawn(un-1n1): worker prompt の禁止節に共有 .git/config mutate 禁止 + 正しい代替(throwaway)が入る" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  # 禁止本文（共有 .git/config の mutate 禁止）。
+  [[ "$output" == *".git/config"* ]]
+  [[ "$output" == *"mutate しない"* ]]
+  # 正しい代替手段は throwaway bare repo / 別 clone（remote 検証用）。
+  [[ "$output" == *"throwaway"* ]]
+  [[ "$output" == *"un-6nf"* ]]
+  # git config --worktree は remote.* には効かないことを明記（誤誘導を避ける・un-1n1 gate finding）。
+  [[ "$output" == *"git config --worktree"* && "$output" == *"隔離できない"* ]]
+}
+
+# ---------- spawn: origin 健全性 marker 捕捉の plan 行（un-1n1 ③）----------
+@test "spawn(un-1n1): dry-run plan に origin 捕捉ステップ（scribe_capture_origin）が worktree add の後に出る" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"scribe_capture_origin"* ]]
+  # worktree add → capture の順序（capture は worktree 生成後でないと marker を置けない）。
+  add_ln="$(echo "$output" | grep -n 'worktree add' | head -1 | cut -d: -f1)"
+  cap_ln="$(echo "$output" | grep -n 'scribe_capture_origin' | head -1 | cut -d: -f1)"
+  [ -n "$add_ln" ] && [ -n "$cap_ln" ] && [ "$cap_ln" -gt "$add_ln" ]
 }
 
 # ---------- spawn: worker prompt に anchor 絶対パスを焼き込む（un-gjr）----------
@@ -643,4 +669,171 @@ _mk_main_and_linked() {
   [[ "$output" != *"branch -D"* ]]
   [[ "$output" != *"kill-server"* ]]
   rm -rf "$cwd" "$nongit"
+}
+
+# ---------- origin 健全性ガード（bd un-1n1）----------
+# worktree は anchor と .git/config（remotes）を共有するため worker の origin mutate が anchor+全 worktree を
+# 壊す（un-v5x 実害）。spawn で canonical origin を per-worktree marker へ捕捉し、gate で照合・復元する。
+# 実 git で main+linked worktree（origin 付き）を作り、共有 config の origin 汚染→検知→復元を検証する。
+
+# main+linked worktree（origin remote 付き）を 1 組作る。stdout に "<main>\t<linked>" を返す。
+_mk_repo_with_origin() {
+  local main linked
+  main="$(cd "$(mktemp -d)" && pwd -P)"
+  git -C "$main" -c init.defaultBranch=main init -q
+  git -C "$main" config user.email t@e; git -C "$main" config user.name t
+  git -C "$main" commit -q --allow-empty -m init
+  git -C "$main" remote add origin https://github.com/shuu5/scribe.git
+  linked="$main/.worktrees/spawn/un-4nm-101010"
+  git -C "$main" worktree add -q -b spawn/un-4nm-101010 "$linked" >/dev/null
+  printf '%s\t%s\n' "$main" "$linked"
+}
+
+@test "origin-guard(un-1n1): marker path は per-worktree git dir 配下（共有 config と別物）・非 git は空+非0" {
+  IFS=$'\t' read -r main linked < <(_mk_repo_with_origin)
+  run bash -c 'source "$1"; scribe_origin_marker_path "$2"' _ "$LIB" "$linked"
+  [ "$status" -eq 0 ]
+  # per-worktree の private git dir（.git/worktrees/<name>/）配下に置く＝共有 .git/config とは別物。
+  [[ "$output" == "$main/.git/worktrees/un-4nm-101010/scribe-origin.marker" ]]
+  # 非 git / 引数欠落は空 + 非0。
+  nongit="$(mktemp -d)"
+  run bash -c 'source "$1"; scribe_origin_marker_path "$2"' _ "$LIB" "$nongit"
+  [ "$status" -ne 0 ]; [ -z "$output" ]
+  run bash -c 'source "$1"; scribe_origin_marker_path ""' _ "$LIB"
+  [ "$status" -ne 0 ]; [ -z "$output" ]
+  rm -rf "$nongit"
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "origin-guard(un-1n1): capture が canonical origin を marker へ捕捉する（spawn 相当）" {
+  IFS=$'\t' read -r main linked < <(_mk_repo_with_origin)
+  run "$GUARD" capture --worktree "$linked"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"captured: origin=https://github.com/shuu5/scribe.git"* ]]
+  [[ "$(cat "$main/.git/worktrees/un-4nm-101010/scribe-origin.marker")" == "https://github.com/shuu5/scribe.git" ]]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "origin-guard(un-1n1): verify は健全なら exit 0（汚染なし）" {
+  IFS=$'\t' read -r main linked < <(_mk_repo_with_origin)
+  "$GUARD" capture --worktree "$linked" >/dev/null
+  run "$GUARD" verify --worktree "$linked"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"* ]]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "origin-guard(un-1n1): 汚染 origin を検知して exit 非0 + canonical URL を stdout（核心 AC）" {
+  IFS=$'\t' read -r main linked < <(_mk_repo_with_origin)
+  "$GUARD" capture --worktree "$linked" >/dev/null
+  # worker が共有 .git/config の origin を dummy へ書換（un-v5x の汚染を再現）。
+  git -C "$linked" remote set-url origin https://10.255.255.1/repo.git
+  # main 側も同じ汚染を見る（config 共有の証拠）。
+  [[ "$(git -C "$main" remote get-url origin)" == "https://10.255.255.1/repo.git" ]]
+  # 汚染検知 → exit 非0・canonical URL を stdout・差分を stderr。
+  run "$GUARD" verify --worktree "$linked"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"https://github.com/shuu5/scribe.git"* ]]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "origin-guard(un-1n1): verify --restore は汚染検知時に origin を復元してなお exit 非0（fail-loud 維持）" {
+  IFS=$'\t' read -r main linked < <(_mk_repo_with_origin)
+  "$GUARD" capture --worktree "$linked" >/dev/null
+  git -C "$linked" remote set-url origin https://10.255.255.1/repo.git
+  run "$GUARD" verify --worktree "$linked" --restore
+  # 復元しても「汚染が起きた事実」は非0 で上流へ伝える（fail-loud）。
+  [ "$status" -ne 0 ]
+  # origin は canonical へ復元されている（main 側で確認）。
+  [[ "$(git -C "$main" remote get-url origin)" == "https://github.com/shuu5/scribe.git" ]]
+  # 復元後は verify が健全（exit 0）。
+  run "$GUARD" verify --worktree "$linked"
+  [ "$status" -eq 0 ]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "origin-guard(un-1n1): restore サブコマンドで marker から origin を復元する" {
+  IFS=$'\t' read -r main linked < <(_mk_repo_with_origin)
+  "$GUARD" capture --worktree "$linked" >/dev/null
+  git -C "$linked" remote set-url origin https://10.255.255.1/repo.git
+  run "$GUARD" restore --worktree "$linked"
+  [ "$status" -eq 0 ]
+  [[ "$(git -C "$main" remote get-url origin)" == "https://github.com/shuu5/scribe.git" ]]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+# worker が `git remote remove origin` で origin ごと削除したケースも復元できる（set-url は存在しない
+# remote を作れず No such remote で失敗するため add へ分岐する・un-1n1 gate finding）。
+@test "origin-guard(un-1n1): origin を remove で削除しても verify は汚染検知 + restore が add で再作成する" {
+  IFS=$'\t' read -r main linked < <(_mk_repo_with_origin)
+  "$GUARD" capture --worktree "$linked" >/dev/null
+  git -C "$linked" remote remove origin   # worker が origin ごと削除（書換でなく削除）
+  ! git -C "$main" remote get-url origin >/dev/null 2>&1   # origin 不在を確認
+  # verify は origin 消失も汚染として検知（fail-loud・false-clean ではない）。
+  run "$GUARD" verify --worktree "$linked"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"https://github.com/shuu5/scribe.git"* ]]
+  # restore は remote add で再作成して復元する。
+  run "$GUARD" restore --worktree "$linked"
+  [ "$status" -eq 0 ]
+  [[ "$(git -C "$main" remote get-url origin)" == "https://github.com/shuu5/scribe.git" ]]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "origin-guard(un-1n1): origin 無しの repo では capture は no-op（marker 未作成・exit 0）" {
+  main="$(cd "$(mktemp -d)" && pwd -P)"
+  git -C "$main" -c init.defaultBranch=main init -q
+  git -C "$main" config user.email t@e; git -C "$main" config user.name t
+  git -C "$main" commit -q --allow-empty -m init
+  linked="$main/.worktrees/spawn/un-4nm-202020"
+  git -C "$main" worktree add -q -b spawn/un-4nm-202020 "$linked" >/dev/null
+  run "$GUARD" capture --worktree "$linked"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"origin 無し"* ]]
+  [ ! -f "$main/.git/worktrees/un-4nm-202020/scribe-origin.marker" ]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "origin-guard(un-1n1): marker 不在（baseline なし）の verify は skip して exit 0 + warn を出す" {
+  IFS=$'\t' read -r main linked < <(_mk_repo_with_origin)
+  # capture せずに verify（marker が無い）→ 照合不能ゆえ skip（exit 0）だが warn を surface。
+  run "$GUARD" verify --worktree "$linked"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"marker が無く照合できません"* ]]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "origin-guard(un-1n1): verify は継承 GIT_DIR/GIT_WORK_TREE から隔離して marker/origin を解決する" {
+  IFS=$'\t' read -r main linked < <(_mk_repo_with_origin)
+  "$GUARD" capture --worktree "$linked" >/dev/null
+  poison="$(mktemp -d)"
+  git -C "$poison" -c init.defaultBranch=main init -q
+  git -C "$poison" config user.email t@e; git -C "$poison" config user.name t
+  git -C "$poison" commit -q --allow-empty -m init
+  git -C "$poison" remote add origin https://example.invalid/poison.git
+  # poison の GIT_DIR/GIT_WORK_TREE を export しても、当該 worktree の共有 config origin を読む。
+  run bash -c 'export GIT_DIR="$1/.git" GIT_WORK_TREE="$1"; "$2" verify --worktree "$3"' \
+      _ "$poison" "$GUARD" "$linked"
+  [ "$status" -eq 0 ]   # 健全（poison の origin に引きずられない）
+  [[ "$output" != *"poison"* ]]
+  rm -rf "$poison"
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "origin-guard(un-1n1): 引数なし/未知サブコマンド/--worktree 欠落/--restore 誤用で fail-loud" {
+  run "$GUARD"; [ "$status" -ne 0 ]
+  run "$GUARD" bogus --worktree /tmp/wt; [ "$status" -ne 0 ]
+  run "$GUARD" verify; [ "$status" -ne 0 ]
+  # --restore は verify 専用（capture/restore に付けると fail-loud）。
+  run "$GUARD" capture --worktree /tmp/wt --restore; [ "$status" -ne 0 ]
 }

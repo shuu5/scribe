@@ -262,6 +262,7 @@ build_prompt() {
 ## 禁止（protocol.md §2/§3）
 - \`bd create\` / \`bd dep\` / assignment / \`bd dolt push\`（graph・同期点は admin の所有物）。
 - GitHub への push（admin が gate 後）/ admin window への tmux inject / 編集可スコープ外の編集。
+- **共有 \`.git/config\`（remotes / hooks / config 等）を mutate しない**: worktree は anchor と \`.git/config\` を **共有** するため、worker が origin/remote を書き換えると anchor+全 worktree の origin が壊れ admin の push が破綻する（un-1n1 実害）。remote 検証が要るなら **throwaway bare repo / 別 clone** を使う（\`remote.*\` は git が共有 config からのみ読むため \`git config --worktree\` でも隔離できない＝検証済み・物理隔離は →un-6nf）。
 - **follow-up の bd create**: 起票が要っても自分で起票せず自 issue の notes に「admin への起票候補」として書く。
 PROMPT
 }
@@ -275,6 +276,7 @@ MONITOR_CMD="tmux capture-pane -p -t \"\$WID\" | tail -n 3   # busy regex: '… 
 emit_plan() {
   echo "[plan] scribe-spawn: issue=$ID（実在検証 OK）"
   echo "[plan] git -C $REPO worktree add -b $BRANCH $WORKTREE $BASE"
+  echo "[plan] scribe_capture_origin $REPO $WORKTREE   # canonical origin を per-worktree marker へ捕捉（un-1n1・gate §5 verify 用）"
   echo "[plan] $CLD_SPAWN --cd $WORKTREE --bd-id $ID --model $MODEL \"<task prompt>\""
   echo "[plan] monitor（window ID @N 参照・dotted id の tmux -t 衝突回避）:"
   echo "         $MONITOR_RESOLVE"
@@ -290,6 +292,18 @@ fi
 
 # ===== 実行（real）=====
 git -C "$REPO" worktree add -b "$BRANCH" "$WORKTREE" "$BASE"
+
+# --- origin 健全性ガード: canonical origin を per-worktree marker へ捕捉（un-1n1・protocol.md §1/§5）---
+# worker が共有 .git/config の origin を mutate しても、admin が gate 時（§5）にこの marker と照合して
+# 汚染を検知・復元できるようにする。捕捉失敗（origin 無し等）は spawn を止めない（best-effort・warn のみ）。
+if scribe_capture_origin "$REPO" "$WORKTREE"; then
+  _origin_marker="$(scribe_origin_marker_path "$WORKTREE" 2>/dev/null || true)"
+  if [[ -n "${_origin_marker:-}" && -f "$_origin_marker" ]]; then
+    echo "origin captured: $(cat "$_origin_marker")（marker=$_origin_marker・gate §5 verify 用）"
+  fi
+else
+  echo "scribe: warn: origin の捕捉に失敗（gate §5 の origin 健全性 verify が skip される）: worktree=$WORKTREE" >&2
+fi
 
 PROMPT_TEXT="$(build_prompt)"
 

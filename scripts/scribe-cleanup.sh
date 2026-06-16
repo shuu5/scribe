@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scribe-cleanup.sh — merge 後の後片付けチェックリストを実行する道具。
 #
-# admin の gate funnel（docs/protocol.md §5 step6 cleanup / step7 dolt push 同期点）を 1 コマンド化。
+# admin の gate funnel（docs/protocol.md §5 step7 cleanup / step8 dolt push 同期点）を 1 コマンド化。
 # 掃除対象: worktree remove / branch -d / window kill / `bd dolt push` リマインド。
 #
 # 安全規律（CLAUDE.md 破壊的操作の禁止・protocol.md）:
