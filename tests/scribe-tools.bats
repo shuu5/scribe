@@ -9,6 +9,7 @@ setup() {
   FIXTURES="$BATS_TEST_DIRNAME/fixtures"
   SPAWN="$SCRIPTS/scribe-spawn.sh"
   GATE="$SCRIPTS/scribe-gate-args.sh"
+  SELFTEST="$SCRIPTS/scribe-selftest-args.sh"
   CLEANUP="$SCRIPTS/scribe-cleanup.sh"
   LIB="$SCRIPTS/lib/scribe-lib.sh"
   # bd を実在検証スタブへ差し替え（実 graph 不要）。
@@ -404,6 +405,75 @@ _mk_main_and_linked() {
 
 @test "gate-args: --model fable 系を拒否する" {
   run "$GATE" --dry-run --worktree /tmp/wt --model claude-fable-5 un-4nm
+  [ "$status" -ne 0 ]
+}
+
+# ---------- worker 自己点検 支援 (un-3yc / un-aq5) ----------
+# gate-args(read-only) と対称の道具だが**責務だけ非対称**: 自己点検は worker 実装済み前提の gated autoFix。
+# 非対称点を assert: autoFix=true / doImplement=doPlan=false / --self-test 必須 / --model fable 拒否 /
+# --max-concurrency 既定4 / dimensions 既定なし(WF が必須4補完)。dry-run + bd スタブのみ（実 spawn しない）。
+@test "selftest-args: 出力 JSON が valid で autoFix:true / doImplement:false / doPlan:false 固定（gate と非対称）" {
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'bats tests/foo.bats' un-4nm
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -m json.tool >/dev/null
+  [ "$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["autoFix"])')" = "True" ]
+  [ "$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["doImplement"])')" = "False" ]
+  [ "$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["doPlan"])')" = "False" ]
+}
+
+@test "selftest-args: worktree / baseRef / selfTestCmd / model / maxConcurrency が JSON に入る（既定 model=opus・maxConcurrency=4）" {
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --base origin/main --self-test 'bats tests/foo.bats' un-4nm
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["worktree"])')" = "/tmp/wt" ]
+  [ "$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["baseRef"])')" = "origin/main" ]
+  [ "$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["selfTestCmd"])')" = "bats tests/foo.bats" ]
+  [ "$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["model"])')" = "opus" ]
+  [ "$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["maxConcurrency"])')" = "4" ]
+  [[ "$output" == *"un-4nm"* ]]
+}
+
+@test "selftest-args: --max-concurrency で上書きでき、非正整数(0/非数)は fail-loud" {
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' --max-concurrency 8 un-4nm
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["maxConcurrency"])')" = "8" ]
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' --max-concurrency 0 un-4nm
+  [ "$status" -ne 0 ]
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' --max-concurrency abc un-4nm
+  [ "$status" -ne 0 ]
+}
+
+@test "selftest-args: dimensions は既定で載らない（WF が必須4補完）／--add-dimension で追加観点が載る" {
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' un-4nm
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | python3 -c 'import json,sys; print("dimensions" in json.load(sys.stdin))')" = "False" ]
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' --add-dimension perf:hotpath un-4nm
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["dimensions"][0]["key"])')" = "perf" ]
+  [ "$(echo "$output" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["dimensions"][0]["focus"])')" = "hotpath" ]
+}
+
+@test "selftest-args: --add-dimension に必須4観点 key（correctness 等）を渡すと fail-loud" {
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' --add-dimension correctness:foo un-4nm
+  [ "$status" -ne 0 ]
+}
+
+@test "selftest-args: --worktree 未指定で fail-loud" {
+  run "$SELFTEST" --dry-run --self-test 'x' un-4nm
+  [ "$status" -ne 0 ]
+}
+
+@test "selftest-args: --self-test 未指定で fail-loud（autoFix の fail-closed ゲート必須）" {
+  run "$SELFTEST" --dry-run --worktree /tmp/wt un-4nm
+  [ "$status" -ne 0 ]
+}
+
+@test "selftest-args: --self-test の値を省くと次フラグを誤消費せず fail-loud" {
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test --task-type chore un-4nm
+  [ "$status" -ne 0 ]
+}
+
+@test "selftest-args: --model fable 系を拒否する（worker は opus・protocol.md §1）" {
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' --model claude-fable-5 un-4nm
   [ "$status" -ne 0 ]
 }
 
