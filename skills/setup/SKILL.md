@@ -47,8 +47,16 @@ bd config get backup.git-push 2>/dev/null                  # → false か
 bd dolt remote list 2>/dev/null | grep -q '://' && echo "REMOTE:yes" || echo "REMOTE:no"
 # PRIME.md が我々の版か（sentinel: 役割分担 + bd remember 禁止）
 if test -f .beads/PRIME.md && { grep -q 'beads-init-template v:' .beads/PRIME.md || { grep -q '役割分担（最重要）' .beads/PRIME.md && grep -q 'memories` は使わない' .beads/PRIME.md; }; }; then echo "PRIME:ours"; else echo "PRIME:missing/wrong"; fi   # marker か役割分担 sentinel で判定（既存の marker 無し正版も救済＝移行安全）
-# PRIME が旧・役割入り版でないか（scribe 注入と矛盾する一律注入）。我々版でも旧版だと scribe opt-in 未成立。
-if test -f .beads/PRIME.md && grep -qE 'セッション終了プロトコル|着手前に .?bd create' .beads/PRIME.md; then echo "PRIME:role-laden(旧版・要同期)"; else echo "PRIME:role-neutral"; fi
+# PRIME が role 中立版か（marker バージョン番号で判定＝本文フレーズに依存しない。将来 PRIME を再編集して
+# 偶然「セッション終了プロトコル」等を含めても marker が残る限り誤上書きしない）。我々版でも marker が旧/無しだと
+# scribe opt-in 未成立。役割中立版の最小 marker バージョン（v:1）未満 or marker 無しは旧世代＝要同期。ただし
+# marker 無し/旧版でも明示的 role 中立 sentinel「本 PRIME は role 中立」があれば救済（移行安全・上の ours 救済と整合）。
+MIN_ROLE_NEUTRAL_VERSION=1
+prime_ver=$(grep -oE 'beads-init-template v:[0-9]+' .beads/PRIME.md 2>/dev/null | head -1 | grep -oE '[0-9]+$')
+# marker があれば v:N が唯一の権威で判定（v:0 等の旧版は本文に何が書かれても要同期＝sentinel で救済しない）。
+# marker が無いときだけ role 中立 sentinel で移行救済（pre-marker な hand-derived 正版を過剰同期しない）。
+# こうすると marker 権威が一貫し、旧版が本文中で偶然 sentinel 句に言及しても誤って role-neutral に倒れない。
+if test -f .beads/PRIME.md && { if [ -n "$prime_ver" ]; then [ "$prime_ver" -ge "$MIN_ROLE_NEUTRAL_VERSION" ]; else grep -q '本 PRIME は role 中立' .beads/PRIME.md; fi; }; then echo "PRIME:role-neutral"; else echo "PRIME:role-laden(marker 旧/無し・要同期)"; fi
 # CLAUDE.md/AGENTS.md の bd 既定汚染（英語既定の特徴句）
 for f in CLAUDE.md AGENTS.md; do grep -qE 'Use `bd remember`|do NOT use MEMORY\.md|PUSH TO REMOTE' "$f" 2>/dev/null && echo "POLLUTED:$f" || true; done
 # project-local settings.json の bd prime hook（二重発火）。bd が書く正規 command はラッパ形
@@ -80,14 +88,14 @@ bd dolt remote list 2>/dev/null | grep -q '://' || {
 ```
 origin remote が無い場合もスキップし「後で `bd dolt remote add origin git+<url>` を」と案内（安全・再 init はしない）。
 
-### PRIME.md（#5）— missing/wrong または旧・役割入り版のときだけ配置
+### PRIME.md（#5）— missing/wrong または旧版（marker 旧/無し・role-laden）のときだけ配置
 テンプレ（**この skill に同梱** `${CLAUDE_PLUGIN_ROOT}/skills/setup/PRIME.template.md`）を置換コピー:
 ```bash
 proj=$(basename "$(git rev-parse --show-toplevel)")
 sed "s|{{PROJECT}}|${proj}|g" "${CLAUDE_PLUGIN_ROOT}/skills/setup/PRIME.template.md" > .beads/PRIME.md
 ```
 `|` 区切りで `/` を含むパスに耐える。proj 名に `|`/`&`/`\` を含む稀なケースは sed が壊れ得るので、その時は Read+Write で手動置換する。
-判定は marker `beads-init-template v:` か役割分担 sentinel で行う。**旧・役割入り版（`セッション終了プロトコル` / `着手前に bd create` を含む）を検出したら、scribe 注入と矛盾するので役割中立版へ同期する**（marker があっても旧版なら上書き対象）。既存 PRIME.md が「our でなく独自カスタム」の場合は**上書きせずユーザーに確認**（意図的カスタムを尊重）。
+「我々の版か」判定は marker `beads-init-template v:` か役割分担 sentinel（#5）で行う。「role 中立か」判定は **marker バージョン番号**で行う（PRIME 本文の自然言語フレーズには依存しない＝将来 PRIME を再編集して偶然「セッション終了プロトコル」「着手前に bd create」等を含めても marker が残る限り誤上書きしない）。**marker `beads-init-template v:N` の N が役割中立版の最小バージョン（`v:1`）未満、または marker が無く role 中立 sentinel「本 PRIME は role 中立」も無い旧世代を検出したら、scribe 注入と矛盾するので役割中立版へ同期する**（marker があれば `v:N` が唯一の権威＝旧バージョンなら本文に何があっても上書き対象。marker が無いときだけ role 中立 sentinel で移行救済し同期しない）。既存 PRIME.md が「our でなく独自カスタム」の場合は**上書きせずユーザーに確認**（意図的カスタムを尊重）。
 
 ### 汚染除去（#6）— POLLUTED:<file> のときだけ
 CLAUDE.md/AGENTS.md を Read し、`<!-- BEGIN BEADS INTEGRATION -->` 〜 `<!-- END BEADS INTEGRATION -->` の **bd 既定汚染ブロックを丸ごと削除**（Edit）。bd 既定の特徴句（`Use bd remember`/`do NOT use MEMORY.md`/`PUSH TO REMOTE ... MANDATORY`）を含む版のみが対象。我々の矯正済み内容なら触らない。
@@ -126,8 +134,9 @@ grep -L 'BEGIN BEADS INTEGRATION' CLAUDE.md AGENTS.md   # 汚染が消えたか
 # 二重発火是正の確認（#7）: project-local settings.json に bd prime hook が残っていないか fail-loud 再 grep
 # （検出・除去が部分一致 `bd prime` ゆえ、bd ラッパ形 `... && bd prime || true` も剥がれているはず）
 test -f .claude/settings.json && grep -q 'bd prime' .claude/settings.json && echo "⚠ #7 未是正（settings.json に bd prime hook 残存）" || echo "二重発火なし（#7）✅"
-# scribe opt-in 成立の確認（#10）: PRIME が role 中立版（旧・役割入り句が無い）
-test -d .beads && ! grep -qE 'セッション終了プロトコル|着手前に .?bd create' .beads/PRIME.md && echo "scribe opt-in: role 中立 PRIME ✅" || echo "⚠ PRIME 未同期（旧・役割入り版）"
+# scribe opt-in 成立の確認（#10）: PRIME が role 中立版（marker v:N≥1 か role 中立 sentinel。本文フレーズに依存しない）
+_pv=$(grep -oE 'beads-init-template v:[0-9]+' .beads/PRIME.md 2>/dev/null | head -1 | grep -oE '[0-9]+$')
+test -d .beads && test -f .beads/PRIME.md && { if [ -n "$_pv" ]; then [ "$_pv" -ge 1 ]; else grep -q '本 PRIME は role 中立' .beads/PRIME.md; fi; } && echo "scribe opt-in: role 中立 PRIME ✅" || echo "⚠ PRIME 未同期（marker 旧/無し）"
 git status --short
 ```
 変更を**標準 git ワークフロー**でコミット（`main` 直 push 禁止のプロジェクトは feature branch → PR）。最後に「何を skip し何を修正/追加したか」を要約報告。
