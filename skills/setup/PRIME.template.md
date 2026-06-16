@@ -33,4 +33,4 @@
 - 完了/依存: `bd close <id> [--reason="..."]` / `bd dep add <issue> <depends-on>`（issue が depends-on に依存）
 - 同期/健全: `bd dolt push` / `bd dolt pull`（refs/dolt/data 同期）/ `bd stats` / `bd doctor`
 
-<!-- beads-init-template v:1 — このファイルは scribe:setup（旧 beads-init）skill 由来。手動編集してもこの行を残せば skill は「我々の版」と認識し上書きしない。役割を帯びた規約は scribe plugin の role 別 SessionStart 注入が SSOT（本 PRIME は role 中立）。 -->
+<!-- beads-init-template v:1 — このファイルは scribe:setup（旧 beads-init）skill 由来。skill はこの marker の `v:N` バージョン番号で「我々の版か」と「role 中立版か（N が現行 role 中立版の最小バージョン以上か）」を判定する（本文の自然言語フレーズには依存しない）。この行（特に `v:N`）を残せば手動編集しても上書きされない。役割を帯びた規約は scribe plugin の role 別 SessionStart 注入が SSOT（本 PRIME は role 中立）。 -->
