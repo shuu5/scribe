@@ -383,7 +383,7 @@ v0 の最重要設計判断。**role 別に注入内容を分割する**:
 ### v0 チェックリスト（堀 OFF・今すぐ着手）
 
 - [ ] `~/projects/local-projects/scribe/` を新規作成（`thesis-scribe` とは別物・無関係）。
-- [ ] beads 導入は **`/beads-init` skill 経由**（`bd init` 直叩き禁止）。
+- [ ] beads 導入は **`/scribe:setup` skill 経由**（`bd init` 直叩き禁止）。
 - [ ] 本書 `docs/scribe-design.md` を scribe リポにコピーし初期設計ドキュメントとする。
 - [ ] plugin 構造を起こす（`.claude-plugin/plugin.json` + `hooks/hooks.json` + `skills/` + `scripts/` + `docs/`）。実装形式 = **plugin**（skill は scripts 同梱のみ可・hooks/agents/MCP 同梱は plugin 専用＝一次情報 verified）。`claude/plugins/scribe` symlink 登録（session/folio と同型・ubuntu-note-system 側は別 PR）。
 - [ ] **手動 admin プロトコルを plugin docs へ成文化**（§14: spawn 規約・close→gate→errata・worker prompt 規約・監視 busy regex・B/hybrid graph 所有境界）。project CLAUDE.md のポインタ縮小は別 PR。
