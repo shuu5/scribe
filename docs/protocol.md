@@ -22,6 +22,7 @@
 - **admin = anchor（orchestrator セッション）**。graph の所有者であり、唯一の `bd dolt push` 同期点。
 - **worker = worktree セッション**。自 issue の進捗だけを書き、graph は触らない（§3 B/hybrid）。
 - 役割の env 判定仕様は `docs/role-context-spec.md`（`SCRIBE_ROLE` > cwd `.worktrees/` 判定 > anchor 既定）。
+- **needs-user タスク**（worker 着手不可・人間判断依存）は通常フローに乗らず §7 の解決フロー（consult 並列 pre-bake → grill → admin 起票/着手）へ分岐する。
 
 ---
 
@@ -167,6 +168,23 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 - inject は worker の pane で起き、**admin の context には載らない**（PUSH チャネル・scribe-design.md §9）。`-t` 参照は window ID（`@N`）か `session:index` で行う（§1 の dotted id 衝突回避）。
 
 > 一次出典: doobidoo `6d11f667`(un-8q5 pilot 横断 GOTCHA: session-state が WF 実行中に input-waiting を返す false-DONE／`verified`)・bd un-jax 引き継ぎ / scribe-design.md §9 通信モデル（PUSH=操舵注入）/ ubuntu-note-system `docs/session-orchestration-strategy.md` §3.2（外部・本リポ未同梱・session-comm wait-ready→inject）。
+
+---
+
+## 7. needs-user タスクの扱い（consult 並列 pre-bake → grill）
+
+> **v0 暫定・未 dogfood（sc-osn 設計合意/grill 2026-06-17）**: 本節は consult 並列 pre-bake regime の設計合意を成文化したもので、まだ実走実証していない。一次記録 = doobidoo `9c73606d`。dogfood（実 needs-user タスクで実走 + `scribe-spawn --context` 実装）= bd `sc-in9`。実証後に本マークを外す。
+
+- **対象**: needs-user タスク = worker 着手不可の理由が人間判断に依存する状態（概念定義 = `scribe-design.md` §1）。needs-user は駐車ラベル、本節の consult 並列 pre-bake + grill が解決機構（別物）。
+- **発火条件**: needs-user が複数（≥2）溜まったときの consult fan-out。各 consult が 1 タスクを pre-bake。1 件なら admin インライン or 単一 consult で足り、fan-out 不要。
+- **フロー**:
+  1. admin が各 needs-user タスクに context（`bd show` + 関連 notes + doobidoo recall の要約）を焼き込み、consult を N 並列起動（`scribe-spawn --consult`・anchor 同居・各 consult を同一出発点に）。
+  2. 各 consult が 1 タスクを pre-bake（現状調査〔read-only〕→ 決定木 → 選択肢 + トレードオフ → admin への起票候補）し、brief を doobidoo へ保存（consult は graph を触らない＝§3 / role-context-spec §2.3）。
+  3. admin が brief を集約 → 人間が grill-me で判断に集中（consult が grill を焼き、人間が判断を grill する）。
+  4. graph 変更・起票・着手は admin/人間（consult は不可）。
+- **handoff 規約（doobidoo）**: `conversation_id=scribe-brief-{task_id}` でグループ、`tag=consult-{HHMMSS}` で個別識別。brief = 構造化メタ（`status: complete|partial`・`task_ref: <bd-id>`）+ 自然言語本文。admin は `memory_search conversation_id:scribe-brief-{task_id}` で全 brief を集約し `status` で完了判断。consult は終了前に brief を保存し**保存完了を最終出力に出す**（admin が `capture-pane` で未保存中断と区別）。
+- **un-sl9 回避**: 並列 consult は MEMORY.md を使わず **doobidoo 専用**。各 consult が distinct な conversation_id/tag で store＝create-new ゆえ衝突安全（lost-update なし）で、anchor 同居 2 セッション同時 MEMORY.md 衝突 e2e（un-sl9）未消化のブロックを受けない。
+- consult 側の義務詳細 = `role-context-spec.md` §2.3 / パターン選択（いつ fan-out するか）= `methodology.md` §2。
 
 ---
 
