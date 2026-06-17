@@ -6,3 +6,6 @@ selftest-*.local.sh
 .dolt/
 *.db
 .beads-credential-key
+.beads/issues.jsonl
+.beads/interactions.jsonl
+embeddeddolt/
