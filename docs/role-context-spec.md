@@ -91,6 +91,7 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
   - 観測は可（read）。タスク化が必要になっても自分で bd 起票せず、相談サマリに「admin への起票候補」として書き出すに留める（起票は admin）。
 - **write してよいのは記憶系のみ**: doobidoo（`mcp__doobidoo__memory_store`）と auto-memory（`MEMORY.md`）への保存だけ許可。
 - **サマリ保存義務（必須）**: 終了・中断の前に、議論の結論・未解決の論点・admin への起票候補を相談サマリとしてまとめ、doobidoo へ保存する（会話履歴に依存させない）。
+- **pre-bake brief 義務（needs-user タスクを割り当てられた場合・v0 暫定/未 dogfood: sc-osn）**: 1 つの needs-user タスクを admin から渡された consult は、それを pre-bake する — 現状調査（read-only）→ 決定木 → 選択肢 + トレードオフ → admin への起票候補。結果は doobidoo へ `conversation_id=scribe-brief-{task_id}` / `tag=consult-{HHMMSS}` で保存し、構造化メタ（`status: complete|partial`・`task_ref: <bd-id>`）+ 自然言語本文を含める。終了前に保存し保存完了を最終出力に出す。N 並列時は MEMORY.md を使わず doobidoo 専用（衝突安全）。手順 SSOT = `protocol.md` §7。
 - **モデル規約**: 基本 **opus**（ユーザー指定時のみ fable）。consult は admin と同じ main-loop 系統ゆえ fable 起動が許される例外（WF agent への fable 投入とは無関係）。
   - 起動は `cld-spawn --model opus "<テンプレ本文>"` を直接呼ぶ（`/session:spawn` の NLU は `--model` を解析せず新規既定 `claude-fable-5` を継承するため、基本 opus にできない）。
 - **暫定運用（un-sl9 検証完了まで）**: working memory の session-scoped 化（un-gcu）は実装・live 済みで compact 跨ぎ復元（PostCompact restore）は検証済みだが、anchor 同居 2 セッション同時運用の live e2e（un-sl9 検証点(2) = working-memory 衝突非発生）が未消化のため、それが消化されるまで consult は **compaction 系スキル（ready-compaction 等）の使用を控える**。検証完了後は un-sl9 が一次出典 3 文書と本条項を撤去する（撤去は un-sl9 の仕事）。一次出典: bd un-tao 確定 5 点(2)・CLAUDE.md 開発トポロジー節・session-orchestration-strategy.md §6・現状の検証状態は bd un-sl9/un-gcu notes。
