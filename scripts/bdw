@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# bdw — bd WRITE serializer (Path2: flock-serialized B/hybrid). 設計由来: uns un-gmq / scribe へ re-home: sc-jr0
+#
+# WHY ─────────────────────────────────────────────────────────────────────────
+# .beads/embeddeddolt は embedded Dolt = single-writer。anchor とその全 worktree は
+# git common-dir 経由で「物理 1 つの DB」を共有する。N 並列 worker が同一 issue へ
+# read-modify-write 系の write (bd update --append-notes / --claim / close 等) を
+# 並行実行すると last-writer-wins で lost-update が起きる
+#   (実測 un-gmq: 15 並列 append-notes → 10 しか残らず 5 件消失。逐次なら 15/15)。
+# bd 内部にも DB ロック+リトライはあるが、独立行を作る create は守れても、同一行の
+# read-modify-write(append-notes 等)の lost-update は防げない。本ラッパは bd の WRITE
+# サブコマンドを「マシン共通 flock」で直列化し、READ は素通しする。これで B/hybrid
+# (worker 自己直書き) を並列でも安全に維持できる。
+#
+# USAGE ───────────────────────────────────────────────────────────────────────
+#   並列 worker:      scripts/bdw update un-x --claim   # write は必ず bdw 経由
+#   逐次 1-worker:    素の bd でよい(同時 writer が居ないため直列化不要)
+#   read-only worker: bd --readonly ...                 # defense-in-depth(write 自体を遮断)
+#
+# DESIGN ──────────────────────────────────────────────────────────────────────
+#   fail-closed: 明示的に「READ と確証できる」サブコマンドだけ lock 無しで素通しし、
+#   それ以外(未知 or 全 write)は flock 取得後に実行する。新しい write サブコマンドが
+#   増えても自動で直列化される(allowlist 漏れ=破損、を構造的に防ぐ)。READ を余分に
+#   直列化しても遅くなるだけだが、write を素通しすると台帳が壊れる──ゆえに迷えば lock。
+#   lock = マシン共通(repo の git common-dir で物理 DB と 1 対 1)。timeout 有界、取得
+#   不能は fail-closed(非 0 終了で write を実行しない)。bd の exit code/stdout/stderr
+#   は素通し転送。既存 flock イディオム(cc-session session-comm.sh L305 'flock -w 30 9'
+#   / claude-session-save.sh 'flock -w 5 -x 9')を踏襲。
+#
+# ENV(任意の上書き):
+#   BDW_BD_BIN       bd 実体(既定: PATH 上の bd。bd は v1.0.4 pin=.beads/PRIME.md)
+#   BDW_LOCK_DIR     lock 配置 dir(既定: ${XDG_RUNTIME_DIR:-/tmp})。同一マシン・同一 user の
+#                    全 bd writer が同じ dir に合意している必要がある。
+#   BDW_LOCK_TIMEOUT flock 待機秒(既定: 60)。超過で fail-closed。
+
+set -uo pipefail
+
+BD_BIN="${BDW_BD_BIN:-bd}"
+command -v -- "$BD_BIN" >/dev/null 2>&1 || {
+  echo "bdw: bd executable not found (BDW_BD_BIN=$BD_BIN). bd を PATH に通すこと(v1.0.4 pin)" >&2
+  exit 127
+}
+
+# 引数無しは bd のヘルプ等に委譲(素通し)
+[ "$#" -eq 0 ] && exec "$BD_BIN"
+
+# --- サブコマンド検出: 先頭の global flag を読み飛ばし、最初の非フラグ token を採る ---
+# 値を取る global flag は次トークン(=値)も読み飛ばす(値を subcommand と誤認しない)。
+# 万一の誤認は「READ を lock する」側に倒れるだけで安全(fail-closed)。
+subcmd=""
+skip_next=false
+for tok in "$@"; do
+  if [ "$skip_next" = true ]; then skip_next=false; continue; fi
+  case "$tok" in
+    --actor|--db|--directory|-C|--dolt-auto-commit)
+      skip_next=true ;;          # 値取り global flag → 次トークンは値
+    --*=*|-*) : ;;               # --flag=value / boolean flag → 読み飛ばし
+    *) subcmd="$tok"; break ;;
+  esac
+done
+
+# --- READ allowlist: lock 無しで素通し(Dolt を絶対に書かないと確証できる read 専用のみ) ---
+case "$subcmd" in
+  show|list|ready|blocked|search|query|count|status|stats|info|context|history|\
+  children|state|statuses|types|graph|version|prime|human|quickstart|help|"")
+    exec "$BD_BIN" "$@" ;;
+esac
+
+# --- WRITE 系(create/update/close/dep/… 及び未知): マシン共通 flock で直列化 ---
+# repo-id: git common-dir の物理パス(anchor + 全 worktree で同一・物理 DB と 1 対 1)。
+common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+[ -z "$common_dir" ] && common_dir="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+# 物理パスへ正規化(symlink 経由の別名アクセスや相対出力でも同一鍵に収束させる)。
+if [ -n "$common_dir" ]; then
+  common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P || printf '%s' "$common_dir")"
+fi
+key_src="${common_dir:-$PWD}"   # git 外(想定外)でも安定鍵で lock は維持する(fail-closed)
+repo_id="$(printf '%s' "$key_src" | sha256sum | cut -c1-16)"
+
+# lock dir: 同一マシン・同一 user の全 bd writer が同じパスに合意する必要がある。
+lock_dir="${BDW_LOCK_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
+mkdir -p "$lock_dir" 2>/dev/null || lock_dir="/tmp"
+lock_file="${lock_dir}/bd-write-${repo_id}.lock"
+
+timeout_s="${BDW_LOCK_TIMEOUT:-60}"
+
+# fd 9 を lock file に開き flock 取得 → 保持したまま bd を exec(fd 9 は bd に継承され、
+# bd 終了時に閉じられて lock が解放される)。bd の exit code がそのまま bdw の exit code。
+exec 9>"$lock_file" || { echo "bdw: cannot open lock file: $lock_file" >&2; exit 1; }
+if ! flock -w "$timeout_s" 9; then
+  echo "bdw: could not acquire bd-write lock within ${timeout_s}s ($lock_file); fail-closed — '$subcmd' not run" >&2
+  exit 1
+fi
+exec "$BD_BIN" "$@"
