@@ -225,6 +225,73 @@ _mk_main_and_linked() {
   [[ "$output" == *"bd create"* ]]
 }
 
+# ---------- spawn: consult pre-bake モード（--context・§7 needs-user regime / 合意スペック 9c73606d）----------
+@test "spawn(pre-bake): --context + bd id で handoff 規約（conversation_id/tag）と焼き込み context が prompt に注入される" {
+  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  printf 'ADMIN_PREBAKED_CONTEXT_SENTINEL\n' > "$ctx"
+  run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
+  rm -f "$ctx"
+  [ "$status" -eq 0 ]
+  # admin 事前 context が焼き込まれる（同一出発点）。
+  [[ "$output" == *"ADMIN_PREBAKED_CONTEXT_SENTINEL"* ]]
+  # handoff 規約: conversation_id は task_ref keyed。tag=consult-<HHMMSS> は window 名と一致。
+  [[ "$output" == *"conversation_id=scribe-brief-un-consult"* ]]
+  [[ "$output" == *"scribe-brief-un-consult"* ]]
+  re='tag=consult-[0-9]{6}'
+  [[ "$output" =~ $re ]]
+  # pre-bake 手順 + doobidoo 専用（un-sl9 回避）の brief 保存規約。
+  [[ "$output" == *"pre-bake"* ]]
+  [[ "$output" == *"task_ref: un-consult"* ]]
+  [[ "$output" == *"un-sl9"* ]]
+  # 並列 consult の brief 衝突回避ゆえ MEMORY.md は使わない指示が出る。
+  [[ "$output" == *"MEMORY.md は使わない"* ]]
+}
+
+@test "spawn(pre-bake): --context は worker モードでは consult 専用 die（worker は pre-bake しない）" {
+  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  printf 'x\n' > "$ctx"
+  run "$SPAWN" --dry-run --context "$ctx" un-4nm
+  rm -f "$ctx"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"consult"* ]]
+  [[ "$output" != *"[plan]"* ]]
+}
+
+@test "spawn(pre-bake): --context は bd id（task_ref）必須で fail-loud（conversation_id を構成できない）" {
+  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  printf 'x\n' > "$ctx"
+  run "$SPAWN" --dry-run --consult --context "$ctx"
+  rm -f "$ctx"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"task_ref"* ]]
+  [[ "$output" != *"[plan]"* ]]
+}
+
+@test "spawn(pre-bake): --context のファイルが不在だと fail-loud（typo を上流で塞ぐ）" {
+  run "$SPAWN" --dry-run --consult --context /tmp/scribe-no-such-ctx-file.md un-consult
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"通常ファイル"* ]]
+  [[ "$output" != *"[plan]"* ]]
+}
+
+@test "spawn(pre-bake): --context にディレクトリを渡すと fail-loud（空 context のまま起動する fail-safe ギャップ防御・review wf_a92a624f）" {
+  dir="$(mktemp -d /tmp/scribe-ctx-dir-XXXXXX)"
+  run "$SPAWN" --dry-run --consult --context "$dir" un-consult
+  rmdir "$dir"
+  # -r 単体ならディレクトリは truthy で通過してしまう。-f で弾けていることを確認。
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"通常ファイル"* ]]
+  [[ "$output" != *"[plan]"* ]]
+}
+
+@test "spawn(pre-bake): --context 無しの素 consult は pre-bake 節を一切出さない（回帰防御）" {
+  run "$SPAWN" --dry-run --consult un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"pre-bake"* ]]
+  [[ "$output" != *"scribe-brief-"* ]]
+  [[ "$output" != *"conversation_id"* ]]
+}
+
 # ---------- spawn: 共有 .git/config mutate 禁止（un-1n1 ①）----------
 @test "spawn(un-1n1): worker prompt の禁止節に共有 .git/config mutate 禁止 + 正しい代替(throwaway)が入る" {
   run "$SPAWN" --dry-run un-4nm
