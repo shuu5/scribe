@@ -9,3 +9,7 @@ selftest-*.local.sh
 .beads/issues.jsonl
 .beads/interactions.jsonl
 embeddeddolt/
+
+# Python bytecode (scripts/hooks/*.py = git-destructive-guard 等)
+__pycache__/
+*.pyc
