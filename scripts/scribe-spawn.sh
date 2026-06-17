@@ -36,6 +36,9 @@
 #   --base REF      新 branch の base（worker のみ・既定: HEAD）
 #   --anchor PATH   bd graph の所在（bd show 用・既定: cwd）。consult はここで起動する
 #   --consult       consult role セッションを anchor で起動（worktree/worker prompt なし・SCRIBE_ROLE=consult を --env-file 注入）
+#   --context FILE  consult 専用。admin 事前 context（FILE 内容）を consult prompt へ焼き込み pre-bake モードへ。
+#                   §7 needs-user regime: bd id（task_ref）必須。handoff 規約（conversation_id=scribe-brief-<id>
+#                   / tag=consult-<HHMMSS>=window 名 / 構造化 brief を doobidoo 専用保存）を prompt へ自動注入する。
 #   --model MODEL   cld-spawn のモデル（既定: opus）。worker は fable 厳禁＝コスト爆発。
 #                   consult は基本 opus・ユーザー指定時のみ fable 可（role-context-spec §2.3 の例外）
 #   --dry-run       実行するはずのコマンド列を arg-echo するだけ（実 spawn しない）
@@ -54,11 +57,14 @@ usage() {
 Usage:
   scribe-spawn.sh [options] <bd-id>              # worker モード
   scribe-spawn.sh --consult [options] [<bd-id>]  # consult モード（worktree/worker prompt なし）
+  scribe-spawn.sh --consult --context FILE <bd-id>  # consult pre-bake モード（§7 needs-user regime）
 Options:
   --repo PATH     worktree を作る git リポジトリ（worker のみ・既定: cwd）
   --base REF      新 branch の base（worker のみ・既定: HEAD）
   --anchor PATH   bd graph の所在（bd show 用・既定: cwd）。consult はここで起動する
   --consult       consult role セッションを anchor で起動（worktree/worker prompt なし）
+  --context FILE  consult 専用。admin 事前 context（FILE）を焼き込み pre-bake モードへ（§7・bd id 必須）。
+                  handoff 規約（conversation_id=scribe-brief-<id> / tag=consult-<HHMMSS> / brief を doobidoo 保存）を自動注入
   --model MODEL   cld-spawn のモデル（既定: opus）。worker は fable 厳禁＝コスト爆発。
                   consult は基本 opus・ユーザー指定時のみ fable 可（role-context-spec §2.3 の例外）
   --dry-run       実行するはずのコマンド列を arg-echo するだけ（実 spawn しない）
@@ -74,6 +80,9 @@ CONSULT=0
 MODEL="opus"
 DRY_RUN=0
 BD_ID=""
+# --context: admin 事前 context をファイルから consult prompt へ焼き込み pre-bake モードへ切替える
+# （§7 needs-user regime / 合意スペック doobidoo 9c73606d）。consult 専用・空なら従来の素 consult。
+CONTEXT_FILE=""
 # REPO/ANCHOR が「既定（cwd）」か「明示指定」かを独立に追う（un-ag7・AC3/AC4）。
 # 明示時は linked-worktree ガードを不発火にし、cross-repo cell の意図的 override を壊さない。
 REPO_EXPLICIT=0
@@ -85,6 +94,7 @@ while [[ $# -gt 0 ]]; do
     --base)    [[ -n "${2:-}" ]] || scribe_die "--base に ref を指定してください"; BASE="$2"; shift 2 ;;
     --anchor)  [[ -n "${2:-}" ]] || scribe_die "--anchor にパスを指定してください"; ANCHOR="$2"; ANCHOR_EXPLICIT=1; shift 2 ;;
     --consult) CONSULT=1; shift ;;
+    --context) [[ -n "${2:-}" ]] || scribe_die "--context にファイルパスを指定してください"; CONTEXT_FILE="$2"; shift 2 ;;
     --model)   [[ -n "${2:-}" ]] || scribe_die "--model にモデル名を指定してください"; MODEL="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage 0 ;;
@@ -121,6 +131,12 @@ if [[ "$ANCHOR_EXPLICIT" -eq 0 ]] && _anchor_main="$(scribe_linked_worktree_main
   → そこへ cd するか、--anchor '$_anchor_main' を明示してください。"
 fi
 
+# --- --context は consult 専用（pre-bake は consult role 機構・worker は pre-bake しない）---
+# worker 分岐は consult 分岐の後に来るため、ここで先に弾かないと worker 経路へ --context が漏れる。
+if [[ -n "$CONTEXT_FILE" && "$CONSULT" -eq 0 ]]; then
+  scribe_die "--context は consult モード(--consult)専用です（pre-bake は consult role 機構・§7 / role-context-spec §2.3）"
+fi
+
 # fable の許否は role で非対称（道具は規約を変えない）:
 #   - worker: fable 厳禁（protocol.md §1: worker は opus 必須＝コスト爆発防止）。worker 分岐内で die する。
 #   - consult: fable は **許容**（role-context-spec §2.3: 基本 opus・ユーザー指定時のみ fable。
@@ -145,8 +161,24 @@ if [[ "$CONSULT" -eq 1 ]]; then
       || scribe_die "bd issue が存在しません: '$TOPIC'（consult 議題参照の typo を上流で阻止）"
   fi
 
+  # --- pre-bake モード（--context 指定時）の前提検証（§7 / 合意スペック 9c73606d）---
+  if [[ -n "$CONTEXT_FILE" ]]; then
+    # (a) task_ref（bd id）必須: handoff の conversation_id=scribe-brief-<task_id> を構成できないと
+    #     admin が brief を集約できない（§7 handoff 規約）。pre-bake は 1 consult = 1 task。
+    [[ -n "$TOPIC" ]] \
+      || scribe_die "--context（pre-bake）は task_ref（bd id）が必須です（conversation_id=scribe-brief-<id> を構成するため・§7）"
+    # (b) context は読める通常ファイルであること（admin が焼き込む素材。typo を上流で fail-loud）。
+    #     -r 単体だとディレクトリも真を返し、後段 build_consult_prompt 内の `cat "$CONTEXT_FILE"` が
+    #     'Is a directory' で失敗しても直後の heredoc 成功で関数 exit が上書きされ「空 context のまま
+    #     consult 起動」する fail-safe ギャップになる（review wf_a92a624f confirmed）。-f を足して
+    #     ディレクトリ/特殊ファイルを上流で fail-loud にする。
+    [[ -f "$CONTEXT_FILE" && -r "$CONTEXT_FILE" ]] \
+      || scribe_die "--context は読める通常ファイルを指定してください: '$CONTEXT_FILE'（不在/ディレクトリ/特殊ファイルは不可）"
+  fi
+
   # consult テンプレ本文（role-context-spec §2.3）= 設計議論/grill 専用・read-only 規律・記憶系のみ write・サマリ保存義務。
   # **worker prompt（worktree 拘束 / bdw / selftest / cell-quality / bd close）は一切含めない**（role 契約）。
+  # --context 指定時は末尾に pre-bake 任務（admin 事前 context 焼き込み + handoff 規約）を追記する（§7）。
   build_consult_prompt() {
     cat <<PROMPT
 あなたは scribe consult セッション（設計議論・grill 専用の第 2 対話相手）。応答は日本語。
@@ -166,6 +198,39 @@ ${TOPIC:+- 議題参照（read-only）: \`bd show $TOPIC\`（観測のみ。work
 ## サマリ保存義務（必須）
 - 終了・中断の前に、議論の結論・未解決の論点・admin への起票候補を相談サマリにまとめ doobidoo へ保存する（会話履歴に依存させない）。
 PROMPT
+    # --- pre-bake 任務の追記（--context 指定時のみ・§7 needs-user regime / 合意スペック 9c73606d）---
+    if [[ -n "$CONTEXT_FILE" ]]; then
+      # tag=consult-<HHMMSS> は window 名と一致させる（admin が capture-pane の window と brief を突合する証跡）。
+      local _hhmmss="${CONSULT_WINDOW#consult-}"
+      cat <<PREBAKE
+
+## 【pre-bake 任務】§7 needs-user regime（admin 並列起動・各 consult 同一出発点）
+admin が下記 context を焼き込みました。これを唯一の出発点として **task_ref=$TOPIC を 1 件だけ** pre-bake してください
+（あなたは並列起動された N consult の 1 つ。他タスクには触れない）。
+
+--- admin 事前 context ここから ---
+PREBAKE
+      cat "$CONTEXT_FILE"
+      cat <<PREBAKE
+
+--- admin 事前 context ここまで ---
+
+### pre-bake 手順（すべて read-only。write・spawn・bd 起票は禁止＝§3 / role-context-spec §2.3）
+1. **現状調査**: read のみ（\`bd show $TOPIC\` / 関連コード観測）。事実と推測を区別する。
+2. **決定木**: 決めるべき枝を上流から並べる（grill-me の「全体地図」を焼く）。
+3. **選択肢 + トレードオフ**: 各枝の取りうる案を対等に並べ、「現状→なぜ問題→選択肢」を起草する（推奨は理由付きで後置・印は付けない）。
+4. **admin への起票候補**: タスク化が要っても自分で bd 起票せず、候補として brief に書き出すに留める（起票は admin/人間）。
+
+### brief 保存規約（必須・doobidoo 専用＝un-sl9 回避）
+- **MEMORY.md は使わない**（並列 consult の同時 MEMORY.md 書込み衝突を避ける。doobidoo は distinct な keying ゆえ create-new で衝突安全）。
+- 終了・中断の前に \`mcp__doobidoo__memory_store\` で brief を保存する:
+  - \`conversation_id\` = \`scribe-brief-$TOPIC\`（admin がこの id で全 brief を集約する）
+  - \`tags\` に \`consult-$_hhmmss\` を含める（この consult の window 名と一致＝個別識別）
+  - 本文冒頭に構造化メタを置く: \`status: complete|partial\` / \`task_ref: $TOPIC\`
+  - 本文 = 上記 1〜4（現状調査→決定木→選択肢+トレードオフ→admin 起票候補）。
+- 保存が完了したら、**保存した旨（返ってきた hash 等）を最終出力に明記**する（admin が capture-pane で「未保存のまま中断」と区別する完了証跡）。
+PREBAKE
+    fi
   }
 
   # env-file は **anchor working tree の外**（/tmp 配下）に作る。anchor は admin orchestrator の cwd で
@@ -183,6 +248,10 @@ PROMPT
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "[plan] scribe-spawn(consult): anchor=$ANCHOR${TOPIC:+ 議題参照=$TOPIC（read-only）}"
+    if [[ -n "$CONTEXT_FILE" ]]; then
+      echo "[plan] pre-bake モード（§7）: context=$CONTEXT_FILE を焼き込み・task_ref=$TOPIC"
+      echo "[plan]   handoff 規約 → conversation_id=scribe-brief-$TOPIC / tag=consult-${CONSULT_WINDOW#consult-}（=window 名）"
+    fi
     echo "[plan] env-file（anchor 外＝anchor リポを汚さない・spawn 後 rm）:"
     echo "         ENV_FILE=\$(mktemp /tmp/scribe-consult-XXXXXX.env)"
     echo "         printf '%s\\n' '$ENV_LINE' > \"\$ENV_FILE\""
@@ -201,7 +270,7 @@ PROMPT
   printf '%s\n' "$ENV_LINE" > "$ENV_FILE"
   CONSULT_PROMPT="$(build_consult_prompt)"
   "$CLD_SPAWN" --cd "$ANCHOR" --model "$MODEL" --window-name "$CONSULT_WINDOW" --force-new --env-file "$ENV_FILE" "$CONSULT_PROMPT"
-  echo "spawned(consult): anchor=$ANCHOR model=$MODEL window=$CONSULT_WINDOW${TOPIC:+ 議題参照=$TOPIC}"
+  echo "spawned(consult): anchor=$ANCHOR model=$MODEL window=$CONSULT_WINDOW${TOPIC:+ 議題参照=$TOPIC}${CONTEXT_FILE:+ pre-bake=$TOPIC（conversation_id=scribe-brief-$TOPIC）}"
   exit 0
 fi
 
