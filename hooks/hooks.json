@@ -2,6 +2,7 @@
   "_comment": "scribe v0 SessionStart wire(bd un-led 雛形 → bd un-ck2/C2 で実配線化)。role 別文脈注入の実体は scripts/hooks/session-start-role-inject.sh(C2 実装済・SCRIBE_ROLE env > cwd .worktrees(worker) > 既定(admin) で role 判定し role 別規約を stdout 注入)。注入内容の SSOT は docs/role-context-spec.md(§1 判定 / §2.1-2.3 role 別)・規約本文は docs/protocol.md。本 hook が live になるのは C4(symlink 登録)後。",
   "_comment_safety": "command は『参照先 script が存在し実行可能なときだけ実行する』安全形。SCRIPT を [ -x ] でガードし、未存在(symlink 未登録の現状や CLAUDE_PLUGIN_ROOT 異常時)でも `|| true` で必ず成功する(fail-open)。これは『存在しない script を無条件実行して全セッションを壊す』ことを構造的に防ぐため。C2 は雛形の command を温存(バイト不変)したまま参照先 script を実装した。script 側も spec/doc 不在・判定不能で exit 0 degrade する二重 fail-safe。",
   "_comment_scope": "本セル(C1)は wire(hooks.json の形)だけを置き、hook の実 script は書かない(= C2 の領分)。PostToolUse diagnostics hook(scribe-design.md §11)は v0 堀 OFF のため未配線(v1+)。",
+  "_comment_guard": "PreToolUse[Bash]=git-destructive-guard.py(sc-erd で uns から re-home)。SessionStart と違い command に `|| true` を付けない(guard の exit2=block を必ず伝播させるため。consistency-fix で || true を足すと guard が無効化されるので禁止)。script 不在/非実行時のみ if/else で exit 0=fail-open。global(~/.claude)guard との二重発火は block 冪等で安全、scribe-anchor 認識(.claude-plugin+docs/protocol.md 署名)は本 guard のみが持ち uns 非導入ホストでの自己防護を成す。",
   "hooks": {
     "SessionStart": [
       {
@@ -9,6 +10,18 @@
           {
             "type": "command",
             "command": "SCRIPT=\"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/session-start-role-inject.sh\"; [ -x \"$SCRIPT\" ] && \"$SCRIPT\" || true",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SCRIPT=\"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/git-destructive-guard.py\"; if [ -x \"$SCRIPT\" ]; then python3 \"$SCRIPT\"; else exit 0; fi",
             "timeout": 10000
           }
         ]
