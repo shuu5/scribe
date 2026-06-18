@@ -222,10 +222,10 @@ PREBAKE
 4. **admin への起票候補**: タスク化が要っても自分で bd 起票せず、候補として brief に書き出すに留める（起票は admin/人間）。
 
 ### brief 保存規約（必須・doobidoo 専用＝un-sl9 回避）
-- **MEMORY.md は使わない**（並列 consult の同時 MEMORY.md 書込み衝突を避ける。doobidoo は distinct な keying ゆえ create-new で衝突安全）。
+- **MEMORY.md は使わない**（並列 consult の同時 MEMORY.md 書込み衝突を避ける。doobidoo は内容が異なる create-new ゆえ衝突安全）。
 - 終了・中断の前に \`mcp__doobidoo__memory_store\` で brief を保存する:
-  - \`conversation_id\` = \`scribe-brief-$TOPIC\`（admin がこの id で全 brief を集約する）
-  - \`tags\` に \`consult-$_hhmmss\` を含める（この consult の window 名と一致＝個別識別）
+  - \`tags\` に **集約用の共有グループ tag \`scribe-brief-$TOPIC\`**（admin はこの tag で全 brief を集約する）と **個別 tag \`consult-$_hhmmss\`**（この consult の window 名と一致＝個別識別）の**両方**を含める。
+  - \`conversation_id\` = \`scribe-brief-$TOPIC\` も付けてよい（保存時の dedup 回避ヒント）。ただし admin の集約は **tag** で行う（\`memory_search\` は conversation_id をフィルタに採れない＝§7 verified）。
   - 本文冒頭に構造化メタを置く: \`status: complete|partial\` / \`task_ref: $TOPIC\`
   - 本文 = 上記 1〜4（現状調査→決定木→選択肢+トレードオフ→admin 起票候補）。
 - 保存が完了したら、**保存した旨（返ってきた hash 等）を最終出力に明記**する（admin が capture-pane で「未保存のまま中断」と区別する完了証跡）。
@@ -250,7 +250,7 @@ PREBAKE
     echo "[plan] scribe-spawn(consult): anchor=$ANCHOR${TOPIC:+ 議題参照=$TOPIC（read-only）}"
     if [[ -n "$CONTEXT_FILE" ]]; then
       echo "[plan] pre-bake モード（§7）: context=$CONTEXT_FILE を焼き込み・task_ref=$TOPIC"
-      echo "[plan]   handoff 規約 → conversation_id=scribe-brief-$TOPIC / tag=consult-${CONSULT_WINDOW#consult-}（=window 名）"
+      echo "[plan]   handoff 規約 → 集約 tag=scribe-brief-$TOPIC（admin はこの tag で集約）/ 個別 tag=consult-${CONSULT_WINDOW#consult-}（=window 名）/ conversation_id=scribe-brief-$TOPIC（dedup ヒント）"
     fi
     echo "[plan] env-file（anchor 外＝anchor リポを汚さない・spawn 後 rm）:"
     echo "         ENV_FILE=\$(mktemp /tmp/scribe-consult-XXXXXX.env)"
