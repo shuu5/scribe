@@ -101,6 +101,43 @@ _mk_main_and_linked() {
   [[ "$output" == *"spawn/un-3sh.3.5-"* ]]
 }
 
+# ---------- spawn: sandbox opt-in（SCRIBE_SANDBOX=1・sc-1gu）----------
+@test "spawn(sandbox): gen-sandbox-settings.sh は failIfUnavailable + .beads先頭 allowWrite の valid JSON を出す" {
+  run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$SCRIBE_TEST_CWD"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.sandbox.enabled==true and .sandbox.failIfUnavailable==true and .sandbox.allowUnsandboxedCommands==false' >/dev/null
+  echo "$output" | jq -e '(.sandbox.filesystem.allowWrite|length)==2 and (.sandbox.filesystem.allowWrite[0]|endswith("/.beads"))' >/dev/null
+}
+
+@test "spawn(sandbox): SCRIBE_SANDBOX=1 の worker dry-run は settings.local.json 生成を plan に出す（spawn 行は不変）" {
+  SCRIBE_SANDBOX=1 run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"settings.local.json"* ]]
+  [[ "$output" == *"SCRIBE_SANDBOX"* ]]
+  [[ "$output" == *"--bd-id un-4nm"* ]]      # 本番 spawn 行は SCRIBE_SANDBOX で変わらない
+  [[ "$output" == *"--model opus"* ]]
+}
+
+@test "spawn(sandbox): SCRIBE_SANDBOX 未指定なら sandbox 節を一切出さない（opt-in gating・本番 byte 不変の核）" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"settings.local.json"* ]]
+  [[ "$output" == *"--bd-id un-4nm"* ]]
+  [[ "$output" == *"--model opus"* ]]
+}
+
+@test "spawn(sandbox): SCRIBE_SANDBOX 有無で cld-spawn の spawn 行は byte 同一（substring でなく full-line で pin）" {
+  # worktree タイムスタンプ(spawn/un-4nm-HHMMSS)だけ正規化し、spawn 行の完全一致を直接 assert する。
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  plain="$(printf '%s\n' "$output" | grep -F 'cld-spawn --cd' | sed -E 's#un-4nm-[0-9]+#un-4nm-TS#')"
+  SCRIBE_SANDBOX=1 run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  sb="$(printf '%s\n' "$output" | grep -F 'cld-spawn --cd' | sed -E 's#un-4nm-[0-9]+#un-4nm-TS#')"
+  [ -n "$plain" ]
+  [ "$plain" == "$sb" ]   # SCRIBE_SANDBOX で spawn 行は 1 byte も変わらない
+}
+
 # ---------- spawn: consult モード ----------
 @test "spawn: consult モードで SCRIBE_ROLE=consult が env-file に焼き込まれる" {
   run "$SPAWN" --dry-run --consult un-consult

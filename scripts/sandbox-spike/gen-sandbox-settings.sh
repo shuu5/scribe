@@ -6,7 +6,7 @@
 #   - cwd(worktree) + 配下           … sandbox 既定で writable(列挙不要)
 #   - linked worktree の共有 .git     … sandbox 既定で writable(hooks/ と config は拒否のまま)
 #   - <ANCHOR>/.beads                … 明示(bd/bdw の台帳書込み = B/hybrid。worktree subtree 外ゆえ絶対パス必須)
-#   - $XDG_RUNTIME_DIR(/run/user/<uid>) … 明示(bdw の flock 鍵 bd-write-<repo>.lock の置き場)
+#   - bdw のロック dir(BDW_LOCK_DIR:-XDG_RUNTIME_DIR:-/tmp) … 明示(bdw の flock 鍵 bd-write-<repo>.lock の置き場・bdw と同式)
 # 上記以外への書込みは sandbox 外壁(層2)が拒否する。
 #
 # キー名は CC 公式 docs で verified(code.claude.com/docs/en/sandboxing.md / settings.md):
@@ -32,7 +32,11 @@ anchor="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$wt" worktree list --porcelain
 [[ -n "$anchor" ]] || { echo "gen-sandbox-settings: anchor 逆算に失敗(git worktree 外?): $wt" >&2; exit 3; }
 
 uid="$(id -u)"
-runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+# bdw(scripts/bdw)が flock 鍵を置く dir と**同式**で導出する。bdw は
+#   lock_dir="${BDW_LOCK_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
+# なので、ここを XDG だけに依ると XDG 未設定の劣化環境で bdw=/tmp / sandbox=/run/user とズレ、
+# sandbox 有効時だけ bdw の flock 作成がブロックされて bd write が壊れる(env 依存で気付きにくい)。
+runtime_dir="${BDW_LOCK_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 beads_dir="$anchor/.beads"
 
 jq -n \
