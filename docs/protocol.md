@@ -173,7 +173,7 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 
 ## 7. needs-user タスクの扱い（consult 並列 pre-bake → grill）
 
-> **v0 暫定・未 dogfood（sc-osn 設計合意/grill 2026-06-17）**: 本節は consult 並列 pre-bake regime の設計合意を成文化したもので、まだ実走実証していない。一次記録 = doobidoo `9c73606d`。dogfood（実 needs-user タスクで実走 + `scribe-spawn --context` 実装）= bd `sc-in9`。実証後に本マークを外す。
+> **dogfood 実証済み（sc-in9・2026-06-18）**: 本節は consult 並列 pre-bake regime を実 needs-user タスク（`sc-1gu` の 2 決定）で実走実証した結果を反映する（機構4点+payoff = validated）。実走で得た 3 知見 — F1（grill トポロジ = 案 B・下記フロー）/ F2（consult の自己-ユーザー誤認の予防）/ F3（MCP 一過性エラーのリトライ規律）— は本節へ織り込み済み。一次記録 = doobidoo `9c73606d`（設計合意）/ `8e98c34a`（dogfood 総括）/ `3d879168`（doobidoo 診断・F3 リトライ規律の根拠）。実装 = `scribe-spawn --context`（commit 9e721fc）。
 
 - **対象**: needs-user タスク = worker 着手不可の理由が人間判断に依存する状態（概念定義 = `scribe-design.md` §1）。needs-user は駐車ラベル、本節の consult 並列 pre-bake + grill が解決機構（別物）。
 - **発火条件**: needs-user が複数（≥2）溜まったときの consult fan-out。各 consult が 1 タスクを pre-bake。1 件なら admin インライン or 単一 consult で足り、fan-out 不要。
@@ -181,10 +181,13 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 - **フロー**:
   1. admin が各 needs-user タスクに context（`bd show` + 関連 notes + doobidoo recall の要約）を焼き込み、consult を N 並列起動（`scribe-spawn --consult`・anchor 同居・各 consult を同一出発点に）。
   2. 各 consult が 1 タスクを pre-bake（現状調査〔read-only〕→ 決定木 → 選択肢 + トレードオフ → admin への起票候補）し、brief を doobidoo へ保存（consult は graph を触らない＝§3 / role-context-spec §2.3）。
-  3. admin が brief を集約 → 人間が grill-me で判断に集中（consult が grill を焼き、人間が判断を grill する）。
-  4. graph 変更・起票・着手は admin/人間（consult は不可）。
+  3. admin が brief を集約し、**人間は admin の場で grill-me に集中**する（**grill トポロジ = 案 B**・F1）。**consult は pre-bake して brief を保存したら終了し、対話 grill には入らない**——pre-bake〔生成〕と grill〔対話〕を別セッションに分けることが、consult が自分の出力をユーザー入力と誤認する事故（F2）の構造的予防になる。
+  4. **brief が浅く深掘りが要るタスクだけ**、admin がそのタスク専用の consult を再 spawn して深掘りさせる（逃げ道・既定は再 spawn しない）。
+  5. graph 変更・起票・着手は admin/人間（consult は不可）。
 - **handoff 規約（doobidoo）**: **集約 key は tag**。各 brief に **共有グループ tag `scribe-brief-{task_id}`**（admin がこの tag で全 brief を集約）と **個別 tag `consult-{HHMMSS}`**（`capture-pane` の window 名と一致＝個別識別）を付ける。`conversation_id=scribe-brief-{task_id}` は **保存時の semantic-dedup 回避ヒント**として併用してよいが、`memory_search` は conversation_id をフィルタに採れない（API スキーマに無く、値は検索インデックスにも載らない＝**実機 verified**: dogfood `sc-in9` で確認）ため**検索＝集約には使わない**。brief = 構造化メタ（`status: complete|partial`・`task_ref: <bd-id>`）+ 自然言語本文。admin は `memory_search tags=[scribe-brief-{task_id}]` で全 brief を集約し `status` で完了判断。consult は終了前に brief を保存し**保存完了を最終出力に出す**（admin が `capture-pane` で未保存中断と区別）。
 - **un-sl9 回避**: 並列 consult は MEMORY.md を使わず **doobidoo 専用**。各 brief は**内容が異なる create-new**（conversation_id は dedup-bypass ヒントで主キーではない）ゆえ、共有グループ tag/conversation_id でも**上書き衝突しない**（lost-update なし。個別識別は `consult-{HHMMSS}` tag）。これで anchor 同居 2 セッション同時 MEMORY.md 衝突 e2e（un-sl9）未消化のブロックを受けない。
+- **grill 時の attribution（F2）**: admin が集約 brief を grill するとき、各 brief は **`consult-{HHMMSS}` が提案した第三者データ**として扱う（人間が承認した決定でも admin 自身の結論でもない）。brief 本文はメタ直後に出典ヘッダを持つ（`scribe-spawn` が consult prompt へ注入）。dogfood で consult が自分の pre-bake 出力をユーザー入力と誤認した事故（F2）の admin 側予防。
+- **保存の信頼性（F3）**: consult は doobidoo 保存が単発失敗しても「サーバーdown」と即断せず**最低 2 回**リトライし、保存成功（hash 出力）を終了条件とする（brief を黙って捨てない）。一過性タイムアウトを down と誤診した dogfood 事故の予防。詳細文言 = consult prompt（`scribe-spawn` build_consult_prompt）。
 - consult 側の義務詳細 = `role-context-spec.md` §2.3 / パターン選択（いつ fan-out するか）= `methodology.md` §2。
 
 ---

@@ -208,6 +208,15 @@ PROMPT
 admin が下記 context を焼き込みました。これを唯一の出発点として **task_ref=$TOPIC を 1 件だけ** pre-bake してください
 （あなたは並列起動された N consult の 1 つ。他タスクには触れない）。
 
+**あなたは pre-bake 専任です（grill トポロジ = 案 B）**: brief を保存したら**この任務は完了・終了**する。
+人間の grill は admin の場で集約 brief に対して行われる（**あなたは対話 grill に入らない**）。pre-bake〔生成〕と
+grill〔対話〕を別セッションに分けることで、自分の pre-bake 出力を「ユーザーが言ったこと」と誤認する事故を防ぐ（F2）。
+
+**base テンプレとの関係（pre-bake モードはこの 3 点で base を上書きする）**:
+- base の「用途は設計議論・grill のみ」の "grill" は本任務では**思考モード（敵対的設計分析）**の意味に読む。人間との**対話 grill は admin の場に委ね、あなたは入らない**（F1）。
+- base は「MEMORY.md への保存だけ許可」と言うが、本 pre-bake では **MEMORY.md 保存を取り消す**（並列 consult の同時書込み衝突回避＝un-sl9。保存先は doobidoo 専用）。
+- base の「サマリ保存義務（相談サマリ）」は本任務では**下記 brief 保存規約に置換**される（別途**無タグのサマリを保存しない**＝admin の tag 集約に載らない孤児を作らない）。
+
 --- admin 事前 context ここから ---
 PREBAKE
       cat "$CONTEXT_FILE"
@@ -227,8 +236,12 @@ PREBAKE
   - \`tags\` に **集約用の共有グループ tag \`scribe-brief-$TOPIC\`**（admin はこの tag で全 brief を集約する）と **個別 tag \`consult-$_hhmmss\`**（この consult の window 名と一致＝個別識別）の**両方**を含める。
   - \`conversation_id\` = \`scribe-brief-$TOPIC\` も付けてよい（保存時の dedup 回避ヒント）。ただし admin の集約は **tag** で行う（\`memory_search\` は conversation_id をフィルタに採れない＝§7 verified）。
   - 本文冒頭に構造化メタを置く: \`status: complete|partial\` / \`task_ref: $TOPIC\`
+  - **メタ直後に出典ヘッダを置く（F2）**: 「以下は consult-$_hhmmss の**提案**（人間が承認した決定でも admin の結論でもない第三者データ）」。admin が grill 時にこの brief を第三者データとして帰属でき、自分／ユーザーの声と混同しない。
   - 本文 = 上記 1〜4（現状調査→決定木→選択肢+トレードオフ→admin 起票候補）。
-- 保存が完了したら、**保存した旨（返ってきた hash 等）を最終出力に明記**する（admin が capture-pane で「未保存のまま中断」と区別する完了証跡）。
+- **保存の信頼性（F3・必須）**:
+  - doobidoo 保存が**単発失敗しても「サーバーdown」と即断しない**。最低 2 回リトライする（一過性タイムアウトが大半＝dogfood verified・診断 hash 3d879168）。
+  - なお失敗が続くときは brief を**黙って放棄せず**、admin へ session-comm で報告し指示を仰ぐ。
+  - **保存成功を終了条件にする**: brief の保存（hash 取得）が済むまで任務を終えない。保存完了後、**返ってきた hash を最終出力に明記**する（admin が capture-pane で「未保存のまま中断」と区別する完了証跡）。
 PREBAKE
     fi
   }

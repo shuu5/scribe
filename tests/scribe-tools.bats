@@ -251,6 +251,22 @@ _mk_main_and_linked() {
   [[ "$output" == *"MEMORY.md は使わない"* ]]
 }
 
+@test "spawn(pre-bake): F1/F2/F3 regime 知見が consult prompt へ注入される（dogfood sc-in9）" {
+  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  printf 'x\n' > "$ctx"
+  run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
+  rm -f "$ctx"
+  [ "$status" -eq 0 ]
+  # F1: consult は pre-bake 専任で対話 grill に入らない（grill トポロジ = 案 B）。
+  [[ "$output" == *"pre-bake 専任"* ]]
+  [[ "$output" == *"対話 grill に入らない"* ]]
+  # F2: brief にメタ直後の出典ヘッダ（提案＝第三者データ・決定でない）を置く＝admin の attribution 予防。
+  [[ "$output" == *"第三者データ"* ]]
+  # F3: 単発失敗で down 断定せずリトライ + 保存成功を終了条件にする（黙って brief を捨てない）。
+  [[ "$output" == *"単発失敗"* ]]
+  [[ "$output" == *"保存成功を終了条件"* ]]
+}
+
 @test "spawn(pre-bake): --context は worker モードでは consult 専用 die（worker は pre-bake しない）" {
   ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
   printf 'x\n' > "$ctx"

@@ -75,7 +75,7 @@ administrator の spec elicitation は可変自律:
 2. **監督付き自律**: 自答 → spec ドラフト → requirement 差分を人間が ratify
 3. **完全自律**: 根源要望のみから自答、仮定を非同期レビューキューへ（ユーザーが明示的に指示したときのみ）
 
-- **needs-user タスク**: worker 着手不可の理由が人間判断に依存する状態（自律度ダイヤルが人間 grill へ倒れる側のタスク）。駐車ラベル（タスク属性）であり、解決機構（consult 並列 pre-bake + grill-me）とは別物。orchestration 上の扱い = `protocol.md` §7（v0 暫定・未 dogfood: sc-osn）。
+- **needs-user タスク**: worker 着手不可の理由が人間判断に依存する状態（自律度ダイヤルが人間 grill へ倒れる側のタスク）。駐車ラベル（タスク属性）であり、解決機構（consult 並列 pre-bake + grill-me）とは別物。orchestration 上の扱い = `protocol.md` §7（dogfood 実証済み: sc-in9）。
 
 ---
 
