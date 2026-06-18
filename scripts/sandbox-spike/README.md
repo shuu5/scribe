@@ -40,9 +40,17 @@ CC 組込み sandbox は次の3つを要求する(spike で実測):
 ⟹ CC sandbox は worktree-local `settings.local.json` の allowWrite 境界を OS レベルで強制する。
 正当な cross-dir 書込み(cwd/.beads/runtime)は通り、外への書込みは封じる。
 
-## 残(本番反映・別フェーズ)
+## 本番反映(実装済み: direct-gen)
 
-spike は pre-place 方式。本番は `SCRIBE_SANDBOX=1` opt-in 時に `CLD_PATH` wrapper が
-worktree の settings.local.json を自動生成する(seam = `scripts/scribe-spawn.sh` の `$CLD_SPAWN`
-呼出し直前で `export CLD_PATH=<wrapper>`・cld-spawn は byte 不変)。
-残 assert: (c)opt-in 未指定時 launcher byte 同一 /(d)bwrap・socat 不在で opt-in worker 起動失敗。
+`SCRIBE_SANDBOX=1` opt-in 時、`scripts/scribe-spawn.sh` が `git worktree add` 後に
+`gen-sandbox-settings.sh` で worktree の `.claude/settings.local.json` を**直接生成**する
+(`CLD_PATH`/cld-spawn/launcher は触らない＝opt-in 未指定時は本番経路 byte 不変)。生成した
+settings は worktree の git exclude(`info/exclude`)へ冪等追記して ephemeral に保つ
+(worker の `git add -A` で巻き込まない・全マシン/全ユーザーで効かせる)。
+
+> decision② の元案「CLD_PATH wrapper」は撤回: worker 経路は ENV_FILE を使わず tmux new-window が
+> server 環境で走るため wrapper へ本物の cld パスを渡せず複雑化する。direct-gen の方が単純で
+> ratified 本質(opt-in / byte 不変 / failIfUnavailable / D1 穴)を保つ。
+
+検証: bats(SCRIBE_SANDBOX gating + spawn 行 full-line byte 同一)。
+残: live opt-in の end-to-end spawn 実証(c/d) / docs(protocol.md 等)へ socat 前提 + opt-in を反映。

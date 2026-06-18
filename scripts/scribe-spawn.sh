@@ -358,6 +358,7 @@ MONITOR_CMD="tmux capture-pane -p -t \"\$WID\" | tail -n 3   # busy regex: '… 
 emit_plan() {
   echo "[plan] scribe-spawn: issue=$ID（実在検証 OK）"
   echo "[plan] git -C $REPO worktree add -b $BRANCH $WORKTREE $BASE"
+  [[ "${SCRIBE_SANDBOX:-0}" == "1" ]] && echo "[plan] sandbox: $WORKTREE/.claude/settings.local.json を生成（SCRIBE_SANDBOX=1・bwrap 外壁。CLD_PATH/launcher は不変＝本番経路 byte 同一）"
   echo "[plan] scribe_capture_origin $REPO $WORKTREE   # canonical origin を per-worktree marker へ捕捉（un-1n1・gate §5 verify 用）"
   echo "[plan] $CLD_SPAWN --cd $WORKTREE --bd-id $ID --model $MODEL \"<task prompt>\""
   echo "[plan] monitor（window ID @N 参照・dotted id の tmux -t 衝突回避）:"
@@ -385,6 +386,33 @@ if scribe_capture_origin "$REPO" "$WORKTREE"; then
   fi
 else
   echo "scribe: warn: origin の捕捉に失敗（gate §5 の origin 健全性 verify が skip される）: worktree=$WORKTREE" >&2
+fi
+
+# --- sandbox opt-in（SCRIBE_SANDBOX=1・sc-1gu）: worker を OS レベル bwrap sandbox に封じる ---
+# git worktree add 済みの worktree に .claude/settings.local.json を生成し、worker(cwd=worktree)の
+# Bash subprocess を「自 worktree + 共有 .git + anchor の .beads + bdw 鍵($XDG_RUNTIME_DIR)」へ限定する。
+# CLD_PATH/cld-spawn/launcher は一切触らない＝opt-in 未指定時は本番経路 byte 不変。前提=bubblewrap +
+# socat + apparmor_restrict_unprivileged_userns=0。依存欠如時は failIfUnavailable で worker が起動拒否。
+if [[ "${SCRIBE_SANDBOX:-0}" == "1" ]]; then
+  # == "1" の文字列比較（[[ -eq ]] の算術評価は非数値で die・算術インジェクションを許すため避ける）。
+  mkdir -p "$WORKTREE/.claude" || scribe_die "sandbox: .claude ディレクトリ作成に失敗（SCRIBE_SANDBOX=1）: $WORKTREE"
+  # 一時ファイルへ生成し成功時のみ atomic mv（gen が途中失敗しても半端な settings を残さない）。
+  _sb_tmp="$(mktemp "$WORKTREE/.claude/.settings.XXXXXX")" || scribe_die "sandbox: 一時ファイル作成に失敗: $WORKTREE/.claude"
+  if "$SCRIPT_DIR/sandbox-spike/gen-sandbox-settings.sh" "$WORKTREE" > "$_sb_tmp"; then
+    mv -f "$_sb_tmp" "$WORKTREE/.claude/settings.local.json"
+  else
+    rm -f "$_sb_tmp"; scribe_die "sandbox settings.local.json の生成に失敗（SCRIBE_SANDBOX=1）: $WORKTREE"
+  fi
+  # 生成した settings.local.json を ephemeral に保つ（worker の git add -A で巻き込まない）。repo の
+  # tracked .gitignore でなく worktree の git exclude へ冪等追記する＝全マシン/全ユーザー（CI・他ホスト・
+  # machine-local ~/.config/git/ignore を持たない環境）でも効かせる。info/exclude は共有 common-dir。
+  _sb_excl="$(git -C "$WORKTREE" rev-parse --git-path info/exclude 2>/dev/null || true)"
+  if [[ -n "$_sb_excl" ]]; then
+    mkdir -p "$(dirname "$_sb_excl")" 2>/dev/null || true
+    grep -qxF '**/.claude/settings.local.json' "$_sb_excl" 2>/dev/null \
+      || printf '%s\n' '**/.claude/settings.local.json' >> "$_sb_excl"
+  fi
+  echo "sandbox: worker を bwrap sandbox に封じます（SCRIBE_SANDBOX=1・settings=$WORKTREE/.claude/settings.local.json）"
 fi
 
 PROMPT_TEXT="$(build_prompt)"
