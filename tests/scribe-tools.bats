@@ -234,11 +234,15 @@ _mk_main_and_linked() {
   [ "$status" -eq 0 ]
   # admin 事前 context が焼き込まれる（同一出発点）。
   [[ "$output" == *"ADMIN_PREBAKED_CONTEXT_SENTINEL"* ]]
-  # handoff 規約: conversation_id は task_ref keyed。tag=consult-<HHMMSS> は window 名と一致。
-  [[ "$output" == *"conversation_id=scribe-brief-un-consult"* ]]
-  [[ "$output" == *"scribe-brief-un-consult"* ]]
+  # handoff 規約: 集約は共有グループ tag。conversation_id は dedup 回避ヒントとして併用。
+  # tag=consult-<HHMMSS> は window 名と一致（capture-pane 突合の個別識別）。
+  [[ "$output" == *"scribe-brief-un-consult"* ]]                 # 共有グループ tag = task_ref keyed
+  [[ "$output" == *"conversation_id"* ]]                          # dedup 回避ヒントとして残す
   re='tag=consult-[0-9]{6}'
   [[ "$output" =~ $re ]]
+  # 集約 key は tag（conversation_id は memory_search フィルタに採れない＝§7 verified errata）。
+  [[ "$output" == *"集約"* ]]
+  [[ "$output" == *"memory_search"* ]]
   # pre-bake 手順 + doobidoo 専用（un-sl9 回避）の brief 保存規約。
   [[ "$output" == *"pre-bake"* ]]
   [[ "$output" == *"task_ref: un-consult"* ]]

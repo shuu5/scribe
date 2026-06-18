@@ -177,13 +177,14 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 
 - **対象**: needs-user タスク = worker 着手不可の理由が人間判断に依存する状態（概念定義 = `scribe-design.md` §1）。needs-user は駐車ラベル、本節の consult 並列 pre-bake + grill が解決機構（別物）。
 - **発火条件**: needs-user が複数（≥2）溜まったときの consult fan-out。各 consult が 1 タスクを pre-bake。1 件なら admin インライン or 単一 consult で足り、fan-out 不要。
+- **タスクの単位**: 通常は 1 needs-user issue = 1 タスク。ただし **1 issue 内に相互独立な複数の決定があり、各々が人間判断を要するとき**は、各決定を 1 タスク扱いして fan-out してよい（例: sandbox spike `sc-1gu` の「bwrap install 是非」と「書込み許可注入の設計」）。この場合 **task_ref は同一 issue id を共有**し（別個の bd id を起票しない）、**各 consult のスコープは context file が区切る**（task_ref では区別できないため）。**濫用防止**: 決定が相互独立でない・人間判断を要さない些末な選択肢は分割しない（consult 乱発を避ける）。
 - **フロー**:
   1. admin が各 needs-user タスクに context（`bd show` + 関連 notes + doobidoo recall の要約）を焼き込み、consult を N 並列起動（`scribe-spawn --consult`・anchor 同居・各 consult を同一出発点に）。
   2. 各 consult が 1 タスクを pre-bake（現状調査〔read-only〕→ 決定木 → 選択肢 + トレードオフ → admin への起票候補）し、brief を doobidoo へ保存（consult は graph を触らない＝§3 / role-context-spec §2.3）。
   3. admin が brief を集約 → 人間が grill-me で判断に集中（consult が grill を焼き、人間が判断を grill する）。
   4. graph 変更・起票・着手は admin/人間（consult は不可）。
-- **handoff 規約（doobidoo）**: `conversation_id=scribe-brief-{task_id}` でグループ、`tag=consult-{HHMMSS}` で個別識別。brief = 構造化メタ（`status: complete|partial`・`task_ref: <bd-id>`）+ 自然言語本文。admin は `memory_search conversation_id:scribe-brief-{task_id}` で全 brief を集約し `status` で完了判断。consult は終了前に brief を保存し**保存完了を最終出力に出す**（admin が `capture-pane` で未保存中断と区別）。
-- **un-sl9 回避**: 並列 consult は MEMORY.md を使わず **doobidoo 専用**。各 consult が distinct な conversation_id/tag で store＝create-new ゆえ衝突安全（lost-update なし）で、anchor 同居 2 セッション同時 MEMORY.md 衝突 e2e（un-sl9）未消化のブロックを受けない。
+- **handoff 規約（doobidoo）**: **集約 key は tag**。各 brief に **共有グループ tag `scribe-brief-{task_id}`**（admin がこの tag で全 brief を集約）と **個別 tag `consult-{HHMMSS}`**（`capture-pane` の window 名と一致＝個別識別）を付ける。`conversation_id=scribe-brief-{task_id}` は **保存時の semantic-dedup 回避ヒント**として併用してよいが、`memory_search` は conversation_id をフィルタに採れない（API スキーマに無く、値は検索インデックスにも載らない＝**実機 verified**: dogfood `sc-in9` で確認）ため**検索＝集約には使わない**。brief = 構造化メタ（`status: complete|partial`・`task_ref: <bd-id>`）+ 自然言語本文。admin は `memory_search tags=[scribe-brief-{task_id}]` で全 brief を集約し `status` で完了判断。consult は終了前に brief を保存し**保存完了を最終出力に出す**（admin が `capture-pane` で未保存中断と区別）。
+- **un-sl9 回避**: 並列 consult は MEMORY.md を使わず **doobidoo 専用**。各 brief は**内容が異なる create-new**（conversation_id は dedup-bypass ヒントで主キーではない）ゆえ、共有グループ tag/conversation_id でも**上書き衝突しない**（lost-update なし。個別識別は `consult-{HHMMSS}` tag）。これで anchor 同居 2 セッション同時 MEMORY.md 衝突 e2e（un-sl9）未消化のブロックを受けない。
 - consult 側の義務詳細 = `role-context-spec.md` §2.3 / パターン選択（いつ fan-out するか）= `methodology.md` §2。
 
 ---
