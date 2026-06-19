@@ -107,8 +107,9 @@ if [[ -z "$BD_ID" && $# -gt 0 ]]; then BD_ID="$1"; fi
 [[ -n "$BD_ID" ]]   || scribe_die "bd id（必須引数）がありません。Usage は --help。"
 [[ -n "$WORKTREE" ]] || scribe_die "--worktree（必須）がありません。"
 [[ -n "$SELFTEST" ]] || scribe_die "--self-test（必須・autoFix の fail-closed ゲート）がありません。"
-# worker は opus 必須（protocol.md §1）。fable 系は拒否（gate-args と対称）。
-case "$MODEL" in *[Ff][Aa][Bb][Ll][Ee]*) scribe_die "--model に fable 系は使えません（worker は opus・protocol.md §1）" ;; esac
+# worker は opus 必須（protocol.md §1）。fable 系は拒否（gate-args / spawn と 3 兄弟対称）。
+# case-insensitive を ${MODEL,,} 流へ統一（旧 glob `*[Ff][Aa]...` から・挙動は同値・sc-vuu facet4）。
+case "${MODEL,,}" in *fable*) scribe_die "--model に fable 系は使えません（worker は opus・protocol.md §1）" ;; esac
 # max-concurrency は正整数（cap=並列上限）。0/負/非数は弾く（無 cap にしたいなら本道具を使わず WF へ直接）。
 [[ "$MAX_CONCURRENCY" =~ ^[1-9][0-9]*$ ]] || scribe_die "--max-concurrency は正整数で指定してください: '$MAX_CONCURRENCY'"
 

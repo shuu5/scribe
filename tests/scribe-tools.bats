@@ -416,6 +416,32 @@ _mk_main_and_linked() {
   [ -n "$add_ln" ] && [ -n "$cap_ln" ] && [ "$cap_ln" -gt "$add_ln" ]
 }
 
+# ---------- spawn: cld-spawn 失敗時の orphan worktree 案内（sc-vuu facet3・failure injection 初導入）----------
+# 実モード spawn（dry-run でない）で cld-spawn を失敗 stub に差し替える初の failure-injection。
+# 自動 rollback はしない（破壊操作ポリシー: force 禁止・確認必須＝自動削除の例外を作らない）。
+# orphan worktree を残し、stderr に orphan path + scribe-cleanup.sh 復旧コマンドを明示して非0 終了する。
+@test "spawn(facet3): cld-spawn 失敗時は worktree を自動削除せず orphan を残し stderr 掃除案内+非0" {
+  local repo wt fail_stub
+  repo="$SCRIBE_TEST_CWD"   # setup() の temp git repo（init コミット済み）
+  fail_stub="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 7\n' > "$fail_stub"; chmod +x "$fail_stub"
+  wt="$repo/.worktrees/spawn/un-4nm-101010"
+  run env SCRIBE_CLD_SPAWN="$fail_stub" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$fail_stub"
+  # cld-spawn の exit code（7）を上流へ伝える（fail-loud）。
+  [ "$status" -eq 7 ]
+  # worktree は自動削除されず orphan として残る（自動 rollback しない）。
+  [ -d "$wt" ]
+  # stderr に orphan path + scribe-cleanup.sh 復旧コマンドが出る（path + 復旧コマンド付き明示）。
+  [[ "$output" == *"orphan"* ]]
+  [[ "$output" == *"$wt"* ]]
+  [[ "$output" == *"scribe-cleanup.sh"* ]]
+  # happy-path 由来の "spawned:" 行は出ない（失敗経路）。
+  [[ "$output" != *"spawned: issue=un-4nm"* ]]
+  # 後片付け（テスト自身は force 可・本番ポリシーとは別物）。
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+}
+
 # ---------- spawn: worker prompt に anchor 絶対パスを焼き込む（un-gjr）----------
 # anchor は worker 実行コマンド（cd "$ANCHOR" && bd show / bdw）へ補間されるため、空白を含む
 # パスでも 1 引数に収まるよう **ダブルクォート付き**で焼き込む（quote 漏れは空白 anchor で cd 破綻）。
@@ -595,8 +621,15 @@ _mk_main_and_linked() {
   [ "$status" -ne 0 ]
 }
 
-@test "gate-args: --model fable 系を拒否する" {
+@test "gate-args: --model fable 系を拒否する（大文字混在も case-insensitive で die・3兄弟対称・sc-vuu facet4）" {
   run "$GATE" --dry-run --worktree /tmp/wt --model claude-fable-5 un-4nm
+  [ "$status" -ne 0 ]
+  # case-insensitive: 大文字混在（CLAUDE-FABLE-5 / Fable）も取りこぼさず die する。
+  # 旧 case-sensitive `*fable*`（gate-args:65）は Fable/FABLE を見逃す fail-open だった（sc-2m0 派生・sc-vuu facet4）。
+  # spawn:325 の `${MODEL,,}` 流へ統一（selftest:111 と 3 兄弟対称化）。
+  run "$GATE" --dry-run --worktree /tmp/wt --model CLAUDE-FABLE-5 un-4nm
+  [ "$status" -ne 0 ]
+  run "$GATE" --dry-run --worktree /tmp/wt --model Fable un-4nm
   [ "$status" -ne 0 ]
 }
 
@@ -694,8 +727,11 @@ _mk_main_and_linked() {
   [[ "$output" == *"誤消費"* ]]
 }
 
-@test "selftest-args: --model fable 系を拒否する（worker は opus・protocol.md §1）" {
+@test "selftest-args: --model fable 系を拒否する（worker は opus・protocol.md §1・大文字も die・sc-vuu facet4）" {
   run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' --model claude-fable-5 un-4nm
+  [ "$status" -ne 0 ]
+  # 3 兄弟対称化（sc-vuu facet4）: 旧 glob `*[Ff][Aa]...` を `${MODEL,,}` 流へ統一しても大文字を取りこぼさない。
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' --model CLAUDE-FABLE-5 un-4nm
   [ "$status" -ne 0 ]
 }
 
@@ -834,6 +870,52 @@ _mk_main_and_linked() {
   # force 系は依然 dry-run/real とも出さない
   [[ "$output" != *"branch -D"* ]]
   [[ "$output" != *"kill-server"* ]]
+}
+
+# ---------- cleanup: 確認 read EOF を user-N と区別（sc-vuu facet1）----------
+# confirm() の read が EOF（非対話/パイプ切れ）に当たったとき、従来は user-N（拒否）と同じ「skip」へ
+# 落ち exit 0 で「未確認なのに成功扱い」する fail-open だった。三値化（0=承認/1=拒否/2=EOF）で
+# EOF を FAILED 計上→exit 非0 へ倒す（lib の EOF=fail-loud イディオムとの非対称を解消）。
+# --yes/--dry-run は先行 return で read 不到達ゆえ不変（tests:824/679 不変）。
+@test "cleanup(facet1): 確認入力が EOF（</dev/null・非対話）なら user-N と区別し FAILED 計上+exit 非0" {
+  local tmpdir; tmpdir="$(mktemp -d)"   # 非 git でも確認段（read）で EOF に当たるので git コマンドは不到達
+  # --yes/--dry-run を付けず stdin を閉じて（</dev/null）confirm の read を EOF に当てる。
+  run bash -c '"$1" --repo "$2" --worktree "$2/nope" --branch "spawn/no-such-$$" \
+      --window "wt-no-such-window-$$" un-4nm </dev/null' _ "$CLEANUP" "$tmpdir"
+  rm -rf "$tmpdir"
+  # EOF 専用識別メッセージが出る（user-N の "skip" とは別経路）。
+  [[ "$output" == *"EOF"* ]]
+  # 確認が EOF＝未確認なので step は実行されない（"→ worktree remove" は出ない）。
+  [[ "$output" != *"→ worktree remove"* ]]
+  # FAILED 計上で終了コードは非 0（fail-closed・user-N の skip+exit0 とは非対称）。
+  [ "$status" -ne 0 ]
+}
+
+@test "cleanup(facet1): user-N（printf 'N'）は EOF と区別され skip+exit0（三値化の非対称を pin）" {
+  local tmpdir; tmpdir="$(mktemp -d)"
+  # 全 step に 'N' を与える（改行なしでも ans 非空なら通常拒否＝EOF(2) と区別）。
+  run bash -c 'printf "N\nN\nN\n" | "$1" --repo "$2" --worktree "$2/nope" \
+      --branch "spawn/no-such-$$" --window "wt-no-such-window-$$" un-4nm' _ "$CLEANUP" "$tmpdir"
+  rm -rf "$tmpdir"
+  # ユーザー拒否は skip 経路（EOF 専用メッセージは出ない）。
+  [[ "$output" == *"skip: worktree remove"* ]]
+  [[ "$output" != *"EOF"* ]]
+  # 全 step skip で失敗ゼロ → exit 0（user-N は fail-loud しない）。
+  [ "$status" -eq 0 ]
+}
+
+# confirm() の `[[ -z "$ans" ]]` ガード（read rc=1 でも ans 非空なら通常回答）を pin（sc-vuu facet1・gate finding）。
+# 末尾改行なしの 'y' は read を rc=1 で返すが ans='y' ゆえ EOF(2) でなく承認(0)へ落ちる——この分岐は
+# EOF(</dev/null=ans 空) と user-N(改行付き=rc0) のテストでは未踏ゆえ、ここで明示的に pin する
+# （将来 confirm を「read 非0=即 EOF(2)」へ単純化すると改行なし入力が黙って壊れるのを捕捉する）。
+@test "cleanup(facet1): 末尾改行なしの 'y'（printf 'y'）は EOF(2) でなく承認(0)＝[[ -z ans ]] ガードを pin" {
+  local tmpdir; tmpdir="$(mktemp -d)"
+  # stdin が 'y' だけで閉じる（末尾改行なし）→ read rc=1 だが ans='y' → 承認（"→ worktree remove" が出る）。
+  run bash -c 'printf "y" | "$1" --repo "$2" --worktree "$2/nope" --branch "spawn/no-such-$$" \
+      --window "wt-no-such-$$" un-4nm' _ "$CLEANUP" "$tmpdir"
+  rm -rf "$tmpdir"
+  # step1(worktree remove) は承認され実行へ進む＝EOF skip でも user-N skip でもない。
+  [[ "$output" == *"→ worktree remove"* ]]
 }
 
 # ---------- cleanup: cross-repo（bd un-c4s）----------
@@ -1094,6 +1176,30 @@ _mk_repo_with_origin() {
   rm -rf "$main"
 }
 
+# marker 不在=skip=exit0 は意図的 fail-open（dogfood: origin 無し新規リポは gate を素通りすべき）。
+# それを個別 gate で厳格化したい場合の additive opt-in が --require-marker（既定挙動は不変・sc-vuu facet2）。
+@test "origin-guard(facet2): --require-marker は marker 不在を fail-open(skip) でなく fail-loud（exit 非0+error 文言）" {
+  IFS=$'\t' read -r main linked < <(_mk_repo_with_origin)
+  # capture せず（marker 不在）に --require-marker で verify → 既定 skip と異なり fail-loud。
+  run "$GUARD" verify --worktree "$linked" --require-marker
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"marker が不在"* ]]
+  # 同条件で --require-marker 無しなら従来どおり skip=exit0（既定挙動が additive opt-in で壊れていない）。
+  run "$GUARD" verify --worktree "$linked"
+  [ "$status" -eq 0 ]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "origin-guard(facet2): --require-marker 下でも marker があれば健全 verify は exit 0（厳格化は不在時のみ）" {
+  IFS=$'\t' read -r main linked < <(_mk_repo_with_origin)
+  "$GUARD" capture --worktree "$linked" >/dev/null   # marker を作る
+  run "$GUARD" verify --worktree "$linked" --require-marker
+  [ "$status" -eq 0 ]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
 @test "origin-guard(un-1n1): verify は継承 GIT_DIR/GIT_WORK_TREE から隔離して marker/origin を解決する" {
   IFS=$'\t' read -r main linked < <(_mk_repo_with_origin)
   "$GUARD" capture --worktree "$linked" >/dev/null
@@ -1118,6 +1224,8 @@ _mk_repo_with_origin() {
   run "$GUARD" verify; [ "$status" -ne 0 ]
   # --restore は verify 専用（capture/restore に付けると fail-loud）。
   run "$GUARD" capture --worktree /tmp/wt --restore; [ "$status" -ne 0 ]
+  # --require-marker も verify 専用（capture/restore に付けると fail-loud・sc-vuu facet2）。
+  run "$GUARD" capture --worktree /tmp/wt --require-marker; [ "$status" -ne 0 ]
 }
 
 # ---------- live security guard の self-test を回帰網へ配線（sc-i9b member 1）----------

@@ -62,7 +62,10 @@ if [[ -z "$BD_ID" && $# -gt 0 ]]; then BD_ID="$1"; fi
 
 [[ -n "$BD_ID" ]] || scribe_die "bd id（必須引数）がありません。Usage は --help。"
 [[ -n "$WORKTREE" ]] || scribe_die "--worktree（必須）がありません。"
-case "$MODEL" in *fable*) scribe_die "--model に fable 系は使えません（gate は opus・protocol.md §1）" ;; esac
+# fable 拒否は case-insensitive（${MODEL,,} で小文字化）＝Fable/FABLE/CLAUDE-FABLE-5 も取りこぼさない。
+# 旧 case-sensitive `*fable*` は大文字混在を見逃す fail-open だった（sc-vuu facet4）。spawn:325 / selftest:111
+# と同一イディオムへ統一（3 兄弟対称化）。
+case "${MODEL,,}" in *fable*) scribe_die "--model に fable 系は使えません（gate は opus・protocol.md §1）" ;; esac
 
 ID="$(scribe_normalize_bd_id "$BD_ID")" || scribe_die "bd id の形式が不正です: '$BD_ID'"
 
