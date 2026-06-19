@@ -21,7 +21,8 @@
 #             --restore 併用で、汚染検知時に marker から復元してから exit 非0（fail-loud は維持）。
 #             既定では marker 不在=照合不能ゆえ skip=exit 0（**意図的 fail-open**: origin 無しの新規リポ/
 #             dogfood は保護対象が無く marker も作られないため gate を素通りすべき）。これを厳格化したい
-#             個別 gate は --require-marker（marker 不在=fail-loud）を additive opt-in で付ける（sc-vuu facet2）。
+#             個別 gate は --require-marker を additive opt-in で付ける（sc-vuu facet2）。--require-marker 下の
+#             marker 不在は origin 現存なら fail-loud（真の漏れ）・origin 無しなら exit0（正当 no-op）＝sc-cw6。
 #             default を非0 へ反転する移行条件は docs/protocol.md §5（全 spawn marker 捕捉保証 + gate 自動配線）。
 #   restore   marker の canonical URL で origin を復元する（汚染検知後の手動復元）。
 # Options:
@@ -29,7 +30,9 @@
 #   --repo PATH      origin remote を持つ git リポジトリ（既定: --worktree の所属 main worktree）。
 #                    config 共有のため worktree/repo どちらでも origin は同一だが、admin の心象に合わせ既定は main。
 #   --restore        verify が汚染を検知したとき marker から復元する（verify サブコマンド専用）。
-#   --require-marker verify で marker 不在を skip でなく fail-loud（exit 非0）にする（verify 専用・既定挙動は不変）。
+#   --require-marker verify で marker 不在を厳格化する（verify 専用・既定挙動は不変）。marker 不在は origin 現存
+#                    なら fail-loud（真の漏れ）・origin 無しなら exit0（正当 no-op を誤検知しない）・probe 失敗は
+#                    fail-closed（sc-cw6）。
 #   -h | --help
 set -euo pipefail
 
@@ -47,13 +50,13 @@ Subcommands:
   capture   spawn 時: canonical origin URL を per-worktree marker へ捕捉（origin 無しは no-op）
   verify    gate 時: marker と現在 origin を照合（健全=0 / 汚染=非0・canonical URL を stdout）
             --restore 併用で汚染検知時に復元してから非0 終了（fail-loud 維持）
-            既定は marker 不在=skip=exit0（意図的 fail-open）。--require-marker で不在を fail-loud 化
+            既定は marker 不在=skip=exit0（意図的 fail-open）。--require-marker で厳格化（origin 現存のみ非0・sc-cw6）
   restore   marker の canonical URL で origin を復元
 Options:
   --worktree PATH  対象 worktree（必須）
   --repo PATH      origin を持つリポジトリ（既定: --worktree の所属 main worktree）
   --restore        verify が汚染検知時に復元する（verify 専用）
-  --require-marker verify で marker 不在を skip でなく fail-loud（verify 専用・既定挙動は不変）
+  --require-marker verify の marker 不在を厳格化: origin 現存=fail-loud/origin 無し=exit0/probe 失敗=fail-closed（verify 専用・sc-cw6）
   -h | --help
 EOF
   exit "${1:-0}"
@@ -109,14 +112,28 @@ case "$SUBCMD" in
     fi
     ;;
   verify)
-    # --require-marker（additive opt-in・sc-vuu facet2）: marker 不在を skip(fail-open) でなく fail-loud に倒す。
+    # --require-marker（additive opt-in・sc-vuu facet2 / sc-cw6）: marker 不在を skip(fail-open) でなく厳格化する。
     # 既定（--require-marker なし）は scribe_verify_origin が marker 不在=skip=exit0（意図的 fail-open・
-    # tests:1087 AC 不変）。lib 関数は「健全」と「marker 不在 skip」をどちらも return 0 に畳むため、ここで
+    # tests AC 不変）。lib 関数は「健全」と「marker 不在 skip」をどちらも return 0 に畳むため、ここで
     # marker の実在を先に検査して厳格化する（lib 非改変＝既定経路は byte 不変。default 反転条件は protocol.md §5）。
     if [[ "$REQUIRE_MARKER" -eq 1 ]]; then
       _marker="$(scribe_origin_marker_path "$WORKTREE" 2>/dev/null || true)"
-      [[ -n "${_marker:-}" && -f "$_marker" ]] \
-        || scribe_die "--require-marker: origin marker が不在です（spawn 時の捕捉なし＝origin 健全性を verify できない）: worktree=$WORKTREE"
+      if [[ -z "${_marker:-}" || ! -f "$_marker" ]]; then
+        # marker 不在。sc-cw6: 「origin 現存なのに marker 無い(=真の漏れ・spawn 時の捕捉漏れ)」と「origin が
+        # そもそも無い(=正当 no-op・capture も origin 無しなら marker を作らない)」を区別し、前者だけ fail-loud に
+        # 倒す。後者まで非0 にすると、守る対象が無いリポの push を誤って止める false-positive(footgun)になる。
+        # origin 現存 probe は移植性の高い `git remote` 一覧で origin の有無を見る（get-url の exit2/exit128 依存より
+        # git 版差に堅牢）。probe 自体が落ちる稀ケース（$REPO 異常で git remote 非0）は origin 現存を判定できない＝
+        # --require-marker の strict 意図に従い fail-closed（非0）に倒す（sc-cw6 論点1）。
+        if _remotes="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$REPO" remote 2>/dev/null)"; then
+          if printf '%s\n' "$_remotes" | grep -qx origin; then
+            scribe_die "--require-marker: origin が現存するのに marker が不在です（spawn 時の捕捉漏れ＝真の漏れ・origin 健全性を verify できない）: repo=$REPO worktree=$WORKTREE"
+          fi
+          echo "origin OK（保護対象なし: origin 未設定ゆえ marker 不要・strict でも素通す）: repo=$REPO"
+          exit 0
+        fi
+        scribe_die "--require-marker: origin の現存を判定できませんでした（git remote 失敗＝repo=$REPO が異常な可能性・strict ゆえ fail-closed）: worktree=$WORKTREE"
+      fi
     fi
     if canonical="$(scribe_verify_origin "$REPO" "$WORKTREE")"; then
       echo "origin OK（健全）: repo=$REPO"

@@ -1223,15 +1223,46 @@ _mk_repo_with_origin() {
 
 # marker 不在=skip=exit0 は意図的 fail-open（dogfood: origin 無し新規リポは gate を素通りすべき）。
 # それを個別 gate で厳格化したい場合の additive opt-in が --require-marker（既定挙動は不変・sc-vuu facet2）。
-@test "origin-guard(facet2): --require-marker は marker 不在を fail-open(skip) でなく fail-loud（exit 非0+error 文言）" {
-  IFS=$'\t' read -r main linked < <(_mk_repo_with_origin)
-  # capture せず（marker 不在）に --require-marker で verify → 既定 skip と異なり fail-loud。
+# sc-cw6: --require-marker 下の marker 不在は「origin 現存=真の漏れ=非0」と「origin 無し=正当 no-op=exit0」を
+# 区別する（capture-failure と origin-無し の区別）。下 2 test で両枝を pin する。
+@test "origin-guard(facet2/sc-cw6): --require-marker は origin 現存 ＆ marker 不在を fail-loud（真の漏れ=非0）" {
+  IFS=$'\t' read -r main linked < <(_mk_repo_with_origin)   # repo は origin 付き
+  # capture せず（marker 不在）に --require-marker で verify → origin 現存ゆえ真の漏れ＝fail-loud。
   run "$GUARD" verify --worktree "$linked" --require-marker
   [ "$status" -ne 0 ]
   [[ "$output" == *"marker が不在"* ]]
+  [[ "$output" == *"origin が現存"* ]]
   # 同条件で --require-marker 無しなら従来どおり skip=exit0（既定挙動が additive opt-in で壊れていない）。
   run "$GUARD" verify --worktree "$linked"
   [ "$status" -eq 0 ]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "origin-guard(sc-cw6): --require-marker でも origin 無し ＆ marker 不在は exit 0（正当 no-op を誤検知しない）" {
+  # origin を持たない repo + linked worktree（capture は no-op で marker 未作成）。
+  main="$(cd "$(mktemp -d)" && pwd -P)"
+  git -C "$main" -c init.defaultBranch=main init -q
+  git -C "$main" config user.email t@e; git -C "$main" config user.name t
+  git -C "$main" commit -q --allow-empty -m init
+  linked="$main/.worktrees/spawn/un-4nm-303030"
+  git -C "$main" worktree add -q -b spawn/un-4nm-303030 "$linked" >/dev/null
+  # origin が無いので marker 不在は「保護対象なし」＝strict でも素通す（false-positive を出さない）。
+  run "$GUARD" verify --worktree "$linked" --require-marker
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"保護対象なし"* ]]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main"
+}
+
+@test "origin-guard(sc-cw6): --require-marker で origin 現存 probe が失敗（--repo が非 git）なら fail-closed（非0・論点1）" {
+  IFS=$'\t' read -r main linked < <(_mk_repo_with_origin)
+  notgit="$(mktemp -d)"   # git repo でないディレクトリ＝git remote が失敗し origin 現存を判定できない
+  # marker 不在 + origin 現存判定不能（--repo が非 git で git remote が落ちる）→ strict 意図ゆえ fail-closed。
+  run "$GUARD" verify --worktree "$linked" --repo "$notgit" --require-marker
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"判定できませんでした"* ]]
+  rm -rf "$notgit"
   git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
   rm -rf "$main"
 }
