@@ -12,7 +12,7 @@
 
 現状 `bd prime` の SessionStart hook が **全セッション（worker 含む）へ無条件**に「非自明な作業は着手前に `bd create`」を注入している。これは B/hybrid（worker は graph を操作しない・`bd create`/`dep` しない・notes 提案 → admin 起票）と**矛盾**し、worker の `bd create` 逸脱の**構造原因**である（2026-06-10 に 1 件の逸脱を prompt 明記で解消した実績＝注入の問題と確認・`verified`）。
 
-→ 対処 = **role 別注入**（下表）。`bd prime` の一律注入と role 別注入の重複解消は **案 A 責務分割**で確定: PRIME は bd 基礎へ縮小し、役割規約は scribe 注入が SSOT になる（縮小は注入 live 後・別 cell C4）。
+→ 対処 = **role 別注入**（下表）。`bd prime` の一律注入と role 別注入の重複解消は **案 A 責務分割**で確定: PRIME は bd 基礎へ縮小し、役割規約は scribe 注入が SSOT になる（PRIME の bd 基礎への縮小・注入 live はいずれも実施済＝本リポの `bd prime` 出力は role 中立・SessionStart 注入は live。経緯 = 別 cell C4 / bd un-0c6）。
 
 > 一次出典: doobidoo `13447a54`（role 別 PRIME 分割 = 構造原因の発見）/ `e2addec8`（PRIME 重複 = 案 A 責務分割）/ scribe-design.md §14「role 別分割の根拠」。
 
@@ -29,7 +29,7 @@
 - **git toplevel フォールバックの理由**: cwd が repo のサブディレクトリ（例 `anchor/docs/`）のとき `.beads/` は直下に無いが toplevel にはある。これを拾うため `git rev-parse --show-toplevel` で補う（git 不在・非 repo では無害に失敗し「`.beads` 無し」へ倒れる＝fail-safe）。
 - **ガード不成立時の挙動**: role 判定すら行わず、**stdout/stderr とも無出力で `exit 0`**（現行 fail-safe を維持し、無関係セッションを一切汚さない）。
 - **適用順**: このガードは `SCRIBE_ROLE` env 明示より**外側**（最優先）。明示 role があっても `.beads/` が無ければ注入しない（scribe 管轄外で role を騙る誤注入を防ぐ。正規の consult/admin は `.beads` を持つ anchor で動くため実害なし）。
-- **既知の副作用（scribe 自己抑制）**: scribe repo 自身は issue を ubuntu-note-system 側の beads で管理し `.beads/` を持たない。ゆえに本ガード後、**素の scribe checkout を直接開いたセッション（scribe-code worktree 含む）は SessionStart 注入がゼロ**になる。これは「`.beads` 無し = scribe 管轄外」判定の素直な帰結であり意図どおり（scribe-code worker の役割文脈は `scribe-spawn.sh` 生成の spawn prompt が主担体）。scribe 開発の admin anchor は通常 ubuntu-note-system（`.beads` あり）側なので admin 注入は従来どおり効く。注入を残したい satellite repo があれば、その repo に `.beads/`（redirect でも可）を置けば opt-in できる。
+- **本ガードと scribe 自身（自己管理）**: scribe repo は現在**自身の `.beads/`（prefix `sc-`）を持ち scribe 自身で自己管理する**（CLAUDE.md 冒頭が SSOT）。ゆえに本ガードを通過し、**素の scribe checkout を直接開いた anchor セッションは admin 注入が発火する**（`.beads` あり = scribe 管轄・anchor 無印 = admin）。`.worktrees/` 配下の scribe-code worker セッションは worker 判定となり、その役割文脈は `scribe-spawn.sh` 生成の spawn prompt が主担体（注入は protocol §2/§3/§4 のみ）。注入を残したい satellite repo があれば、その repo に `.beads/`（redirect でも可）を置けば opt-in できる。（歴史的経緯: 旧くは scribe を ubuntu-note-system 側の beads で管理し `.beads/` を持たなかったため、本ガード後に注入ゼロ＝自己抑制となっていた。scribe 自身を `.beads/` で自己管理する構成に移行して解消した。）
 
 > 一次出典: bd un-7hx（grill 確定: doobidoo `2ad028a2` + 2026-06-11 設計議論。背景＝ガード無しで全ホストへ admin 注入が漏れる）。実装は `scripts/hooks/session-start-role-inject.sh` の `_scribe_has_beads()`。
 
@@ -79,7 +79,7 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 - GitHub への push / `gh repo create` / admin window への tmux inject / 編集可スコープ外の編集。
 - **follow-up の bd create**: タスク化が要っても自分で起票せず、自 issue の notes に「admin への起票候補」として書き出す（起票は admin）。
 
-> ※ この worker 注入が、§0 の「`bd prime` 一律 `bd create` 注入」を打ち消す層。PRIME 縮小（C4）前は注入順序で worker の create 禁止が後勝ちになるよう配置する。
+> ※ この worker 注入は worker の `bd create` 禁止を明示する層。PRIME を role 中立へ縮小した現在は PRIME 側に「`bd create` 一律注入」が無く、本注入が禁止の明示を担う（縮小前の移行期は、注入順序で worker の create 禁止が後勝ちになるよう配置していた）。
 
 ### 2.3 consult（anchor 同居可・read-only セッション）
 
@@ -104,6 +104,6 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 
 - 実装先: `scripts/hooks/session-start-role-inject.sh`（`hooks/hooks.json` の SessionStart wire が `[ -x ]` ガードで参照済み）。
 - §1 の判定で role を解決し、§2 の role 別内容を `docs/protocol.md` から引いて SessionStart 出力（additionalContext）として注入する。**規約本文は protocol.md を SSOT とし、注入 script は「どの節を出すか」だけを持つ**（本文を script に二重化しない）。
-- PRIME 重複の解消（案 A 責務分割・PRIME を bd 基礎へ縮小）は注入 live 後・別 cell（C4 = bd un-0c6）。それまでは注入順序で worker の create 禁止が後勝ちになるよう配置する。
+- PRIME 重複の解消（案 A 責務分割・PRIME を bd 基礎へ縮小）は実施済＝本リポの `bd prime` は role 中立（経緯 = 別 cell C4 / bd un-0c6）。縮小前の移行期は注入順序で worker の create 禁止が後勝ちになるよう配置していた。
 - v0 は堀 OFF。PostToolUse diagnostics hook（scribe-design.md §11）は配線しない（v1+）。
 - **C2 着手時の selftest 強化（C1 gate からの引き継ぎ）**: C1 の `selftest-<id>.local.sh` は hooks.json の安全性を「ガード idiom（`[ -x`/`test -x`）の存在」の部分一致で検査する。これは見せかけガード + 末尾無条件実行（`[ -x "$S" ] && "$S"; evil.sh` 等）を false-PASS しうる脆い判定（C1 gate finding・出荷物 hooks.json 自体は真に no-op で安全のため C1 では minor 据置）。C2 が `session-start-role-inject.sh` を実装して wire を編集する際は、selftest の hook 検査を「各 command を `;`/`&&`/`||` で分割し、`${CLAUDE_PLUGIN_ROOT}` script 参照を含む実行 token が必ず直前ガードに支配される」or「`CLAUDE_PLUGIN_ROOT` を未存在パスにして実行し副作用ゼロ・exit 0 をドライラン観測」する dynamic assertion へ強化すること。
