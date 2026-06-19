@@ -646,6 +646,36 @@ _mk_main_and_linked() {
   [ "$status" -ne 0 ]
 }
 
+# ---------- 値省略→次フラグ誤消費せず fail-loud（scribe_need_val strict 統一・sc-2m0 facet1）----------
+# weak ガード([[ -n "${2:-}" ]])は値を省いて次フラグを書くと次フラグを silent に消費し bogus 値で
+# 進む（gate-args 実機再現: `--worktree --base un-4nm` → worktree=--base の bogus JSON を exit 0 で吐く）。
+# scribe_need_val は「非空 かつ -始まりでない」を要求し各道具の parse loop を fail-loud に統一する。
+# 各テストは weak のままだと RED（exit 0 もしくは別 die で "誤消費" 文言が出ない）/ strict で GREEN。
+# selftest-args の鏡像（上記）を gate-args/cleanup/spawn/origin-guard へ 1 本ずつ展開（D4 回帰網）。
+@test "gate-args: --worktree の値を省くと次フラグを誤消費せず fail-loud（scribe_need_val）" {
+  run "$GATE" --dry-run --worktree --base un-4nm
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"誤消費"* ]]
+}
+
+@test "cleanup: --worktree の値を省くと次フラグを誤消費せず fail-loud（scribe_need_val）" {
+  run "$CLEANUP" --dry-run --worktree --branch un-4nm
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"誤消費"* ]]
+}
+
+@test "spawn: --repo の値を省くと次フラグを誤消費せず fail-loud（scribe_need_val）" {
+  run "$SPAWN" --dry-run --repo --base un-4nm
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"誤消費"* ]]
+}
+
+@test "origin-guard: --worktree の値を省くと次フラグを誤消費せず fail-loud（scribe_need_val）" {
+  run "$GUARD" verify --worktree --repo /tmp/r
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"誤消費"* ]]
+}
+
 @test "selftest-args: --model fable 系を拒否する（worker は opus・protocol.md §1）" {
   run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' --model claude-fable-5 un-4nm
   [ "$status" -ne 0 ]

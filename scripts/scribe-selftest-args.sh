@@ -68,24 +68,21 @@ DIMS_RAW=""
 DRY_RUN=0
 BD_ID=""
 
-# 値必須オプションのガード: 値が「非空 かつ 先頭が '-' でない」ことを要求する。
-# 非空チェックだけ([[ -n ]])だと、値を省いて次フラグを書いた場合に次フラグを silent に消費する
-# (例: `--self-test --task-type ...` が selfTestCmd='--task-type' を載せて exit 0)。とりわけ
-# --self-test は autoFix の fail-closed ゲートで WF の fixPrompt に生埋めされるため、bogus な
+# 値必須オプションのガードは lib の scribe_need_val（全道具共通・sc-2m0 facet1 で集約）。
+# 「非空 かつ 先頭が '-' でない」を要求し、値を省いて次フラグを書いた場合の silent 消費を弾く。
+# とりわけ --self-test は autoFix の fail-closed ゲートで WF の fixPrompt に生埋めされるため、bogus な
 # gate コマンドへすり替わると fail-closed ゲートが silent 破壊される。先頭 '-' を弾いて fail-loud にする。
-_need_val() { [[ -n "${1:-}" && "$1" != -* ]] || scribe_die "$2 に値を指定してください（値の欠落・次フラグの誤消費を防止）"; }
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --worktree)       _need_val "${2:-}" --worktree; WORKTREE="$2"; shift 2 ;;
-    --self-test)      _need_val "${2:-}" --self-test; SELFTEST="$2"; shift 2 ;;
-    --base)           _need_val "${2:-}" --base; BASE="$2"; shift 2 ;;
-    --anchor)         _need_val "${2:-}" --anchor; ANCHOR="$2"; shift 2 ;;
-    --model)          _need_val "${2:-}" --model; MODEL="$2"; shift 2 ;;
-    --max-concurrency)_need_val "${2:-}" --max-concurrency; MAX_CONCURRENCY="$2"; shift 2 ;;
-    --task-type)      _need_val "${2:-}" --task-type; TASK_TYPE="$2"; shift 2 ;;
+    --worktree)       scribe_need_val "${2:-}" --worktree; WORKTREE="$2"; shift 2 ;;
+    --self-test)      scribe_need_val "${2:-}" --self-test; SELFTEST="$2"; shift 2 ;;
+    --base)           scribe_need_val "${2:-}" --base; BASE="$2"; shift 2 ;;
+    --anchor)         scribe_need_val "${2:-}" --anchor; ANCHOR="$2"; shift 2 ;;
+    --model)          scribe_need_val "${2:-}" --model; MODEL="$2"; shift 2 ;;
+    --max-concurrency)scribe_need_val "${2:-}" --max-concurrency; MAX_CONCURRENCY="$2"; shift 2 ;;
+    --task-type)      scribe_need_val "${2:-}" --task-type; TASK_TYPE="$2"; shift 2 ;;
     --add-dimension)
-      _need_val "${2:-}" --add-dimension
+      scribe_need_val "${2:-}" --add-dimension
       # focus/key に改行・タブが混ざると DIMS_RAW(タブ区切り・改行終端)が壊れ別観点へ silent に化ける。上流で弾く。
       case "$2" in *$'\n'*|*$'\t'*) scribe_die "--add-dimension に改行/タブは使えません(DIMS_RAW 区切りが壊れる): '$2'" ;; esac
       # 最初の ':' で key / focus を分割（focus 側に ':' を残す）。':' 不在は弾く。

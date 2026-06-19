@@ -93,12 +93,12 @@ ANCHOR_EXPLICIT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --repo)    [[ -n "${2:-}" ]] || scribe_die "--repo にパスを指定してください"; REPO="$2"; REPO_EXPLICIT=1; shift 2 ;;
-    --base)    [[ -n "${2:-}" ]] || scribe_die "--base に ref を指定してください"; BASE="$2"; shift 2 ;;
-    --anchor)  [[ -n "${2:-}" ]] || scribe_die "--anchor にパスを指定してください"; ANCHOR="$2"; ANCHOR_EXPLICIT=1; shift 2 ;;
+    --repo)    scribe_need_val "${2:-}" --repo; REPO="$2"; REPO_EXPLICIT=1; shift 2 ;;
+    --base)    scribe_need_val "${2:-}" --base; BASE="$2"; shift 2 ;;
+    --anchor)  scribe_need_val "${2:-}" --anchor; ANCHOR="$2"; ANCHOR_EXPLICIT=1; shift 2 ;;
     --consult) CONSULT=1; shift ;;
-    --context) [[ -n "${2:-}" ]] || scribe_die "--context にファイルパスを指定してください"; CONTEXT_FILE="$2"; shift 2 ;;
-    --model)   [[ -n "${2:-}" ]] || scribe_die "--model にモデル名を指定してください"; MODEL="$2"; shift 2 ;;
+    --context) scribe_need_val "${2:-}" --context; CONTEXT_FILE="$2"; shift 2 ;;
+    --model)   scribe_need_val "${2:-}" --model; MODEL="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage 0 ;;
     --) shift; break ;;
