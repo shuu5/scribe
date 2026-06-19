@@ -51,6 +51,36 @@ scribe_bd_id_exists() {
   ( cd "${SCRIBE_ANCHOR:-.}" 2>/dev/null && "${SCRIBE_BD:-bd}" show "$id" >/dev/null 2>&1 )
 }
 
+# scribe_synthesize_issue_desc <id> <dry_run> <anchor> — gate-args / selftest-args 共通の
+#   「issue から taskTitle / description を合成」する手順を 1 関数に集約する（DRY・sc-2m0 facet2）。
+#   <dry_run>: 1=dry-run（bd show 省略・プレースホルダ＋title-suffix）/ それ以外=実 bd 参照。
+#   実 bd 参照では scribe_bd_id_exists で実在を事前検証し、不在なら **関数内で fail-loud**
+#     （scribe_die・早期失敗）。bd show 本文が空なら sentinel '(bd show 取得不可)' へ fallback する。
+#   env seam（スタブ差し替え点）: bd バイナリ=$SCRIBE_BD（既定 bd）/ graph 所在=<anchor>
+#     （scribe_bd_id_exists の SCRIBE_ANCHOR と bd show の cd 先の双方に効く）。
+#   返却（D2）: TITLE と DESC を **NUL 区切りで stdout**（DESC を最後・末尾も NUL 終端）。DESC は
+#     複数行ゆえ command substitution（NUL 不可・末尾改行 strip）では受けられないため NUL 区切りにする。
+#   caller は 1 呼出で受ける（DESC が最後ゆえ末尾 NUL まで読めば 2 値が揃う）:
+#     { IFS= read -r -d '' TITLE && IFS= read -r -d '' DESC; } < <(scribe_synthesize_issue_desc …) \
+#       || scribe_die '…'
+#   合成が die すると stdout が空になり最初の read が EOF→非0 → caller の `|| scribe_die` が
+#   fail-loud に倒れる（process substitution の subshell 越しでも早期失敗が caller へ伝播する）。
+scribe_synthesize_issue_desc() {
+  local id="${1:?id required}" dry_run="${2:?dry_run flag required}" anchor="${3:?anchor required}"
+  local title="$id" desc
+  if [[ "$dry_run" -eq 1 ]]; then
+    desc="(dry-run: bd show 省略)"
+    title="$id (dry-run)"
+  else
+    SCRIBE_ANCHOR="$anchor" scribe_bd_id_exists "$id" \
+      || scribe_die "bd issue が存在しません: '$id'"
+    # bd show の本文（description）を合成材料に使う。取得不可（空）時はプレースホルダ sentinel。
+    desc="$( ( cd "$anchor" 2>/dev/null && "${SCRIBE_BD:-bd}" show "$id" 2>/dev/null ) || true )"
+    [[ -n "$desc" ]] || desc="(bd show 取得不可)"
+  fi
+  printf '%s\0%s\0' "$title" "$desc"
+}
+
 # scribe_window_name <id> → wt-<id>（protocol.md §1 命名規約）。
 scribe_window_name() { printf 'wt-%s' "$1"; }
 

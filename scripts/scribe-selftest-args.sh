@@ -114,18 +114,13 @@ case "$MODEL" in *[Ff][Aa][Bb][Ll][Ee]*) scribe_die "--model に fable 系は使
 
 ID="$(scribe_normalize_bd_id "$BD_ID")" || scribe_die "bd id の形式が不正です: '$BD_ID'"
 
-# --- issue から taskTitle / goal / acceptance を合成 ---
-TITLE="$ID"
-DESC=""
-if [[ "$DRY_RUN" -eq 1 ]]; then
-  DESC="(dry-run: bd show 省略)"
-  TITLE="$ID (dry-run)"
-else
-  SCRIBE_ANCHOR="$ANCHOR" scribe_bd_id_exists "$ID" \
-    || scribe_die "bd issue が存在しません: '$ID'"
-  DESC="$( ( cd "$ANCHOR" 2>/dev/null && "${SCRIBE_BD:-bd}" show "$ID" 2>/dev/null ) || true )"
-  [[ -n "$DESC" ]] || DESC="(bd show 取得不可)"
-fi
+# --- issue から taskTitle / DESC を合成（lib に集約・DRY・sc-2m0 facet2）---
+# scribe_synthesize_issue_desc が TITLE\0DESC を返す（DESC が最後・複数行ゆえ NUL 区切り）。
+# dry-run 分岐・実在検証 die・取得不可 sentinel は関数内に閉じ込め済み（caller は 1 呼出）。
+# 合成が die（bd 不在等）すると stdout が空→最初の read が EOF→非0 で caller も fail-loud に倒れる。
+{ IFS= read -r -d '' TITLE && IFS= read -r -d '' DESC; } \
+  < <(scribe_synthesize_issue_desc "$ID" "$DRY_RUN" "$ANCHOR") \
+  || scribe_die "issue description の合成に失敗しました: '$ID'"
 
 GOAL="self-review of $ID（worker 自己点検）: worktree=$WORKTREE の base...HEAD diff を review→verify→gated autoFix で点検する。契約 SSOT = bd $ID description。"
 ACCEPTANCE="(1) 契約に対する diff の整合 (2) スコープ外編集ゼロ (3) self-test green（fail-closed ゲート） (4) confirmed blocking を gated autoFix で解消し loop-until-dry で収束。"
