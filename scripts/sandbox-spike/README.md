@@ -1,4 +1,8 @@
-# sandbox-spike (sc-1gu)
+# sandbox-spike (sc-1gu) — sandbox opt-in 本番ヘルパー + 実証 spike 記録
+
+> ディレクトリ名は `sandbox-spike` のまま据え置く（sc-2m0 facet3・案C軽量）が、`gen-sandbox-settings.sh`
+> は実証 spike を経て **本番反映済みの opt-in 本番ヘルパー**（下記「本番反映」節）。本ファイルは
+> その本番ヘルパーの仕様 + 実証 spike（2026-06-18 検証済み）の記録を兼ねる。
 
 scribe worker を **OS レベル sandbox**(Claude Code 組込み bubblewrap)で封じ込められるか、
 かつ正当な cross-dir 作業(anchor の bd 台帳書込み)を壊さないかを、使い捨て worktree で実証する spike。

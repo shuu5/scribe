@@ -142,6 +142,24 @@ _mk_main_and_linked() {
   [ "$plain" == "$sb" ]   # SCRIBE_SANDBOX で spawn 行は 1 byte も変わらない
 }
 
+# ---------- sandbox-spike 'spike' 文言の本番ヘルパー手当て（sc-2m0 facet3・案C軽量）----------
+# 実害: 'spike' 語が **本番ヘルパー** gen-sandbox-settings.sh（scribe-spawn.sh の SCRIBE_SANDBOX=1
+# opt-in が起動）を experimental と誤認させる可読性問題。ディレクトリ scripts/sandbox-spike/ は
+# 据え置き（path 追従なし）。本番ヘルパーの自己記述（gen ヘッダ）と README 見出しが「本番」と読める
+# ことを pin（旧 'sandbox spike:' 框組が消えたことも）。weak のままだと RED / 手当て後に GREEN。
+@test "sandbox(facet3): 本番ヘルパー gen-sandbox-settings.sh のヘッダが experimental 'spike' でなく本番と読める" {
+  run head -3 "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"本番"* ]]
+  [[ "$output" != *"sandbox spike:"* ]]
+}
+
+@test "sandbox(facet3): README 見出しが本番ヘルパーを含意する（experimental spike 単独框組でない）" {
+  run head -1 "$SCRIPTS/sandbox-spike/README.md"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"本番"* ]]
+}
+
 # ---------- spawn: consult モード ----------
 @test "spawn: consult モードで SCRIBE_ROLE=consult が env-file に焼き込まれる" {
   run "$SPAWN" --dry-run --consult un-consult
