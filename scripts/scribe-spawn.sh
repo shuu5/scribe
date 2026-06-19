@@ -36,9 +36,10 @@
 #   --base REF      新 branch の base（worker のみ・既定: HEAD）
 #   --anchor PATH   bd graph の所在（bd show 用・既定: cwd）。consult はここで起動する
 #   --consult       consult role セッションを anchor で起動（worktree/worker prompt なし・SCRIBE_ROLE=consult を --env-file 注入）
-#   --context FILE  consult 専用。admin 事前 context（FILE 内容）を consult prompt へ焼き込み pre-bake モードへ。
-#                   §7 needs-user regime: bd id（task_ref）必須。handoff 規約（conversation_id=scribe-brief-<id>
-#                   / tag=consult-<HHMMSS>=window 名 / 構造化 brief を doobidoo 専用保存）を prompt へ自動注入する。
+#   --context FILE  consult 専用。admin 集約 brief（FILE 内容）を grill 材料として焼き込み grill-consult モードへ。
+#                   §7 needs-user regime: grill-issue id 必須。grill-consult は brief を出発点にユーザーと対話 grill し、
+#                   決定を own grill-issue の bd notes へ書く（bdw 経由 --claim/--append-notes のみ・read-only 限定緩和）。
+#                   （pre-bake 自体は admin が回す dynamic Workflow = workflows/needs-user-prebake.workflow.js へ移管。）
 #   --model MODEL   cld-spawn のモデル（既定: opus）。worker は fable 厳禁＝コスト爆発。
 #                   consult は基本 opus・ユーザー指定時のみ fable 可（role-context-spec §2.3 の例外）
 #   --dry-run       実行するはずのコマンド列を arg-echo するだけ（実 spawn しない）
@@ -57,14 +58,14 @@ usage() {
 Usage:
   scribe-spawn.sh [options] <bd-id>              # worker モード
   scribe-spawn.sh --consult [options] [<bd-id>]  # consult モード（worktree/worker prompt なし）
-  scribe-spawn.sh --consult --context FILE <bd-id>  # consult pre-bake モード（§7 needs-user regime）
+  scribe-spawn.sh --consult --context FILE <bd-id>  # grill-consult モード（§7 needs-user regime・brief を grill）
 Options:
   --repo PATH     worktree を作る git リポジトリ（worker のみ・既定: cwd）
   --base REF      新 branch の base（worker のみ・既定: HEAD）
   --anchor PATH   bd graph の所在（bd show 用・既定: cwd）。consult はここで起動する
   --consult       consult role セッションを anchor で起動（worktree/worker prompt なし）
-  --context FILE  consult 専用。admin 事前 context（FILE）を焼き込み pre-bake モードへ（§7・bd id 必須）。
-                  handoff 規約（conversation_id=scribe-brief-<id> / tag=consult-<HHMMSS> / brief を doobidoo 保存）を自動注入
+  --context FILE  consult 専用。admin 集約 brief（FILE）を grill 材料として焼き込み grill-consult モードへ（§7・grill-issue id 必須）。
+                  grill-consult は brief を grill し決定を own grill-issue の bd notes へ書く（bdw 経由・read-only 限定緩和）
   --model MODEL   cld-spawn のモデル（既定: opus）。worker は fable 厳禁＝コスト爆発。
                   consult は基本 opus・ユーザー指定時のみ fable 可（role-context-spec §2.3 の例外）
   --dry-run       実行するはずのコマンド列を arg-echo するだけ（実 spawn しない）
@@ -80,8 +81,10 @@ CONSULT=0
 MODEL="opus"
 DRY_RUN=0
 BD_ID=""
-# --context: admin 事前 context をファイルから consult prompt へ焼き込み pre-bake モードへ切替える
-# （§7 needs-user regime / 合意スペック doobidoo 9c73606d）。consult 専用・空なら従来の素 consult。
+# --context: admin 集約 brief をファイルから consult prompt へ焼き込み grill-consult モードへ切替える
+# （§7 needs-user regime・sc-cuw 再編）。consult 専用・空なら従来の素 consult。
+# 意味の変化: 旧「焼いて死ぬ pre-bake」→ 新「brief を grill 材料に受け取りユーザーと対話 grill する grill-consult」
+# （pre-bake 自体は admin が回す dynamic Workflow = workflows/needs-user-prebake.workflow.js へ移管）。
 CONTEXT_FILE=""
 # REPO/ANCHOR が「既定（cwd）」か「明示指定」かを独立に追う（un-ag7・AC3/AC4）。
 # 明示時は linked-worktree ガードを不発火にし、cross-repo cell の意図的 override を壊さない。
@@ -131,10 +134,10 @@ if [[ "$ANCHOR_EXPLICIT" -eq 0 ]] && _anchor_main="$(scribe_linked_worktree_main
   → そこへ cd するか、--anchor '$_anchor_main' を明示してください。"
 fi
 
-# --- --context は consult 専用（pre-bake は consult role 機構・worker は pre-bake しない）---
+# --- --context は consult 専用（grill-consult は consult role 機構・worker は grill-consult しない）---
 # worker 分岐は consult 分岐の後に来るため、ここで先に弾かないと worker 経路へ --context が漏れる。
 if [[ -n "$CONTEXT_FILE" && "$CONSULT" -eq 0 ]]; then
-  scribe_die "--context は consult モード(--consult)専用です（pre-bake は consult role 機構・§7 / role-context-spec §2.3）"
+  scribe_die "--context は consult モード(--consult)専用です（grill-consult は consult role 機構・§7 / role-context-spec §2.3）"
 fi
 
 # fable の許否は role で非対称（道具は規約を変えない）:
@@ -161,15 +164,15 @@ if [[ "$CONSULT" -eq 1 ]]; then
       || scribe_die "bd issue が存在しません: '$TOPIC'（consult 議題参照の typo を上流で阻止）"
   fi
 
-  # --- pre-bake モード（--context 指定時）の前提検証（§7 / 合意スペック 9c73606d）---
+  # --- grill-consult モード（--context 指定時）の前提検証（§7・sc-cuw 再編）---
   if [[ -n "$CONTEXT_FILE" ]]; then
-    # (a) task_ref（bd id）必須: handoff の conversation_id=scribe-brief-<task_id> を構成できないと
-    #     admin が brief を集約できない（§7 handoff 規約）。pre-bake は 1 consult = 1 task。
+    # (a) grill-issue id 必須: grill-consult は admin が起票した grill-issue を 1 件担当し、その bd notes へ
+    #     決定を handoff する（§7）。grill-issue が無いと claim/append-notes/admin 監視の対象が定まらない。
     [[ -n "$TOPIC" ]] \
-      || scribe_die "--context（pre-bake）は task_ref（bd id）が必須です（conversation_id=scribe-brief-<id> を構成するため・§7）"
-    # (b) context は読める通常ファイルであること（admin が焼き込む素材。typo を上流で fail-loud）。
+      || scribe_die "--context（grill-consult）は grill-issue id が必須です（決定 handoff 先の bd notes を定めるため・§7）"
+    # (b) context は読める通常ファイルであること（admin が焼き込む集約 brief。typo を上流で fail-loud）。
     #     -r 単体だとディレクトリも真を返し、後段 build_consult_prompt 内の `cat "$CONTEXT_FILE"` が
-    #     'Is a directory' で失敗しても直後の heredoc 成功で関数 exit が上書きされ「空 context のまま
+    #     'Is a directory' で失敗しても直後の heredoc 成功で関数 exit が上書きされ「空 brief のまま
     #     consult 起動」する fail-safe ギャップになる（review wf_a92a624f confirmed）。-f を足して
     #     ディレクトリ/特殊ファイルを上流で fail-loud にする。
     [[ -f "$CONTEXT_FILE" && -r "$CONTEXT_FILE" ]] \
@@ -178,15 +181,26 @@ if [[ "$CONSULT" -eq 1 ]]; then
 
   # consult テンプレ本文（role-context-spec §2.3）= 設計議論/grill 専用・read-only 規律・記憶系のみ write・サマリ保存義務。
   # **worker prompt（worktree 拘束 / bdw / selftest / cell-quality / bd close）は一切含めない**（role 契約）。
-  # --context 指定時は末尾に pre-bake 任務（admin 事前 context 焼き込み + handoff 規約）を追記する（§7）。
+  # --context 指定時は末尾に grill-consult 任務（admin 集約 brief 焼き込み + bd notes handoff 規約）を追記する（§7）。
   build_consult_prompt() {
+    # 役割節の bd id 行は mode で意味が変わる: grill-consult（--context 指定）では $TOPIC は
+    # 担当 grill-issue（下記 grill-consult 任務で claim し決定 notes を書く＝read-only 観測ではない）、
+    # 素 consult では read-only な議題参照。heredoc 内で分岐できないため事前に文字列を組む。
+    local _topic_line=""
+    if [[ -n "$TOPIC" ]]; then
+      if [[ -n "$CONTEXT_FILE" ]]; then
+        _topic_line="- 担当 grill-issue: \`bd show $TOPIC\`（下記 grill-consult 任務で claim し決定 notes を書く＝read-only 観測ではない）。"
+      else
+        _topic_line="- 議題参照（read-only）: \`bd show $TOPIC\`（観測のみ。worktree 仕事はしない）。"
+      fi
+    fi
     cat <<PROMPT
 あなたは scribe consult セッション（設計議論・grill 専用の第 2 対話相手）。応答は日本語。
 役割と禁止は docs/role-context-spec.md §2.3 が SSOT。
 
 ## 役割
 - 用途は **設計議論・grill のみ**。オーケストレーション・gate 代行・実装はしない。
-${TOPIC:+- 議題参照（read-only）: \`bd show $TOPIC\`（観測のみ。worktree 仕事はしない）。}
+${_topic_line}
 
 ## read-only 規律（厳守）
 - リポの tracked ファイル・コードを編集しない。bd の write（create/update/close/dolt push）・spawn・deploy は **禁止**。
@@ -198,51 +212,60 @@ ${TOPIC:+- 議題参照（read-only）: \`bd show $TOPIC\`（観測のみ。work
 ## サマリ保存義務（必須）
 - 終了・中断の前に、議論の結論・未解決の論点・admin への起票候補を相談サマリにまとめ doobidoo へ保存する（会話履歴に依存させない）。
 PROMPT
-    # --- pre-bake 任務の追記（--context 指定時のみ・§7 needs-user regime / 合意スペック 9c73606d）---
+    # --- grill-consult 任務の追記（--context 指定時のみ・§7 needs-user regime・sc-cuw 再編）---
+    # --context は「焼いて死ぬ pre-bake」から「grill 材料を受け取る grill-consult」へ意味が変わった
+    # （pre-bake 自体は admin が回す dynamic Workflow へ移管・consult から撤去）。grill-consult は brief を
+    # 出発点にユーザーと **対話 grill** し、確定した決定を own grill-issue の bd notes へ書く（bdw 経由）。
     if [[ -n "$CONTEXT_FILE" ]]; then
-      # tag=consult-<HHMMSS> は window 名と一致させる（admin が capture-pane の window と brief を突合する証跡）。
-      local _hhmmss="${CONSULT_WINDOW#consult-}"
-      cat <<PREBAKE
+      cat <<GRILL
 
-## 【pre-bake 任務】§7 needs-user regime（admin 並列起動・各 consult 同一出発点）
-admin が下記 context を焼き込みました。これを唯一の出発点として **task_ref=$TOPIC を 1 件だけ** pre-bake してください
-（あなたは並列起動された N consult の 1 つ。他タスクには触れない）。
+## 【grill-consult 任務】§7 needs-user regime（admin から grill-issue を割り当てられた第 2 対話相手）
+admin が下記 brief（pre-bake WF の集約出力）を **grill 材料**として渡しました。あなたは grill-issue=$TOPIC を担当する
+**grill-consult** です。この brief を出発点に、**ユーザーと対話 grill** して決定木を一つずつ詰めてください
+（admin は解放され、あなたがユーザーの grill 相手になります）。
 
-**あなたは pre-bake 専任です（grill トポロジ = 案 B）**: brief を保存したら**この任務は完了・終了**する。
-人間の grill は admin の場で集約 brief に対して行われる（**あなたは対話 grill に入らない**）。pre-bake〔生成〕と
-grill〔対話〕を別セッションに分けることで、自分の pre-bake 出力を「ユーザーが言ったこと」と誤認する事故を防ぐ（F2）。
+**あなたは grill 専任です（consult 原義回帰）**: brief を「焼く（pre-bake する）」のはあなたの仕事ではありません
+——pre-bake は admin が回した dynamic Workflow が済ませ、その出力が下記 brief です。あなたの仕事は brief を
+材料に **ユーザーと対話 grill し、決まった決定を grill-issue の bd notes へ書き出す**ことです。
 
-**base テンプレとの関係（pre-bake モードはこの 3 点で base を上書きする）**:
-- base の「用途は設計議論・grill のみ」の "grill" は本任務では**思考モード（敵対的設計分析）**の意味に読む。人間との**対話 grill は admin の場に委ね、あなたは入らない**（F1）。
-- base は「MEMORY.md への保存だけ許可」と言うが、本 pre-bake では **MEMORY.md 保存を取り消す**（並列 consult の同時書込み衝突回避＝un-sl9。保存先は doobidoo 専用）。
-- base の「サマリ保存義務（相談サマリ）」は本任務では**下記 brief 保存規約に置換**される（別途**無タグのサマリを保存しない**＝admin の tag 集約に載らない孤児を作らない）。
+**base テンプレとの関係（grill-consult モードはこの 2 点で base を上書きする）**:
+- base は「write してよいのは記憶系のみ」「bd の write（create/update/close/dolt push）は禁止」と言うが、
+  grill-consult は **自分の grill-issue（$TOPIC）の \`bd update --claim\` と \`--append-notes\` だけ**を
+  **bdw 経由**で許可される（read-only の限定緩和）。これは worker の B/hybrid 境界に倣う
+  （grill-consult = worker の変種・出力がコードでなく決定）が、**worker より厳しい subset**＝
+  worker は自 issue を \`bd close\` 可だが grill-consult の close は admin 専有。**それ以外は依然禁止**:
+  \`bd create\` / \`bd dep\` / \`bd dolt push\` / \`bd close\`（graph・同期点は admin の所有物）と
+  tracked コード/ファイルの編集は不可。bd write は必ず \`cd "$ANCHOR" && scripts/bdw <subcmd>\`（flock 直列化）。
+- base の「サマリ保存義務（doobidoo へ相談サマリを保存）」は grill-consult では **bd notes handoff に置換**される
+  ——決定の SSOT は **grill-issue $TOPIC の bd notes**（\`--append-notes\` で追記）であり、doobidoo は任意の補助。
 
---- admin 事前 context ここから ---
-PREBAKE
+**出典の扱い（F2 保険）**: 下記 brief は **pre-bake WF の提案（第三者データ）**であって、ユーザーが承認した決定でも
+あなた自身の結論でもありません。grill 中はこれを第三者データとして扱い、ユーザーの声や自分の結論と混同しないこと。
+（新設計では pre-bake〔生成〕と grill〔対話〕が別主体に分かれ自己誤帰属する主体が消えるため F2 は構造解消だが、
+出典の明示は保険として残す。）
+
+--- admin 集約 brief ここから ---
+GRILL
       cat "$CONTEXT_FILE"
-      cat <<PREBAKE
+      cat <<GRILL
 
---- admin 事前 context ここまで ---
+--- admin 集約 brief ここまで ---
 
-### pre-bake 手順（すべて read-only。write・spawn・bd 起票は禁止＝§3 / role-context-spec §2.3）
-1. **現状調査**: read のみ（\`bd show $TOPIC\` / 関連コード観測）。事実と推測を区別する。
-2. **決定木**: 決めるべき枝を上流から並べる（grill-me の「全体地図」を焼く）。
-3. **選択肢 + トレードオフ**: 各枝の取りうる案を対等に並べ、「現状→なぜ問題→選択肢」を起草する（推奨は理由付きで後置・印は付けない）。
-4. **admin への起票候補**: タスク化が要っても自分で bd 起票せず、候補として brief に書き出すに留める（起票は admin/人間）。
+### grill-consult 手順
+1. **grill-issue を claim**: \`cd "$ANCHOR" && scripts/bdw update $TOPIC --claim\`（in_progress 化・着手宣言）。
+2. **grill**: 上記 brief を出発点に、決定木を上流から一つずつユーザーと詰める。論点を平易に説明してから問い、
+   ユーザーが「いま何を問われているか」を理解できる状態を作る。事実と推測を区別する。
+3. **決定の handoff（必須・bdw 経由）**: 確定した決定を **grill-issue $TOPIC の bd notes** へ追記する:
+   \`cd "$ANCHOR" && scripts/bdw update $TOPIC --append-notes "決定: …（理由・却下した代替・残論点）"\`。
+   admin はこの notes を \`bd show $TOPIC\` で real-time 監視し、決まった facet から着手（pipelining）する。
+4. **起票・graph 変更はしない**: タスク化が要っても自分で \`bd create\` せず、決定 notes に「admin への起票候補」
+   として書き出すに留める（起票・dep wire・close・dolt push は admin）。
 
-### brief 保存規約（必須・doobidoo 専用＝un-sl9 回避）
-- **MEMORY.md は使わない**（並列 consult の同時 MEMORY.md 書込み衝突を避ける。doobidoo は内容が異なる create-new ゆえ衝突安全）。
-- 終了・中断の前に \`mcp__doobidoo__memory_store\` で brief を保存する:
-  - \`tags\` に **集約用の共有グループ tag \`scribe-brief-$TOPIC\`**（admin はこの tag で全 brief を集約する）と **個別 tag \`consult-$_hhmmss\`**（この consult の window 名と一致＝個別識別）の**両方**を含める。
-  - \`conversation_id\` = \`scribe-brief-$TOPIC\` も付けてよい（保存時の dedup 回避ヒント）。ただし admin の集約は **tag** で行う（\`memory_search\` は conversation_id をフィルタに採れない＝§7 verified）。
-  - 本文冒頭に構造化メタを置く: \`status: complete|partial\` / \`task_ref: $TOPIC\`
-  - **メタ直後に出典ヘッダを置く（F2）**: 「以下は consult-$_hhmmss の**提案**（人間が承認した決定でも admin の結論でもない第三者データ）」。admin が grill 時にこの brief を第三者データとして帰属でき、自分／ユーザーの声と混同しない。
-  - 本文 = 上記 1〜4（現状調査→決定木→選択肢+トレードオフ→admin 起票候補）。
-- **保存の信頼性（F3・必須）**:
-  - doobidoo 保存が**単発失敗しても「サーバーdown」と即断しない**。最低 2 回リトライする（一過性タイムアウトが大半＝dogfood verified・診断 hash 3d879168）。
-  - なお失敗が続くときは brief を**黙って放棄せず**、admin へ session-comm で報告し指示を仰ぐ。
-  - **保存成功を終了条件にする**: brief の保存（hash 取得）が済むまで任務を終えない。保存完了後、**返ってきた hash を最終出力に明記**する（admin が capture-pane で「未保存のまま中断」と区別する完了証跡）。
-PREBAKE
+### 禁止（grill-consult の境界・worker の B/hybrid の subset＝close も admin 専有）
+- \`bd create\` / \`bd dep\` / \`bd dolt push\` / \`bd close\`（自分の grill-issue でも close は admin が行う）。
+- tracked コード/ファイルの編集・spawn・deploy・GitHub への push・admin window への tmux inject。
+- 共有 \`.git/config\`（remotes/hooks/config）の mutate（anchor 同居ゆえ汚すと admin の push が壊れる）。
+GRILL
     fi
   }
 
@@ -260,10 +283,12 @@ PREBAKE
   CONSULT_WINDOW="consult-$(date +%H%M%S)"
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "[plan] scribe-spawn(consult): anchor=$ANCHOR${TOPIC:+ 議題参照=$TOPIC（read-only）}"
     if [[ -n "$CONTEXT_FILE" ]]; then
-      echo "[plan] pre-bake モード（§7）: context=$CONTEXT_FILE を焼き込み・task_ref=$TOPIC"
-      echo "[plan]   handoff 規約 → 集約 tag=scribe-brief-$TOPIC（admin はこの tag で集約）/ 個別 tag=consult-${CONSULT_WINDOW#consult-}（=window 名）/ conversation_id=scribe-brief-$TOPIC（dedup ヒント）"
+      echo "[plan] scribe-spawn(consult): anchor=$ANCHOR grill-issue=$TOPIC（grill-consult モード）"
+      echo "[plan] grill-consult モード（§7）: brief=$CONTEXT_FILE を grill 材料として焼き込み・grill-issue=$TOPIC"
+      echo "[plan]   handoff 規約 → 決定は grill-issue $TOPIC の bd notes（bdw 経由 --claim/--append-notes のみ・read-only 限定緩和）。admin は bd show $TOPIC で監視"
+    else
+      echo "[plan] scribe-spawn(consult): anchor=$ANCHOR${TOPIC:+ 議題参照=$TOPIC（read-only）}"
     fi
     echo "[plan] env-file（anchor 外＝anchor リポを汚さない・spawn 後 rm）:"
     echo "         ENV_FILE=\$(mktemp /tmp/scribe-consult-XXXXXX.env)"
@@ -283,7 +308,11 @@ PREBAKE
   printf '%s\n' "$ENV_LINE" > "$ENV_FILE"
   CONSULT_PROMPT="$(build_consult_prompt)"
   "$CLD_SPAWN" --cd "$ANCHOR" --model "$MODEL" --window-name "$CONSULT_WINDOW" --force-new --env-file "$ENV_FILE" "$CONSULT_PROMPT"
-  echo "spawned(consult): anchor=$ANCHOR model=$MODEL window=$CONSULT_WINDOW${TOPIC:+ 議題参照=$TOPIC}${CONTEXT_FILE:+ pre-bake=$TOPIC（conversation_id=scribe-brief-$TOPIC）}"
+  if [[ -n "$CONTEXT_FILE" ]]; then
+    echo "spawned(consult): anchor=$ANCHOR model=$MODEL window=$CONSULT_WINDOW grill-consult=$TOPIC（決定 handoff=grill-issue bd notes）"
+  else
+    echo "spawned(consult): anchor=$ANCHOR model=$MODEL window=$CONSULT_WINDOW${TOPIC:+ 議題参照=$TOPIC}"
+  fi
   exit 0
 fi
 

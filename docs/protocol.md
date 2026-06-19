@@ -22,7 +22,7 @@
 - **admin = anchor（orchestrator セッション）**。graph の所有者であり、唯一の `bd dolt push` 同期点。
 - **worker = worktree セッション**。自 issue の進捗だけを書き、graph は触らない（§3 B/hybrid）。
 - 役割の env 判定仕様は `docs/role-context-spec.md`（`SCRIBE_ROLE` > cwd `.worktrees/` 判定 > anchor 既定）。
-- **needs-user タスク**（worker 着手不可・人間判断依存）は通常フローに乗らず §7 の解決フロー（consult 並列 pre-bake → grill → admin 起票/着手）へ分岐する。
+- **needs-user タスク**（worker 着手不可・人間判断依存）は通常フローに乗らず §7 の解決フロー（WF pre-bake → grill-consult → admin 起票/着手）へ分岐する。
 
 ---
 
@@ -180,24 +180,25 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 
 ---
 
-## 7. needs-user タスクの扱い（consult 並列 pre-bake → grill）
+## 7. needs-user タスクの扱い（WF pre-bake → grill-consult）
 
-> **dogfood 実証済み（sc-in9・2026-06-18）**: 本節は consult 並列 pre-bake regime を実 needs-user タスク（`sc-1gu` の 2 決定）で実走実証した結果を反映する（機構4点+payoff = validated）。実走で得た 3 知見 — F1（grill トポロジ = 案 B・下記フロー）/ F2（consult の自己-ユーザー誤認の予防）/ F3（MCP 一過性エラーのリトライ規律）— は本節へ織り込み済み。一次記録 = doobidoo `9c73606d`（設計合意）/ `8e98c34a`（dogfood 総括）/ `3d879168`（doobidoo 診断・F3 リトライ規律の根拠）。実装 = `scribe-spawn --context`（commit 9e721fc）。
+> **regime 再編（sc-cuw・2026-06-19）**: 本節は旧 F1=B regime（consult が pre-bake 専任で死に・grill は admin の場＝sc-osn/sc-in9 で codify）を改訂したもの。**pre-bake は consult から撤去し、admin が回す dynamic Workflow（`workflows/needs-user-prebake.workflow.js`）へ移管**した。consult は **grill 専任（原義回帰）** に戻り、admin が集約 brief を `--context` で渡して spawn する **grill-consult** が、**ユーザーと対話 grill する第 2 対話相手**になる（admin は grill から解放される）。旧 regime の経緯・dogfood 一次記録 = doobidoo `9c73606d`（設計合意）/ `b7c99f2f`（sc-in9 dogfood F1-F3）/ `8e98c34a`。
 
-- **対象**: needs-user タスク = worker 着手不可の理由が人間判断に依存する状態（概念定義 = `scribe-design.md` §1）。needs-user は駐車ラベル、本節の consult 並列 pre-bake + grill が解決機構（別物）。
-- **発火条件**: needs-user が複数（≥2）溜まったときの consult fan-out。各 consult が 1 タスクを pre-bake。1 件なら admin インライン or 単一 consult で足り、fan-out 不要。
-- **タスクの単位**: 通常は 1 needs-user issue = 1 タスク。ただし **1 issue 内に相互独立な複数の決定があり、各々が人間判断を要するとき**は、各決定を 1 タスク扱いして fan-out してよい（例: sandbox spike `sc-1gu` の「bwrap install 是非」と「書込み許可注入の設計」）。この場合 **task_ref は同一 issue id を共有**し（別個の bd id を起票しない）、**各 consult のスコープは context file が区切る**（task_ref では区別できないため）。**濫用防止**: 決定が相互独立でない・人間判断を要さない些末な選択肢は分割しない（consult 乱発を避ける）。
+- **対象**: needs-user タスク = worker 着手不可の理由が人間判断に依存する状態（概念定義 = `scribe-design.md` §1）。needs-user は駐車ラベル、本節の WF pre-bake + grill-consult が解決機構（別物）。
+- **発火条件**: 人間判断を要する **相互独立な決定軸（facet）が複数（≥2）**あるとき、admin が pre-bake WF で各 facet を並列 read-only 分析する。1 facet なら admin インラインで足り、WF fan-out 不要（そのまま grill-consult を立てるか admin が直接 grill するかは admin 判断）。
+- **facet の単位**: 通常は 1 needs-user issue = 1 grill-issue。1 issue 内に相互独立な複数決定があれば、各決定を 1 facet 扱いして pre-bake WF の `facets[]` に並べる（例: sandbox spike の「bwrap install 是非」と「書込み許可注入の設計」）。**濫用防止**: 相互独立でない・人間判断を要さない些末な選択肢は facet に分割しない。
 - **フロー**:
-  1. admin が各 needs-user タスクに context（`bd show` + 関連 notes + doobidoo recall の要約）を焼き込み、consult を N 並列起動（`scribe-spawn --consult`・anchor 同居・各 consult を同一出発点に）。
-  2. 各 consult が 1 タスクを pre-bake（現状調査〔read-only〕→ 決定木 → 選択肢 + トレードオフ → admin への起票候補）し、brief を doobidoo へ保存（consult は graph を触らない＝§3 / role-context-spec §2.3）。
-  3. admin が brief を集約し、**人間は admin の場で grill-me に集中**する（**grill トポロジ = 案 B**・F1）。**consult は pre-bake して brief を保存したら終了し、対話 grill には入らない**——pre-bake〔生成〕と grill〔対話〕を別セッションに分けることが、consult が自分の出力をユーザー入力と誤認する事故（F2）の構造的予防になる。
-  4. **brief が浅く深掘りが要るタスクだけ**、admin がそのタスク専用の consult を再 spawn して深掘りさせる（逃げ道・既定は再 spawn しない）。
-  5. graph 変更・起票・着手は admin/人間（consult は不可）。
-- **handoff 規約（doobidoo）**: **集約 key は tag**。各 brief に **共有グループ tag `scribe-brief-{task_id}`**（admin がこの tag で全 brief を集約）と **個別 tag `consult-{HHMMSS}`**（`capture-pane` の window 名と一致＝個別識別）を付ける。`conversation_id=scribe-brief-{task_id}` は **保存時の semantic-dedup 回避ヒント**として併用してよいが、`memory_search` は conversation_id をフィルタに採れない（API スキーマに無く、値は検索インデックスにも載らない＝**実機 verified**: dogfood `sc-in9` で確認）ため**検索＝集約には使わない**。brief = 構造化メタ（`status: complete|partial`・`task_ref: <bd-id>`）+ 自然言語本文。admin は `memory_search tags=[scribe-brief-{task_id}]` で全 brief を集約し `status` で完了判断。consult は終了前に brief を保存し**保存完了を最終出力に出す**（admin が `capture-pane` で未保存中断と区別）。
-- **un-sl9 回避**: 並列 consult は MEMORY.md を使わず **doobidoo 専用**。各 brief は**内容が異なる create-new**（conversation_id は dedup-bypass ヒントで主キーではない）ゆえ、共有グループ tag/conversation_id でも**上書き衝突しない**（lost-update なし。個別識別は `consult-{HHMMSS}` tag）。これで anchor 同居 2 セッション同時 MEMORY.md 衝突 e2e（un-sl9）未消化のブロックを受けない。
-- **grill 時の attribution（F2）**: admin が集約 brief を grill するとき、各 brief は **`consult-{HHMMSS}` が提案した第三者データ**として扱う（人間が承認した決定でも admin 自身の結論でもない）。brief 本文はメタ直後に出典ヘッダを持つ（`scribe-spawn` が consult prompt へ注入）。dogfood で consult が自分の pre-bake 出力をユーザー入力と誤認した事故（F2）の admin 側予防。
-- **保存の信頼性（F3）**: consult は doobidoo 保存が単発失敗しても「サーバーdown」と即断せず**最低 2 回**リトライし、保存成功（hash 出力）を終了条件とする（brief を黙って捨てない）。一過性タイムアウトを down と誤診した dogfood 事故の予防。詳細文言 = consult prompt（`scribe-spawn` build_consult_prompt）。
-- consult 側の義務詳細 = `role-context-spec.md` §2.3 / パターン選択（いつ fan-out するか）= `methodology.md` §2。
+  1. **pre-bake（admin が WF を回す・read-only）**: admin が `Workflow({name:'needs-user-prebake', args:{taskRef, taskTitle, anchor, facets:[{key,question,context}]}})` を起動する。各 facet を **並列 read-only agent** が分析（現状調査〔read-only〕→ 決定木 → 選択肢 + トレードオフ → admin 起票候補）し、opus が **単一の構造化 brief へ統合して WF 返り値（`briefMarkdown`/`facets`/`receivedArgs`）で admin に返す**。WF は **grill しない・graph を触らない・doobidoo 保存もしない**（データを admin に返すだけ）。admin は返り値を一次監査する（薄 gate＝worker 報告と同型）。
+  2. **grill-issue 起票（admin）**: admin が brief を集約し、その needs-user 決定群を 1 件の **grill-issue** として起票する（`bd create`・依存 wire は admin）。
+  3. **grill-consult spawn（admin）**: admin が brief を file へ書き、`scribe-spawn --consult --context <brief-file> <grill-issue>` で **grill-consult** を起動する（anchor 同居・SCRIBE_ROLE=consult）。brief は grill の **材料（第三者データ）** として焼き込まれる。
+  4. **grill（ユーザー × grill-consult）**: **ユーザーが grill-consult と対話 grill** する。grill-consult は brief を出発点に決定木を一つずつ詰める（**admin は grill から解放される**）。
+  5. **決定の handoff（grill-consult → bd notes）**: grill-consult は確定した決定を **own grill-issue の bd notes** に書く（`scripts/bdw update <grill-issue> --claim` / `--append-notes`・**bdw 経由のみ**）。admin はこの notes を `bd show <grill-issue>` で **real-time 監視**し、決まった facet から実装 cell を spawn する（**pipelining**＝全 facet の確定を待たない）。同一マシン anchor 同居ゆえ `bd dolt push` 無しで admin が即視認できる。
+  6. **反映・cleanup（admin）**: admin が決定を graph へ反映（実装 cell 起票・dep wire）し、grill 完了後に grill-issue を `bd close`、grill-consult window を cleanup（`kill-window`）する。
+- **admin 責務（明文化）**: ① pre-bake WF 起動 → ② brief 集約 → ③ grill-issue 起票 → ④ grill-consult spawn（context=brief）→ ⑤ bd notes 監視・決定反映 → ⑥ grill-issue close → ⑦ consult window cleanup（kill-window）。graph 変更・起票・`bd dolt push` は **すべて admin**（grill-consult は不可）。
+- **grill-consult の read-only 限定緩和（§3 worker B/hybrid の subset・close を除く）**: grill-consult は **自分の grill-issue の `bd update --claim` と `--append-notes` だけ** を **bdw 経由**で書ける。`bd create` / `bd dep` / `bd dolt push` / `bd close` と tracked コード/ファイルの編集は **read-only 維持**（不可）。grill-consult = worker の変種（出力がコードでなく決定）で worker 境界に倣うが、**worker は自 issue を `bd close` できる（§4）のに対し grill-consult の close は admin 専有**ゆえ worker より厳しい subset。義務詳細 = `role-context-spec.md` §2.3。
+- **F2 の構造解消**: 旧 regime の F2（consult が自分の pre-bake 出力をユーザー入力と誤認する事故）は、新設計で **pre-bake〔生成〕= WF agent / grill〔対話〕= grill-consult** と別主体に分かれ、**自己 pre-bake を誤帰属する主体が消える**ため構造的に解消する。grill-consult は brief を **外部 context（第三者データ）** として受け取るだけで自分では pre-bake しない。出典ヘッダ（「brief は WF の提案であって決定でない」）は **保険として** consult prompt に残す（`scribe-spawn` build_consult_prompt）。
+- **旧 doobidoo handoff regime の撤去**: brief は **WF 返り値**（in-memory で admin に返る）であり、決定 handoff は **bd notes**（ローカル・flock 直列化）ゆえ、旧 regime の doobidoo 集約機構（共有 tag `scribe-brief-{id}` / `conversation_id` / un-sl9 の MEMORY.md 衝突回避 / F3 の doobidoo リトライ規律）は **本フローでは不要になり撤去**した（pre-bake が doobidoo を経由しないため）。grill-consult が任意で議論メモを doobidoo へ残すのは妨げないが、決定の SSOT は grill-issue の bd notes。
+- パターン選択（いつ WF fan-out するか）= `methodology.md` §2。
 
 ---
 

@@ -1,0 +1,312 @@
+export const meta = {
+  name: 'needs-user-prebake',
+  description:
+    'needs-user タスクの pre-bake WF（admin が回す）: 並列 read-only facet 分析 → 各 facet が「現状調査(read-only・事実/推測を区別)→決定木→選択肢+トレードオフ→admin 起票候補」を構造化 brief で返す → opus が単一の構造化 brief へ統合し admin に返す。grill は含まない(対話 grill は grill-consult が別途行う=protocol §7)。F2 構造解消: WF は admin にデータを返すだけで自己 pre-bake を grill しない。固有物(taskRef/taskTitle/anchor/facets/model)は args で差し込む(骨格は再利用)。',
+  whenToUse:
+    'admin が needs-user タスク(人間判断依存)の grill 準備として pre-bake brief を作りたいとき。相互独立な複数の決定軸(facet)を並列 read-only 分析する。返り値の brief を admin が file へ書き grill-consult へ `scribe-spawn --consult --context <brief> <grill-issue>` で渡す(protocol §7)。1 facet なら admin インラインで足り fan-out 不要。',
+  // phases は phase() 呼び出し / opts.phase と同名で対応させる(タイトル完全一致でグループ化)。
+  // 全 substantive agent は model:'opus'(args.model 既定)。facet 分析は read-only だが「決定木構築・
+  // 選択肢起草」= 設計分析(thinking)ゆえ opus(CLAUDE.md model 階層: opus=思考・統合・分析の主力)。
+  phases: [
+    { title: 'Analyze', detail: '各 facet を並列 read-only agent が分析(現状調査→決定木→選択肢+トレードオフ→admin 起票候補)', model: 'opus' },
+    { title: 'Synthesize', detail: '全 facet brief を単一の構造化 brief へ統合(admin が grill-consult へ渡す材料)', model: 'opus' },
+  ],
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 設計の核(維持すること):
+//  (1) pre-bake は read-only。各 facet agent は「read のみ・編集/spawn/bd write をしない」を prompt で
+//      明示する。WF は admin にデータ(brief)を返すだけで、grill(対話)も graph 変更も一切しない。
+//      → これが F2(consult が自己 pre-bake をユーザー入力と誤認)の構造的予防: pre-bake〔生成〕と
+//        grill〔対話〕が別主体(WF agent / grill-consult)に分かれ、自己誤帰属する主体が消える。
+//  (2) 各 facet が 1 つの相互独立な決定軸を担う(現状調査→決定木→選択肢+トレードオフ→admin 起票候補)。
+//      facet 同士は互いの結論を見ずに独立分析する(multi-modal sweep の一種)。
+//  (3) Synthesize は全 facet brief を【単一の構造化 brief】へ統合する。これが admin が grill-consult へ
+//      `--context` で渡す材料。grill-consult は brief を「第三者データ(提案)」として grill する(F2 保険)。
+//  (4) 返り値(briefMarkdown / facets / receivedArgs)を呼出元(admin)が一次監査する(薄 gate 設計)。
+//      facet agent の throw は .catch で null へ正規化し握り潰さない(silent 欠落と clean を区別)。
+//  (5) defensive args parse(cell-quality と同型・un-2yy): args は呼び出し側 serialization 依存で string で
+//      届くことがある。冒頭で string なら JSON.parse して吸収し、parse 失敗/必須欠落(facets 空)は agent を
+//      一切起動せず escalate=true + 明示 reason で即 return する(silent 暴走根治)。返り値へ receivedArgs を
+//      載せ呼出元が「何が届いたか」を一次監査できるようにする。
+//  (6) model 明示(CLAUDE.md model 階層ルーティング): facet/synthesis とも既定 opus(args.model 上書き可)。
+//      fable は dynamic WF agent に投入しない方針(CLAUDE.md)ゆえ、fable 指定は opus へ畳む。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── defensive args parse(un-2yy): string で届いたら JSON.parse、object はそのまま ──────────
+const __rawArgsType = args === null ? 'null' : Array.isArray(args) ? 'array' : typeof args
+let A
+if (typeof args === 'string') {
+  try {
+    const parsed = JSON.parse(args)
+    A = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch (e) {
+    log('[args parse 失敗] needs-user-prebake 起動: args の JSON.parse に失敗(taskRef 不明)')
+    const reason = `defensive parse 失敗: string args の JSON.parse が失敗(${e && e.message ? e.message : 'invalid JSON'})。scope/契約が不明のまま pre-bake させない。呼出元が args の serialization を修正して再 invoke すること。`
+    log(`fail-fast: ${reason}`)
+    return {
+      taskRef: '',
+      taskTitle: '(untitled needs-user task)',
+      facetCount: 0,
+      escalate: true,
+      escalateReason: reason,
+      facets: [],
+      briefMarkdown: '',
+      receivedArgs: { type: __rawArgsType, parseFailed: true, keys: [] },
+    }
+  }
+} else {
+  A = args && typeof args === 'object' && !Array.isArray(args) ? args : {}
+}
+
+const receivedArgs = {
+  type: __rawArgsType,
+  parseFailed: false,
+  keys: Object.keys(A),
+  keyTypes: Object.fromEntries(Object.keys(A).map((k) => [k, Array.isArray(A[k]) ? 'array' : typeof A[k]])),
+}
+
+// ── args(固有物)。骨格は不変、ここだけ差し替える ───────────────────────────
+const str = (v, d) => (typeof v === 'string' ? v : d)
+const taskRef = str(A.taskRef, '').trim()
+const taskTitle = str(A.taskTitle, '').trim() || (taskRef ? `needs-user ${taskRef}` : '(untitled needs-user task)')
+const anchor = str(A.anchor, '').trim() // bd graph 所在(facet agent が read 用に bd show するなら使う)
+// model: 既定 opus。fable は dynamic WF agent に投入しない(CLAUDE.md)ゆえ opus へ畳む。
+const rawModel = str(A.model, 'opus').trim() || 'opus'
+const model = /fable/i.test(rawModel) ? 'opus' : rawModel
+
+log(`[${taskTitle}] needs-user-prebake 起動(taskRef=${taskRef || '(none)'} / model=${model})`)
+
+// facets: 相互独立な決定軸の配列。各 facet = { key, question, context? }。
+// key=識別子 / question=その facet で人間が裁定すべき問い / context=admin が焼く事前材料(任意)。
+const facets = (Array.isArray(A.facets) ? A.facets : [])
+  .map((f, i) => {
+    if (!f || typeof f !== 'object') return null
+    const key = str(f.key, '').trim() || `facet-${i + 1}`
+    const question = str(f.question, '').trim()
+    const context = str(f.context, '').trim()
+    return question ? { key, question, context } : null
+  })
+  .filter(Boolean)
+
+// 必須欠落(facets 空)は agent を一切起動せず escalate(silent 暴走根治)。
+if (facets.length === 0) {
+  const reason =
+    'facets が空(または全要素が question 欠落)。pre-bake する決定軸が 1 つも無いため agent を起動しない。' +
+    'args.facets=[{key,question,context?}] を 1 つ以上指定して再 invoke すること(protocol §7: 各 facet=相互独立な決定軸)。'
+  log(`fail-fast: ${reason}`)
+  return {
+    taskRef,
+    taskTitle,
+    facetCount: 0,
+    escalate: true,
+    escalateReason: reason,
+    facets: [],
+    briefMarkdown: '',
+    receivedArgs,
+  }
+}
+
+// ── facet brief の構造化 schema(各 read-only agent が返す) ─────────────────────
+const FACET_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['facetKey', 'currentState', 'decisionTree', 'options', 'adminTicketCandidates'],
+  properties: {
+    facetKey: { type: 'string', description: 'この facet の識別子(args.facets[].key と一致させる)' },
+    currentState: {
+      type: 'string',
+      description: '現状調査(read-only)。事実(verified/deduced)と推測(inferred/uncertain)を明示的に区別する。',
+    },
+    decisionTree: {
+      type: 'array',
+      description: '決めるべき枝を上流→下流に並べた決定木(grill の全体地図)。',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['node', 'question'],
+        properties: {
+          node: { type: 'string', description: '決定ノード名(例 D0/D1)' },
+          question: { type: 'string', description: 'このノードで決めるべき問い' },
+          dependsOn: { type: 'array', items: { type: 'string' }, description: '上流ノード名(あれば)' },
+        },
+      },
+    },
+    options: {
+      type: 'array',
+      description: '各決定の取りうる案を対等に並べトレードオフを付す(推奨は理由付きで後置・印は付けない)。',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['decision', 'choices'],
+        properties: {
+          decision: { type: 'string', description: 'どの決定についての選択肢か(decisionTree の node と対応)' },
+          choices: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['label', 'tradeoff'],
+              properties: {
+                label: { type: 'string' },
+                tradeoff: { type: 'string' },
+              },
+            },
+          },
+          leaning: { type: 'string', description: '推奨(あれば・理由付きで後置・印は付けない)。無ければ空。' },
+        },
+      },
+    },
+    adminTicketCandidates: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'タスク化候補(WF は起票しない=read-only。候補列挙のみ。起票は admin)。',
+    },
+    openQuestions: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'pre-bake では決め切れず人間 grill に委ねる未解決の論点。',
+    },
+  },
+}
+
+// ── Analyze: 各 facet を並列 read-only agent が分析(barrier=全 facet brief を Synthesize へ渡す) ──
+phase('Analyze')
+const facetPrompt = (f) => `あなたは scribe needs-user タスクの **pre-bake facet analyst**(read-only)。
+このタスク(${taskTitle}${taskRef ? ` / bd ${taskRef}` : ''})の **1 つの相互独立な決定軸** だけを分析する。
+
+## あなたが担当する facet
+- key: ${f.key}
+- 人間が裁定すべき問い: ${f.question}
+${f.context ? `\n## admin が焼いた事前材料(出発点・これを唯一の起点にする)\n${f.context}\n` : ''}
+## 厳守(read-only・WF は admin にデータを返すだけ)
+- **read のみ**: コード/ファイルの編集・bd write(create/update/close/dolt push)・spawn・deploy を一切しない。
+- 観測は可(コード read${anchor ? ` / cd "${anchor}" && bd show ${taskRef || '<id>'}` : ''})。事実(verified/deduced)と推測(inferred/uncertain)を区別する。
+- **あなたは grill しない・起票しない**: 対話 grill は別途 grill-consult が、起票は admin が行う。あなたは brief(データ)を返すだけ。
+
+## 手順(grill-me の全体地図を焼く)
+1. 現状調査(read-only): この facet に関わる事実を集め、事実/推測を区別する。
+2. 決定木: 決めるべき枝を上流→下流に並べる。
+3. 選択肢 + トレードオフ: 各枝の取りうる案を対等に並べる(「現状→なぜ問題→選択肢」)。推奨は理由付きで後置(印は付けない)。
+4. admin 起票候補: タスク化が要っても自分で起票せず候補として列挙するに留める。
+
+返り値は FACET_SCHEMA(構造化 brief)。facetKey は "${f.key}" にする。`
+
+const facetBriefs = await parallel(
+  facets.map((f) => () =>
+    agent(facetPrompt(f), {
+      label: `prebake:${f.key}`,
+      phase: 'Analyze',
+      model,
+      agentType: 'Explore', // read-only を構造強制（prompt 任せにしない・cell-quality 同型・gate sc-cuw F1）。opts.model:opus が Explore のモデル退化を上書き。
+      schema: FACET_SCHEMA,
+    })
+      .then((b) => (b ? { ...b, facetKey: b.facetKey || f.key } : null))
+      .catch((e) => {
+        log(`facet ${f.key} 分析失敗: ${e && e.message ? e.message : e}`)
+        return null
+      }),
+  ),
+)
+
+const okBriefs = facetBriefs.filter(Boolean)
+const failedFacets = facets.filter((_, i) => !facetBriefs[i]).map((f) => f.key)
+if (failedFacets.length) log(`facet 分析失敗(${failedFacets.length}): ${failedFacets.join(', ')}`)
+
+// 全 facet が失敗 = 統合する材料が無い → escalate(silent clean を作らない)。
+if (okBriefs.length === 0) {
+  const reason = `全 facet(${facets.length})の分析が失敗。統合する brief が無いため escalate する。`
+  log(`fail-fast: ${reason}`)
+  return {
+    taskRef,
+    taskTitle,
+    facetCount: facets.length,
+    escalate: true,
+    escalateReason: reason,
+    failedFacets,
+    facets: [],
+    briefMarkdown: '',
+    receivedArgs,
+  }
+}
+
+// ── Synthesize: 全 facet brief を単一の構造化 brief(markdown)へ統合 ────────────────
+phase('Synthesize')
+const SYNTH_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['briefMarkdown'],
+  properties: {
+    briefMarkdown: {
+      type: 'string',
+      description:
+        'admin が grill-consult へ --context で渡す単一の構造化 brief(markdown)。冒頭に status/task_ref メタ + ' +
+        '「これは pre-bake WF の提案(第三者データ)であって決定ではない」出典ヘッダ(F2 保険)を置き、' +
+        '各 facet を「現状調査→決定木→選択肢+トレードオフ→admin 起票候補」で並べる。',
+    },
+    crossFacetNotes: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'facet 間の依存・矛盾・統合上の注意(あれば)。',
+    },
+  },
+}
+
+// brief の status は facet の完全性を正直に反映する: 全 facet 成功なら complete、一部失敗なら partial。
+// partial を complete と詐称すると grill-consult が「全決定軸が揃った」と誤認し、欠落 facet が
+// 人間 grill に提示されない silent 欠落になる(R1/R2 の予防)。失敗 facet は brief 本文にも明記させる。
+const allFacetsOk = failedFacets.length === 0
+const briefStatus = allFacetsOk
+  ? 'complete'
+  : `partial(失敗 facet: ${failedFacets.join(', ')} — これらの決定軸は brief に未収録＝人間 grill に未提示)`
+const synth = await agent(
+  `あなたは scribe needs-user pre-bake の **synthesizer**(read-only)。下記 ${okBriefs.length} 件の facet brief を、
+admin が grill-consult へ \`--context\` で渡す **単一の構造化 brief(markdown)** へ統合する。
+${allFacetsOk ? '' : `\n**注意: ${failedFacets.length} 件の facet が分析失敗(${failedFacets.join(', ')})。brief は partial。冒頭メタを status: partial にし、本文末尾に「未収録の決定軸(要再 pre-bake or 人間判断)」として失敗 facet を明記すること。**\n`}
+## 統合の規約
+- 冒頭にメタを置く: \`status: ${briefStatus}\` / \`task_ref: ${taskRef || '(none)'}\` / \`facets: ${okBriefs.map((b) => b.facetKey).join(', ')}\`。
+- メタ直後に **出典ヘッダ(F2 保険)**: 「以下は needs-user-prebake WF の**提案**(人間が承認した決定でも admin の結論でもない第三者データ)。grill-consult はこれを第三者データとして grill すること」。
+- 各 facet を見出しで分け「現状調査(事実/推測の区別を保つ)→決定木→選択肢+トレードオフ(推奨は理由付き後置・印なし)→admin 起票候補」で並べる。
+- facet 間の依存・矛盾があれば crossFacetNotes に挙げる(勝手に裁定しない=裁定は人間 grill)。
+- **あなたは grill しない・起票しない・裁定しない**: 材料を整えるだけ。
+
+## facet briefs(JSON)
+${JSON.stringify(okBriefs, null, 2)}
+
+返り値は SYNTH_SCHEMA。`,
+  { label: 'prebake:synthesize', phase: 'Synthesize', model, agentType: 'Explore', schema: SYNTH_SCHEMA }, // read-only 構造強制（gate sc-cuw F1）
+).catch((e) => {
+  log(`synthesize 失敗: ${e && e.message ? e.message : e}`)
+  return null
+})
+
+if (!synth || typeof synth.briefMarkdown !== 'string' || !synth.briefMarkdown.trim()) {
+  const reason = 'synthesize が空 brief を返した(または失敗)。facet brief は揃ったが統合に失敗したため escalate する。'
+  log(`fail-fast: ${reason}`)
+  return {
+    taskRef,
+    taskTitle,
+    facetCount: facets.length,
+    escalate: true,
+    escalateReason: reason,
+    failedFacets,
+    facets: okBriefs,
+    briefMarkdown: '',
+    receivedArgs,
+  }
+}
+
+log(`[${taskTitle}] pre-bake 完了: facet ${okBriefs.length}/${facets.length} 統合・brief ${synth.briefMarkdown.length} 文字`)
+
+return {
+  taskRef,
+  taskTitle,
+  facetCount: facets.length,
+  escalate: false,
+  partial: !allFacetsOk, // 一部 facet 失敗=brief は partial(admin が grill-consult へ渡す前に再 pre-bake 判断)
+  failedFacets,
+  facets: okBriefs, // 各 facet の構造化 brief(admin の一次監査用)
+  briefMarkdown: synth.briefMarkdown, // admin が file へ書き grill-consult へ --context で渡す材料
+  crossFacetNotes: Array.isArray(synth.crossFacetNotes) ? synth.crossFacetNotes : [],
+  receivedArgs,
+}
