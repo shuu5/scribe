@@ -3,6 +3,8 @@
 # **実 spawn・実 tmux・実 claude 起動はしない**（dry-run + bd スタブのみ・コスト大ゆえ）。
 # 道具がコード化する規約の SSOT = docs/protocol.md。
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   SCRIPTS="$REPO_ROOT/scripts"
@@ -13,6 +15,8 @@ setup() {
   CLEANUP="$SCRIPTS/scribe-cleanup.sh"
   GUARD="$SCRIPTS/scribe-origin-guard.sh"
   LIB="$SCRIPTS/lib/scribe-lib.sh"
+  BDW="$SCRIPTS/bdw"
+  HOOKS="$SCRIPTS/hooks"
   # bd を実在検証スタブへ差し替え（実 graph 不要）。
   export SCRIBE_BD="$FIXTURES/bd-stub.sh"
   export BD_STUB_OK_IDS="un-4nm un-consult un-3sh.3.5"
@@ -49,7 +53,7 @@ _mk_main_and_linked() {
 
 # ---------- bash -n（全 script 構文）----------
 @test "bash -n: 全 script が構文 OK" {
-  for f in "$SPAWN" "$GATE" "$SELFTEST" "$CLEANUP" "$GUARD" "$SCRIPTS/lib/scribe-lib.sh"; do
+  for f in "$SPAWN" "$GATE" "$SELFTEST" "$CLEANUP" "$GUARD" "$BDW" "$SCRIPTS/lib/scribe-lib.sh"; do
     run bash -n "$f"
     [ "$status" -eq 0 ]
   done
@@ -980,4 +984,152 @@ _mk_repo_with_origin() {
   run "$GUARD" verify; [ "$status" -ne 0 ]
   # --restore は verify 専用（capture/restore に付けると fail-loud）。
   run "$GUARD" capture --worktree /tmp/wt --restore; [ "$status" -ne 0 ]
+}
+
+# ---------- live security guard の self-test を回帰網へ配線（sc-i9b member 1）----------
+# rm/git/cmdtokens guard はそれぞれ hermetic な `--self-test`（実破壊なし・/tmp に fixture を作って
+# 判定だけ検証）を内蔵し、pass で exit 0 を返す。これを bats から呼ぶことで 200+ の security
+# assertion が「bats 緑のまま壊れうる」状態を脱し回帰網へ入る。python3 は本ファイルで json.tool
+# 既使用ゆえ前提不変。rm guard の scratch は /tmp 等 HOME 外固定（TMPDIR 非依存・un-x3o）。
+@test "guard self-test: rm-destructive-guard --self-test が exit 0（hermetic）" {
+  run python3 "$HOOKS/rm-destructive-guard.py" --self-test
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SELF-TEST PASSED"* ]]
+}
+
+@test "guard self-test: git-destructive-guard --self-test が exit 0（hermetic）" {
+  run python3 "$HOOKS/git-destructive-guard.py" --self-test
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"* ]]
+}
+
+@test "guard self-test: cmdtokens --self-test が exit 0（軽量サニティ）" {
+  run python3 "$HOOKS/lib/cmdtokens.py" --self-test
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"* ]]
+}
+
+# ---------- bdw: flock-serialized B/hybrid の中核ロジックを pin（sc-i9b member 2）----------
+# bd 実体を echo に差し替え（BDW_BD_BIN=echo）て実 Dolt write を起こさず、READ/WRITE 経路の
+# 分岐だけを検証する。判定の観測点 = BDW_LOCK_DIR に `bd-write-*.lock` が作られたか。
+#   - READ allowlist  → exec が lock 作成より前（L66）に走るため lock 0 個（無ロック素通し）
+#   - WRITE / 未知    → flock 取得後 exec のため lock 1 個（直列化路）
+# 各 @test は使い捨ての空 lock dir を作って観測する。cwd は setup() の temp git repo。
+_bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
+
+@test "bdw: READ allowlist（show）は無ロックで素通し（lock 0 個・args 透過）" {
+  local ld; ld="$(mktemp -d)"
+  run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" show un-x
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"show un-x"* ]]
+  [ "$(_bdw_locks "$ld")" -eq 0 ]
+  rm -rf "$ld"
+}
+
+@test "bdw: WRITE（update --claim）は flock 取得路（lock 1 個・args 透過）" {
+  local ld; ld="$(mktemp -d)"
+  run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" update un-x --claim
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"update un-x --claim"* ]]
+  [ "$(_bdw_locks "$ld")" -eq 1 ]
+  rm -rf "$ld"
+}
+
+@test "bdw: WRITE（close）は flock 取得路（lock 1 個）" {
+  local ld; ld="$(mktemp -d)"
+  run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" close un-x
+  [ "$status" -eq 0 ]
+  [ "$(_bdw_locks "$ld")" -eq 1 ]
+  rm -rf "$ld"
+}
+
+@test "bdw: 未知サブコマンドは fail-closed で flock 取得路（lock 1 個・allowlist 漏れ=直列化）" {
+  local ld; ld="$(mktemp -d)"
+  run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" frobnicate x
+  [ "$status" -eq 0 ]
+  [ "$(_bdw_locks "$ld")" -eq 1 ]
+  rm -rf "$ld"
+}
+
+@test "bdw: WRITE は flock 取得失敗で fail-closed（実排他を観測・lock file 在＝取得済 を証明しない）" {
+  # 上の WRITE @test 群は「lock file が在る」しか見ない。だが bdw L89 `exec 9>lock_file` は
+  # flock 取得の成否に依らず lock file を無条件生成するので、L90 `flock -w` が回帰で消えても
+  # それらは緑のまま通る（lock file 在 ≠ 排他が効いている）。本 @test は実際の相互排他を観測する:
+  # 別プロセスに同一 lock を保持させたまま bdw WRITE を BDW_LOCK_TIMEOUT=1 で起動し、取得失敗で
+  # 非 0 終了し bd を実行しない（fail-closed）ことを assert する。flock が外れれば bdw は素通しで
+  # 緑になり本 @test が落ちる＝『flock が実際に直列化している』を pin する。
+  local ld; ld="$(mktemp -d)"
+  # 1) WRITE を 1 回走らせて bdw が計算する実 lock file パスを得る（repo_id は cwd 依存）。
+  run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" close un-x
+  [ "$status" -eq 0 ]
+  local lock_file; lock_file="$(ls "$ld"/bd-write-*.lock)"
+  # 2) 別プロセスに排他ロックを保持させる。marker でロック保持を待ち、release で解放する
+  #    （固定 sleep に依らない決定論同期）。
+  local marker="$ld/held" release="$ld/release"
+  ( flock -x 9; touch "$marker"; while [ ! -e "$release" ]; do sleep 0.05; done ) 9>"$lock_file" &
+  local holder=$!
+  local i; for ((i=0; i<200; i++)); do [ -e "$marker" ] && break; sleep 0.05; done
+  [ -e "$marker" ]   # holder が確かにロックを保持していること
+  # 3) ロック保持中に bdw WRITE → 取得失敗で fail-closed（非 0・bd 不実行・診断 stderr）。
+  run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" BDW_LOCK_TIMEOUT=1 "$BDW" close un-y
+  touch "$release"; wait "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not acquire"* ]]
+  [[ "$output" != *"close un-y"* ]]   # bd（echo スタブ）は実行されていない
+  rm -rf "$ld"
+}
+
+@test "bdw: 値取り global flag（--actor）の値を subcommand と誤認しない（--actor close show → READ・lock 0）" {
+  # --actor の値が write subcmd 名（close）でも次トークンとして読み飛ばし、真の subcmd=show を採る。
+  # skip_next が壊れると subcmd=close と誤認 → WRITE lock になる。lock 0 でそれを pin。
+  local ld; ld="$(mktemp -d)"
+  run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" --actor close show un-x
+  [ "$status" -eq 0 ]
+  [ "$(_bdw_locks "$ld")" -eq 0 ]
+  rm -rf "$ld"
+}
+
+@test "bdw: 値取り global flag（--db）の値を subcommand と誤認しない（--db close show → READ・lock 0）" {
+  # 契約 member(2) が名指しで pin を要求する 3 つ目の value-taking flag。--db の値が write subcmd 名
+  # （close）でも次トークンとして読み飛ばし、真の subcmd=show を採る。bdw L55 の case 一覧から --db が
+  # 回帰で落ちると subcmd=close と誤認 → WRITE lock になる。lock 0 でそれを pin（--actor と対称）。
+  local ld; ld="$(mktemp -d)"
+  run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" --db close show un-x
+  [ "$status" -eq 0 ]
+  [ "$(_bdw_locks "$ld")" -eq 0 ]
+  rm -rf "$ld"
+}
+
+@test "bdw: 値取り global flag（--directory）の値を subcommand と誤認しない（--directory close show → READ・lock 0）" {
+  # 同 skip_next case 分岐（L55）の網羅を完成させる。--directory の値（close）を読み飛ばし真の subcmd=show
+  # を採る。case 一覧から --directory が落ちれば subcmd=close 誤認 → WRITE lock。lock 0 でそれを pin。
+  local ld; ld="$(mktemp -d)"
+  run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" --directory close show un-x
+  [ "$status" -eq 0 ]
+  [ "$(_bdw_locks "$ld")" -eq 0 ]
+  rm -rf "$ld"
+}
+
+@test "bdw: 値取り global flag（-C）は値を飛ばし真の subcommand を採る（-C path update → WRITE・lock 1）" {
+  # -C の値（/tmp/x）を飛ばした上で update を subcmd と認識する＝flag-skip が真の subcmd を食わない。
+  local ld; ld="$(mktemp -d)"
+  run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" -C /tmp/x update un-y --claim
+  [ "$status" -eq 0 ]
+  [ "$(_bdw_locks "$ld")" -eq 1 ]
+  rm -rf "$ld"
+}
+
+@test "bdw: boolean flag（-f）を値取りと誤読しない（-f show → READ・lock 0）" {
+  # -f は boolean。次トークン show を値として食わない（食えば subcmd=un-x→未知→WRITE lock）。lock 0 で pin。
+  local ld; ld="$(mktemp -d)"
+  run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" -f show un-x
+  [ "$status" -eq 0 ]
+  [ "$(_bdw_locks "$ld")" -eq 0 ]
+  rm -rf "$ld"
+}
+
+@test "bdw: bd 不在は exit 127 で fail-loud（write を実行しない）" {
+  run -127 env BDW_BD_BIN=/nonexistent-bd-xyz "$BDW" show un-x
+  [ "$status" -eq 127 ]
+  [[ "$output" == *"not found"* ]]
 }
