@@ -161,10 +161,13 @@ let refinedAcceptance = acceptance // Plan で精緻化されたら更新(review
 
 // ── (1) per-stage model 上書き + fable→opus 降格(新方針=dynamic WF から fable 全廃) ─────────────
 // fable 判定は per-stage model の解決(下)より前に置く必要がある(降格を解決値へ適用するため)。
-// 値は alias 推奨('fable' 等。Agent tool enum 互換)だが Workflow opts.model は full id('claude-fable-5')も
-// 受理する(verified)ので両表記を吸収する。大小文字/空白ゆらぎも吸収する。
-const FABLE_ALIASES = new Set(['fable', 'claude-fable-5'])
-const isFable = (m) => FABLE_ALIASES.has((m || '').trim().toLowerCase())
+// 判定は **部分一致** `/fable/i`= ツール層(scribe-{gate,selftest}-args.sh / scribe-spawn.sh の `*fable*`)と
+// 兄弟 WF(needs-user-prebake.workflow.js の `/fable/i`)に意味を揃える。旧 exact-match 集合だと
+// `claude-fable-5-preview` 等の派生名を WF 直叩き経路(gate-args を通さず args 直投入)で取りこぼし、
+// demoteFable も ≤2 cap(共に isFable 依存)も外れた二重 fail-open で silent にフルコスト fable が走る(sc-tl3)。
+// 部分一致なら新 variant 名の列挙保守が不要(根治)。'fable' は Anthropic のモデル系統名ゆえ偽陽性はまず無い
+// (ツール層・兄弟 WF も同じ risk を受容済み)。大小文字ゆらぎは /i で吸収する。
+const isFable = (m) => /fable/i.test(m || '')
 const FABLE_MAX_CONCURRENCY = 2
 
 // un-1kb: 解決済み model 値が fable なら opus へ降格する単一ヘルパ。新モデル方針(2026-06-10 改訂=dynamic WF

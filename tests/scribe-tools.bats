@@ -765,6 +765,21 @@ _mk_main_and_linked() {
   [ "$status" -ne 0 ]
 }
 
+# ---------- WF 層 fable 降格の回帰（cell-quality.workflow.js・sc-tl3）----------
+# ツール層 3 兄弟（spawn/gate-args/selftest-args）の `*fable*` は上で test 済み。WF 層 demoteFable の
+# isFable も同じ部分一致 `/fable/i` であること・旧 exact-match 集合 FABLE_ALIASES へ退化していないことを
+# source assertion で固定する（exact-match だと claude-fable-5-preview 等を WF 直叩き経路で取りこぼし、
+# demoteFable も ≤2 cap も外れる二重 fail-open=sc-tl3）。挙動 unit は repo に node test 機構が無いため
+# source-level で層間一致を pin する（~/.claude/workflows は repo workflows/ への symlink=単一実体）。
+@test "cell-quality WF: isFable は部分一致 /fable/i で層間一致（exact-match 集合へ退化しない・sc-tl3）" {
+  WF="$REPO_ROOT/workflows/cell-quality.workflow.js"
+  [ -f "$WF" ]
+  # 部分一致判定が在る（ツール層 *fable* / 兄弟 prebake /fable/i と意味一致）。
+  grep -Eq 'isFable.*/fable/i' "$WF"
+  # 旧 exact-match 集合へ退化していない（派生 fable 名の取りこぼし=二重 fail-open を再発させない）。
+  ! grep -q 'FABLE_ALIASES' "$WF"
+}
+
 # ---------- DESC 合成の lib 抽出（scribe_synthesize_issue_desc・sc-2m0 facet2）----------
 # gate-args / selftest-args で byte 同一だった「issue→taskTitle/description 合成」を lib へ集約（D1）。
 # 非 dry-run 経路は従来 bats coverage ゼロ（D0）だったため、本体（lib unit）+ 両 caller 結線 smoke +
