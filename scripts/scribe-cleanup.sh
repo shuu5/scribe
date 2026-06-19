@@ -55,10 +55,10 @@ BD_ID=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --repo)     [[ -n "${2:-}" ]] || scribe_die "--repo にパスを指定してください"; REPO="$2"; REPO_EXPLICIT=1; shift 2 ;;
-    --worktree) [[ -n "${2:-}" ]] || scribe_die "--worktree にパスを指定してください"; WORKTREE="$2"; shift 2 ;;
-    --branch)   [[ -n "${2:-}" ]] || scribe_die "--branch に名前を指定してください"; BRANCH="$2"; shift 2 ;;
-    --window)   [[ -n "${2:-}" ]] || scribe_die "--window に名前を指定してください"; WINDOW="$2"; shift 2 ;;
+    --repo)     scribe_need_val "${2:-}" --repo; REPO="$2"; REPO_EXPLICIT=1; shift 2 ;;
+    --worktree) scribe_need_val "${2:-}" --worktree; WORKTREE="$2"; shift 2 ;;
+    --branch)   scribe_need_val "${2:-}" --branch; BRANCH="$2"; shift 2 ;;
+    --window)   scribe_need_val "${2:-}" --window; WINDOW="$2"; shift 2 ;;
     --yes)      ASSUME_YES=1; shift ;;
     --dry-run)  DRY_RUN=1; shift ;;
     -h|--help)  usage 0 ;;

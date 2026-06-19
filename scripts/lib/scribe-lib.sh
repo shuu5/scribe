@@ -18,6 +18,16 @@ scribe_die() {
   exit 1
 }
 
+# scribe_need_val <value> <flag-name> — 値必須オプションのガード（fail-loud・全道具の parse loop 共通）。
+# 値が「非空 かつ 先頭が '-' でない」ことを要求する。非空チェックだけ([[ -n ]])だと、値を省いて
+# 次フラグを書いた場合に次フラグを silent に消費する（例: `--worktree --base X` が worktree='--base'
+# を載せて exit 0 で bogus 値のまま進む silent-misparse）。先頭 '-' を弾いて fail-loud にする。
+# 消費し得る値（path/ref/branch/model/window/file）はいずれも '-' で始まらないため over-rejection は
+# 実用上起きない。'-' 始まりの値が正当に必要化したら `--` セパレータで後付けする（escape hatch は無し）。
+scribe_need_val() {
+  [[ -n "${1:-}" && "$1" != -* ]] || scribe_die "$2 に値を指定してください（値の欠落・次フラグの誤消費を防止）"
+}
+
 # scribe_normalize_bd_id <raw> — bd id を正規化・検証する（protocol.md §1 / session-name.sh producer 準拠）。
 #   - 許容: 英数始まり + 英数 '.' '-'（dotted 階層 id un-3sh.3.5 を通す）。先頭 '#' は剥がす。
 #   - 拒否: path traversal（'..' を含む・'/' を含む）= path/window 名へ埋め込むため構造的に防御。
