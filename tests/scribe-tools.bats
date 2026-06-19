@@ -262,49 +262,66 @@ _mk_main_and_linked() {
   [[ "$output" == *"bd create"* ]]
 }
 
-# ---------- spawn: consult pre-bake モード（--context・§7 needs-user regime / 合意スペック 9c73606d）----------
-@test "spawn(pre-bake): --context + bd id で handoff 規約（conversation_id/tag）と焼き込み context が prompt に注入される" {
+# ---------- spawn: grill-consult モード（--context・§7 needs-user regime・sc-cuw 再編）----------
+# --context は「焼いて死ぬ pre-bake」から「admin 集約 brief を grill 材料に受け取りユーザーと対話 grill する
+# grill-consult」へ意味が変わった。pre-bake 自体は admin が回す dynamic Workflow へ移管(consult から撤去)。
+@test "spawn(grill-consult): --context + grill-issue で brief 焼き込み + bd notes handoff(bdw 経由)が prompt に注入される" {
   ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
-  printf 'ADMIN_PREBAKED_CONTEXT_SENTINEL\n' > "$ctx"
+  printf 'ADMIN_BRIEF_SENTINEL\n' > "$ctx"
   run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
   rm -f "$ctx"
   [ "$status" -eq 0 ]
-  # admin 事前 context が焼き込まれる（同一出発点）。
-  [[ "$output" == *"ADMIN_PREBAKED_CONTEXT_SENTINEL"* ]]
-  # handoff 規約: 集約は共有グループ tag。conversation_id は dedup 回避ヒントとして併用。
-  # tag=consult-<HHMMSS> は window 名と一致（capture-pane 突合の個別識別）。
-  [[ "$output" == *"scribe-brief-un-consult"* ]]                 # 共有グループ tag = task_ref keyed
-  [[ "$output" == *"conversation_id"* ]]                          # dedup 回避ヒントとして残す
-  re='tag=consult-[0-9]{6}'
-  [[ "$output" =~ $re ]]
-  # 集約 key は tag（conversation_id は memory_search フィルタに採れない＝§7 verified errata）。
-  [[ "$output" == *"集約"* ]]
-  [[ "$output" == *"memory_search"* ]]
-  # pre-bake 手順 + doobidoo 専用（un-sl9 回避）の brief 保存規約。
-  [[ "$output" == *"pre-bake"* ]]
-  [[ "$output" == *"task_ref: un-consult"* ]]
-  [[ "$output" == *"un-sl9"* ]]
-  # 並列 consult の brief 衝突回避ゆえ MEMORY.md は使わない指示が出る。
-  [[ "$output" == *"MEMORY.md は使わない"* ]]
+  # admin 集約 brief が grill 材料として焼き込まれる。
+  [[ "$output" == *"ADMIN_BRIEF_SENTINEL"* ]]
+  # grill-consult はユーザーと対話 grill する第 2 対話相手(原義回帰)。
+  [[ "$output" == *"grill-consult"* ]]
+  [[ "$output" == *"対話 grill"* ]]
+  [[ "$output" == *"grill-issue=un-consult"* ]]
+  # 決定 handoff = own grill-issue の bd notes(bdw 経由 --claim/--append-notes のみ)。
+  [[ "$output" == *"bdw"* ]]
+  [[ "$output" == *"--claim"* ]]
+  [[ "$output" == *"--append-notes"* ]]
+  [[ "$output" == *"bd show un-consult"* ]]   # admin が real-time 監視
+  [[ "$output" == *"限定緩和"* ]]
+  # 旧 doobidoo handoff regime(tag/conversation_id)は撤去された(brief は WF 返り値・handoff は bd notes)。
+  [[ "$output" != *"scribe-brief-"* ]]
+  [[ "$output" != *"conversation_id"* ]]
 }
 
-@test "spawn(pre-bake): F1/F2/F3 regime 知見が consult prompt へ注入される（dogfood sc-in9）" {
+@test "spawn(grill-consult): read-only 限定緩和は厳密 — 自 grill-issue notes のみ可・graph 構造と tracked コードは不可" {
   ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
   printf 'x\n' > "$ctx"
   run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
   rm -f "$ctx"
   [ "$status" -eq 0 ]
-  # F1: consult は pre-bake 専任で対話 grill に入らない（grill トポロジ = 案 B）。
-  [[ "$output" == *"pre-bake 専任"* ]]
-  [[ "$output" == *"対話 grill に入らない"* ]]
-  # F2: brief にメタ直後の出典ヘッダ（提案＝第三者データ・決定でない）を置く＝admin の attribution 予防。
-  [[ "$output" == *"第三者データ"* ]]
-  # F3: 単発失敗で down 断定せずリトライ + 保存成功を終了条件にする（黙って brief を捨てない）。
-  [[ "$output" == *"単発失敗"* ]]
-  [[ "$output" == *"保存成功を終了条件"* ]]
+  # 緩和されるのは自 grill-issue の --claim / --append-notes だけ(bdw 経由)。
+  [[ "$output" == *"--append-notes"* ]]
+  # graph 構造(create/dep/dolt push/close)は依然禁止であることを禁止節で明示。
+  [[ "$output" == *"bd create"* ]]
+  [[ "$output" == *"bd dep"* ]]
+  [[ "$output" == *"bd dolt push"* ]]
+  [[ "$output" == *"bd close"* ]]
+  # tracked コード/共有 .git/config も不可(worker B/hybrid 境界と一致)。
+  [[ "$output" == *"tracked コード"* ]]
+  [[ "$output" == *".git/config"* ]]
 }
 
-@test "spawn(pre-bake): --context は worker モードでは consult 専用 die（worker は pre-bake しない）" {
+@test "spawn(grill-consult): F2 は構造解消 — 第三者データ出典は保険として残り旧 pre-bake 専任文言は消える" {
+  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  printf 'x\n' > "$ctx"
+  run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
+  rm -f "$ctx"
+  [ "$status" -eq 0 ]
+  # F2 保険: brief は WF の提案=第三者データ。
+  [[ "$output" == *"第三者データ"* ]]
+  # 新設計では consult が grill 相手(原義回帰)。旧 regime の「pre-bake 専任」「対話 grill に入らない」は消える。
+  [[ "$output" != *"pre-bake 専任"* ]]
+  [[ "$output" != *"対話 grill に入らない"* ]]
+  # 旧 doobidoo F3 リトライ規律(保存成功を終了条件)は撤去(handoff は bd notes ゆえ doobidoo 保存しない)。
+  [[ "$output" != *"保存成功を終了条件"* ]]
+}
+
+@test "spawn(grill-consult): --context は worker モードでは consult 専用 die(worker は grill-consult しない)" {
   ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
   printf 'x\n' > "$ctx"
   run "$SPAWN" --dry-run --context "$ctx" un-4nm
@@ -314,24 +331,24 @@ _mk_main_and_linked() {
   [[ "$output" != *"[plan]"* ]]
 }
 
-@test "spawn(pre-bake): --context は bd id（task_ref）必須で fail-loud（conversation_id を構成できない）" {
+@test "spawn(grill-consult): --context は grill-issue id 必須で fail-loud(handoff 先の bd notes を定められない)" {
   ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
   printf 'x\n' > "$ctx"
   run "$SPAWN" --dry-run --consult --context "$ctx"
   rm -f "$ctx"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"task_ref"* ]]
+  [[ "$output" == *"grill-issue"* ]]
   [[ "$output" != *"[plan]"* ]]
 }
 
-@test "spawn(pre-bake): --context のファイルが不在だと fail-loud（typo を上流で塞ぐ）" {
+@test "spawn(grill-consult): --context のファイルが不在だと fail-loud(typo を上流で塞ぐ)" {
   run "$SPAWN" --dry-run --consult --context /tmp/scribe-no-such-ctx-file.md un-consult
   [ "$status" -ne 0 ]
   [[ "$output" == *"通常ファイル"* ]]
   [[ "$output" != *"[plan]"* ]]
 }
 
-@test "spawn(pre-bake): --context にディレクトリを渡すと fail-loud（空 context のまま起動する fail-safe ギャップ防御・review wf_a92a624f）" {
+@test "spawn(grill-consult): --context にディレクトリを渡すと fail-loud(空 brief のまま起動する fail-safe ギャップ防御・review wf_a92a624f)" {
   dir="$(mktemp -d /tmp/scribe-ctx-dir-XXXXXX)"
   run "$SPAWN" --dry-run --consult --context "$dir" un-consult
   rmdir "$dir"
@@ -341,12 +358,15 @@ _mk_main_and_linked() {
   [[ "$output" != *"[plan]"* ]]
 }
 
-@test "spawn(pre-bake): --context 無しの素 consult は pre-bake 節を一切出さない（回帰防御）" {
+@test "spawn(grill-consult): --context 無しの素 consult は grill-consult 節を一切出さない(回帰防御)" {
   run "$SPAWN" --dry-run --consult un-consult
   [ "$status" -eq 0 ]
-  [[ "$output" != *"pre-bake"* ]]
+  # 素 consult(設計議論・grill の read-only)は grill-consult 任務・bd notes handoff を持たない。
+  [[ "$output" != *"grill-consult"* ]]
+  [[ "$output" != *"--append-notes"* ]]
+  [[ "$output" != *"第三者データ"* ]]
+  [[ "$output" != *"bdw"* ]]
   [[ "$output" != *"scribe-brief-"* ]]
-  [[ "$output" != *"conversation_id"* ]]
 }
 
 # ---------- spawn: 共有 .git/config mutate 禁止（un-1n1 ①）----------

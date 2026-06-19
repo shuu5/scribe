@@ -85,18 +85,19 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 
 **伝える**: 設計議論・grill 専用の第 2 対話相手。admin/worker とは別系統で、オーケストレーション・gate 代行・実装はしない。以下は ubuntu-note-system `docs/session-orchestration-strategy.md` §6（外部・本リポ未同梱）の起動テンプレ（規約 SSOT = bd un-tao）を scribe plugin 側へ**移設**したもの（移設後は本書 §2.3 の本文が内容の SSOT・外部パスは原典トレース用）:
 
-- **役割と禁止**:
-  - 用途は設計議論・grill のみ。オーケストレーション・gate 代行・実装はしない。
-  - **read-only 規律**: リポの tracked ファイル・コードを編集しない。bd の write（create/update/close/dolt push）・spawn・deploy は禁止。
-  - 観測は可（read）。タスク化が必要になっても自分で bd 起票せず、相談サマリに「admin への起票候補」として書き出すに留める（起票は admin）。
-- **write してよいのは記憶系のみ**: doobidoo（`mcp__doobidoo__memory_store`）と auto-memory（`MEMORY.md`）への保存だけ許可。
-- **サマリ保存義務（必須）**: 終了・中断の前に、議論の結論・未解決の論点・admin への起票候補を相談サマリとしてまとめ、doobidoo へ保存する（会話履歴に依存させない）。
-- **pre-bake brief 義務（needs-user タスクを割り当てられた場合・dogfood 実証済み: sc-in9）**: 1 つの needs-user タスクを admin から渡された consult は、それを pre-bake する — 現状調査（read-only）→ 決定木 → 選択肢 + トレードオフ → admin への起票候補。**consult は pre-bake 専任で、brief を保存したら終了する**（対話 grill には入らない＝grill トポロジ案 B・F1。pre-bake と grill のセッション分離が自己-ユーザー誤認〔F2〕の構造的予防）。結果は doobidoo へ保存する: **集約用の共有グループ tag `scribe-brief-{task_id}`** と **個別 tag `consult-{HHMMSS}`** を付け（admin は前者で集約する＝`conversation_id` は検索フィルタに採れないため tag で引く・§7 verified）、`conversation_id=scribe-brief-{task_id}` は dedup 回避ヒントとして併用してよい。構造化メタ（`status: complete|partial`・`task_ref: <bd-id>`）+ **出典ヘッダ（「consult の提案であって決定でない」＝admin は grill 時これを `consult-{HHMMSS}` の第三者提案として attribution する・F2）** + 自然言語本文を含める。**保存は単発失敗で down 断定せず最低 2 回リトライし、保存成功（hash）を終了条件とする**（黙って brief を捨てない・F3）。終了前に保存し保存完了を最終出力に出す。N 並列時は MEMORY.md を使わず doobidoo 専用（衝突安全）。F1/F2/F3 の定義・手順 SSOT = `protocol.md` §7。
+- **役割（grill 専任・原義回帰）**: 用途は **設計議論・grill のみ**。オーケストレーション・gate 代行・実装・**pre-bake はしない**（pre-bake は admin が回す dynamic Workflow `workflows/needs-user-prebake.workflow.js` へ移管＝consult の仕事ではない・`protocol.md` §7）。consult には 2 つの立ち上がり方がある:
+  - **素 consult**（ユーザーが `/scribe:consult` で起動）: 設計議論・grill の read-only セッション（議題参照 bd id は read-only）。
+  - **grill-consult**（admin が `scribe-spawn --consult --context <brief> <grill-issue>` で起動・§7）: admin の集約 brief を **grill 材料（第三者データ）** として受け取り、**ユーザーと対話 grill** して確定した決定を own grill-issue の bd notes へ書く第 2 対話相手（admin は grill から解放される）。
+- **read-only 規律（基本）**: リポの tracked ファイル・コードを編集しない。graph 構造（`bd create` / `bd dep` / `bd dolt push` / `bd close`）・spawn・deploy は禁止。観測は可（read）。タスク化が必要になっても自分で bd 起票せず、「admin への起票候補」として書き出すに留める（起票は admin）。
+- **read-only 限定緩和（grill-consult のみ・§3 worker B/hybrid の subset・close を除く）**: grill-consult は **自分の grill-issue の `bd update --claim` と `--append-notes` だけ**を **bdw 経由**（`cd <anchor> && scripts/bdw <subcmd>`・flock 直列化）で書ける。これは worker の B/hybrid 境界に倣う（grill-consult = worker の変種・出力がコードでなく決定）が、**worker は自 issue を `bd close` できる（protocol §4）のに対し grill-consult の close は admin 専有**ゆえ worker より厳しい subset。`bd create` / `bd dep` / `bd dolt push` / `bd close` と tracked コードは read-only 維持。素 consult は自 grill-issue を持たないため本緩和の対象外。
+- **write してよいのは記憶系のみ（素 consult）+ 自 grill-issue notes（grill-consult）**: doobidoo（`mcp__doobidoo__memory_store`）と auto-memory（`MEMORY.md`）への保存、および grill-consult の自 grill-issue notes（bdw 経由）だけ許可。
+- **サマリ保存義務 / 決定 handoff**: 素 consult は終了・中断の前に、議論の結論・未解決の論点・admin への起票候補を相談サマリとしてまとめ doobidoo へ保存する（会話履歴に依存させない）。**grill-consult はこのサマリ保存義務が「決定の bd notes handoff」に置換される**——確定した決定を grill-issue の bd notes へ `--append-notes`（bdw 経由）で書くのが SSOT で、admin が `bd show` で real-time 監視する（doobidoo 保存は任意の補助）。
+- **F2（自己-ユーザー誤認）の構造解消**: grill-consult は brief を **外部 context（第三者データ）** として受け取るだけで自分では pre-bake しない（pre-bake は WF が別途実施）。**自己 pre-bake を誤帰属する主体が消えるため F2 は構造解消**する。brief の出典ヘッダ（「WF の提案であって決定でない」）は保険として `scribe-spawn` build_consult_prompt が consult prompt へ注入する。旧 F1/F2/F3 regime の経緯・手順 SSOT = `protocol.md` §7。
 - **モデル規約**: 基本 **opus**（ユーザー指定時のみ fable）。consult は admin と同じ main-loop 系統ゆえ fable 起動が許される例外（WF agent への fable 投入とは無関係）。
   - 起動は `cld-spawn --model opus "<テンプレ本文>"` を直接呼ぶ（`/session:spawn` の NLU は `--model` を解析せず新規既定 `claude-fable-5` を継承するため、基本 opus にできない）。
 - **暫定運用（un-sl9 検証完了まで）**: working memory の session-scoped 化（un-gcu）は実装・live 済みで compact 跨ぎ復元（PostCompact restore）は検証済みだが、anchor 同居 2 セッション同時運用の live e2e（un-sl9 検証点(2) = working-memory 衝突非発生）が未消化のため、それが消化されるまで consult は **compaction 系スキル（ready-compaction 等）の使用を控える**。検証完了後は un-sl9 が一次出典 3 文書と本条項を撤去する（撤去は un-sl9 の仕事）。一次出典: bd un-tao 確定 5 点(2)・CLAUDE.md 開発トポロジー節・session-orchestration-strategy.md §6・現状の検証状態は bd un-sl9/un-gcu notes。
 
-> 一次出典: ubuntu-note-system `docs/session-orchestration-strategy.md` §6（外部・本リポ未同梱。consult 起動テンプレ・read-only 規律・記憶系のみ write・サマリ保存義務・モデル opus 規約。本文の SSOT は上記 §2.3 にインライン移設済み）/ bd un-tao（consult 規約 SSOT）/ scribe-design.md §14（consult = 第 3 role・docs §6 テンプレを scribe plugin へ移設）。
+> 一次出典: ubuntu-note-system `docs/session-orchestration-strategy.md` §6（外部・本リポ未同梱。consult 起動テンプレ・read-only 規律・記憶系のみ write・サマリ保存義務・モデル opus 規約。本文の SSOT は上記 §2.3 にインライン移設済み）/ bd un-tao（consult 規約 SSOT）/ scribe-design.md §14（consult = 第 3 role・docs §6 テンプレを scribe plugin へ移設）/ bd sc-cuw（grill 専任への再編・pre-bake の Workflow 化・read-only 限定緩和＝自 grill-issue notes・F2 構造解消。手順 SSOT = `protocol.md` §7）。
 
 ---
 

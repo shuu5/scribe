@@ -329,6 +329,20 @@ _link_bin_without_awk() {
     [[ "$output" != *"## 3. C2"* ]]
 }
 
+@test "注入(consult): grill 専任 / read-only 限定緩和(自 grill-issue notes) / grill-consult を含む(sc-cuw 再編)" {
+    run --separate-stderr inject consult "$REPO" "$ANCHOR_JSON"
+    [ "$status" -eq 0 ]
+    # consult は grill 専任(原義回帰)・grill-consult は admin が brief を渡して立てる第 2 対話相手。
+    [[ "$output" == *"grill 専任"* ]]
+    [[ "$output" == *"grill-consult"* ]]
+    # read-only 限定緩和: 自 grill-issue の --claim/--append-notes だけ bdw 経由で可(worker B/hybrid と一致)。
+    [[ "$output" == *"限定緩和"* ]]
+    [[ "$output" == *"--append-notes"* ]]
+    [[ "$output" == *"bdw"* ]]
+    # pre-bake は WF へ移管(consult の仕事ではない)。
+    [[ "$output" == *"needs-user-prebake.workflow.js"* ]]
+}
+
 # ---- fail-safe: doc 不在で exit 0 degrade ----
 @test "fail-safe(admin): protocol.md 不在 → exit 0・stdout 無注入・stderr 警告" {
     run --separate-stderr inject - "$BATS_TEST_TMPDIR" "$ANCHOR_JSON"
