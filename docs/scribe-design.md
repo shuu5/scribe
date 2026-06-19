@@ -75,7 +75,7 @@ administrator の spec elicitation は可変自律:
 2. **監督付き自律**: 自答 → spec ドラフト → requirement 差分を人間が ratify
 3. **完全自律**: 根源要望のみから自答、仮定を非同期レビューキューへ（ユーザーが明示的に指示したときのみ）
 
-- **needs-user タスク**: worker 着手不可の理由が人間判断に依存する状態（自律度ダイヤルが人間 grill へ倒れる側のタスク）。駐車ラベル（タスク属性）であり、解決機構（consult 並列 pre-bake + grill-me）とは別物。orchestration 上の扱い = `protocol.md` §7（dogfood 実証済み: sc-in9）。
+- **needs-user タスク**: worker 着手不可の理由が人間判断に依存する状態（自律度ダイヤルが人間 grill へ倒れる側のタスク）。駐車ラベル（タスク属性）であり、解決機構（admin が回す WF pre-bake + grill-consult）とは別物。orchestration 上の扱い = `protocol.md` §7（dogfood 実証済み: sc-in9）。
 
 ---
 
@@ -347,7 +347,7 @@ v0 の最重要設計判断。**role 別に注入内容を分割する**:
 |---|---|---|
 | **admin** | anchor（orchestrator セッション） | プロトコル全文（graph 所有 = `bd create`/`dep`/assignment / gate funnel / errata 規約 / `bd dolt push` = 同期点） |
 | **worker** | worktree（`.worktrees/<branch>`） | 自 issue の write のみ（`bd update --claim` / `--notes` / `bd close`）+ bdw 並列直列化規律 + **`bd create` / `bd dep` / `bd dolt push` の明示禁止** |
-| **consult** | anchor 同居可（read-only セッション） | 設計議論・grill 専用。記憶系（doobidoo + auto-memory）のみ write 可。bd・リポ tracked ファイル・`bd dolt push`・spawn は禁止。相談サマリ保存義務。docs/session-orchestration-strategy.md §6 の起動テンプレを SSOT として参照（v0 実装 epic で scribe plugin へ移設） |
+| **consult** | anchor 同居可（read-only セッション） | 設計議論・grill 専用。記憶系（doobidoo + auto-memory）のみ write 可。bd・リポ tracked ファイル・`bd dolt push`・spawn は禁止。相談サマリ保存義務。**緩和**: grill-consult（admin が `--context` brief で spawn）のみ自 grill-issue の `bd update --claim`/`--append-notes` を bdw 経由 write 可（close は admin 専有）＝ role-context-spec §2.3。docs/session-orchestration-strategy.md §6 の起動テンプレを SSOT として参照（v0 実装 epic で scribe plugin へ移設） |
 
 **role 別分割の根拠（verified・構造原因の発見）**: 現状 `bd prime` の SessionStart hook が**全セッション（worker 含む）へ無条件**に「非自明な作業は着手前に `bd create`」を注入している。これは B/hybrid の「worker は graph を操作しない（`bd create`/`dep` しない・notes 提案 → admin 起票）」と**矛盾**しており、**worker の `bd create` 逸脱の構造原因**である（2026-06-10 に 1 件の逸脱を prompt 明記で解消した実績がある＝注入の問題と確認）。対処 = role 別注入（上表）。`bd prime` の一律注入と role 別注入の重複解消（PRIME 縮小 or 注入順序）は v0 実装時に決定する。
 
