@@ -121,6 +121,12 @@ _ANALYZE_DEADLINE = None      # decide() がセットする wall-clock 期限(mo
 _BUDGET_FINDING = ("(コマンド全体)", "解析予算超過: 安全に解析しきれないため保守的に block（DoS 耐性・fail-closed）")
 _HUGE_SEG_FINDING = ("(巨大トークン)", "単一トークンが解析上限超過: shlex 暴走回避のため保守的に block（fail-closed）")
 
+
+def _budget_expired():
+    # 解析予算(wall-clock)を超過したか。decide() がセットする module global _ANALYZE_DEADLINE を
+    # 参照する純述語。classify/check_target/文ループの fail-closed 判定が共有する(inline 展開時と挙動不変)。
+    return _ANALYZE_DEADLINE is not None and time.monotonic() > _ANALYZE_DEADLINE
+
 # 巨大コマンド/セグメントの安全弁。本 guard の範囲は削除(rm/find)のみ(ヘッダ参照)なので、解析上限を
 # 超えた入力でも「削除の可能性すら無い」ものまで一律 block すると、削除でない巨大コマンド(base64 画像・
 # JSON/SQL dump・curl -d ペイロード等)を削除テーマの誤メッセージで弾く scope 違反になる(un-uog F2)。
@@ -353,7 +359,7 @@ def classify(p):
     # ここから先は git/find subprocess(各 2s timeout)を最大3回発行する。予算切れなら subprocess を
     # 一切起動せず保守的 block（hang 中の classify が予算超過後も最大6s 走り続ける worst-case を抑え、
     # 10s hook timeout に対する真の margin を確保・un-uog F4）。判定は単純化のため再生不能と見なす。
-    if _ANALYZE_DEADLINE is not None and time.monotonic() > _ANALYZE_DEADLINE:
+    if _budget_expired():
         return True, _BUDGET_FINDING[1]
 
     repo = repo_root_of(p)
@@ -362,7 +368,7 @@ def classify(p):
     if is_repo_root(p):
         return True, "git repository root (history loss is irreversible)"
 
-    if _ANALYZE_DEADLINE is not None and time.monotonic() > _ANALYZE_DEADLINE:
+    if _budget_expired():
         return True, _BUDGET_FINDING[1]
     # 配下に git repo を内包するなら disposable 名でも block（vendor/bin/out 等に実 repo を
     # 持つケースの誤許可を防ぐ。contains_git_repo を disposable allow より前に評価）。
@@ -376,7 +382,7 @@ def classify(p):
         # それ以外(gitignore/untracked の実データ)は block。
         if is_disposable:
             return False, ""
-        if _ANALYZE_DEADLINE is not None and time.monotonic() > _ANALYZE_DEADLINE:
+        if _budget_expired():
             return True, _BUDGET_FINDING[1]
         if git_recoverable(repo, p):
             return False, ""
@@ -394,12 +400,12 @@ def classify(p):
 
 def check_target(arg, eff_cwd):
     # 予算超過時は保守的に block（per-target の git subprocess fanout DoS 耐性・fail-closed・un-uog）
-    if _ANALYZE_DEADLINE is not None and time.monotonic() > _ANALYZE_DEADLINE:
+    if _budget_expired():
         return [_BUDGET_FINDING]
     out = []
     for kind, val in resolve_targets(arg, eff_cwd):
         # per-path 予算: 単一 glob/brace 引数が数千パスに展開した場合も classify 毎に検査(fail-closed・un-uog)
-        if _ANALYZE_DEADLINE is not None and time.monotonic() > _ANALYZE_DEADLINE:
+        if _budget_expired():
             out.append(_BUDGET_FINDING)
             break
         if kind == "root-risk":
@@ -524,12 +530,12 @@ def analyze(cmd, cwd, depth=0):
     cmd = re.sub(r'\$\(\s*\)|\$\{\s*\}|``', '', cmd)
     eff = {"cwd": cwd}
     for statement in parse_statements(cmd):
-        if _ANALYZE_DEADLINE is not None and time.monotonic() > _ANALYZE_DEADLINE:
+        if _budget_expired():
             findings.append(_BUDGET_FINDING)  # 予算超過 → 残り文は解析せず保守的 block(fail-closed・un-uog)
             break
         seg_words = []
         for seg in statement:
-            if _ANALYZE_DEADLINE is not None and time.monotonic() > _ANALYZE_DEADLINE:
+            if _budget_expired():
                 findings.append(_BUDGET_FINDING)  # pipeline 多数 segment の shlex 累積を予算で fail-closed(un-uog)
                 break
             if len(seg) > MAX_SEG_LEN:
