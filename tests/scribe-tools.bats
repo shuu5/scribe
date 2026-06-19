@@ -681,6 +681,92 @@ _mk_main_and_linked() {
   [ "$status" -ne 0 ]
 }
 
+# ---------- DESC 合成の lib 抽出（scribe_synthesize_issue_desc・sc-2m0 facet2）----------
+# gate-args / selftest-args で byte 同一だった「issue→taskTitle/description 合成」を lib へ集約（D1）。
+# 非 dry-run 経路は従来 bats coverage ゼロ（D0）だったため、本体（lib unit）+ 両 caller 結線 smoke +
+# 移植前後の byte 不変 pin を test-first で敷く。NUL 区切り 2 値返却（DESC が最後・D2）・dry-run
+# title-suffix・sentinel・scribe_die 早期失敗を関数内に閉じ込めた忠実移植（D4）を各枝で検証する。
+@test "lib synth(facet2): 正常取得（TITLE=id・DESC=bd show 本文）" {
+  run bash -c '
+    set -euo pipefail
+    source "'"$LIB"'"
+    { IFS= read -r -d "" t && IFS= read -r -d "" d; } < <(scribe_synthesize_issue_desc un-4nm 0 "'"$PWD"'")
+    printf "TITLE=[%s]\n" "$t"
+    printf "BODY=%s\n" "$([[ "$d" == *"stub description for un-4nm"* ]] && echo yes || echo no)"
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TITLE=[un-4nm]"* ]]
+  [[ "$output" == *"BODY=yes"* ]]
+}
+
+@test "lib synth(facet2): 複数行 DESC が NUL read で改行ごと保たれる" {
+  run bash -c '
+    set -euo pipefail
+    source "'"$LIB"'"
+    { IFS= read -r -d "" t && IFS= read -r -d "" d; } < <(scribe_synthesize_issue_desc un-4nm 0 "'"$PWD"'")
+    printf "HEAD=[%s]\n" "$(printf "%s" "$d" | sed -n 1p)"
+    printf "MULTILINE=%s\n" "$([[ "$d" == *$'"'"'\n'"'"'* ]] && echo yes || echo no)"
+    printf "TAIL=%s\n" "$([[ "$d" == *"stub description for un-4nm" ]] && echo yes || echo no)"
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"HEAD=[○ un-4nm · stub issue]"* ]]
+  [[ "$output" == *"MULTILINE=yes"* ]]
+  [[ "$output" == *"TAIL=yes"* ]]
+}
+
+@test "lib synth(facet2): 取得不可（exists OK だが本文空）は sentinel へ fallback" {
+  run bash -c '
+    set -euo pipefail
+    source "'"$LIB"'"
+    export BD_STUB_EMPTY_IDS="un-4nm"
+    { IFS= read -r -d "" t && IFS= read -r -d "" d; } < <(scribe_synthesize_issue_desc un-4nm 0 "'"$PWD"'")
+    printf "TITLE=[%s]\nDESC=[%s]\n" "$t" "$d"
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TITLE=[un-4nm]"* ]]
+  [[ "$output" == *"DESC=[(bd show 取得不可)]"* ]]
+}
+
+@test "lib synth(facet2): dry-run は bd show を踏まず title-suffix + placeholder" {
+  run bash -c '
+    set -euo pipefail
+    source "'"$LIB"'"
+    { IFS= read -r -d "" t && IFS= read -r -d "" d; } < <(scribe_synthesize_issue_desc un-4nm 1 "'"$PWD"'")
+    printf "TITLE=[%s]\nDESC=[%s]\n" "$t" "$d"
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TITLE=[un-4nm (dry-run)]"* ]]
+  [[ "$output" == *"DESC=[(dry-run: bd show 省略)]"* ]]
+}
+
+@test "lib synth(facet2): 非 dry-run で実在しない id は関数内 scribe_die で早期失敗（fail-loud）" {
+  run bash -c '
+    set -euo pipefail
+    source "'"$LIB"'"
+    scribe_synthesize_issue_desc un-nope 0 "'"$PWD"'" >/dev/null
+  '
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"bd issue が存在しません"* ]]
+}
+
+@test "gate-args(facet2): 非 dry-run 合成の byte 不変 pin（taskTitle suffix 無し・DESC 末尾 byte 忠実）" {
+  run "$GATE" --worktree /tmp/wt --base origin/main --anchor "$PWD" un-4nm
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -m json.tool >/dev/null
+  [ "$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["taskTitle"])')" = "un-4nm" ]
+  [ "$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["context"].endswith("○ un-4nm · stub issue\n\nDESCRIPTION\nstub description for un-4nm"))')" = "True" ]
+  [[ "$output" != *"bd show 取得不可"* ]]
+  [[ "$output" != *"dry-run"* ]]
+}
+
+@test "selftest-args(facet2): 非 dry-run の結線 smoke（DESC が context に入る・lib 合成経由）" {
+  run "$SELFTEST" --worktree /tmp/wt --self-test 'x' --anchor "$PWD" un-4nm
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -m json.tool >/dev/null
+  [ "$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["taskTitle"])')" = "un-4nm" ]
+  [[ "$output" == *"stub description for un-4nm"* ]]
+}
+
 # ---------- cleanup ----------
 @test "cleanup: dry-run に禁止操作（branch -D / reset --hard / kill-server）が含まれない" {
   run "$CLEANUP" --dry-run --repo /tmp/repo --worktree /tmp/wt --branch spawn/un-4nm-101010 un-4nm
