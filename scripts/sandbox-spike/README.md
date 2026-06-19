@@ -20,14 +20,13 @@ CC 組込み sandbox は次の3つを要求する(spike で実測):
   worktree から anchor を逆算し、`sandbox.filesystem.allowWrite` に
   `<ANCHOR>/.beads`(台帳) と `$XDG_RUNTIME_DIR`(bdw flock 鍵) を絶対パスで入れる。
   cwd(worktree) と linked worktree の共有 `.git` は sandbox 既定で writable(列挙不要)。
-- `run-spike.sh [--keep]` — D7 assert ハーネス。使い捨て worktree に settings を pre-place し、
-  `claude -p` を sandbox 内で起動して allowWrite 境界を検証する。一次シグナルは実ファイル副作用。
-  各コマンドに `; echo <token>` を付け「コマンドが実際に走ったか(ran)」を確認する(無いと block
-  assert が vacuous PASS する — spike で露呈し修正)。
+
+> spike ハーネス `run-spike.sh` は spike 目的達成後 deadcode として削除した(commit 71bf862 で凍結・sc-18q)。
+> 本番反映は下記「本番反映」節のとおり `gen-sandbox-settings.sh` の direct-gen が担う。
 
 ## 検証済み(2026-06-18)
 
-`run-spike.sh` 5/5 PASS(全て ran=yes ＝ genuine):
+spike ハーネス(commit 71bf862)で 5/5 PASS(全て ran=yes ＝ genuine):
 
 | assert | 期待 | 結果 |
 |---|---|---|

@@ -1,6 +1,8 @@
-# worker cell の self-test は untracked(コミットしない・docs/protocol.md §2)
+# worker cell の self-test(selftest-*.local.sh 等) は untracked(コミットしない・docs/protocol.md §2)
 *.local.sh
-selftest-*.local.sh
+
+# spawn worker の worktree(.worktrees/spawn/<branch>) は ephemeral・コミットしない(sc-18q)
+/.worktrees/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
