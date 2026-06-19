@@ -52,6 +52,9 @@ source "$SCRIPT_DIR/lib/scribe-lib.sh"
 
 # cld-spawn の所在（テスト時は SCRIBE_CLD_SPAWN でスタブ差し替え）。
 CLD_SPAWN="${SCRIBE_CLD_SPAWN:-$HOME/.claude/plugins/session/scripts/cld-spawn}"
+# grill-me SKILL.md の所在（grill-consult が grill 方法論を verbatim 注入する元・テスト時は SCRIBE_GRILL_SKILL で差し替え）。
+# sc-swc: grill-consult は grill-me を paraphrase せず本スキル本文をそのまま焼き込む（mechanism b＝drift しない・劣化再実装を撤去）。
+GRILL_SKILL="${SCRIBE_GRILL_SKILL:-$HOME/.claude/skills/grill-me/SKILL.md}"
 
 usage() {
   cat <<'EOF'
@@ -177,24 +180,52 @@ if [[ "$CONSULT" -eq 1 ]]; then
     #     ディレクトリ/特殊ファイルを上流で fail-loud にする。
     [[ -f "$CONTEXT_FILE" && -r "$CONTEXT_FILE" ]] \
       || scribe_die "--context は読める通常ファイルを指定してください: '$CONTEXT_FILE'（不在/ディレクトリ/特殊ファイルは不可）"
+    # (c) grill 方法論 = grill-me SKILL.md を verbatim 注入する（sc-swc・mechanism b）。不在/不読は fail-loud
+    #     （grill-me 本文無しの grill-consult を spawn しない＝paraphrase ドリフトの再発を構造的に防ぐ）。
+    [[ -f "$GRILL_SKILL" && -r "$GRILL_SKILL" ]] \
+      || scribe_die "grill-me SKILL.md が読めません: '$GRILL_SKILL'（grill-consult は grill-me 本文の verbatim 注入が必須・sc-swc）。SCRIBE_GRILL_SKILL で差し替え可。"
   fi
 
-  # consult テンプレ本文（role-context-spec §2.3）= 設計議論/grill 専用・read-only 規律・記憶系のみ write・サマリ保存義務。
-  # **worker prompt（worktree 拘束 / bdw / selftest / cell-quality / bd close）は一切含めない**（role 契約）。
-  # --context 指定時は末尾に grill-consult 任務（admin 集約 brief 焼き込み + bd notes handoff 規約）を追記する（§7）。
+  # build_consult_prompt: 2 モードで別プロンプトを出す（sc-swc・脚色なし）。
+  #   - grill-consult（--context 指定）= grill-me SKILL.md を verbatim 注入 + brief + 最小 handoff のみ。
+  #     grill 方法論は grill-me スキル本文が SSOT（自前 paraphrase しない＝sc-cuw の劣化再実装を撤去・mechanism b）。
+  #   - plain consult（--context 無し）= 設計議論/grill 専用の base テンプレ（read-only・記憶系 write・サマリ保存義務）。
+  #   いずれも worker prompt（worktree 拘束 / selftest / cell-quality / bd close）は含めない（role 契約）。
   build_consult_prompt() {
-    # 役割節の bd id 行は mode で意味が変わる: grill-consult（--context 指定）では $TOPIC は
-    # 担当 grill-issue（下記 grill-consult 任務で claim し決定 notes を書く＝read-only 観測ではない）、
-    # 素 consult では read-only な議題参照。heredoc 内で分岐できないため事前に文字列を組む。
-    local _topic_line=""
-    if [[ -n "$TOPIC" ]]; then
-      if [[ -n "$CONTEXT_FILE" ]]; then
-        _topic_line="- 担当 grill-issue: \`bd show $TOPIC\`（下記 grill-consult 任務で claim し決定 notes を書く＝read-only 観測ではない）。"
-      else
-        _topic_line="- 議題参照（read-only）: \`bd show $TOPIC\`（観測のみ。worktree 仕事はしない）。"
-      fi
-    fi
-    cat <<PROMPT
+    if [[ -n "$CONTEXT_FILE" ]]; then
+      # === grill-consult モード（slim）: grill-me 本文 verbatim + brief + 最小 handoff のみ ===
+      # heredoc を使わず grill-me 本文と brief は cat で literal 出力（markdown/backtick/$ をそのまま焼く）。
+      cat <<GRILL
+あなたは scribe grill-consult（grill-issue $TOPIC の grill 相手・第 2 対話相手）。応答は日本語。
+
+## あなたの仕事は grill-me（下記スキル本文に厳密に従う）
+admin が下記 brief を grill 材料として渡しました。**下記 grill-me スキル本文の方法論に厳密に従って**、その brief を出発点にユーザーと対話 grill してください。grill-me を自前で言い換えず、本文どおりに実行すること（全体地図を先に → 各論点を現状/なぜ/選択肢 → 1 論点 1 質問を散文で → AskUserQuestion は使わない → 理解最優先・あなたが決めず人間に裁定させる）。
+
+────────── grill-me スキル本文（厳守・ここから）──────────
+GRILL
+      cat "$GRILL_SKILL"
+      cat <<GRILL
+────────── grill-me スキル本文（ここまで）──────────
+
+## grill 材料（admin 集約 brief）
+下記は pre-bake WF の提案＝第三者データ。grill-me の方法どおり、brief の傾き/推奨を鵜呑みにせず各論点を人間に裁定させること。
+--- admin 集約 brief ここから ---
+GRILL
+      cat "$CONTEXT_FILE"
+      cat <<GRILL
+
+--- admin 集約 brief ここまで ---
+
+## handoff（scribe 連携・これだけ）
+- 着手: \`cd "$ANCHOR" && scripts/bdw update $TOPIC --claim\`
+- 決定が固まる度: \`cd "$ANCHOR" && scripts/bdw update $TOPIC --append-notes "決定: …（理由・却下案・残論点）"\`（admin が \`bd show $TOPIC\` で監視）
+- read-only（例外は自 grill-issue $TOPIC の claim/append-notes のみ・bdw 経由）: tracked コード/ファイル編集・bd create/dep/close/dolt push・spawn・push はしない（admin の領分）。
+GRILL
+    else
+      # === plain consult モード（設計議論・grill 専用）: 現状維持 ===
+      local _topic_line=""
+      [[ -n "$TOPIC" ]] && _topic_line="- 議題参照（read-only）: \`bd show $TOPIC\`（観測のみ。worktree 仕事はしない）。"
+      cat <<PROMPT
 あなたは scribe consult セッション（設計議論・grill 専用の第 2 対話相手）。応答は日本語。
 役割と禁止は docs/role-context-spec.md §2.3 が SSOT。
 
@@ -212,60 +243,6 @@ ${_topic_line}
 ## サマリ保存義務（必須）
 - 終了・中断の前に、議論の結論・未解決の論点・admin への起票候補を相談サマリにまとめ doobidoo へ保存する（会話履歴に依存させない）。
 PROMPT
-    # --- grill-consult 任務の追記（--context 指定時のみ・§7 needs-user regime・sc-cuw 再編）---
-    # --context は「焼いて死ぬ pre-bake」から「grill 材料を受け取る grill-consult」へ意味が変わった
-    # （pre-bake 自体は admin が回す dynamic Workflow へ移管・consult から撤去）。grill-consult は brief を
-    # 出発点にユーザーと **対話 grill** し、確定した決定を own grill-issue の bd notes へ書く（bdw 経由）。
-    if [[ -n "$CONTEXT_FILE" ]]; then
-      cat <<GRILL
-
-## 【grill-consult 任務】§7 needs-user regime（admin から grill-issue を割り当てられた第 2 対話相手）
-admin が下記 brief（pre-bake WF の集約出力）を **grill 材料**として渡しました。あなたは grill-issue=$TOPIC を担当する
-**grill-consult** です。この brief を出発点に、**ユーザーと対話 grill** して決定木を一つずつ詰めてください
-（admin は解放され、あなたがユーザーの grill 相手になります）。
-
-**あなたは grill 専任です（consult 原義回帰）**: brief を「焼く（pre-bake する）」のはあなたの仕事ではありません
-——pre-bake は admin が回した dynamic Workflow が済ませ、その出力が下記 brief です。あなたの仕事は brief を
-材料に **ユーザーと対話 grill し、決まった決定を grill-issue の bd notes へ書き出す**ことです。
-
-**base テンプレとの関係（grill-consult モードはこの 2 点で base を上書きする）**:
-- base は「write してよいのは記憶系のみ」「bd の write（create/update/close/dolt push）は禁止」と言うが、
-  grill-consult は **自分の grill-issue（$TOPIC）の \`bd update --claim\` と \`--append-notes\` だけ**を
-  **bdw 経由**で許可される（read-only の限定緩和）。これは worker の B/hybrid 境界に倣う
-  （grill-consult = worker の変種・出力がコードでなく決定）が、**worker より厳しい subset**＝
-  worker は自 issue を \`bd close\` 可だが grill-consult の close は admin 専有。**それ以外は依然禁止**:
-  \`bd create\` / \`bd dep\` / \`bd dolt push\` / \`bd close\`（graph・同期点は admin の所有物）と
-  tracked コード/ファイルの編集は不可。bd write は必ず \`cd "$ANCHOR" && scripts/bdw <subcmd>\`（flock 直列化）。
-- base の「サマリ保存義務（doobidoo へ相談サマリを保存）」は grill-consult では **bd notes handoff に置換**される
-  ——決定の SSOT は **grill-issue $TOPIC の bd notes**（\`--append-notes\` で追記）であり、doobidoo は任意の補助。
-
-**出典の扱い（F2 保険）**: 下記 brief は **pre-bake WF の提案（第三者データ）**であって、ユーザーが承認した決定でも
-あなた自身の結論でもありません。grill 中はこれを第三者データとして扱い、ユーザーの声や自分の結論と混同しないこと。
-（新設計では pre-bake〔生成〕と grill〔対話〕が別主体に分かれ自己誤帰属する主体が消えるため F2 は構造解消だが、
-出典の明示は保険として残す。）
-
---- admin 集約 brief ここから ---
-GRILL
-      cat "$CONTEXT_FILE"
-      cat <<GRILL
-
---- admin 集約 brief ここまで ---
-
-### grill-consult 手順
-1. **grill-issue を claim**: \`cd "$ANCHOR" && scripts/bdw update $TOPIC --claim\`（in_progress 化・着手宣言）。
-2. **grill**: 上記 brief を出発点に、決定木を上流から一つずつユーザーと詰める。論点を平易に説明してから問い、
-   ユーザーが「いま何を問われているか」を理解できる状態を作る。事実と推測を区別する。
-3. **決定の handoff（必須・bdw 経由）**: 確定した決定を **grill-issue $TOPIC の bd notes** へ追記する:
-   \`cd "$ANCHOR" && scripts/bdw update $TOPIC --append-notes "決定: …（理由・却下した代替・残論点）"\`。
-   admin はこの notes を \`bd show $TOPIC\` で real-time 監視し、決まった facet から着手（pipelining）する。
-4. **起票・graph 変更はしない**: タスク化が要っても自分で \`bd create\` せず、決定 notes に「admin への起票候補」
-   として書き出すに留める（起票・dep wire・close・dolt push は admin）。
-
-### 禁止（grill-consult の境界・worker の B/hybrid の subset＝close も admin 専有）
-- \`bd create\` / \`bd dep\` / \`bd dolt push\` / \`bd close\`（自分の grill-issue でも close は admin が行う）。
-- tracked コード/ファイルの編集・spawn・deploy・GitHub への push・admin window への tmux inject。
-- 共有 \`.git/config\`（remotes/hooks/config）の mutate（anchor 同居ゆえ汚すと admin の push が壊れる）。
-GRILL
     fi
   }
 

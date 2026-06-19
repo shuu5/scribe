@@ -184,6 +184,8 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 ## 7. needs-user タスクの扱い（WF pre-bake → grill-consult）
 
 > **regime 再編（sc-cuw・2026-06-19）**: 本節は旧 F1=B regime（consult が pre-bake 専任で死に・grill は admin の場＝sc-osn/sc-in9 で codify）を改訂したもの。**pre-bake は consult から撤去し、admin が回す dynamic Workflow（`workflows/needs-user-prebake.workflow.js`）へ移管**した。consult は **grill 専任（原義回帰）** に戻り、admin が集約 brief を `--context` で渡して spawn する **grill-consult** が、**ユーザーと対話 grill する第 2 対話相手**になる（admin は grill から解放される）。旧 regime の経緯・dogfood 一次記録 = doobidoo `9c73606d`（設計合意）/ `b7c99f2f`（sc-in9 dogfood F1-F3）/ `8e98c34a`。
+>
+> **grill 方法論の実装（sc-swc・2026-06-19）**: grill-consult の grill 挙動は **grill-me スキル本文を SSOT** とし、build_consult_prompt が spawn 時に `$SCRIBE_GRILL_SKILL`（既定 `~/.claude/skills/grill-me/SKILL.md`）を **verbatim 注入**する（不在は fail-loud）。旧 build_consult_prompt は grill-me を自前 paraphrase し load-bearing ルール（AskUserQuestion 禁止・1論点1問）を落としていた（sc-vuu の grill dogfood で露呈）ため撤去。plain consult（`--context` 無し）の base テンプレは grill-me を名乗らないため不変。
 
 - **対象**: needs-user タスク = worker 着手不可の理由が人間判断に依存する状態（概念定義 = `scribe-design.md` §1）。needs-user は駐車ラベル、本節の WF pre-bake + grill-consult が解決機構（別物）。
 - **発火条件**: 人間判断を要する **相互独立な決定軸（facet）が複数（≥2）**あるとき、admin が pre-bake WF で各 facet を並列 read-only 分析する。1 facet なら admin インラインで足り、WF fan-out 不要（そのまま grill-consult を立てるか admin が直接 grill するかは admin 判断）。
@@ -192,7 +194,7 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
   1. **pre-bake（admin が WF を回す・read-only）**: admin が `Workflow({name:'needs-user-prebake', args:{taskRef, taskTitle, anchor, facets:[{key,question,context}]}})` を起動する。各 facet を **並列 read-only agent** が分析（現状調査〔read-only〕→ 決定木 → 選択肢 + トレードオフ → admin 起票候補）し、opus が **単一の構造化 brief へ統合して WF 返り値（`briefMarkdown`/`facets`/`receivedArgs`）で admin に返す**。WF は **grill しない・graph を触らない・doobidoo 保存もしない**（データを admin に返すだけ）。admin は返り値を一次監査する（薄 gate＝worker 報告と同型）。
   2. **grill-issue 起票（admin）**: admin が brief を集約し、その needs-user 決定群を 1 件の **grill-issue** として起票する（`bd create`・依存 wire は admin）。
   3. **grill-consult spawn（admin）**: admin が brief を file へ書き、`scribe-spawn --consult --context <brief-file> <grill-issue>` で **grill-consult** を起動する（anchor 同居・SCRIBE_ROLE=consult）。brief は grill の **材料（第三者データ）** として焼き込まれる。
-  4. **grill（ユーザー × grill-consult）**: **ユーザーが grill-consult と対話 grill** する。grill-consult は brief を出発点に決定木を一つずつ詰める（**admin は grill から解放される**）。
+  4. **grill（ユーザー × grill-consult）**: **ユーザーが grill-consult と対話 grill** する。grill 方法論は **grill-me スキル本文を SSOT** とし、`scribe-spawn` build_consult_prompt が spawn 時に `$SCRIBE_GRILL_SKILL`（既定 `~/.claude/skills/grill-me/SKILL.md`）を **verbatim 注入**する（自前 paraphrase しない・不在は fail-loud＝sc-swc）。grill-consult はその本文どおり（全体地図→現状/なぜ/選択肢→1論点1問・ポップアップ禁止・理解最優先）に brief を出発点に決定木を一つずつ詰める（**admin は grill から解放される**）。
   5. **決定の handoff（grill-consult → bd notes）**: grill-consult は確定した決定を **own grill-issue の bd notes** に書く（`scripts/bdw update <grill-issue> --claim` / `--append-notes`・**bdw 経由のみ**）。admin はこの notes を `bd show <grill-issue>` で **real-time 監視**し、決まった facet から実装 cell を spawn する（**pipelining**＝全 facet の確定を待たない）。同一マシン anchor 同居ゆえ `bd dolt push` 無しで admin が即視認できる。
   6. **反映・cleanup（admin）**: admin が決定を graph へ反映（実装 cell 起票・dep wire）し、grill 完了後に grill-issue を `bd close`、grill-consult window を cleanup（`kill-window`）する。
 - **admin 責務（明文化）**: ① pre-bake WF 起動 → ② brief 集約 → ③ grill-issue 起票 → ④ grill-consult spawn（context=brief）→ ⑤ bd notes 監視・決定反映 → ⑥ grill-issue close → ⑦ consult window cleanup（kill-window）。graph 変更・起票・`bd dolt push` は **すべて admin**（grill-consult は不可）。

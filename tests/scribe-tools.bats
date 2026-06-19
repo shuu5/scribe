@@ -22,6 +22,9 @@ setup() {
   export BD_STUB_OK_IDS="un-4nm un-consult un-3sh.3.5"
   # cld-spawn は dry-run では実行されない。echo を決定論化するため固定値を入れる。
   export SCRIBE_CLD_SPAWN="cld-spawn"
+  # grill-consult は grill-me SKILL.md を verbatim 注入する（sc-swc・mechanism b）。テストは hermetic に
+  # するためホストの実 skill でなく fixture stub を読ませる（注入の機構＝sentinel が焼かれるかを検証）。
+  export SCRIBE_GRILL_SKILL="$FIXTURES/grill-me-stub.md"
   chmod +x "$FIXTURES/bd-stub.sh" 2>/dev/null || true
   # 既定 REPO/ANCHOR は cwd。テストの cwd が linked worktree（このリポ自身の .worktrees/ 配下で
   # 走らせた場合など）だと un-ag7 ガードが発火して既定パスのテストを汚す。cwd を安定した
@@ -316,16 +319,43 @@ _mk_main_and_linked() {
   run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
   rm -f "$ctx"
   [ "$status" -eq 0 ]
-  # 緩和されるのは自 grill-issue の --claim / --append-notes だけ(bdw 経由)。
+  # 緩和されるのは自 grill-issue の --claim / --append-notes だけ(bdw 経由・read-only 限定緩和)。
   [[ "$output" == *"--append-notes"* ]]
-  # graph 構造(create/dep/dolt push/close)は依然禁止であることを禁止節で明示。
-  [[ "$output" == *"bd create"* ]]
-  [[ "$output" == *"bd dep"* ]]
-  [[ "$output" == *"bd dolt push"* ]]
-  [[ "$output" == *"bd close"* ]]
-  # tracked コード/共有 .git/config も不可(worker B/hybrid 境界と一致)。
+  [[ "$output" == *"限定緩和"* ]]
+  # graph 構造(create/dep/close/dolt push)は依然禁止(slim prompt の handoff 禁止節で明示)。
+  [[ "$output" == *"bd create/dep/close/dolt push"* ]]
+  # tracked コード編集も不可(read-only=admin の領分)。
   [[ "$output" == *"tracked コード"* ]]
-  [[ "$output" == *".git/config"* ]]
+}
+
+# sc-swc: grill-consult は grill-me を自前 paraphrase せず SKILL.md を verbatim 注入する(mechanism b)。
+# 旧 grill-consult は grill-me を言い換え load-bearing ルール(ポップアップ禁止・1論点1問)を落としていた
+# (dogfood で露呈)。注入の機構を fixture stub の sentinel で hermetic に検証する。
+@test "spawn(grill-consult): grill-me SKILL.md を verbatim 注入する(paraphrase でなく本文・sc-swc)" {
+  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  printf 'x\n' > "$ctx"
+  run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
+  rm -f "$ctx"
+  [ "$status" -eq 0 ]
+  # fixture stub の sentinel が prompt に現れる = $SCRIBE_GRILL_SKILL を verbatim 焼いている。
+  [[ "$output" == *"GRILL_ME_VERBATIM_SENTINEL"* ]]
+  # grill-me の load-bearing ルール(paraphrase では落ちていた)が本文として入る。
+  [[ "$output" == *"AskUserQuestion"* ]]
+  [[ "$output" == *"1 論点 1 質問"* ]]
+  [[ "$output" == *"全体地図"* ]]
+  # 自前 paraphrase に委ねず「スキル本文に厳密に従う」と指示する。
+  [[ "$output" == *"grill-me スキル本文"* ]]
+}
+
+@test "spawn(grill-consult): grill-me SKILL.md 不在は fail-loud(grill-me 本文無しで grill-consult を spawn しない・sc-swc)" {
+  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  printf 'x\n' > "$ctx"
+  export SCRIBE_GRILL_SKILL=/tmp/scribe-no-such-grill-skill.md
+  run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
+  rm -f "$ctx"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"SKILL.md"* ]]
+  [[ "$output" != *"[plan]"* ]]
 }
 
 @test "spawn(grill-consult): F2 は構造解消 — 第三者データ出典は保険として残り旧 pre-bake 専任文言は消える" {
