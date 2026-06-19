@@ -92,12 +92,21 @@ else
   REPO="$(pwd)"
 fi
 
-# confirm <prompt> — DRY_RUN/--yes を尊重しつつ破壊操作の確認を取る。承認なら 0。
+# confirm <prompt> — DRY_RUN/--yes を尊重しつつ破壊操作の確認を取る **三値関数**（sc-vuu facet1）。
+#   0 = 承認 / 1 = ユーザー拒否（N 等）/ 2 = EOF（確認入力が閉じている＝非対話・パイプ切れ）。
+# EOF を拒否(1)と区別するのが肝: 区別しないと EOF も run_step の "skip" へ落ち exit 0 で
+# 「未確認なのに成功扱い」する fail-open になる（lib の `read … || return 1`＝EOF fail-loud
+# イディオムとの非対称が残り、将来の非対話 cleanup 機械化で黙って skip→成功扱いが再燃する）。
+#   --dry-run/--yes は先行 return で read 不到達ゆえ三値化の影響なし（tests:824 不変）。
+#   read が EOF で非0 を返しても、改行欠落で何か入力されていれば（ans 非空）通常回答として評価し、
+#   何も入力されていない（ans 空）ときだけ EOF(2) に倒す（末尾改行欠落だけで EOF 扱いにしない）。
 confirm() {
   [[ "$DRY_RUN" -eq 1 ]] && return 0
   [[ "$ASSUME_YES" -eq 1 ]] && return 0
   local ans
-  read -r -p "scribe-cleanup: $1 を実行しますか? [y/N] " ans || return 1
+  if ! read -r -p "scribe-cleanup: $1 を実行しますか? [y/N] " ans; then
+    [[ -z "$ans" ]] && return 2   # 確認入力が閉じている（非対話/パイプ切れ）= EOF。skip と区別して fail-loud へ。
+  fi
   [[ "$ans" == "y" || "$ans" == "Y" ]]
 }
 
@@ -108,7 +117,10 @@ run_step() {
     echo "[plan] $label: $*"
     return 0
   fi
-  if confirm "$label"; then
+  # confirm の三値（0/1/2）を取る。set -e 下では `confirm; rc=$?` が非0で中断するため `|| rc=$?` で捕捉。
+  local rc=0
+  confirm "$label" || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
     echo "→ $label: $*"
     # set -euo pipefail 下でも 1 step の失敗でチェックリストを中断させない。
     # 例: force 無しの `git worktree remove` は dirty で安全失敗するのが意図だが、bare 実行だと
@@ -118,6 +130,11 @@ run_step() {
       echo "  warn: $label が失敗（安全失敗の可能性・手動対応を確認）"
       FAILED=$((FAILED + 1))
     fi
+  elif [[ "$rc" -eq 2 ]]; then
+    # EOF: 確認入力が EOF（非対話/パイプ切れ）＝未確認のため未実行。user-N の skip(exit0) と区別し
+    # FAILED 計上で fail-loud（exit 非0）。run_step を歩き切る思想は保つ（即 die しない）。
+    echo "  warn: $label の確認入力が EOF（非対話/パイプ切れ）＝未確認につき未実行。FAILED 計上で fail-loud。"
+    FAILED=$((FAILED + 1))
   else
     echo "  skip: $label"
   fi

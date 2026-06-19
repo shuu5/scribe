@@ -446,7 +446,24 @@ fi
 
 PROMPT_TEXT="$(build_prompt)"
 
-"$CLD_SPAWN" --cd "$WORKTREE" --bd-id "$ID" --model "$MODEL" "$PROMPT_TEXT"
+# cld-spawn 失敗時の扱い（sc-vuu facet3）: worktree は既に `git worktree add` 済み（上記）。
+# **自動 rollback はしない**——破壊操作ポリシー（force 禁止・確認必須）の例外を作らないため
+# （自動削除 trap / ハイブリッドは却下）。代わりに orphan worktree を残し、orphan path と
+# scribe-cleanup.sh 復旧コマンドを stderr に明示して cld-spawn の exit code で fail-loud する
+# （掃除は admin が scribe-cleanup.sh で確認の上 = no-force 保守姿勢と整合）。
+# `|| _rc=$?` で実 exit code を捕捉（set -e 下でも中断させず、案内を出してから伝播）。成功時は
+# 下記案内を出さず従来の "spawned:" 経路へ抜ける＝happy-path 出力は byte 不変。
+_cld_rc=0
+"$CLD_SPAWN" --cd "$WORKTREE" --bd-id "$ID" --model "$MODEL" "$PROMPT_TEXT" || _cld_rc=$?
+if [[ "$_cld_rc" -ne 0 ]]; then
+  {
+    echo "scribe: error: cld-spawn が失敗しました（exit=$_cld_rc）。worker は起動していません。"
+    echo "scribe: worktree が orphan として残っています（自動削除はしません＝force 禁止・確認必須ポリシー）: $WORKTREE"
+    echo "scribe: 掃除するには（force 系を使わない確認プロンプト付き cleanup）:"
+    echo "         $SCRIPT_DIR/scribe-cleanup.sh --repo \"$REPO\" --worktree \"$WORKTREE\" --branch \"$BRANCH\" --window \"$WINDOW\" $ID"
+  } >&2
+  exit "$_cld_rc"
+fi
 
 # monitor: window 名 → window_id(@N) を解決し、以後の -t は ID で行う（protocol.md §1）。
 # cld-spawn 成功後の monitor 案内用。tmux 不在/失敗でも spawn は済んでいるので set -e で落とさず
