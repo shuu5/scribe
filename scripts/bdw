@@ -77,8 +77,12 @@ fi
 key_src="${common_dir:-$PWD}"   # git 外(想定外)でも安定鍵で lock は維持する(fail-closed)
 repo_id="$(printf '%s' "$key_src" | sha256sum | cut -c1-16)"
 
-# lock dir: 同一マシン・同一 user の全 bd writer が同じパスに合意する必要がある。
-lock_dir="${BDW_LOCK_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
+# lock dir: 同一マシン・同一 user の全 bd writer が同じパスに合意する必要がある。専用サブdir
+# `scribe-bdw` に置く（sc-da0: sandbox の allowWrite を runtime dir 丸ごとでなくこの subdir へ
+# 最小化するため。gen-sandbox-settings.sh と**同式**＝D4 合意。base が書込不可な劣化環境のみ
+# /tmp/scribe-bdw→/tmp へ段階フォールバック）。
+lock_dir="${BDW_LOCK_DIR:-${XDG_RUNTIME_DIR:-/tmp}}/scribe-bdw"
+mkdir -p "$lock_dir" 2>/dev/null || lock_dir="/tmp/scribe-bdw"
 mkdir -p "$lock_dir" 2>/dev/null || lock_dir="/tmp"
 lock_file="${lock_dir}/bd-write-${repo_id}.lock"
 
