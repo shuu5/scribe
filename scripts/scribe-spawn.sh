@@ -52,6 +52,9 @@ source "$SCRIPT_DIR/lib/scribe-lib.sh"
 
 # cld-spawn の所在（テスト時は SCRIBE_CLD_SPAWN でスタブ差し替え）。
 CLD_SPAWN="${SCRIBE_CLD_SPAWN:-$HOME/.claude/plugins/session/scripts/cld-spawn}"
+# sandbox settings 生成器の所在（テスト時は SCRIBE_SANDBOX_GEN でスタブ差し替え＝gen 失敗注入用。
+# 既定は本番ヘルパ＝SCRIBE_SANDBOX opt-in 時の挙動 byte 不変。CLD_SPAWN と同型の testability seam）。
+SANDBOX_GEN="${SCRIBE_SANDBOX_GEN:-$SCRIPT_DIR/sandbox-spike/gen-sandbox-settings.sh}"
 # grill-me SKILL.md の所在（grill-consult が grill 方法論を verbatim 注入する元・テスト時は SCRIBE_GRILL_SKILL で差し替え）。
 # sc-swc: grill-consult は grill-me を paraphrase せず本スキル本文をそのまま焼き込む（mechanism b＝drift しない・劣化再実装を撤去）。
 GRILL_SKILL="${SCRIBE_GRILL_SKILL:-$HOME/.claude/skills/grill-me/SKILL.md}"
@@ -404,7 +407,7 @@ if [[ "${SCRIBE_SANDBOX:-0}" == "1" ]]; then
   mkdir -p "$WORKTREE/.claude" || scribe_die "sandbox: .claude ディレクトリ作成に失敗（SCRIBE_SANDBOX=1）: $WORKTREE"
   # 一時ファイルへ生成し成功時のみ atomic mv（gen が途中失敗しても半端な settings を残さない）。
   _sb_tmp="$(mktemp "$WORKTREE/.claude/.settings.XXXXXX")" || scribe_die "sandbox: 一時ファイル作成に失敗: $WORKTREE/.claude"
-  if "$SCRIPT_DIR/sandbox-spike/gen-sandbox-settings.sh" "$WORKTREE" > "$_sb_tmp"; then
+  if "$SANDBOX_GEN" "$WORKTREE" > "$_sb_tmp"; then
     mv -f "$_sb_tmp" "$WORKTREE/.claude/settings.local.json"
   else
     rm -f "$_sb_tmp"; scribe_die "sandbox settings.local.json の生成に失敗（SCRIBE_SANDBOX=1）: $WORKTREE"
