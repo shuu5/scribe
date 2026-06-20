@@ -17,6 +17,7 @@ setup() {
   LIB="$SCRIPTS/lib/scribe-lib.sh"
   BDW="$SCRIPTS/bdw"
   HOOKS="$SCRIPTS/hooks"
+  HOOKS_JSON="$REPO_ROOT/hooks/hooks.json"
   # bd を実在検証スタブへ差し替え（実 graph 不要）。
   export SCRIBE_BD="$FIXTURES/bd-stub.sh"
   export BD_STUB_OK_IDS="un-4nm un-consult un-3sh.3.5"
@@ -1325,6 +1326,40 @@ _mk_repo_with_origin() {
   run python3 "$HOOKS/lib/cmdtokens.py" --self-test
   [ "$status" -eq 0 ]
   [[ "$output" == *"OK"* ]]
+}
+
+# ---------- PreToolUse guard WIRE の e2e 回帰（sc-4ix）----------
+# 上の self-test は guard 単体の判定を pin するが、hooks.json の *配線*（command 文字列・matcher・
+# 起動行・guard の存在）は別物。fail-open suffix(`|| true`)混入・matcher typo・起動行破損・guard 削除が
+# 起きると 3 guard の self-test が緑のまま本番で破壊コマンドが素通りしうる（exit2→exit0 化は実機再現済）。
+# そこで hooks.json から *実際の command 文字列を抽出して起動* し end-to-end で block/fail-open を pin する
+# （session-start-role-inject.bats の SessionStart wire テストと対称）。guard 名で select するので配列順や
+# 一方の guard 削除にも耐える（jq が空を返し [ -n ] で fail-loud）。
+_pre_cmd() {  # <guard-script-basename> → 該当 PreToolUse[Bash] hook の command 文字列
+  jq -r --arg s "$1" '.hooks.PreToolUse[] | select(.matcher=="Bash") | .hooks[].command | select(contains($s))' "$HOOKS_JSON"
+}
+
+@test "PreToolUse wire(sc-4ix): hooks.json の command 経由で破壊 git/rm を exit2 block（end-to-end）" {
+  local gcmd rcmd
+  gcmd="$(_pre_cmd git-destructive-guard.py)"
+  rcmd="$(_pre_cmd rm-destructive-guard.py)"
+  [ -n "$gcmd" ]   # git-guard が PreToolUse[Bash] 下に配線されている（削除/matcher typo を捕捉）
+  [ -n "$rcmd" ]   # rm-guard が配線されている
+  # 実 command を起動（${CLAUDE_PLUGIN_ROOT}→repo root に解決）。fail-open suffix 混入なら exit0 化し fail。
+  run env CLAUDE_PLUGIN_ROOT="$REPO_ROOT" bash -c "$gcmd" <<< '{"tool_name":"Bash","tool_input":{"command":"git push --force"},"cwd":"/tmp"}'
+  [ "$status" -eq 2 ]
+  run env CLAUDE_PLUGIN_ROOT="$REPO_ROOT" bash -c "$rcmd" <<< '{"tool_name":"Bash","tool_input":{"command":"rm -rf /etc"},"cwd":"/tmp"}'
+  [ "$status" -eq 2 ]
+}
+
+@test "PreToolUse wire(sc-4ix): script 不在（CLAUDE_PLUGIN_ROOT 異常）で exit0・副作用ゼロ（fail-open）" {
+  local cmd
+  for cmd in "$(_pre_cmd git-destructive-guard.py)" "$(_pre_cmd rm-destructive-guard.py)"; do
+    run --separate-stderr env CLAUDE_PLUGIN_ROOT="$BATS_TEST_TMPDIR/nonexistent" bash -c "$cmd" <<< '{"tool_name":"Bash","tool_input":{"command":"git push --force"},"cwd":"/tmp"}'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ -z "$stderr" ]
+  done
 }
 
 # ---------- bdw: flock-serialized B/hybrid の中核ロジックを pin（sc-i9b member 2）----------
