@@ -64,6 +64,13 @@ LAUNCHER_VALUE_OPTS = {
               "--nodelist", "-p", "--partition", "-t", "--time", "-A", "--account"},
 }
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+# シェルが -c より前に取る「値取りオプション」（値トークンを飛ばして -c へ到達するため。sc-1yz root#3）。
+# over-block 安全側: 未知オプは飛ばさず -c 探索を継続する（取りこぼしても従来挙動＝後退しない）。
+SHELL_VALUE_OPTS = {
+    "bash": {"--init-file", "--rcfile", "-O", "+O", "-o", "+o"},
+    "zsh": {"--emulate", "-o", "+o"},
+    "sh": {"-o", "+o"}, "dash": {"-o", "+o"}, "ksh": {"-o", "+o"},
+}
 # -c "文字列" で委譲するランチャ（全引数から -c を走査して inline 化）
 CMD_STRING_LAUNCHERS = {"su", "runuser", "sg", "script"}
 TASKSET_MASK_RE = re.compile(r"^(0x)?[0-9a-fA-F]+$")  # taskset の CPU マスク
@@ -137,9 +144,54 @@ def parse_statements(cmd):
     return statements
 
 
+# ANSI-C / locale ドルクォート（$'...' / $"..."）の正規化（sc-1yz root#1）。shlex(posix) は $ を残し
+# `$'git push -f'` を `$git push -f` と誤解釈する → basename が git/rm でなく guard 不発火。bash は $ を剥がし
+# ANSI-C エスケープ(\x67/\147 等)を復号して実行するため、shlex 前にここで復号して token を正規化する。
+_DOLLAR_SQ = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
+_DOLLAR_DQ = re.compile(r'\$"((?:[^"\\]|\\.)*)"')
+_ANSI_C_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f",
+                  "n": "\n", "r": "\r", "t": "\t", "v": "\v", "\\": "\\",
+                  "'": "'", '"': '"', "?": "?"}
+
+
+def _decode_ansi_c(s):
+    """bash $'...' の ANSI-C エスケープを best-effort 復号（guard 脱難読化用・安全側）。"""
+    out, i, n = [], 0, len(s)
+    while i < n:
+        c = s[i]
+        if c == "\\" and i + 1 < n:
+            nxt = s[i + 1]
+            if nxt in _ANSI_C_SIMPLE:
+                out.append(_ANSI_C_SIMPLE[nxt]); i += 2; continue
+            if nxt == "x":
+                m = re.match(r"[0-9a-fA-F]{1,2}", s[i + 2:i + 4])
+                if m:
+                    out.append(chr(int(m.group(), 16))); i += 2 + len(m.group()); continue
+            if nxt in "01234567":
+                m = re.match(r"[0-7]{1,3}", s[i + 1:i + 4])
+                out.append(chr(int(m.group(), 8) & 0xFF)); i += 1 + len(m.group()); continue
+            if nxt in "uU":
+                width = 4 if nxt == "u" else 8
+                m = re.match(r"[0-9a-fA-F]{1,%d}" % width, s[i + 2:i + 2 + width])
+                if m:
+                    out.append(chr(int(m.group(), 16))); i += 2 + len(m.group()); continue
+            out.append(nxt); i += 2; continue  # 未知エスケープ: バックスラッシュを落とし文字を残す（安全側）
+        out.append(c); i += 1
+    return "".join(out)
+
+
+def _normalize_dollar_quotes(seg):
+    """セグメント中の $'...'(ANSI-C) / $"..."(locale) を復号し shlex 安全な単一トークンへ置換。"""
+    if "$'" not in seg and '$"' not in seg:
+        return seg
+    seg = _DOLLAR_SQ.sub(lambda m: shlex.quote(_decode_ansi_c(m.group(1))), seg)
+    seg = _DOLLAR_DQ.sub(lambda m: shlex.quote(m.group(1)), seg)
+    return seg
+
+
 def shlex_safe(seg):
     try:
-        return shlex.split(seg, posix=True)
+        return shlex.split(_normalize_dollar_quotes(seg), posix=True)
     except ValueError:
         return None
 
@@ -179,15 +231,22 @@ def long_opt_abbrev(token, optname):
     return bool(name) and optname.startswith(name)
 
 
-def _find_dash_c_inline(words, start):
-    """words[start:] から -c / -lc 等のクラスタ -c を探し、その次トークン(inline)を返す。"""
+def _find_dash_c_inline(words, start, shell=None):
+    """words[start:] から -c / -lc 等のクラスタ -c を探し、その次トークン(inline)を返す。
+    shell が値取りオプション(--init-file/--rcfile/-O 等)を持つ場合は値トークンを飛ばして -c へ到達する
+    （sc-1yz root#3: `bash --init-file /dev/null -c '...'` / `bash -O extglob -c '...'` のバイパス対策）。"""
+    vopts = SHELL_VALUE_OPTS.get(shell, set())
     j = start
     while j < len(words):
         t = words[j]
         if t == "-c" or (t.startswith("-") and not t.startswith("--") and "c" in t):
             return words[j + 1] if j + 1 < len(words) else None, True
         if t.startswith("-"):
-            j += 1
+            flag = t.split("=", 1)[0]
+            if flag in vopts and "=" not in t:
+                j += 2  # 値取りオプション: 値トークンを飛ばして -c 探索継続
+            else:
+                j += 1
             continue
         break
     return None, False
@@ -211,13 +270,15 @@ def peel(words):
             i += 1
             continue
         if b in SHELLS:
-            inline, found = _find_dash_c_inline(words, i + 1)
+            inline, found = _find_dash_c_inline(words, i + 1, b)
             if found:
                 return [], inline, False, cwd_override
-            # here-string: bash <<< "rm ..."
-            for k in range(i + 1, len(words) - 1):
-                if words[k] == "<<<":
+            # here-string: bash <<< "rm ..."（独立 <<<）/ bash <<<"rm ..."（glued・sc-1yz root#2）
+            for k in range(i + 1, len(words)):
+                if words[k] == "<<<" and k + 1 < len(words):
                     return [], words[k + 1], False, cwd_override
+                if words[k].startswith("<<<") and len(words[k]) > 3:
+                    return [], words[k][3:], False, cwd_override
             return words[i:], None, False, cwd_override
         if b in CMD_STRING_LAUNCHERS:
             # su/runuser/sg/script: 全引数から -c を走査して inline 化（user 名・-s 値op を貫通）
@@ -376,6 +437,12 @@ def _self_test():
         ("sudo git push --force", [["git", "push", "--force"]]),
         ('bash -c "git push -f"', [["git", "push", "-f"]]),
         ("find . | xargs git checkout", [["find", "."], ["git", "checkout"]]),
+        # sc-1yz: ドルクォート復号 / glued here-string / 値取りオプ跨ぎ -c が inline を正しく抽出・正規化する
+        ("bash -c $'git push -f'", [["git", "push", "-f"]]),
+        (r"bash -c $'\x67it push -f'", [["git", "push", "-f"]]),       # ANSI-C \x67=g 復号
+        ("bash <<<'git push -f'", [["git", "push", "-f"]]),            # glued here-string
+        ("bash --init-file /dev/null -c 'git push -f'", [["git", "push", "-f"]]),
+        ("bash -O extglob -c 'git push -f'", [["git", "push", "-f"]]),
     ]
     fails = []
     for c, expect in cases:
