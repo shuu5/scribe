@@ -421,6 +421,14 @@ if [[ "${SCRIBE_SANDBOX:-0}" == "1" ]]; then
     grep -qxF '**/.claude/settings.local.json' "$_sb_excl" 2>/dev/null \
       || printf '%s\n' '**/.claude/settings.local.json' >> "$_sb_excl"
   fi
+  # bwrap が allowWrite path を bind 前に存在要求しうる（deduced・sc-da0）。gen が grant した書込み
+  # 許可 path（最小化した lock subdir scribe-bdw 等）を worker 起動前に事前生成する。formula を
+  # 再実装せず生成済み settings の allowWrite から読む＝gen と drift しない（.beads は既存ゆえ no-op）。
+  if command -v jq >/dev/null 2>&1; then
+    while IFS= read -r _sb_aw; do
+      [[ -n "$_sb_aw" ]] && mkdir -p "$_sb_aw" 2>/dev/null || true
+    done < <(jq -r '.sandbox.filesystem.allowWrite[]?' "$WORKTREE/.claude/settings.local.json" 2>/dev/null || true)
+  fi
   echo "sandbox: worker を bwrap sandbox に封じます（SCRIBE_SANDBOX=1・settings=$WORKTREE/.claude/settings.local.json）"
 fi
 

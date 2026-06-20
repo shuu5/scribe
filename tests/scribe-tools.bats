@@ -484,7 +484,7 @@ _mk_main_and_linked() {
   repo="$SCRIBE_TEST_CWD"   # setup() の temp git repo（init コミット済み）
   noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
   wt="$repo/.worktrees/spawn/un-4nm-101010"
-  run env SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
+  run env SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" BDW_LOCK_DIR="$BATS_TEST_TMPDIR/rt" SCRIBE_HHMMSS=101010 \
       "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
   rm -f "$noop"
   [ "$status" -eq 0 ]
@@ -498,6 +498,11 @@ _mk_main_and_linked() {
   # worktree の git exclude 追記で worker の git add -A が settings.local.json を巻き込まない（ephemeral 維持・load-bearing）。
   run git -C "$wt" check-ignore -q .claude/settings.local.json
   [ "$status" -eq 0 ]
+  # sc-da0: runtime grant は /run/user/<uid> 丸ごとでなく専用 lock subdir(scribe-bdw)へ最小化されている。
+  run jq -e '.sandbox.filesystem.allowWrite[1] | endswith("/scribe-bdw")' "$wt/.claude/settings.local.json"
+  [ "$status" -eq 0 ]
+  # sc-da0: bwrap の bind-before-exist 対策で spawn が lock subdir を事前生成する（grant 済 path が実在）。
+  [ -d "$BATS_TEST_TMPDIR/rt/scribe-bdw" ]
   git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
 }
 
@@ -1422,11 +1427,11 @@ _pre_cmd() {  # <guard-script-basename> → 該当 PreToolUse[Bash] hook の com
 
 # ---------- bdw: flock-serialized B/hybrid の中核ロジックを pin（sc-i9b member 2）----------
 # bd 実体を echo に差し替え（BDW_BD_BIN=echo）て実 Dolt write を起こさず、READ/WRITE 経路の
-# 分岐だけを検証する。判定の観測点 = BDW_LOCK_DIR に `bd-write-*.lock` が作られたか。
+# 分岐だけを検証する。判定の観測点 = BDW_LOCK_DIR/scribe-bdw に `bd-write-*.lock`（sc-da0: 専用サブdir）が作られたか。
 #   - READ allowlist  → exec が lock 作成より前（L66）に走るため lock 0 個（無ロック素通し）
 #   - WRITE / 未知    → flock 取得後 exec のため lock 1 個（直列化路）
 # 各 @test は使い捨ての空 lock dir を作って観測する。cwd は setup() の temp git repo。
-_bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
+_bdw_locks() { ls "$1"/scribe-bdw/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
 
 @test "bdw: READ allowlist（show）は無ロックで素通し（lock 0 個・args 透過）" {
   local ld; ld="$(mktemp -d)"
@@ -1473,7 +1478,7 @@ _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
   # 1) WRITE を 1 回走らせて bdw が計算する実 lock file パスを得る（repo_id は cwd 依存）。
   run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" close un-x
   [ "$status" -eq 0 ]
-  local lock_file; lock_file="$(ls "$ld"/bd-write-*.lock)"
+  local lock_file; lock_file="$(ls "$ld"/scribe-bdw/bd-write-*.lock)"
   # 2) 別プロセスに排他ロックを保持させる。marker でロック保持を待ち、release で解放する
   #    （固定 sleep に依らない決定論同期）。
   local marker="$ld/held" release="$ld/release"
