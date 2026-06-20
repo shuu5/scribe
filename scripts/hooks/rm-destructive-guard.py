@@ -66,6 +66,7 @@ try:
         TASKSET_MASK_RE, KEYWORDS, DURATION_RE, VAR_ASSIGN_RE, VAR_OR_SUBST,
         REDIR_BARE, REDIR_GLUED,
         parse_statements, peel, shlex_safe, strip_redirections, track_cd,
+        long_opt_abbrev,
     )
 except Exception as e:  # lib ロード不能 → fail-open（guard 無効化を loud に通知）
     sys.stderr.write(f"[rm-guard] cannot load cmdtokens lib, failing open: {e}\n")
@@ -434,7 +435,9 @@ def is_recursive_rm(words):
     for w in words[1:]:
         if w == "--":
             break
-        if w == "--recursive":
+        # 長オプション短縮（--r/--re/.../--recursive）も再帰削除として扱う（sc-x4h: GNU rm は曖昧でない
+        # 接頭辞を --recursive として受理＝完全一致のみだと rm --r -f <保護パス> が素通しされていた）。
+        if long_opt_abbrev(w, "recursive"):
             return True
         if w.startswith("-") and not w.startswith("--"):
             if "r" in w or "R" in w:
@@ -872,6 +875,13 @@ def run_self_test():
          "un-uog F1: oversize content-quoted find+rm (fi\"n\"d) seg -> still block(fail-closed)"),
         (f'r"m" -rf {repo} #' + "x" * (MAX_CMD_LEN + 10), tmp, B,
          "un-uog F3: oversize WHOLE cmd(>1MB) content-quoted rm (r\"m\") -> still block(fail-closed)"),
+        # sc-x4h: --recursive の長オプション短縮形（GNU は曖昧でない接頭辞を受理）も再帰削除として block。
+        (f"rm --r -f {repo}", tmp, B, "sc-x4h: rm --r (=--recursive abbrev) -> block"),
+        (f"rm --re -f {repo}/rawdata", tmp, B, "sc-x4h: rm --re abbrev -> block"),
+        (f"rm --rec -fd {repo}", tmp, B, "sc-x4h: rm --rec abbrev -> block"),
+        (f"rm --recursiv -f {repo}", tmp, B, "sc-x4h: rm --recursiv abbrev -> block"),
+        (f"rm --recursive -f {repo}", tmp, B, "sc-x4h: full --recursive still blocks"),
+        (f"rm --recursivex -f {repo}", tmp, A, "sc-x4h: --recursivex は接頭辞でない -> 非recursive(allow)"),
     ]
 
     for cmd, cwd, expected, note in cases:
