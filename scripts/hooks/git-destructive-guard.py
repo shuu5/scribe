@@ -263,8 +263,10 @@ def decide(cmd, cwd):
 def main():
     if "--self-test" in sys.argv:
         return run_self_test()
-    raw = sys.stdin.read() if not sys.stdin.isatty() else ""
     try:
+        # stdin.read() も try 内に置く（sc-a7t: 非UTF-8 raw バイトの UnicodeDecodeError を捕捉して
+        # 整形 fail-open(exit0)へ倒す。try 外だと未捕捉例外で exit1 化し fail-open 経路と不整合になる）。
+        raw = sys.stdin.read() if not sys.stdin.isatty() else ""
         data = json.loads(raw) if raw.strip() else {}
         cmd = (data.get("tool_input") or {}).get("command", "") or ""
         cwd = data.get("cwd") or os.getcwd()
