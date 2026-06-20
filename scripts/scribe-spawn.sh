@@ -426,7 +426,9 @@ if [[ "${SCRIBE_SANDBOX:-0}" == "1" ]]; then
   # 再実装せず生成済み settings の allowWrite から読む＝gen と drift しない（.beads は既存ゆえ no-op）。
   if command -v jq >/dev/null 2>&1; then
     while IFS= read -r _sb_aw; do
-      [[ -n "$_sb_aw" ]] && mkdir -p "$_sb_aw" 2>/dev/null || true
+      if [[ -n "$_sb_aw" ]]; then
+        mkdir -p "$_sb_aw" || echo "scribe: warn: sandbox allowWrite path の mkdir に失敗（worker 起動が failIfUnavailable で止まりうる）: $_sb_aw" >&2
+      fi
     done < <(jq -r '.sandbox.filesystem.allowWrite[]?' "$WORKTREE/.claude/settings.local.json" 2>/dev/null || true)
   fi
   echo "sandbox: worker を bwrap sandbox に封じます（SCRIBE_SANDBOX=1・settings=$WORKTREE/.claude/settings.local.json）"
