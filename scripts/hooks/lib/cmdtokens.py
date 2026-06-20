@@ -21,6 +21,7 @@
 #       リダイレクト除去後の「実コマンドのトークン列」を eff_cwd（cd / env --chdir 追跡済）と共に yield。
 #       本物のコマンド先頭語のみを返すので、echo "git ..." や A && B の B の語は混入しない。
 #   parse_statements / shlex_safe / peel / strip_redirections : 低レベル部品（テスト用にも公開）。
+#   long_opt_abbrev(token, optname) : 長オプション短縮の over-block 述語（guard 共有・sc-x4h/sc-i13）。
 #
 # 例外は握り潰さない（呼び出し側 guard の main が try/except で fail-open する＝全 Bash を brick しない）。
 
@@ -160,6 +161,22 @@ def strip_redirections(words):
         out.append(w)
         i += 1
     return out
+
+
+# --- 長オプション短縮の正規化（guard 共有述語・sc-x4h/sc-i13） -------------------
+def long_opt_abbrev(token, optname):
+    """token が長オプション --<optname> に該当するか（GNU/getopt の曖昧でない接頭辞短縮を含む）。
+    safe-side over-block: token が '--' + optname の【非空接頭辞】なら True。曖昧な接頭辞（複数
+    オプションに一致）は実ツール自身が reject するため、実害ある誤検出はゼロ（証明: optname の接頭辞 p が
+    別の安全オプション S に曖昧でなく解決されるなら optname は p で始まれない=矛盾）。rm-guard / git-guard が
+    --recursive / --hard / --force / --delete / --no-verify 等を完全一致でしか見ず短縮形（rm --r /
+    git reset --har 等）に素通しされていた穴を SSOT 述語で一掃する（un-0gu F13 の「複製で検出が乖離する」
+    保守ハザードを避け、両 guard が同一正規化を共用する）。'--'（オプション終端）単独や optname より長い
+    文字列（例 --force-with-lease vs force）は False。末尾 '=value' は剥がして判定する。"""
+    if not token.startswith("--") or token == "--":
+        return False
+    name = token[2:].split("=", 1)[0]
+    return bool(name) and optname.startswith(name)
 
 
 def _find_dash_c_inline(words, start):
@@ -365,6 +382,24 @@ def _self_test():
         got = cmds(c)
         if got != [tuple(e) for e in expect]:
             fails.append(f"{c!r}: got {got} expected {expect}")
+
+    # long_opt_abbrev（over-block 述語）の単体検証（sc-x4h/sc-i13）
+    abbr_cases = [
+        ("--recursive", "recursive", True), ("--r", "recursive", True),
+        ("--rec", "recursive", True), ("--recursiv", "recursive", True),
+        ("--hard", "hard", True), ("--har", "hard", True), ("--h", "hard", True),
+        ("--force", "force", True), ("--forc", "force", True),
+        ("--force-with-lease", "force", False),  # lease は force の接頭辞でない=温存
+        ("--", "recursive", False), ("-r", "recursive", False),  # 終端/短フラグは対象外
+        ("--hardcore", "hard", False), ("--delete", "force", False),
+        ("--no-verify", "no-verify", True), ("--no-veri", "no-verify", True),
+        ("--no-verb", "no-verify", False),  # verbose 側は no-verify の接頭辞でない=温存
+        ("--detach", "detach", True), ("--det", "detach", True), ("--orph", "orphan", True),
+    ]
+    for tok, name, exp in abbr_cases:
+        if long_opt_abbrev(tok, name) != exp:
+            fails.append(f"long_opt_abbrev({tok!r},{name!r}): got {long_opt_abbrev(tok, name)} expected {exp}")
+
     if fails:
         for f in fails:
             print("FAIL:", f)

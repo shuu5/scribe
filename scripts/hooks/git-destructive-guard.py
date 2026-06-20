@@ -30,7 +30,7 @@ import subprocess
 
 try:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib"))
-    from cmdtokens import iter_commands
+    from cmdtokens import iter_commands, long_opt_abbrev
 except Exception as e:  # lib ロード不能 → fail-open（guard 無効化を loud に通知）
     sys.stderr.write(f"[git-guard] cannot load cmdtokens lib, failing open: {e}\n")
     sys.exit(0)
@@ -38,8 +38,10 @@ except Exception as e:  # lib ロード不能 → fail-open（guard 無効化を
 GIT_GLOBAL_VAL = {"-C", "--git-dir", "--work-tree", "--namespace", "--exec-path",
                   "--config-env", "--super-prefix"}
 GPGSIGN_FALSE = re.compile(r"commit\.gpgsign\s*=\s*false", re.I)
-# checkout/switch で必ず現ブランチ(main)を離脱するフラグ（新ブランチ作成/detach/tracking）
-ANCHOR_LEAVE_FLAGS = {"-b", "-B", "-c", "-C", "--orphan", "--detach", "-t", "--track"}
+# checkout/switch で必ず現ブランチ(main)を離脱するフラグ（新ブランチ作成/detach/tracking）。短フラグ
+# (単一文字)はそのまま、長フラグ(--orphan/--detach/--track)は getopt 短縮も拾う(sc-i13: long_opt_abbrev)。
+ANCHOR_LEAVE_SHORT = {"-b", "-B", "-c", "-C", "-t"}
+ANCHOR_LEAVE_LONG = ("orphan", "detach", "track")
 
 
 def _short_flags(tok):
@@ -141,8 +143,9 @@ def _anchor_switch_allowed(sub, sub_args, args):
     else:
         pre, post = list(sub_args), None
     for a in pre:
-        if a.split("=", 1)[0] in ANCHOR_LEAVE_FLAGS:
-            return False  # 新ブランチ作成/detach/tracking は常に main を離脱
+        flag = a.split("=", 1)[0]
+        if flag in ANCHOR_LEAVE_SHORT or any(long_opt_abbrev(flag, lo) for lo in ANCHOR_LEAVE_LONG):
+            return False  # 新ブランチ作成/detach/tracking は常に main を離脱（長フラグ短縮も sc-i13）
     # positional オペランド（非フラグ。`-`=直前ブランチは positional 扱い＝target 不明で block 方向）
     positionals = [a for a in pre if (not a.startswith("-")) or a == "-"]
     if post is not None and len(post) >= 1:
@@ -163,7 +166,7 @@ def check_git(core, seg_cwd):
 
     # フック/署名の無効化（サブコマンド非依存・グローバル -c でも指定されうる）
     for t in args:
-        if t in ("--no-verify", "--no-gpg-sign"):
+        if long_opt_abbrev(t, "no-verify") or long_opt_abbrev(t, "no-gpg-sign"):
             return "フック/署名の無効化(--no-verify/--no-gpg-sign)は禁止。フック失敗や署名設定の問題を調査・修正する。"
     for cfg in c_configs + args:
         if "core.hooksPath" in cfg or GPGSIGN_FALSE.search(cfg):
@@ -184,16 +187,17 @@ def check_git(core, seg_cwd):
             return "force push(+refspec)は禁止。先頭 + の refspec は非fast-forward push。PR ワークフロー経由で。"
 
     if sub == "clean":
-        if any(a == "--force" or "f" in _short_flags(a) for a in sub_args):
+        if any(long_opt_abbrev(a, "force") or "f" in _short_flags(a) for a in sub_args):
             return "git clean -f は禁止。git clean -n で確認後、削除はユーザーに委譲。"
 
-    if sub == "reset" and "--hard" in sub_args:
+    if sub == "reset" and any(long_opt_abbrev(a, "hard") for a in sub_args):
         return "git reset --hard は禁止。git restore --staged <file> か git stash で退避。"
 
     if sub == "branch":
         if any("D" in _short_flags(a) for a in sub_args):
             return "git branch -D（強制削除）は禁止。マージ済みなら git branch -d。"
-        if "--delete" in sub_args and any(a == "--force" or "f" in _short_flags(a) for a in sub_args):
+        if any(long_opt_abbrev(a, "delete") for a in sub_args) \
+           and any(long_opt_abbrev(a, "force") or "f" in _short_flags(a) for a in sub_args):
             return "git branch --delete --force（強制削除）は禁止。マージ済みなら git branch -d。"
 
     if sub == "stash" and ("drop" in sub_args or "clear" in sub_args):
@@ -386,6 +390,20 @@ def run_self_test():
         (f"git -C {scribe_wt} switch feature", tmp, A, "scribe worktree(.git file): switch allowed"),
         (f"cd {scribe_anchor} && git switch feature", tmp, B, "scribe-anchor via cd (eff cwd)"),
         (f"git -C {notscribe} switch feature", tmp, A, "other-plugin(name!=scribe): switch allowed (誤判定しない)"),
+        # --- sc-i13: 長オプション短縮形(getopt 曖昧でない接頭辞)も完全形と同様に block ---
+        ("git reset --har HEAD~1", tmp, B, "sc-i13: reset --har (=--hard abbrev)"),
+        ("git reset --ha HEAD~1", tmp, B, "sc-i13: reset --ha abbrev"),
+        ("git reset --hardx HEAD~1", tmp, A, "sc-i13: --hardx は接頭辞でない -> 非--hard(allow)"),
+        ("git clean -d --for", tmp, B, "sc-i13: clean --for (=--force abbrev)"),
+        ("git clean -d --forc", tmp, B, "sc-i13: clean --forc abbrev"),
+        ("git branch --del --forc feat", tmp, B, "sc-i13: branch --del --forc abbrev"),
+        ("git branch --delete --forc feat", tmp, B, "sc-i13: branch --delete --forc"),
+        ("git commit --no-veri -m x", tmp, B, "sc-i13: commit --no-veri (=--no-verify abbrev)"),
+        ("git commit --no-gpg-si -m x", tmp, B, "sc-i13: --no-gpg-si (=--no-gpg-sign abbrev)"),
+        ("git push --force-with-lease", tmp, A, "sc-i13: lease は force 接頭辞でなく温存(allow)"),
+        (f"git -C {anchor} checkout --det", tmp, B, "sc-i13: anchor --det (=--detach abbrev)"),
+        (f"git -C {anchor} checkout --orph feat", tmp, B, "sc-i13: anchor --orph (=--orphan abbrev)"),
+        (f"git -C {anchor} switch --tra feat", tmp, B, "sc-i13: anchor --tra (=--track abbrev)"),
     ]
 
     failures = []
