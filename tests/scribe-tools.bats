@@ -1358,22 +1358,32 @@ _mk_repo_with_origin() {
 # 判定だけ検証）を内蔵し、pass で exit 0 を返す。これを bats から呼ぶことで 200+ の security
 # assertion が「bats 緑のまま壊れうる」状態を脱し回帰網へ入る。python3 は本ファイルで json.tool
 # 既使用ゆえ前提不変。rm guard の scratch は /tmp 等 HOME 外固定（TMPDIR 非依存・un-x3o）。
-@test "guard self-test: rm-destructive-guard --self-test が exit 0（hermetic）" {
+# case 数下限 pin（sc-16n）: self-test の print は cases 配列 length 駆動ゆえ、cases を空にすると
+# 0/0+exit0 を出して上の status0+substring を全て満たす。117+/81+/7 の security assertion を消す
+# mutation が緑のまま通る second-order な test-on-test 穴を、総数(分母)の下限 assert で塞ぐ
+# （現数 rm=123/git=106/cmdtokens=7。最終 case 数確定後＝sc-x4h/sc-i13/sc-oem 完了後に pin）。
+@test "guard self-test: rm-destructive-guard --self-test が exit 0 + case 数下限（hermetic）" {
   run python3 "$HOOKS/rm-destructive-guard.py" --self-test
   [ "$status" -eq 0 ]
   [[ "$output" == *"SELF-TEST PASSED"* ]]
+  [[ "$output" =~ ([0-9]+)/([0-9]+)" cases" ]]
+  [ "${BASH_REMATCH[2]}" -ge 100 ]   # cases 空(0/0)・大量削除を捕捉
 }
 
-@test "guard self-test: git-destructive-guard --self-test が exit 0（hermetic）" {
+@test "guard self-test: git-destructive-guard --self-test が exit 0 + case 数下限（hermetic）" {
   run python3 "$HOOKS/git-destructive-guard.py" --self-test
   [ "$status" -eq 0 ]
   [[ "$output" == *"OK"* ]]
+  [[ "$output" =~ ([0-9]+)/([0-9]+)" OK" ]]
+  [ "${BASH_REMATCH[2]}" -ge 80 ]
 }
 
-@test "guard self-test: cmdtokens --self-test が exit 0（軽量サニティ）" {
+@test "guard self-test: cmdtokens --self-test が exit 0 + case 数下限（軽量サニティ）" {
   run python3 "$HOOKS/lib/cmdtokens.py" --self-test
   [ "$status" -eq 0 ]
   [[ "$output" == *"OK"* ]]
+  [[ "$output" =~ ([0-9]+)/([0-9]+)" OK" ]]
+  [ "${BASH_REMATCH[2]}" -ge 5 ]
 }
 
 # ---------- PreToolUse guard WIRE の e2e 回帰（sc-4ix）----------
