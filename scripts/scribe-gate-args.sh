@@ -97,7 +97,7 @@ args = {
     "goal": os.environ["GOAL"],
     "acceptance": os.environ["ACCEPTANCE"],
     "context": ctx,
-    "taskType": "code",
+    "taskType": "executable",
     "model": os.environ["MODEL"],
     # ↓ read-only 固定（gate は実装も自動修正もしない一次監査）
     "doPlan": False,
