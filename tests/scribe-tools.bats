@@ -288,6 +288,20 @@ _mk_main_and_linked() {
   [[ "$output" == *"bd create"* ]]
 }
 
+# 上の positive テストは cell-quality/receivedArgs/bdw のみ assert し、build_prompt が焼く
+# selftest-args 呼出（cell-quality の自己点検 args 1 コマンド化）を pin しない＝行の脱落/改変が
+# 緑通過する純 test-gap（sc-e22）。dry-run prompt 出力に selftest-args の核要素が焼けることを pin する。
+@test "spawn(sc-e22): worker prompt に selftest-args 注入（helper/anchor/self-test/selfTestCmd/autoFix/doImplement）が焼ける" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"scribe-selftest-args.sh"* ]]   # 自己点検 args を 1 コマンド化する helper
+  [[ "$output" == *"--anchor"* ]]                   # bd graph 所在＝worktree cwd で解決せず必須（省くと die）
+  [[ "$output" == *"--self-test"* ]]                # selfTestCmd を渡すフラグ
+  [[ "$output" == *"selfTestCmd"* ]]                # selfTestCmd 必須の明示
+  [[ "$output" == *"autoFix"* ]]                    # autoFix=true 固定（review→自動 fix を回す）
+  [[ "$output" == *"doImplement"* ]]                # doImplement/doPlan=false 固定（gate review のみ・実装/計画しない）
+}
+
 # ---------- spawn: grill-consult モード（--context・§7 needs-user regime・sc-cuw 再編）----------
 # --context は「焼いて死ぬ pre-bake」から「admin 集約 brief を grill 材料に受け取りユーザーと対話 grill する
 # grill-consult」へ意味が変わった。pre-bake 自体は admin が回す dynamic Workflow へ移管(consult から撤去)。
