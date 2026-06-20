@@ -1439,6 +1439,15 @@ _pre_cmd() {  # <guard-script-basename> → 該当 PreToolUse[Bash] hook の com
   done
 }
 
+@test "guard: 非UTF-8 stdin で fail-open exit0（sc-a7t: UnicodeDecodeError を exit1 化させない）" {
+  # 非UTF-8 raw バイトの stdin.read() を try 外に置くと未捕捉 UnicodeDecodeError で exit1 化し、
+  # 整形 fail-open(exit0)経路と不整合になる。両 guard が exit0(=non-blocking fail-open)へ倒すことを pin。
+  for g in git-destructive-guard.py rm-destructive-guard.py; do
+    run bash -c "printf '\\xff\\xfe\\xff' | python3 '$HOOKS/$g'"
+    [ "$status" -eq 0 ]
+  done
+}
+
 @test "bdw/gen-sandbox: lock_dir formula が scribe-lib.sh の scribe_bdw_lock_dir に集約（sc-imu・drift 防止）" {
   # 生 formula の手書き複製が bdw/gen に残っていない（複製は片側 drift で sandbox 外壁が bdw flock を
   # block→bd write 破壊。1関数へ集約して構造的に drift 不能化）。grep -l は一致ファイルを出すので不一致=非0。
