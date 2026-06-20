@@ -302,6 +302,24 @@ _mk_main_and_linked() {
   [[ "$output" == *"doImplement"* ]]                # doImplement/doPlan=false 固定（gate review のみ・実装/計画しない）
 }
 
+# sc-5wu: build_prompt が焼く scribe plugin script 参照（selftest-args/bdw）が相対パスだと、worker cwd=
+# worktree・consult cwd=anchor が downstream repo の場合に解決しない（plugin は ${CLAUDE_PLUGIN_ROOT}/scripts
+# にあり PATH 未配置）。scribe 自己 dev では anchor/worktree が scribe repo ゆえ偶然 scripts/ が在り緑通過する
+# test-gap。$SCRIPT_DIR（spawn 自身の dir＝plugin scripts dir）補間で絶対パスを emit することを pin する。
+@test "spawn(sc-5wu): worker prompt の scribe script 参照は絶対パス（\$SCRIPT_DIR 補間）で worker cwd 非依存" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  # selftest-args helper / bdw が先頭 / 付き絶対パスで焼かれる（相対 scripts/… でない）。
+  [[ "$output" == *"/scripts/scribe-selftest-args.sh"* ]]
+  [[ "$output" == *"/scripts/bdw"* ]]
+  # 退行検出: 相対参照（backtick 直後・&& 直後の bare scripts/…）へ戻していないこと。
+  [[ "$output" != *'`scripts/scribe-selftest-args.sh'* ]]
+  [[ "$output" != *"&& scripts/bdw"* ]]
+  # 絶対パスは spawn 自身の plugin scripts dir に解決される（setup の $SELFTEST/$BDW と一致）。
+  [[ "$output" == *"$SELFTEST"* ]]
+  [[ "$output" == *"$BDW"* ]]
+}
+
 # ---------- spawn: grill-consult モード（--context・§7 needs-user regime・sc-cuw 再編）----------
 # --context は「焼いて死ぬ pre-bake」から「admin 集約 brief を grill 材料に受け取りユーザーと対話 grill する
 # grill-consult」へ意味が変わった。pre-bake 自体は admin が回す dynamic Workflow へ移管(consult から撤去)。
@@ -319,6 +337,9 @@ _mk_main_and_linked() {
   [[ "$output" == *"grill-issue=un-consult"* ]]
   # 決定 handoff = own grill-issue の bd notes(bdw 経由 --claim/--append-notes のみ)。
   [[ "$output" == *"bdw"* ]]
+  # sc-5wu: consult の bdw 参照も絶対パス($SCRIPT_DIR 補間)で anchor=downstream でも解決する。
+  [[ "$output" == *"$BDW"* ]]
+  [[ "$output" != *"&& scripts/bdw"* ]]
   [[ "$output" == *"--claim"* ]]
   [[ "$output" == *"--append-notes"* ]]
   [[ "$output" == *"bd show un-consult"* ]]   # admin が real-time 監視
@@ -555,7 +576,7 @@ _mk_main_and_linked() {
 @test "spawn: worker prompt の bdw 規律行が <anchor> プレースホルダでなく絶対パスになる（un-gjr）" {
   run "$SPAWN" --dry-run --anchor "$REPO_ROOT" un-4nm
   [ "$status" -eq 0 ]
-  [[ "$output" == *"cd \"$REPO_ROOT\" && scripts/bdw"* ]]
+  [[ "$output" == *"cd \"$REPO_ROOT\" && $BDW"* ]]   # bdw も絶対パス（sc-5wu）・anchor は絶対+クォート（un-gjr）
   # 旧プレースホルダ `cd <anchor>` が残っていない（リグレッション防止）。
   [[ "$output" != *"cd <anchor>"* ]]
 }
@@ -567,7 +588,7 @@ _mk_main_and_linked() {
   run bash -c "cd '$parent' && '$SPAWN' --dry-run --anchor '$rel' un-4nm"
   [ "$status" -eq 0 ]
   [[ "$output" == *"cd \"$REPO_ROOT\" && bd show un-4nm"* ]]
-  [[ "$output" == *"cd \"$REPO_ROOT\" && scripts/bdw"* ]]
+  [[ "$output" == *"cd \"$REPO_ROOT\" && $BDW"* ]]   # bdw も絶対パス（sc-5wu）・anchor は絶対+クォート（un-gjr）
   # 相対パスのまま焼き込んでいない（worker から解決できない）。
   [[ "$output" != *"cd \"$rel\" && bd show"* ]]
 }
@@ -580,7 +601,7 @@ _mk_main_and_linked() {
   [ "$status" -eq 0 ]
   # 空白入り anchor がダブルクォートされ、worker の cd が単一引数を受け取る。
   [[ "$output" == *"cd \"$spacedir\" && bd show un-4nm"* ]]
-  [[ "$output" == *"cd \"$spacedir\" && scripts/bdw"* ]]
+  [[ "$output" == *"cd \"$spacedir\" && $BDW"* ]]   # bdw 絶対パス（sc-5wu）・空白 anchor は単一引数（un-gjr）
   # 未クォート（cd /…/sp ace && …）に退行していない＝空白で cd が 2 引数化しない。
   [[ "$output" != *"cd $spacedir && bd show"* ]]
 }
