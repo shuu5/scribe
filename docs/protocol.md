@@ -205,6 +205,19 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 
 ---
 
+## 8. cross-ledger 境界（自 `sc-` 台帳 ↔ 他 project 台帳・federated）
+
+scribe admin が複数 project の台帳が併存する環境（orchestrator 配下・cross-rig handoff）で動くときの境界。**admin が write・所有するのは自 project の台帳（`sc-`）だけ**で、他 project の台帳（`un-` / `cc-` 等）は read に留める。worker/consult はそもそも foreign 台帳に触れないため、**本節は admin 専用**（worker 注入 §2/§3/§4 には含めない＝admin は全文 cat で受領）。
+
+- **writer 規律（自台帳のみ write）**: 他 project の台帳を `bd -C <other>/.beads` / `--db` で **write しない**（create/update/close/dep/dolt push のいずれも）。foreign issue への依存が要るときは自台帳側に `bd dep add <自 issue> <foreign-id>` で **foreign bead を depends-on に置く形のみ**可（foreign 台帳は書き換えない）。cross-project の起票・修正依頼は handoff（doobidoo / 相手 admin への連絡）で渡し、相手 project の admin が自台帳へ起票する。
+- **read 方向の情報分離**: foreign 台帳を read して自 `sc-` bead / worker prompt / doobidoo へ**転記する際は、出所・audience・確度・要確認フラグを保持する**（どの project の誰の主張かを落とさない＝混線・誤帰属の防止）。**他 project の機密本文（運営数値・資金・特許・COI 等）は `-C` 直読みに留め durable copy を作らない**（自台帳 notes・doobidoo へ機密本文を保存しない＝漏洩面を増やさない）。
+- **origin verify は §5 が SSOT**: cross-repo の worker が push する経路の origin URL 健全性 verify/restore（`scribe-origin-guard.sh {capture,verify,restore}`）は **§5（push 前 verify）** に既出。cross-ledger でも同じ gate chain を push 前に必ず通す（本節は再掲せずポインタに留める）。
+- **doobidoo（知識系）を SPOF にしない**: cross-ledger handoff の durable leg は **doobidoo より per-project bead（自台帳 notes）を一次**にする。`memory_search` 失敗で着手を止めない・`memory_quality` 評価は skip 可（best-effort）。doobidoo は知識の二次 carrier であって、タスクの真実源（= bd）ではない。
+
+> 一次出典: doobidoo `9be93364`（uns admin → scribe cross-ledger handoff: un-ao2 split・un-jcn A/B）・`cfd599dc`（federated 設計）・`115521de`（実隔離は各層自身の guard が担う＝role 注入は advisory・writer 規律が機械強制の核）。
+
+---
+
 ## 一次出典（まとめ）
 
 | 出典 | 内容 |
@@ -217,6 +230,7 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 | bd un-3v9 notes | grill 議事（7 論点全確定） |
 | bd un-it7 notes | v0 実装 epic（5 cell 分解・spawn ヘルパー設計引き継ぎ） |
 | bd un-cbi notes | spawn 命名規約 producer 追従・dotted id の tmux -t 衝突 live finding・worker receivedArgs 報告実例 |
+| doobidoo `9be93364` / `cfd599dc` | cross-ledger handoff（uns admin → scribe）: federated 規律（§8）= 自台帳のみ write・read 方向の provenance/機密分離・doobidoo SPOF 回避 |
 | scribe-design.md | 設計の why（§8 B/hybrid・§9 通信・§10 監視・§14 v0 スコープ） |
 
 > 設計の細部に疑義が出たら、本書ではなく上記 doobidoo の原典を recall して確認すること（本書は実証ログ・notes を成文化した how 文書）。
