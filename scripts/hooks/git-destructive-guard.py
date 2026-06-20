@@ -180,9 +180,16 @@ def check_git(core, seg_cwd):
     for t in args:
         if long_opt_abbrev(t, "no-verify") or long_opt_abbrev(t, "no-gpg-sign"):
             return "フック/署名の無効化(--no-verify/--no-gpg-sign)は禁止。フック失敗や署名設定の問題を調査・修正する。"
-    for cfg in c_configs + args:
+    # `-c key=val` グローバル注入のみを検査対象にする（sc-9j2: 旧 `c_configs + args` は args=サブコマンド
+    # 以降の全トークン=commit メッセージ値・ファイル名・mv オペランドまで同列スキャンし、core.hooksPath/gpgsign
+    # を含む正当操作を誤ブロックしていた。real 注入 `-c core.hooksPath=...` は c_configs で捕捉維持）。
+    for cfg in c_configs:
         if "core.hooksPath" in cfg or GPGSIGN_FALSE.search(cfg):
             return "フック/署名の無効化(core.hooksPath/commit.gpgsign=false)は禁止。設定問題を調査・修正する。"
+    # `git config core.hooksPath ...` の永続設定も同じ無効化ベクタ（config サブコマンドの引数に限定＝
+    # データ文字列の誤ブロックを避けつつ永続的フック無効化は捕捉維持）。
+    if sub == "config" and any("core.hooksPath" in a or GPGSIGN_FALSE.search(a) for a in sub_args):
+        return "フック/署名の無効化(core.hooksPath/commit.gpgsign=false)は禁止。設定問題を調査・修正する。"
 
     if sub is None:
         return None
@@ -388,6 +395,11 @@ def run_self_test():
         ("git -c core.hooksPath=/dev/null commit -m x", tmp, B, "core.hooksPath via -c"),
         ("git -c commit.gpgsign=false commit -m x", tmp, B, "commit.gpgsign=false via -c"),
         ("git commit -m x", tmp, A, "normal commit"),
+        # sc-9j2: commit メッセージ/ファイル名の hooksPath/gpgsign 文字列を誤ブロックしない（-c 注入と config 永続設定は維持）
+        ("git commit -m 'disable core.hooksPath in tests'", tmp, A, "sc-9j2: hooksPath in commit msg = allow"),
+        ("git add core.hooksPath", tmp, A, "sc-9j2: hooksPath as filename = allow"),
+        ("git commit -m 'set commit.gpgsign=false later'", tmp, A, "sc-9j2: gpgsign in commit msg = allow"),
+        ("git config core.hooksPath /dev/null", tmp, B, "sc-9j2: git config core.hooksPath = block 維持"),
         # --- anchor branch-switch guard ---
         (f"git -C {anchor} switch feature", tmp, B, "anchor: switch feature"),
         (f"git -C {anchor} checkout -b feature", tmp, B, "anchor: checkout -b new"),
