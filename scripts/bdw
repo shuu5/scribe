@@ -35,6 +35,12 @@
 
 set -uo pipefail
 
+# lock_dir formula(D4 合意の SSOT)を共有するため scribe-lib.sh を source(sc-imu)。lib は source 専用・
+# set -e を張らず関数定義のみ＝bdw の set -uo pipefail に干渉しない。
+_BDW_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# shellcheck source=./lib/scribe-lib.sh
+source "$_BDW_DIR/lib/scribe-lib.sh"
+
 BD_BIN="${BDW_BD_BIN:-bd}"
 command -v -- "$BD_BIN" >/dev/null 2>&1 || {
   echo "bdw: bd executable not found (BDW_BD_BIN=$BD_BIN). bd を PATH に通すこと(v1.0.4 pin)" >&2
@@ -81,7 +87,7 @@ repo_id="$(printf '%s' "$key_src" | sha256sum | cut -c1-16)"
 # `scribe-bdw` に置く（sc-da0: sandbox の allowWrite を runtime dir 丸ごとでなくこの subdir へ
 # 最小化するため。gen-sandbox-settings.sh と**同式**＝D4 合意。base が書込不可な劣化環境のみ
 # /tmp/scribe-bdw→/tmp へ段階フォールバック）。
-lock_dir="${BDW_LOCK_DIR:-${XDG_RUNTIME_DIR:-/tmp}}/scribe-bdw"
+lock_dir="$(scribe_bdw_lock_dir)"
 mkdir -p "$lock_dir" 2>/dev/null || lock_dir="/tmp/scribe-bdw"
 mkdir -p "$lock_dir" 2>/dev/null || lock_dir="/tmp"
 lock_file="${lock_dir}/bd-write-${repo_id}.lock"

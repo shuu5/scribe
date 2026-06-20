@@ -22,6 +22,11 @@
 #   (scribe-lib.sh:scribe_owning_repo と同等。GIT_DIR/GIT_WORK_TREE 継承は env -u で隔離)。
 set -euo pipefail
 
+# lock_dir formula(D4 合意の SSOT)を bdw と共有するため scribe-lib.sh を source(sc-imu)。
+_GEN_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# shellcheck source=../lib/scribe-lib.sh
+source "$_GEN_DIR/../lib/scribe-lib.sh"
+
 wt="${1:?usage: gen-sandbox-settings.sh <worktree-path>}"
 [[ -d "$wt" ]] || { echo "gen-sandbox-settings: ディレクトリではありません: $wt" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "gen-sandbox-settings: jq が必要です" >&2; exit 2; }
@@ -32,14 +37,12 @@ anchor="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$wt" worktree list --porcelain
 [[ -n "$anchor" ]] || { echo "gen-sandbox-settings: anchor 逆算に失敗(git worktree 外?): $wt" >&2; exit 3; }
 
 uid="$(id -u)"
-# bdw(scripts/bdw)が flock 鍵を置く dir と**同式**で導出する。bdw は
-#   lock_dir="${BDW_LOCK_DIR:-${XDG_RUNTIME_DIR:-/tmp}}/scribe-bdw"
-# なので、ここを XDG だけに依ると XDG 未設定の劣化環境で bdw=/tmp / sandbox=/run/user とズレ、
-# sandbox 有効時だけ bdw の flock 作成がブロックされて bd write が壊れる(env 依存で気付きにくい)。
-# sc-da0: runtime dir 丸ごと(/run/user/<uid>)でなく専用サブdir scribe-bdw のみを allowWrite に入れ、
-# 他の runtime socket(dbus/wayland/agent)を sandboxed worker が clobber できる範囲を最小化する。
+# bdw(scripts/bdw)が flock 鍵を置く dir と**同一の SSOT** を使う(sc-imu: scribe-lib.sh の scribe_bdw_lock_dir。
+# 旧: 両ファイルに同式を手書き複製していたが片側 drift で sandbox 外壁が bdw flock を block し bd write が
+# 壊れるため1関数へ集約)。sc-da0: runtime dir 丸ごと(/run/user/<uid>)でなく専用サブdir scribe-bdw のみを
+# allowWrite に入れ、他の runtime socket(dbus/wayland/agent)を sandboxed worker が clobber できる範囲を最小化。
 # bwrap が bind 前に path 存在を要求しうるため、scribe-spawn.sh が worker 起動前にこの subdir を mkdir する。
-runtime_dir="${BDW_LOCK_DIR:-${XDG_RUNTIME_DIR:-/tmp}}/scribe-bdw"
+runtime_dir="$(scribe_bdw_lock_dir)"
 beads_dir="$anchor/.beads"
 
 jq -n \
