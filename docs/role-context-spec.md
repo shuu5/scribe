@@ -45,6 +45,7 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 
 - **`SCRIBE_ROLE` は consult の明示にのみ使う**のが一次。worker の admin/consult 上書きが必要なら env で明示できる設計にしてよいが、**既定の流れは `SCRIBE_ROLE`(consult) > cwd(.worktrees → worker) > 無印(admin)**。
 - window 名は**表示のみ**（判定には使わない）。判定を window 名に依存させると spawn 命名規約（`docs/protocol.md` §1）との結合が増えるため。
+- **`SCRIBE_ROLE=none` は既知の opt-out**: role を抑止し hook は無出力で `exit 0` する（未知値の degrade＝cwd/既定 admin 注入とは異なり、warning も出さない）。自前の `.beads/`（別 prefix）を持つ別レイヤ（orchestrator 等）が `.beads` opt-in ガードを通過してもなお「どの scribe role 注入も受けない」ことを機械保証するための明示シグナル。これは **advisory**（表示・文脈注入の抑止）であり、実隔離（別レイヤが foreign 台帳を書かないこと）は scribe role 注入の中身に依存せず**その層自身の guard が担う**（doobidoo `bfe0ce39` の提案を `115521de` が「cosmetic/advisory・nice-to-have」と確定）。
 
 > 一次出典: doobidoo `e2addec8`（consult 識別 = env var `SCRIBE_ROLE` 一次・anchor 無印 = admin 既定・window 名は表示のみ）/ scribe-design.md §14（worker = cwd `.worktrees/` 判定 / consult = 明示シグナル / admin = anchor）。
 

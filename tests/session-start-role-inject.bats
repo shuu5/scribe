@@ -117,6 +117,24 @@ inject() {
     [[ "$output" == *"role=admin"* ]]
 }
 
+# sc-pfm: SCRIBE_ROLE=none は既知の opt-out — role 注入を抑止し無出力 exit 0（未知値の degrade と異なり
+# warning も出さない）。別レイヤ（自前 .beads の orchestrator 等）が .beads opt-in を通過しても scribe
+# role 注入を受けないための明示シグナル（bfe0ce39 / decision 115521de）。
+@test "opt-out: SCRIBE_ROLE=none + 非 worktree(.beads 有) → 注入ゼロ・exit 0・warning なし(既定 admin に落ちない)" {
+    run --separate-stderr inject none "$REPO" "$ANCHOR_JSON"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]                            # role 注入を出さない（既定 admin にも degrade しない）
+    [[ "$output" != *"role="* ]]
+    [[ "$stderr" != *"未知の SCRIBE_ROLE"* ]]   # 未知値(*)の degrade 経路と区別（warning を出さない）
+}
+
+@test "opt-out: SCRIBE_ROLE=none + worktree → 注入ゼロ・exit 0(cwd worker 判定も抑止)" {
+    run --separate-stderr inject none "$REPO" "$WT_JSON"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [[ "$output" != *"role=worker"* ]]
+}
+
 # ---- .beads opt-in guard(bd un-7hx): .beads 有/無 × role ----
 # .beads 無し = scribe 管轄外 → 無出力で exit 0(注入ゼロ)。.beads 有り = 従来どおり注入。
 @test "guard(.beads 無・非 worktree): admin 注入を漏らさず無出力 exit 0" {

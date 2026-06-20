@@ -18,6 +18,8 @@
 #        admin/consult 上書きが必要なら env で明示できる設計でよい・spec §1 注記）
 #   2. cwd が .worktrees/ 配下 → worker（worktree = worker の構造的マーカー）
 #   3. 既定（上記いずれにも当たらない・anchor 無印） → admin
+#   ※ SCRIBE_ROLE=none は既知の opt-out: role 注入を抑止し無出力 exit 0（degrade せず warning も出さない）。
+#     別レイヤ(自前 .beads の orchestrator 等)が scribe role 注入を受けないための明示シグナル（spec §1.1）
 #   ※ window 名は判定に使わない（表示規約のみ・spec §1）
 #
 # 注入内容の SSOT（本文を script に二重化しない・spec §3。script は「どの file/節を
@@ -125,6 +127,12 @@ case "${SCRIBE_ROLE:-}" in
         role="$SCRIBE_ROLE"; detect_basis="env SCRIBE_ROLE" ;;
     "")
         : ;;  # 未設定 → cwd/既定判定へ
+    none)
+        # 既知の opt-out 値: 別レイヤ(自前 .beads を持つ orchestrator 等)が「どの scribe role 注入も
+        # 受けない」を機械保証するための明示シグナル。未知値(*)と異なり degrade(cwd/既定 admin 注入)
+        # せず、warning も出さず無出力で exit 0 する(意図的 opt-out ゆえ正常終了)。.beads opt-in ガードを
+        # 通過済でも role 注入を抑止する(bfe0ce39 / decision 115521de: advisory な隔離・実隔離は別途 guard)。
+        exit 0 ;;
     *)
         echo "[scribe/SessionStart] warning: 未知の SCRIBE_ROLE='${SCRIBE_ROLE}' を無視し cwd/既定判定へ degrade" >&2 ;;
 esac
