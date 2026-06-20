@@ -63,4 +63,9 @@ settings は worktree の git exclude(`info/exclude`)へ冪等追記して ephem
 > ratified 本質(opt-in / byte 不変 / failIfUnavailable / D1 穴)を保つ。
 
 検証: bats(SCRIBE_SANDBOX gating + spawn 行 full-line byte 同一)。
-残: live opt-in の end-to-end spawn 実証(c/d) / docs(protocol.md 等)へ socat 前提 + opt-in を反映。
+
+**旧「残」項目は完了済み（sc-jqd で source of record と突合）**:
+- ✅ live opt-in の end-to-end spawn 実証(D7 c/d): `sc-1gu` で「live e2e で worker が sandboxed に boot」を実証済（commit 71bf862 / 4d16943 / 5bbd57a）。
+- ✅ docs(protocol.md)へ socat 前提 + opt-in 反映済: `docs/protocol.md` の「sandbox opt-in」節が `bubblewrap`+`socat` 必須・apparmor userns 緩和のトレードオフを明記。
+
+この spike-record に未完項目は残っていない（本番反映は上記「本番反映(実装済み: direct-gen)」節＝production・後続の最小化は sc-da0）。

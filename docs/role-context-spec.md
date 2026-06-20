@@ -2,7 +2,7 @@
 
 > **このファイルの位置づけ**
 > scribe-design.md §14 の v0 第 3 本柱「role 判定つき SessionStart 文脈注入（3 role）」の **内容仕様 SSOT**。
-> 本セル（bd un-led / C1）は仕様だけを起こす。**実装（role guard + role 別 SessionStart 注入の hook script）は後続 cell C2（bd un-ck2）**。`hooks/hooks.json` の SessionStart wire は `scripts/hooks/session-start-role-inject.sh` を `[ -x ]` ガード付きで参照済み（未実装の現状は no-op）。
+> 本セル（bd un-led / C1）は仕様を起こした。**実装は後続 cell C2（bd un-ck2）で完了済み**＝`scripts/hooks/session-start-role-inject.sh`（executable・25+ 回帰テスト `session-start-role-inject.bats`・`hooks/hooks.json` の SessionStart wire が `[ -x ]` ガード付きで live 参照）。本書は以後その**内容仕様 SSOT** として機能し、実装メモは §3 に置く（sc-gub: 旧「後続 C2・現状 no-op」記述を実装済みへ訂正）。
 >
 > 各 role の「何を伝え／何を禁止するか」を定める。注入する規約本文の how は `docs/protocol.md`（規約 SSOT）から引く（本書で重複させない＝ドリフト防止）。
 
@@ -101,10 +101,12 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 
 ---
 
-## 3. C2（bd un-ck2）への実装メモ
+## 3. C2（bd un-ck2）実装メモ（実装済み = `session-start-role-inject.sh`）
+
+> **状態（sc-gub）**: 本節は元は C2 への future handoff だった。C2 は実装完了済み（`scripts/hooks/session-start-role-inject.sh`・executable・25+ 回帰テスト）。以下は実装の **decision record** として残す（未着手 TODO ではない）。
 
 - 実装先: `scripts/hooks/session-start-role-inject.sh`（`hooks/hooks.json` の SessionStart wire が `[ -x ]` ガードで参照済み）。
 - §1 の判定で role を解決し、§2 の role 別内容を `docs/protocol.md` から引いて SessionStart 出力（additionalContext）として注入する。**規約本文は protocol.md を SSOT とし、注入 script は「どの節を出すか」だけを持つ**（本文を script に二重化しない）。
 - PRIME 重複の解消（案 A 責務分割・PRIME を bd 基礎へ縮小）は実施済＝本リポの `bd prime` は role 中立（経緯 = 別 cell C4 / bd un-0c6）。縮小前の移行期は注入順序で worker の create 禁止が後勝ちになるよう配置していた。
 - v0 は堀 OFF。PostToolUse diagnostics hook（scribe-design.md §11）は配線しない（v1+）。
-- **C2 着手時の selftest 強化（C1 gate からの引き継ぎ）**: C1 の `selftest-<id>.local.sh` は hooks.json の安全性を「ガード idiom（`[ -x`/`test -x`）の存在」の部分一致で検査する。これは見せかけガード + 末尾無条件実行（`[ -x "$S" ] && "$S"; evil.sh` 等）を false-PASS しうる脆い判定（C1 gate finding・出荷物 hooks.json 自体は真に no-op で安全のため C1 では minor 据置）。C2 が `session-start-role-inject.sh` を実装して wire を編集する際は、selftest の hook 検査を「各 command を `;`/`&&`/`||` で分割し、`${CLAUDE_PLUGIN_ROOT}` script 参照を含む実行 token が必ず直前ガードに支配される」or「`CLAUDE_PLUGIN_ROOT` を未存在パスにして実行し副作用ゼロ・exit 0 をドライラン観測」する dynamic assertion へ強化すること。
+- **C2 着手時の selftest 強化（C1 gate からの引き継ぎ）**: C1 の `selftest-<id>.local.sh` は hooks.json の安全性を「ガード idiom（`[ -x`/`test -x`）の存在」の部分一致で検査する。これは見せかけガード + 末尾無条件実行（`[ -x "$S" ] && "$S"; evil.sh` 等）を false-PASS しうる脆い判定（C1 gate finding・出荷物 hooks.json 自体は真に no-op で安全のため C1 では minor 据置）。C2 は `session-start-role-inject.sh` を実装し wire を編集する際、selftest の hook 検査を「各 command を `;`/`&&`/`||` で分割し、`${CLAUDE_PLUGIN_ROOT}` script 参照を含む実行 token が必ず直前ガードに支配される」or「`CLAUDE_PLUGIN_ROOT` を未存在パスにして実行し副作用ゼロ・exit 0 をドライラン観測」する dynamic assertion へ**強化した（実施済・`session-start-role-inject.bats` の「安全形 dynamic」テスト）**。
