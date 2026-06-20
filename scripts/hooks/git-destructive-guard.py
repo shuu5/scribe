@@ -208,8 +208,11 @@ def check_git(core, seg_cwd):
     if sub == "branch":
         if any("D" in _short_flags(a) for a in sub_args):
             return "git branch -D（強制削除）は禁止。マージ済みなら git branch -d。"
-        if any(long_opt_abbrev(a, "delete") for a in sub_args) \
-           and any(long_opt_abbrev(a, "force") or "f" in _short_flags(a) for a in sub_args):
+        # 小文字 -d と -f の併用（-d -f / -fd / -df / --delete --force）= force delete ＝ -D 等価（sc-1yz root#4）。
+        # -d / --delete 単独（force なし）は安全削除ゆえ ALLOW 維持。
+        _has_del = any("d" in _short_flags(a) or long_opt_abbrev(a, "delete") for a in sub_args)
+        _has_force = any("f" in _short_flags(a) or long_opt_abbrev(a, "force") for a in sub_args)
+        if _has_del and _has_force:
             return "git branch --delete --force（強制削除）は禁止。マージ済みなら git branch -d。"
 
     if sub == "stash" and ("drop" in sub_args or "clear" in sub_args):
@@ -431,6 +434,18 @@ def run_self_test():
         (f"git -C {anchor} checkout --det", tmp, B, "sc-i13: anchor --det (=--detach abbrev)"),
         (f"git -C {anchor} checkout --orph feat", tmp, B, "sc-i13: anchor --orph (=--orphan abbrev)"),
         (f"git -C {anchor} switch --tra feat", tmp, B, "sc-i13: anchor --tra (=--track abbrev)"),
+        # --- sc-1yz: shlex/bash 発散バイパス4形態（全て BLOCK）+ 安全対照（ALLOW 維持）---
+        ("bash -c $'git push --force'", tmp, B, "sc-1yz#1: ANSI-C $'...' bypass"),
+        (r"bash -c $'\x67it push --force'", tmp, B, "sc-1yz#1: ANSI-C escape \\x67 bypass"),
+        ("bash <<<'git push --force'", tmp, B, "sc-1yz#2: glued here-string bypass"),
+        ("bash --init-file /dev/null -c 'git push --force'", tmp, B, "sc-1yz#3: --init-file value-opt bypass"),
+        ("bash -O extglob -c 'git push --force'", tmp, B, "sc-1yz#3: -O value-opt bypass"),
+        ("git branch -d -f feature", tmp, B, "sc-1yz#4: branch -d -f force-delete"),
+        ("git branch -fd feature", tmp, B, "sc-1yz#4: branch -fd clustered"),
+        ("git branch -df feature", tmp, B, "sc-1yz#4: branch -df clustered"),
+        ("git branch -d feature", tmp, A, "sc-1yz#4: branch -d alone (safe・allow 維持)"),
+        ("git branch --delete feature", tmp, A, "sc-1yz#4: branch --delete alone (safe)"),
+        ("bash -c 'git push --force'", tmp, B, "sc-1yz: space -c は従来通り block（回帰なし）"),
     ]
 
     failures = []

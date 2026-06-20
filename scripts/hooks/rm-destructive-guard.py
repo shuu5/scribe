@@ -774,6 +774,11 @@ def run_self_test():
         (f"runuser -u root -- rm -rf {repo}", tmp, B, "runuser -- "),
         (f"watch -n 1 rm -rf {repo}", tmp, B, "watch -n N"),
         (f"systemd-run rm -rf {repo}", tmp, B, "systemd-run"),
+        # sc-1yz: shlex/bash 発散バイパス（cmdtokens 共有ゆえ rm でも BLOCK）
+        (f"bash -c $'rm -rf {repo}'", tmp, B, "sc-1yz#1: ANSI-C $'...' bypass (rm)"),
+        (f"bash <<<'rm -rf {repo}'", tmp, B, "sc-1yz#2: glued here-string bypass (rm)"),
+        (f"bash --rcfile /dev/null -c 'rm -rf {repo}'", tmp, B, "sc-1yz#3: --rcfile value-opt bypass (rm)"),
+        (f"bash -O extglob -c 'rm -rf {repo}'", tmp, B, "sc-1yz#3: -O value-opt bypass (rm)"),
         (f'r""m -rf {repo}', tmp, B, "obfuscation r\"\"m"),
         (f'fi""nd {repo}/rawdata -delete', tmp, B, "obfuscation fi\"\"nd"),
         (f"{{ rm -rf {repo}; }}", tmp, B, "brace-group"),
