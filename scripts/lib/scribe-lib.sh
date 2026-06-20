@@ -211,6 +211,10 @@ scribe_restore_origin() {
   [[ -f "$marker" ]] || { printf 'scribe: error: origin marker が無く復元できません: %s\n' "$wt" >&2; return 1; }
   expected="$(cat "$marker")"
   [[ -n "$expected" ]] || { printf 'scribe: error: origin marker が空で復元できません: %s\n' "$marker" >&2; return 1; }
+  # 先に git リポジトリか確認（sc-gfm: get-url の exit128=非git を exit2=remote 不在と混同し『削除ケース』へ
+  # 誤分岐するのを防ぐ。非git は復元不能ゆえ fail-loud で根本原因を明示する）。
+  scribe_git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 \
+    || { printf 'scribe: error: origin 復元先が git リポジトリではありません: %s\n' "$repo" >&2; return 1; }
   if scribe_git -C "$repo" remote get-url origin >/dev/null 2>&1; then
     scribe_git -C "$repo" remote set-url origin "$expected"   # 書換ケース
   else

@@ -317,6 +317,9 @@ _link_bin_without_awk() {
     [[ "$output" == *"read-only"* ]]
     [[ "$output" == *"記憶系のみ"* ]]
     [[ "$output" == *"サマリ保存義務"* ]]
+    # TODO(un-sl9 / sc-gfm): 「暫定運用」条項は un-sl9 検証完了で role-context-spec.md:98 ごと撤去される。
+    # これは brittle な偶発 fail でなく**意図的 tripwire**＝撤去時にこの assertion も削除すべきことを loud に
+    # 知らせる（同リポの doc 編集で即 fail するため撤去漏れを検知できる）。un-sl9 完了時はこの 1 行を削除する。
     [[ "$output" == *"暫定運用"* ]]
 }
 
