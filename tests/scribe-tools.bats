@@ -473,6 +473,54 @@ _mk_main_and_linked() {
   git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
 }
 
+# ---------- spawn(sandbox materialization): SCRIBE_SANDBOX=1 実経路の物理生成（sc-s68）----------
+# 上の sandbox テスト(108-165)は dry-run plan と gen 単体 JSON を pin するが、実(非dry-run)経路の
+# *物理 materialization*（settings.local.json の atomic 生成・temp 後始末・worker 巻添え防止の
+# exclude 追記・gen 失敗時の die+temp 掃除）は未検証だった。mv→cp 退化や exclude 破損で
+# settings.local.json が worker commit に漏れても検出できない（README が ephemeral 維持を不変条件と明記）。
+# facet3(上記) と同じく cld-spawn を no-op stub に差し替えて実 spawn を駆動し、生成物を assert する。
+@test "spawn(sandbox/sc-s68): SCRIBE_SANDBOX=1 実経路で settings.local.json を atomic 生成・temp 残無・worker 巻添え防止" {
+  local repo wt noop
+  repo="$SCRIBE_TEST_CWD"   # setup() の temp git repo（init コミット済み）
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  wt="$repo/.worktrees/spawn/un-4nm-101010"
+  run env SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop"
+  [ "$status" -eq 0 ]
+  # 物理生成された settings.local.json は valid JSON で sandbox contract（failIfUnavailable + .beads 先頭）を持つ。
+  [ -f "$wt/.claude/settings.local.json" ]
+  run jq -e '.sandbox.enabled == true and .sandbox.failIfUnavailable == true and (.sandbox.filesystem.allowWrite[0] | endswith("/.beads"))' "$wt/.claude/settings.local.json"
+  [ "$status" -eq 0 ]
+  # atomic mv 後に temp ファイル(.settings.XXXXXX)が残っていない（mv→cp 退化を捕捉）。
+  run bash -c "ls \"$wt/.claude/\".settings.* 2>/dev/null | wc -l | tr -d ' '"
+  [ "$output" = "0" ]
+  # worktree の git exclude 追記で worker の git add -A が settings.local.json を巻き込まない（ephemeral 維持・load-bearing）。
+  run git -C "$wt" check-ignore -q .claude/settings.local.json
+  [ "$status" -eq 0 ]
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+}
+
+@test "spawn(sandbox/sc-s68): gen 失敗時は die（非0）し settings.local.json を残さず temp も後始末する" {
+  local repo wt noop genfail
+  repo="$SCRIBE_TEST_CWD"
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  # SCRIBE_SANDBOX_GEN(=CLD_SPAWN と同型 seam)で gen を失敗 stub に差し替え、spawn の die+temp掃除枝を駆動。
+  genfail="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 5\n' > "$genfail"; chmod +x "$genfail"
+  wt="$repo/.worktrees/spawn/un-4nm-101010"
+  run env SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_GEN="$genfail" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop" "$genfail"
+  # gen 失敗 → scribe_die で非0 終了（cld-spawn 到達前）・理由を stderr に明示。
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"settings.local.json の生成に失敗"* ]]
+  # 半端な settings.local.json を残さない・temp も掃除済み（gen 失敗で worker commit へ漏らさない）。
+  [ ! -f "$wt/.claude/settings.local.json" ]
+  run bash -c "ls \"$wt/.claude/\".settings.* 2>/dev/null | wc -l | tr -d ' '"
+  [ "$output" = "0" ]
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+}
+
 # ---------- spawn: worker prompt に anchor 絶対パスを焼き込む（un-gjr）----------
 # anchor は worker 実行コマンド（cd "$ANCHOR" && bd show / bdw）へ補間されるため、空白を含む
 # パスでも 1 引数に収まるよう **ダブルクォート付き**で焼き込む（quote 漏れは空白 anchor で cd 破綻）。
