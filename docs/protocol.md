@@ -214,7 +214,7 @@ scribe admin が複数 project の台帳が併存する環境（orchestrator 配
 - **origin verify は §5 が SSOT**: cross-repo の worker が push する経路の origin URL 健全性 verify/restore（`scribe-origin-guard.sh {capture,verify,restore}`）は **§5（push 前 verify）** に既出。cross-ledger でも同じ gate chain を push 前に必ず通す（本節は再掲せずポインタに留める）。
 - **doobidoo（知識系）を SPOF にしない**: cross-ledger handoff の durable leg は **doobidoo より per-project bead（自台帳 notes）を一次**にする。`memory_search` 失敗で着手を止めない・`memory_quality` 評価は skip 可（best-effort）。doobidoo は知識の二次 carrier であって、タスクの真実源（= bd）ではない。
 
-> 一次出典: doobidoo `9be93364`（uns admin → scribe cross-ledger handoff: un-ao2 split・un-jcn A/B）・`cfd599dc`（federated 設計）・`115521de`（実隔離は各層自身の guard が担う＝role 注入は advisory・writer 規律が機械強制の核）。
+> 一次出典: doobidoo `9be93364`（uns admin → scribe cross-ledger handoff: un-ao2 split・un-jcn A/B）・`cfd599dc`（federated 設計）・`115521de`（実隔離＝各層自身の bd-write-guard が機械強制し、scribe role 注入は cosmetic/advisory。本 §8 の writer 規律は admin が従う protocol 規約であって機械強制ではない）。
 
 ---
 

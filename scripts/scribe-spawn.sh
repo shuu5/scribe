@@ -220,8 +220,8 @@ GRILL
 --- admin 集約 brief ここまで ---
 
 ## handoff（scribe 連携・これだけ）
-- 着手: \`cd "$ANCHOR" && $SCRIPT_DIR/bdw update $TOPIC --claim\`
-- 決定が固まる度: \`cd "$ANCHOR" && $SCRIPT_DIR/bdw update $TOPIC --append-notes "決定: …（理由・却下案・残論点）"\`（admin が \`bd show $TOPIC\` で監視）
+- 着手: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $TOPIC --claim\`
+- 決定が固まる度: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $TOPIC --append-notes "決定: …（理由・却下案・残論点）"\`（admin が \`bd show $TOPIC\` で監視）
 - read-only（例外は自 grill-issue $TOPIC の claim/append-notes のみ・bdw 経由）: tracked コード/ファイル編集・bd create/dep/close/dolt push・spawn・push はしない（admin の領分）。
 GRILL
     else
@@ -345,10 +345,10 @@ build_prompt() {
 - **test-first**: 実装に対する self-test を自分で用意し worktree 直下に置く
   （\`selftest-$ID.local.sh\`・untracked・コミットしない・**fail-closed**＝assert 1 つでも落ちたら非 0）。
 - **cell-quality WF を直接呼出**（named-WF 明示・scriptPath 直指定）で gate review/verify を 1 回回す。
-  自己点検 args は \`$SCRIPT_DIR/scribe-selftest-args.sh --worktree "$WORKTREE" --anchor "$ANCHOR" --self-test <selfTestCmd> $ID\` で 1 コマンド化済み
+  自己点検 args は \`"$SCRIPT_DIR/scribe-selftest-args.sh" --worktree "$WORKTREE" --anchor "$ANCHOR" --self-test <selfTestCmd> $ID\` で 1 コマンド化済み
   （\`doImplement\`/\`doPlan\`=false・\`autoFix\`=true・\`selfTestCmd\` 必須を固定。手作業で args を組まない。**\`--anchor\` は必須**＝bd graph 所在は worktree cwd では解決しないため省くと die）。
 - **報告に WF 返り値 JSON + \`receivedArgs\` を必須**で含める（args 解決の成否を admin が一次監査できるように）。
-- bd write は必ず \`bdw\` 経由で直列化: \`cd "$ANCHOR" && $SCRIPT_DIR/bdw <subcmd>\`（自 issue の進捗のみ）。
+- bd write は必ず \`bdw\` 経由で直列化: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" <subcmd>\`（自 issue の進捗のみ）。
 
 ## 禁止（protocol.md §2/§3）
 - \`bd create\` / \`bd dep\` / assignment / \`bd dolt push\`（graph・同期点は admin の所有物）。

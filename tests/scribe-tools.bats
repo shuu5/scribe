@@ -318,6 +318,9 @@ _mk_main_and_linked() {
   # 絶対パスは spawn 自身の plugin scripts dir に解決される（setup の $SELFTEST/$BDW と一致）。
   [[ "$output" == *"$SELFTEST"* ]]
   [[ "$output" == *"$BDW"* ]]
+  # 空白安全: emit は $ANCHOR と同様クォート補間する（SCRIPT_DIR にスペースがあっても語分割しない・gate finding）。
+  [[ "$output" == *"\"$SELFTEST\""* ]]
+  [[ "$output" == *"\"$BDW\""* ]]
 }
 
 # ---------- spawn: grill-consult モード（--context・§7 needs-user regime・sc-cuw 再編）----------
@@ -339,6 +342,7 @@ _mk_main_and_linked() {
   [[ "$output" == *"bdw"* ]]
   # sc-5wu: consult の bdw 参照も絶対パス($SCRIPT_DIR 補間)で anchor=downstream でも解決する。
   [[ "$output" == *"$BDW"* ]]
+  [[ "$output" == *"\"$BDW\""* ]]   # 空白安全クォート(gate finding)
   [[ "$output" != *"&& scripts/bdw"* ]]
   [[ "$output" == *"--claim"* ]]
   [[ "$output" == *"--append-notes"* ]]
@@ -576,7 +580,7 @@ _mk_main_and_linked() {
 @test "spawn: worker prompt の bdw 規律行が <anchor> プレースホルダでなく絶対パスになる（un-gjr）" {
   run "$SPAWN" --dry-run --anchor "$REPO_ROOT" un-4nm
   [ "$status" -eq 0 ]
-  [[ "$output" == *"cd \"$REPO_ROOT\" && $BDW"* ]]   # bdw も絶対パス（sc-5wu）・anchor は絶対+クォート（un-gjr）
+  [[ "$output" == *"cd \"$REPO_ROOT\" && \"$BDW\""* ]]   # bdw 絶対パス+空白安全クォート（sc-5wu）・anchor は絶対+クォート（un-gjr）
   # 旧プレースホルダ `cd <anchor>` が残っていない（リグレッション防止）。
   [[ "$output" != *"cd <anchor>"* ]]
 }
@@ -588,7 +592,7 @@ _mk_main_and_linked() {
   run bash -c "cd '$parent' && '$SPAWN' --dry-run --anchor '$rel' un-4nm"
   [ "$status" -eq 0 ]
   [[ "$output" == *"cd \"$REPO_ROOT\" && bd show un-4nm"* ]]
-  [[ "$output" == *"cd \"$REPO_ROOT\" && $BDW"* ]]   # bdw も絶対パス（sc-5wu）・anchor は絶対+クォート（un-gjr）
+  [[ "$output" == *"cd \"$REPO_ROOT\" && \"$BDW\""* ]]   # bdw 絶対パス+空白安全クォート（sc-5wu）・anchor は絶対+クォート（un-gjr）
   # 相対パスのまま焼き込んでいない（worker から解決できない）。
   [[ "$output" != *"cd \"$rel\" && bd show"* ]]
 }
@@ -601,7 +605,7 @@ _mk_main_and_linked() {
   [ "$status" -eq 0 ]
   # 空白入り anchor がダブルクォートされ、worker の cd が単一引数を受け取る。
   [[ "$output" == *"cd \"$spacedir\" && bd show un-4nm"* ]]
-  [[ "$output" == *"cd \"$spacedir\" && $BDW"* ]]   # bdw 絶対パス（sc-5wu）・空白 anchor は単一引数（un-gjr）
+  [[ "$output" == *"cd \"$spacedir\" && \"$BDW\""* ]]   # bdw 絶対パス+空白安全クォート（sc-5wu）・空白 anchor は単一引数（un-gjr）
   # 未クォート（cd /…/sp ace && …）に退行していない＝空白で cd が 2 引数化しない。
   [[ "$output" != *"cd $spacedir && bd show"* ]]
 }
