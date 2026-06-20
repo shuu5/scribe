@@ -12,16 +12,16 @@ cell）で 2026-06-11 にコピーしたもの。
   設計の細部に疑義が出たら本書ではなく §17 の doobidoo 原典を recall して確認する
   （本書は統合・整形版）。ubuntu-note-system 側は staging にすぎず、着手後は
   本リポへのポインタに縮小される（§16 堀フェーズ チェックリスト末項）。
-- **本文は無改変**（この注記ブロックの追加のみ）。設計判断の SSOT は変わらない。
+- 移設時は本文無改変（注記ブロック追加のみ）だったが、**その後 v0 実装に追従して本文を更新済み**（§33 の「本文は常に現行の真のみ」規律に従う・sc-aop）。設計判断の SSOT として現行を保つ。
 ═══════════════════════════════════════════════════════════════════════════════
 -->
 
-# scribe 設計ドキュメント（移行用・概念設計確定 + v0 段階着手版）
+# scribe 設計ドキュメント（概念設計 SSOT + v0 実装完了版）
 
 > **このファイルの位置づけ**
-> scribe は **これから段階着手する将来プロジェクト**（リポ `~/projects/local-projects/scribe/` は未作成）。
-> 本書は概念設計（§1〜§13）の統合 SSOT であり、かつ v0 着手スコープ（§14）の SSOT でもある。
-> **実 scribe リポを作成したときにそのまま初期設計ドキュメントとして持っていける形** にまとめてある。
+> scribe は **v0 実装完了済みで稼働中のプロジェクト**（リポ `~/projects/local-projects/scribe/`・sc-aop で「未作成の将来プロジェクト」記述を訂正）。
+> 本書は概念設計（§1〜§13）の統合 SSOT であり、かつ v0 スコープ（§14）の SSOT でもある。
+> **実装の現行 SSOT は `docs/protocol.md`（admin プロトコル）/ `docs/role-context-spec.md`（role 注入）/ `docs/methodology.md`** で、本書は設計の why を保持する。
 >
 > - **着手戦略 = 段階着手（2026-06-10 改訂）**: 旧「folio 1.0.0 / folio-architect 完成を待って着手（不変）」条項は**撤回**。
 >   §5 graceful degradation の**軽量モード（spec プロバイダ抽象・堀 OFF）を入口に今から着手**する。folio backend と堀（in-loop hook 強制）は後付け（v1+）。詳細スコープは §14、移行手順は §16。
@@ -213,7 +213,7 @@ A↔B 差分（ここだけ）:
 ### 確定（worker↔beads = B/hybrid）
 
 - **administrator(anchor)** が所有: issue 作成・依存グラフ・assignment・最終判断・**`bd dolt push`/remote 同期点**。
-- **worker(worktree)** は自分が claim した issue の進捗/status を **auto-share DB に直接書く**（`bd update --claim` / `--notes` / `bd close`）。
+- **worker(worktree)** は自分が claim した issue の進捗/status を **auto-share DB に直接書く**（`bd update --claim` / `--append-notes` / `bd close`・sc-4kb: 破壊的 `--notes` でなく追記の `--append-notes`）。
 - ＝ **beads 自体が live なタスク共有ボード**。supervise ループ（§10）は `bd ready`/status を主信号に read。
 - 競合は bd の dolt-server が serialize + worktree-native + hash-ID 衝突回避で 3-5 worker は想定内。bottleneck 化したら **admin-batched 書込（A 案）に fallback**。
 - 却下 A（admin 単一 writer・worker は issue ID 参照のみ）: 保守的・実証済み（ubuntu-note-system 現行）だが、LLM 実装 worker は「自分で claim して進捗を書く」が自然なので B 採用。
@@ -346,10 +346,10 @@ v0 の最重要設計判断。**role 別に注入内容を分割する**:
 | role | 配置 | 注入内容（要旨） |
 |---|---|---|
 | **admin** | anchor（orchestrator セッション） | プロトコル全文（graph 所有 = `bd create`/`dep`/assignment / gate funnel / errata 規約 / `bd dolt push` = 同期点） |
-| **worker** | worktree（`.worktrees/<branch>`） | 自 issue の write のみ（`bd update --claim` / `--notes` / `bd close`）+ bdw 並列直列化規律 + **`bd create` / `bd dep` / `bd dolt push` の明示禁止** |
-| **consult** | anchor 同居可（read-only セッション） | 設計議論・grill 専用。記憶系（doobidoo + auto-memory）のみ write 可。bd・リポ tracked ファイル・`bd dolt push`・spawn は禁止。相談サマリ保存義務。**緩和**: grill-consult（admin が `--context` brief で spawn）のみ自 grill-issue の `bd update --claim`/`--append-notes` を bdw 経由 write 可（close は admin 専有）＝ role-context-spec §2.3。docs/session-orchestration-strategy.md §6 の起動テンプレを SSOT として参照（v0 実装 epic で scribe plugin へ移設） |
+| **worker** | worktree（`.worktrees/<branch>`） | 自 issue の write のみ（`bd update --claim` / `--append-notes` / `bd close`）+ bdw 並列直列化規律 + **`bd create` / `bd dep` / `bd dolt push` の明示禁止** |
+| **consult** | anchor 同居可（read-only セッション） | 設計議論・grill 専用。記憶系（doobidoo + auto-memory）のみ write 可。bd・リポ tracked ファイル・`bd dolt push`・spawn は禁止。相談サマリ保存義務。**緩和**: grill-consult（admin が `--context` brief で spawn）のみ自 grill-issue の `bd update --claim`/`--append-notes` を bdw 経由 write 可（close は admin 専有）＝ role-context-spec §2.3。起動テンプレの SSOT は role-context-spec §2.3（scribe plugin へ移設完了・sc-aop。docs/session-orchestration-strategy.md §6 は原典トレース用） |
 
-**role 別分割の根拠（verified・構造原因の発見）**: 現状 `bd prime` の SessionStart hook が**全セッション（worker 含む）へ無条件**に「非自明な作業は着手前に `bd create`」を注入している。これは B/hybrid の「worker は graph を操作しない（`bd create`/`dep` しない・notes 提案 → admin 起票）」と**矛盾**しており、**worker の `bd create` 逸脱の構造原因**である（2026-06-10 に 1 件の逸脱を prompt 明記で解消した実績がある＝注入の問題と確認）。対処 = role 別注入（上表）。`bd prime` の一律注入と role 別注入の重複解消（PRIME 縮小 or 注入順序）は v0 実装時に決定する。
+**role 別分割の根拠（verified・構造原因の発見）**: 現状 `bd prime` の SessionStart hook が**全セッション（worker 含む）へ無条件**に「非自明な作業は着手前に `bd create`」を注入している。これは B/hybrid の「worker は graph を操作しない（`bd create`/`dep` しない・notes 提案 → admin 起票）」と**矛盾**しており、**worker の `bd create` 逸脱の構造原因**である（2026-06-10 に 1 件の逸脱を prompt 明記で解消した実績がある＝注入の問題と確認）。対処 = role 別注入（上表）。`bd prime` の一律注入と role 別注入の重複解消（PRIME 縮小 or 注入順序）は **案 A（PRIME を bd 基礎へ縮小 + role 別注入）で決定・実装済**（SSOT = role-context-spec §0・本リポ PRIME は role 中立・sc-aop）。
 
 ### v0 で作らないもの（v1+ へ後回し）
 
