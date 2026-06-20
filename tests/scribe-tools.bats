@@ -1439,6 +1439,18 @@ _pre_cmd() {  # <guard-script-basename> → 該当 PreToolUse[Bash] hook の com
   done
 }
 
+@test "bdw/gen-sandbox: lock_dir formula が scribe-lib.sh の scribe_bdw_lock_dir に集約（sc-imu・drift 防止）" {
+  # 生 formula の手書き複製が bdw/gen に残っていない（複製は片側 drift で sandbox 外壁が bdw flock を
+  # block→bd write 破壊。1関数へ集約して構造的に drift 不能化）。grep -l は一致ファイルを出すので不一致=非0。
+  run grep -lE 'BDW_LOCK_DIR:-.*XDG_RUNTIME_DIR.*scribe-bdw' "$BDW" "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh"
+  [ "$status" -ne 0 ]
+  # 両者が共有関数 scribe_bdw_lock_dir を呼ぶ。
+  grep -q 'scribe_bdw_lock_dir' "$BDW"
+  grep -q 'scribe_bdw_lock_dir' "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh"
+  # SSOT は scribe-lib.sh の関数定義（生 formula はここだけ）。
+  grep -qE 'scribe_bdw_lock_dir\(\).*BDW_LOCK_DIR.*XDG_RUNTIME_DIR.*scribe-bdw' "$LIB"
+}
+
 # ---------- bdw: flock-serialized B/hybrid の中核ロジックを pin（sc-i9b member 2）----------
 # bd 実体を echo に差し替え（BDW_BD_BIN=echo）て実 Dolt write を起こさず、READ/WRITE 経路の
 # 分岐だけを検証する。判定の観測点 = BDW_LOCK_DIR/scribe-bdw に `bd-write-*.lock`（sc-da0: 専用サブdir）が作られたか。

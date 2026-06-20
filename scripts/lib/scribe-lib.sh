@@ -84,6 +84,11 @@ scribe_synthesize_issue_desc() {
 # scribe_window_name <id> → wt-<id>（protocol.md §1 命名規約）。
 scribe_window_name() { printf 'wt-%s' "$1"; }
 
+# scribe_bdw_lock_dir → bdw の flock 鍵を置く専用サブdir（gen-sandbox の sandbox allowWrite と**同一**＝
+# 全 bd writer + sandbox 外壁の D4 合意の SSOT・sc-imu で集約。sc-da0 で scribe-bdw サブdir 化）。
+# 呼び出し側は結果に対し必要なら mkdir/段階フォールバックを行う（runtime 挙動は呼び出し側の責務）。
+scribe_bdw_lock_dir() { printf '%s' "${BDW_LOCK_DIR:-${XDG_RUNTIME_DIR:-/tmp}}/scribe-bdw"; }
+
 # scribe_branch_name <id> [hhmmss] → spawn/<id>-HHMMSS（protocol.md §1）。
 #   並列 spawn 衝突回避の -HHMMSS サフィックスは規約として維持する。
 #   hhmmss はテスト決定論のため注入可（既定 date +%H%M%S）。
