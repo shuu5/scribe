@@ -456,6 +456,6 @@ fi
 # monitor: window 名 → window_id(@N) を解決し、以後の -t は ID で行う（protocol.md §1）。
 # cld-spawn 成功後の monitor 案内用。tmux 不在/失敗でも spawn は済んでいるので set -e で落とさず
 # 空 WID へ degrade させる（|| true）。空なら下の ${WID:-$WINDOW} が window 名へフォールバック。
-WID="$(tmux list-windows -F '#{window_id} #{window_name}' 2>/dev/null | awk -v n="$WINDOW" '$2==n{print $1; exit}' || true)"
+WID="$(scribe_window_id "$WINDOW")"
 echo "spawned: issue=$ID window=$WINDOW window_id=${WID:-?} worktree=$WORKTREE"
 echo "monitor: tmux capture-pane -p -t \"${WID:-$WINDOW}\" | tail -n 3"

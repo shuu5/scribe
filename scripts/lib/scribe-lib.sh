@@ -89,6 +89,14 @@ scribe_window_name() { printf 'wt-%s' "$1"; }
 # 呼び出し側は結果に対し必要なら mkdir/段階フォールバックを行う（runtime 挙動は呼び出し側の責務）。
 scribe_bdw_lock_dir() { printf '%s' "${BDW_LOCK_DIR:-${XDG_RUNTIME_DIR:-/tmp}}/scribe-bdw"; }
 
+# scribe_git <git-args...> → GIT_DIR/GIT_WORK_TREE の継承干渉を隔離して git を呼ぶ（sc-e1w で集約。
+# worker 等が GIT_DIR を export した環境でも -C 指定先のリポを正しく解く＝隔離の付け忘れを構造防止）。
+scribe_git() { env -u GIT_DIR -u GIT_WORK_TREE git "$@"; }
+
+# scribe_window_id <window-name> → tmux window 名から window_id(@N) を解決（無ければ空。dotted bd id の
+# `-t` 区切り衝突を避けるため以後の tmux -t は @N で行う・protocol.md §1。sc-e1w で spawn/cleanup から集約）。
+scribe_window_id() { tmux list-windows -F '#{window_id} #{window_name}' 2>/dev/null | awk -v n="$1" '$2==n{print $1; exit}' || true; }
+
 # scribe_branch_name <id> [hhmmss] → spawn/<id>-HHMMSS（protocol.md §1）。
 #   並列 spawn 衝突回避の -HHMMSS サフィックスは規約として維持する。
 #   hhmmss はテスト決定論のため注入可（既定 date +%H%M%S）。
@@ -112,7 +120,7 @@ scribe_owning_repo() {
   local main
   # porcelain の 1 行目は常に `worktree <main path>`。1 行目だけ前置詞を剥がして即 quit する
   # （`head` を挟まず pipefail+SIGPIPE の相互作用を避ける）。空白入りパスもそのまま通す。
-  main="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$wt" worktree list --porcelain 2>/dev/null \
+  main="$(scribe_git -C "$wt" worktree list --porcelain 2>/dev/null \
             | sed -n '1{s/^worktree //p;q;}')" || true
   [[ -n "$main" ]] || return 1
   printf '%s' "$main"
@@ -130,7 +138,7 @@ scribe_linked_worktree_main() {
   [[ -n "$path" ]] || return 1
   local main top
   main="$(scribe_owning_repo "$path")" || return 1
-  top="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$path" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  top="$(scribe_git -C "$path" rev-parse --show-toplevel 2>/dev/null)" || return 1
   [[ -n "$top" ]] || return 1
   [[ "$top" != "$main" ]] || return 1   # show-toplevel == main → main worktree 自身（linked ではない）
   printf '%s' "$main"
@@ -152,7 +160,7 @@ scribe_origin_marker_path() {
   local wt="${1:-}"
   [[ -n "$wt" ]] || return 1
   local gitdir
-  gitdir="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  gitdir="$(scribe_git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
   [[ -n "$gitdir" ]] || return 1
   printf '%s/scribe-origin.marker' "$gitdir"
 }
@@ -164,7 +172,7 @@ scribe_capture_origin() {
   local repo="${1:-}" wt="${2:-}"
   local marker url
   marker="$(scribe_origin_marker_path "$wt")" || return 1
-  url="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$repo" remote get-url origin 2>/dev/null)" || url=""
+  url="$(scribe_git -C "$repo" remote get-url origin 2>/dev/null)" || url=""
   [[ -n "$url" ]] || return 0   # origin 無し → 捕捉対象なし（no-op）
   printf '%s\n' "$url" > "$marker" || return 1
 }
@@ -182,7 +190,7 @@ scribe_verify_origin() {
     return 0   # baseline 不在 → 照合不能（skip・但し warn を surface）
   fi
   expected="$(cat "$marker")"
-  current="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$repo" remote get-url origin 2>/dev/null)" || current=""
+  current="$(scribe_git -C "$repo" remote get-url origin 2>/dev/null)" || current=""
   if [[ "$current" != "$expected" ]]; then
     printf 'scribe: error: origin URL 汚染を検知（push 前に復元が必要）: 現在=%s 期待=%s\n' \
       "${current:-<none>}" "$expected" >&2
@@ -203,9 +211,9 @@ scribe_restore_origin() {
   [[ -f "$marker" ]] || { printf 'scribe: error: origin marker が無く復元できません: %s\n' "$wt" >&2; return 1; }
   expected="$(cat "$marker")"
   [[ -n "$expected" ]] || { printf 'scribe: error: origin marker が空で復元できません: %s\n' "$marker" >&2; return 1; }
-  if env -u GIT_DIR -u GIT_WORK_TREE git -C "$repo" remote get-url origin >/dev/null 2>&1; then
-    env -u GIT_DIR -u GIT_WORK_TREE git -C "$repo" remote set-url origin "$expected"   # 書換ケース
+  if scribe_git -C "$repo" remote get-url origin >/dev/null 2>&1; then
+    scribe_git -C "$repo" remote set-url origin "$expected"   # 書換ケース
   else
-    env -u GIT_DIR -u GIT_WORK_TREE git -C "$repo" remote add origin "$expected"       # 削除ケース（再作成）
+    scribe_git -C "$repo" remote add origin "$expected"       # 削除ケース（再作成）
   fi
 }

@@ -164,7 +164,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "         WID=\$(tmux list-windows -F '#{window_id} #{window_name}' | awk -v n='$WINDOW' '\$2==n{print \$1; exit}')   # → @N"
   echo "         tmux kill-window -t \"\$WID\"   # 名前ではなく ID で kill"
 else
-  WID="$(tmux list-windows -F '#{window_id} #{window_name}' 2>/dev/null | awk -v n="$WINDOW" '$2==n{print $1; exit}' || true)"
+  WID="$(scribe_window_id "$WINDOW")"
   if [[ -n "$WID" ]]; then
     run_step "window kill (@N=$WID)" tmux kill-window -t "$WID"
   else

@@ -32,9 +32,8 @@ wt="${1:?usage: gen-sandbox-settings.sh <worktree-path>}"
 command -v jq >/dev/null 2>&1 || { echo "gen-sandbox-settings: jq が必要です" >&2; exit 2; }
 
 # anchor(main worktree)を逆算。GIT_DIR/GIT_WORK_TREE の継承干渉を隔離(scribe-lib.sh 慣例)。
-anchor="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$wt" worktree list --porcelain 2>/dev/null \
-  | sed -n '1{s/^worktree //p;q;}')"
-[[ -n "$anchor" ]] || { echo "gen-sandbox-settings: anchor 逆算に失敗(git worktree 外?): $wt" >&2; exit 3; }
+anchor="$(scribe_owning_repo "$wt")" \
+  || { echo "gen-sandbox-settings: anchor 逆算に失敗(git worktree 外?): $wt" >&2; exit 3; }
 
 uid="$(id -u)"
 # bdw(scripts/bdw)が flock 鍵を置く dir と**同一の SSOT** を使う(sc-imu: scribe-lib.sh の scribe_bdw_lock_dir。
