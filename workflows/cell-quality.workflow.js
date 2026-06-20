@@ -144,7 +144,12 @@ const target = str(A.target, '') // スコープ対象の説明(snapshot/review 
 // un-2f1: snapshot 合成の base ref。worktree のセル diff は「base からの commit 済 + 未 commit」の和。
 // 既定 = origin/main(無ければ main)との merge-base = セルが分岐した起点。Implement/Fix が round 内で commit
 // しても `git diff HEAD` だけでは消えてしまう差分を base...HEAD で回収する(false EMPTY_DIFF 根治)。
-const baseRef = (typeof A.baseRef === 'string' && A.baseRef.trim()) || ''
+const _rawBaseRef = (typeof A.baseRef === 'string' && A.baseRef.trim()) || ''
+// baseRef は snapshotPrompt で `BASE="${baseRef}"`（二重引用符内）として bash へ埋め込まれる(sc-38w hardening)。
+// 二重引用符内で危険なのは " $ ` \ と空白/改行のみ。git ref 安全文字(英数 . _ / - ~ ^ @ {} ＝HEAD~1/HEAD^/
+// HEAD@{1} 等の正当 ref を含む)だけ許可し、それ以外を含む不正値は空扱い→merge-base フォールバックへ倒す
+// (trust boundary 内ゆえ RCE でないが、malformed ref の self-inflicted な壊れた bash / false EMPTY_DIFF を防ぐ)。
+const baseRef = /^[A-Za-z0-9._/~^@{}-]+$/.test(_rawBaseRef) ? _rawBaseRef : ''
 const MODEL = A.model || 'opus' // substantive 既定 = opus(cheap→opus 格上げ)
 const maxRounds = Number.isInteger(A.maxRounds) && A.maxRounds > 0 ? A.maxRounds : 3 // hard cap
 // ── (D2) opus 並列 cap(un-3yc): review fan-out / verify parallel(= opus 経路)の同時実行を args で絞る。
@@ -630,8 +635,8 @@ let escalateReason = ''
 const history = []
 const allBlocking = [] // 累積 confirmed blocking(呼出元監査用)
 const allMinor = [] // 記録のみ(ループ非駆動)
-let lastRefuted = []
-let lastUnverified = []
+const allRefuted = [] // 累積 refuted(sc-38w: allBlocking 同様に全ラウンド累積し逆監査情報を欠落させない)
+const allUnverified = [] // 累積 unverified(同上)
 let lastDiff = diff
 
 // light type(monitoring/notes)はループを回さず 1 ラウンドの軽量チェックのみ。
@@ -758,8 +763,8 @@ while (round < effectiveCap) {
   const machineryFailed = reviewFailedCount > 0 || snapshotFailed
 
   allMinor.push(...minor)
-  lastRefuted = refuted
-  lastUnverified = unverified
+  allRefuted.push(...refuted)
+  allUnverified.push(...unverified)
   history.push({
     round,
     total: verified.length,
@@ -897,8 +902,8 @@ const result = {
   // 監査対象: confirmed blocking は verdict ごと直読して妥当性を確認(過剰却下/誤検出を自分で判断)
   blocking: allBlocking,
   minor: allMinor, // 記録のみ
-  refuted: lastRefuted, // 誤検出として落とした finding(本当に無効か逆監査)
-  unverified: lastUnverified, // verdict 取得失敗 = 人手確認
+  refuted: allRefuted, // 誤検出として落とした finding(本当に無効か逆監査・全ラウンド累積)
+  unverified: allUnverified, // verdict 取得失敗 = 人手確認(全ラウンド累積)
   history,
   diff: lastDiff,
   machineryFailedLastRound: !!(lastH.reviewFailed || lastH.snapshotFailed), // F3/F4: review/snapshot silent 失敗の有無
@@ -907,7 +912,7 @@ const result = {
 
 // admin 薄 gate の指針(再 review はしない)。unverified(verdict 取得失敗/throw)や machinery 失敗が
 // あれば converged でも人手確認が要る = silent ship させない注記を必ず付ける。
-const unvNote = lastUnverified.length ? ` ※unverified=${lastUnverified.length} は要人手確認(verdict 鵜呑み禁止)。` : ''
+const unvNote = allUnverified.length ? ` ※unverified=${allUnverified.length} は要人手確認(verdict 鵜呑み禁止)。` : ''
 const machNote =
   lastH.reviewFailed || lastH.snapshotFailed
     ? ` ※machinery 失敗(reviewFailed=${lastH.reviewFailed || 0}, snapshotFailed=${!!lastH.snapshotFailed})= この round の blocking=0 は信頼不可、人手確認。`
