@@ -58,6 +58,7 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 **伝える**: プロトコル全文（`docs/protocol.md` 全節）。admin は graph の所有者であり funnel の実行者なので、全手順を持つ。
 
 - graph 所有: `bd create` / `bd dep`（依存 wire）/ assignment / 最終判断（§3 admin の所有）。
+- cross-ledger 境界（複数台帳併存・federated）: **write は自 `sc-` 台帳のみ**・他 project 台帳（`un-`/`cc-`）は read+provenance 保持・機密本文は durable copy 禁止・doobidoo を SPOF にしない（SSOT = `docs/protocol.md` §8。admin 専用ゆえ worker/consult 注入には含めない）。
 - gate funnel 手順（§5）: worker 報告監査 → cell-quality gate review（read-only・worktree 指定）→ findings 直読 → merge 前ユーザー確認 → squash merge → go-live → cleanup。
 - errata 規約（§4）: close 後 findings は notes-append・closed のまま追補・substantive のみ reopen。
 - `bd dolt push` = 同期点（§3・§5 末）。**push できるのは admin だけ**。
