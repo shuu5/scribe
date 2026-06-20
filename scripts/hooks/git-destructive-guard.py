@@ -15,7 +15,8 @@
 #
 # 検出対象（旧 .sh と機能等価。token 単位で精密化）:
 #   force push(--force-with-lease は許可) / git clean -f / reset --hard / branch -D / stash drop|clear /
-#   作業ツリー全体の checkout|restore(pathspec '.') / フック・署名の無効化(--no-verify/--no-gpg-sign/
+#   作業ツリー全体の checkout|restore(pathspec '.' / './' / ':/' / ':(top)' / '*' 等の全ツリーセレクタ; sc-oem) /
+#   フック・署名の無効化(--no-verify/--no-gpg-sign/
 #   core.hooksPath/commit.gpgsign=false) / live anchor の非main checkout|switch。
 #
 # 失敗時方針: 入力解析・guard 内部・lib ロードのいずれの例外でも **fail-open(exit 0)**＝複雑化した guard が
@@ -42,6 +43,17 @@ GPGSIGN_FALSE = re.compile(r"commit\.gpgsign\s*=\s*false", re.I)
 # (単一文字)はそのまま、長フラグ(--orphan/--detach/--track)は getopt 短縮も拾う(sc-i13: long_opt_abbrev)。
 ANCHOR_LEAVE_SHORT = {"-b", "-B", "-c", "-C", "-t"}
 ANCHOR_LEAVE_LONG = ("orphan", "detach", "track")
+
+# 作業ツリー全体を復元する pathspec セレクタ（完全一致で判定; sc-oem）。`.` だけでなく `./`・repo-root
+# magic `:/`・`:(top)`・glob `*` も全ツリー復元になり、いずれも実機で未コミット変更を破壊する（`.` のみの
+# 完全一致 block を回避していた）。`:/f.txt`・`./src/x`・`*.txt` 等の**特定ファイル/部分スコープは完全一致
+# しないので含めない**（誤爆ゼロ＝over-block 安全側）。`:/.` は git 自身が reject(exit1) するため無害＝集合外。
+WHOLE_TREE_PATHSPECS = {".", "./", ":/", ":(top)", "*"}
+
+
+def _is_whole_tree_pathspec(token):
+    """token が作業ツリー全体を指す pathspec セレクタと完全一致するか（sc-oem）。"""
+    return token in WHOLE_TREE_PATHSPECS
 
 
 def _short_flags(tok):
@@ -203,8 +215,9 @@ def check_git(core, seg_cwd):
     if sub == "stash" and ("drop" in sub_args or "clear" in sub_args):
         return "stash の破棄は禁止。残すか、削除はユーザーに委譲。"
 
-    # 作業ツリー全体の復元（pathspec '.'）。-- 付きの個別ファイル復元はここでは弾かない。
-    if sub in ("checkout", "restore") and "." in sub_args:
+    # 作業ツリー全体の復元（`.` / `./` / `:/` / `:(top)` / `*` 等の全ツリー pathspec; sc-oem）。
+    # 個別ファイル/部分スコープ（`:/foo`・`./src/x`・`*.txt`・`-- <file>`）は完全一致でないので弾かない。
+    if sub in ("checkout", "restore") and any(_is_whole_tree_pathspec(a) for a in sub_args):
         return "作業ツリー全体の復元は禁止。git restore <specific-file> で個別に。"
 
     # live anchor のブランチ切替（worktree 運用での anchor 誤乗っ取り防止）
@@ -352,6 +365,20 @@ def run_self_test():
         ("git checkout .", tmp, B, "checkout . whole tree"),
         ("git checkout -- .", tmp, B, "checkout -- . whole tree"),
         ("git restore .", tmp, B, "restore . whole tree"),
+        # --- sc-oem: `.` 以外の全ツリー pathspec も block / 特定ファイル・部分スコープは allow ---
+        ("git restore ./", tmp, B, "sc-oem: restore ./ whole tree"),
+        ("git restore :/", tmp, B, "sc-oem: restore :/ (repo-root magic) whole tree"),
+        ("git checkout :/", tmp, B, "sc-oem: checkout :/ whole tree"),
+        ("git restore ':(top)'", tmp, B, "sc-oem: restore ':(top)' (quoted magic) whole tree"),
+        (r"git restore :\(top\)", tmp, B, "sc-oem: restore :\\(top\\) (escaped magic) whole tree"),
+        ("git restore '*'", tmp, B, "sc-oem: restore '*' glob whole tree"),
+        ("git restore -- :/", tmp, B, "sc-oem: restore -- :/ (位置非依存)"),
+        # 未クォート :(top) は実 bash で構文err・cmdtokens も `(` を subshell 分割 → 非実行=非対象(allow)
+        ("git restore :(top)", tmp, A, "sc-oem: 未クォート :(top) は非実行(subshell分割/構文err)=allow"),
+        ("git restore :/f.txt", tmp, A, "sc-oem: :/f.txt は特定ファイル(allow)"),
+        ("git restore ./src/x.c", tmp, A, "sc-oem: ./src/x.c は部分スコープ(allow)"),
+        ("git restore '*.txt'", tmp, A, "sc-oem: *.txt 部分 glob(allow)"),
+        ("git restore :/.", tmp, A, "sc-oem: :/. は git reject ゆえ集合外(allow)"),
         # --- hooks/sign disable ---
         ("git commit --no-verify -m x", tmp, B, "--no-verify"),
         ("git commit --no-gpg-sign -m x", tmp, B, "--no-gpg-sign"),
