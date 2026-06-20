@@ -5,11 +5,11 @@
 # 目的: bash コマンド文字列を「本物のコマンド呼び出し」のトークン列へ分解する SSOT パーサ。
 #   substring/正規表現の全体一致が引き起こす誤検出（無関係コマンドの語の共起・クォート内データ・
 #   コメント偽装）を、クォート認識の文分割 + shlex トークン化 + 透過ランチャ peel で構造的に排除する。
-#   git-destructive-guard.py / tmux-safety-guard.py が共用する。
+#   git-destructive-guard.py / rm-destructive-guard.py が共用する。
 #
 # パーサ部品（parse_statements/shlex_safe/strip_redirections/peel/_find_dash_c_inline/track_cd）と
-#   透過ランチャ/制御構文の定数群は本 lib が SSOT。git-destructive-guard.py / tmux-safety-guard.py（un-0gu）
-#   に続き rm-destructive-guard.py も本 lib を import する（un-x3o で統合・複製解消済）。高レベル駆動 iter_commands は
+#   透過ランチャ/制御構文の定数群は本 lib が SSOT。git-destructive-guard.py（un-0gu）に続き
+#   rm-destructive-guard.py も本 lib を import する（un-x3o で統合・複製解消済）。高レベル駆動 iter_commands は
 #   本 lib のみ（rm-guard は独自の analyze ループで同等処理＝部品は import で共有）。トークナイザを直す際は
 #   本 lib だけを直せば 3 guard すべてへ反映される（旧来の「複製で検出が静かに乖離する保守ハザード」を解消）。
 #

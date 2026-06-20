@@ -3,7 +3,7 @@
 # PreToolUse(Bash) hook: 破壊的 git コマンドをブロックし、コマンド別の代替ルートを stderr に返す（exit 2）。
 # 由来: uns git-destructive-guard (設計 bd un-0gu) を scribe plugin へ re-home (sc-erd)。scribe は
 #   hooks/hooks.json の PreToolUse[Bash] から ${CLAUDE_PLUGIN_ROOT}/scripts/hooks/ 経由で起動する。
-#   _is_live_anchor に scribe 署名 (.claude-plugin/ + docs/protocol.md) を追加し、uns 非導入ホストへ
+#   _is_live_anchor に scribe 署名 (.claude-plugin/plugin.json の name=='scribe') を追加し、uns 非導入ホストへ
 #   配布したときも scribe-anchor の branch-switch 保護を成立させる。
 #
 # 方式（bd un-0gu）: コマンド文字列を shlex トークン化（共有 lib cmdtokens）し、**本物の `git` 呼び出しの
@@ -301,7 +301,7 @@ def run_self_test():
             open(os.path.join(path, "modules.yaml"), "w").write("x\n")
             os.makedirs(os.path.join(path, "claude", "scripts"), exist_ok=True)
             open(os.path.join(path, "claude", "scripts", "git-destructive-guard.py"), "w").write("x\n")
-        if plugin_name is not None:  # plugin 署名: .claude-plugin/plugin.json(name) + docs/protocol.md
+        if plugin_name is not None:  # plugin fixture: plugin.json(name) が署名の弁別子。docs/protocol.md は realistic な付随物で _is_live_anchor は読まない(sc-ekd)
             os.makedirs(os.path.join(path, ".claude-plugin"), exist_ok=True)
             open(os.path.join(path, ".claude-plugin", "plugin.json"), "w").write(json.dumps({"name": plugin_name}) + "\n")
             os.makedirs(os.path.join(path, "docs"), exist_ok=True)

@@ -52,19 +52,17 @@ import fnmatch
 import subprocess
 import time
 
-# 共有コマンドトークナイザ（bd un-0gu / 統合 un-x3o）。git/tmux guard と同じ lib を import し、
-# パーサ部品(parse_statements/peel/shlex_safe/strip_redirections/track_cd)と
-# 透過ランチャ/制御構文の定数群(LAUNCHERS/LAUNCHER_VALUE_OPTS/SHELLS/CMD_STRING_LAUNCHERS/
-# TASKSET_MASK_RE/KEYWORDS/DURATION_RE/VAR_ASSIGN_RE/VAR_OR_SUBST/REDIR_BARE/REDIR_GLUED)を
-# SSOT 化する。旧来は本ファイルに同一ロジックを複製しており、トークナイザを直す際に rm と git/tmux の
-# 検出が静かに乖離するセキュリティ境界の保守ハザードだった（un-0gu F13）。これを import 一本化で解消。
+# 共有コマンドトークナイザ（bd un-0gu / 統合 un-x3o）。git guard と同じ lib(cmdtokens)を import し、
+# パーサ部品(parse_statements/peel/shlex_safe/strip_redirections/track_cd/long_opt_abbrev)と本 guard が
+# 直接参照する定数(SHELLS/VAR_OR_SUBST)を取り込む。透過ランチャ/制御構文の定数群の SSOT は cmdtokens 側に
+# あり、rm-guard は使う名前のみ import する（sc-ekd: 未使用だった 9 定数を整理）。旧来は本ファイルに同一
+# ロジックを複製しており、トークナイザを直す際に rm と git の検出が静かに乖離するセキュリティ境界の保守
+# ハザードだった（un-0gu F13）。これを import 一本化で解消。
 # lib ロード不能 → fail-open（guard 無効化を loud に通知。複雑な guard が全 Bash を brick するのを防ぐ）。
 try:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib"))
     from cmdtokens import (
-        LAUNCHERS, LAUNCHER_VALUE_OPTS, SHELLS, CMD_STRING_LAUNCHERS,
-        TASKSET_MASK_RE, KEYWORDS, DURATION_RE, VAR_ASSIGN_RE, VAR_OR_SUBST,
-        REDIR_BARE, REDIR_GLUED,
+        SHELLS, VAR_OR_SUBST,
         parse_statements, peel, shlex_safe, strip_redirections, track_cd,
         long_opt_abbrev,
     )
@@ -422,9 +420,10 @@ def check_target(arg, eff_cwd):
 
 # --- コマンド解析 -------------------------------------------------------------
 #
-# パーサ部品(parse_statements / shlex_safe / strip_redirections / peel / track_cd)と
-# REDIR_BARE / REDIR_GLUED は cmdtokens から import 済（ファイル冒頭）。
-# 旧来ここに git/tmux guard と同一ロジックを複製していたが un-x3o で SSOT 化した。以降の
+# パーサ部品(parse_statements / shlex_safe / strip_redirections / peel / track_cd)を cmdtokens から
+# import 済（ファイル冒頭。redirection 定数 REDIR_BARE/REDIR_GLUED は strip_redirections が cmdtokens 側で
+# 使うため rm-guard は直接 import しない＝sc-ekd で未使用 import を整理）。
+# 旧来ここに git guard と同一ロジックを複製していたが un-x3o で SSOT 化した。以降の
 # is_recursive_rm / rm_targets / is_destructive_find / find_start_paths / analyze 等は
 # import した部品を呼ぶ（高レベル駆動 analyze は rm-guard 固有なので本ファイルに残す）。
 
