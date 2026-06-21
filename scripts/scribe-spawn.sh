@@ -399,7 +399,7 @@ fi
 
 # --- sandbox opt-in（SCRIBE_SANDBOX=1・sc-1gu）: worker を OS レベル bwrap sandbox に封じる ---
 # git worktree add 済みの worktree に .claude/settings.local.json を生成し、worker(cwd=worktree)の
-# Bash subprocess を「自 worktree + 共有 .git + anchor の .beads + bdw 鍵($XDG_RUNTIME_DIR)」へ限定する。
+# Bash subprocess を「自 worktree + 共有 .git + anchor の .beads + bdw 鍵($HOME/.cache/bdw-locks)」へ限定する。
 # CLD_PATH/cld-spawn/launcher は一切触らない＝opt-in 未指定時は本番経路 byte 不変。前提=bubblewrap +
 # socat + apparmor_restrict_unprivileged_userns=0。依存欠如時は failIfUnavailable で worker が起動拒否。
 if [[ "${SCRIBE_SANDBOX:-0}" == "1" ]]; then
@@ -422,8 +422,9 @@ if [[ "${SCRIBE_SANDBOX:-0}" == "1" ]]; then
       || printf '%s\n' '**/.claude/settings.local.json' >> "$_sb_excl"
   fi
   # bwrap が allowWrite path を bind 前に存在要求しうる（deduced・sc-da0）。gen が grant した書込み
-  # 許可 path（最小化した lock subdir scribe-bdw 等）を worker 起動前に事前生成する。formula を
-  # 再実装せず生成済み settings の allowWrite から読む＝gen と drift しない（.beads は既存ゆえ no-op）。
+  # 許可 path（専用 lock dir = 既定 $HOME/.cache/bdw-locks・sc-xs2 で orch/uns bdw と収束）を worker
+  # 起動前に事前生成する。formula を再実装せず生成済み settings の allowWrite から読む＝gen と drift
+  # しない（.beads は既存ゆえ no-op）。
   if command -v jq >/dev/null 2>&1; then
     while IFS= read -r _sb_aw; do
       if [[ -n "$_sb_aw" ]]; then
