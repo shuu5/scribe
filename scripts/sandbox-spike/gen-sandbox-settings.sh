@@ -6,7 +6,7 @@
 #   - cwd(worktree) + 配下           … sandbox 既定で writable(列挙不要)
 #   - linked worktree の共有 .git     … sandbox 既定で writable(hooks/ と config は拒否のまま)
 #   - <ANCHOR>/.beads                … 明示(bd/bdw の台帳書込み = B/hybrid。worktree subtree 外ゆえ絶対パス必須)
-#   - bdw のロック dir(BDW_LOCK_DIR:-XDG_RUNTIME_DIR:-/tmp) … 明示(bdw の flock 鍵 bd-write-<repo>.lock の置き場・bdw と同式)
+#   - bdw のロック dir(BDW_LOCK_DIR:-$HOME/.cache/bdw-locks) … 明示(bdw の flock 鍵 bd-write-<repo>.lock の置き場・bdw と同式・sc-xs2)
 # 上記以外への書込みは sandbox 外壁(層2)が拒否する。
 #
 # キー名は CC 公式 docs で verified(code.claude.com/docs/en/sandboxing.md / settings.md):
@@ -38,22 +38,22 @@ anchor="$(scribe_owning_repo "$wt")" \
 uid="$(id -u)"
 # bdw(scripts/bdw)が flock 鍵を置く dir と**同一の SSOT** を使う(sc-imu: scribe-lib.sh の scribe_bdw_lock_dir。
 # 旧: 両ファイルに同式を手書き複製していたが片側 drift で sandbox 外壁が bdw flock を block し bd write が
-# 壊れるため1関数へ集約)。sc-da0: runtime dir 丸ごと(/run/user/<uid>)でなく専用サブdir scribe-bdw のみを
-# allowWrite に入れ、他の runtime socket(dbus/wayland/agent)を sandboxed worker が clobber できる範囲を最小化。
-# bwrap が bind 前に path 存在を要求しうるため、scribe-spawn.sh が worker 起動前にこの subdir を mkdir する。
-runtime_dir="$(scribe_bdw_lock_dir)"
+# 壊れるため1関数へ集約)。grant は専用 lock dir(既定 $HOME/.cache/bdw-locks・sc-xs2 で orch/uns bdw と収束)
+# のみ＝parent(`$HOME/.cache` 等)を丸ごと grant せず、sandboxed worker が触れる範囲を最小化する。
+# bwrap が bind 前に path 存在を要求しうるため、scribe-spawn.sh が worker 起動前にこの dir を mkdir する。
+lock_dir="$(scribe_bdw_lock_dir)"
 beads_dir="$anchor/.beads"
 
 jq -n \
   --arg beads "$beads_dir" \
-  --arg runtime "$runtime_dir" \
+  --arg lockdir "$lock_dir" \
   '{
     sandbox: {
       enabled: true,
       failIfUnavailable: true,
       allowUnsandboxedCommands: false,
       filesystem: {
-        allowWrite: [ $beads, $runtime ]
+        allowWrite: [ $beads, $lockdir ]
       }
     }
   }'

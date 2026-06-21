@@ -537,11 +537,12 @@ _mk_main_and_linked() {
   # worktree の git exclude 追記で worker の git add -A が settings.local.json を巻き込まない（ephemeral 維持・load-bearing）。
   run git -C "$wt" check-ignore -q .claude/settings.local.json
   [ "$status" -eq 0 ]
-  # sc-da0: runtime grant は /run/user/<uid> 丸ごとでなく専用 lock subdir(scribe-bdw)へ最小化されている。
-  run jq -e '.sandbox.filesystem.allowWrite[1] | endswith("/scribe-bdw")' "$wt/.claude/settings.local.json"
+  # sc-xs2: runtime grant は専用 lock dir(= BDW_LOCK_DIR をそのまま・subdir 付与なし)へ最小化されている。
+  # 既定なら $HOME/.cache/bdw-locks。ここでは BDW_LOCK_DIR=$BATS_TEST_TMPDIR/rt を直に grant する。
+  run jq -e --arg ld "$BATS_TEST_TMPDIR/rt" '.sandbox.filesystem.allowWrite[1] == $ld' "$wt/.claude/settings.local.json"
   [ "$status" -eq 0 ]
-  # sc-da0: bwrap の bind-before-exist 対策で spawn が lock subdir を事前生成する（grant 済 path が実在）。
-  [ -d "$BATS_TEST_TMPDIR/rt/scribe-bdw" ]
+  # sc-da0: bwrap の bind-before-exist 対策で spawn が lock dir を事前生成する（grant 済 path が実在）。
+  [ -d "$BATS_TEST_TMPDIR/rt" ]
   git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
 }
 
@@ -1476,22 +1477,25 @@ _pre_cmd() {  # <guard-script-basename> → 該当 PreToolUse[Bash] hook の com
 @test "bdw/gen-sandbox: lock_dir formula が scribe-lib.sh の scribe_bdw_lock_dir に集約（sc-imu・drift 防止）" {
   # 生 formula の手書き複製が bdw/gen に残っていない（複製は片側 drift で sandbox 外壁が bdw flock を
   # block→bd write 破壊。1関数へ集約して構造的に drift 不能化）。grep -l は一致ファイルを出すので不一致=非0。
-  run grep -lE 'BDW_LOCK_DIR:-.*XDG_RUNTIME_DIR.*scribe-bdw' "$BDW" "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh"
+  # sc-xs2: formula を orch/uns bdw と収束（${BDW_LOCK_DIR:-$HOME/.cache/bdw-locks}）。生 formula は
+  # `${...}` 展開構文で識別し、doc コメント中の散文 `(BDW_LOCK_DIR:-…)` を誤検出しない。
+  run grep -lE '\$\{BDW_LOCK_DIR:-.*\.cache/bdw-locks' "$BDW" "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh"
   [ "$status" -ne 0 ]
   # 両者が共有関数 scribe_bdw_lock_dir を呼ぶ。
   grep -q 'scribe_bdw_lock_dir' "$BDW"
   grep -q 'scribe_bdw_lock_dir' "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh"
   # SSOT は scribe-lib.sh の関数定義（生 formula はここだけ）。
-  grep -qE 'scribe_bdw_lock_dir\(\).*BDW_LOCK_DIR.*XDG_RUNTIME_DIR.*scribe-bdw' "$LIB"
+  grep -qE 'scribe_bdw_lock_dir\(\).*BDW_LOCK_DIR.*\.cache/bdw-locks' "$LIB"
 }
 
 # ---------- bdw: flock-serialized B/hybrid の中核ロジックを pin（sc-i9b member 2）----------
 # bd 実体を echo に差し替え（BDW_BD_BIN=echo）て実 Dolt write を起こさず、READ/WRITE 経路の
-# 分岐だけを検証する。判定の観測点 = BDW_LOCK_DIR/scribe-bdw に `bd-write-*.lock`（sc-da0: 専用サブdir）が作られたか。
+# 分岐だけを検証する。判定の観測点 = BDW_LOCK_DIR 直下に `bd-write-*.lock`（sc-xs2: override は
+# subdir を足さず直接使う＝orch/uns bdw と収束）が作られたか。
 #   - READ allowlist  → exec が lock 作成より前（L66）に走るため lock 0 個（無ロック素通し）
 #   - WRITE / 未知    → flock 取得後 exec のため lock 1 個（直列化路）
 # 各 @test は使い捨ての空 lock dir を作って観測する。cwd は setup() の temp git repo。
-_bdw_locks() { ls "$1"/scribe-bdw/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
+_bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
 
 @test "bdw: READ allowlist（show）は無ロックで素通し（lock 0 個・args 透過）" {
   local ld; ld="$(mktemp -d)"
@@ -1538,7 +1542,7 @@ _bdw_locks() { ls "$1"/scribe-bdw/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' 
   # 1) WRITE を 1 回走らせて bdw が計算する実 lock file パスを得る（repo_id は cwd 依存）。
   run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" close un-x
   [ "$status" -eq 0 ]
-  local lock_file; lock_file="$(ls "$ld"/scribe-bdw/bd-write-*.lock)"
+  local lock_file; lock_file="$(ls "$ld"/bd-write-*.lock)"
   # 2) 別プロセスに排他ロックを保持させる。marker でロック保持を待ち、release で解放する
   #    （固定 sleep に依らない決定論同期）。
   local marker="$ld/held" release="$ld/release"

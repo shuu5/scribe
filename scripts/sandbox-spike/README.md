@@ -22,8 +22,8 @@ CC 組込み sandbox は次の3つを要求する(spike で実測):
 
 - `gen-sandbox-settings.sh <worktree>` — worker 用 `.claude/settings.local.json` を stdout 出力。
   worktree から anchor を逆算し、`sandbox.filesystem.allowWrite` に
-  `<ANCHOR>/.beads`(台帳) と `$XDG_RUNTIME_DIR/scribe-bdw`(bdw flock 鍵の専用サブdir・sc-da0 で
-  runtime dir 丸ごとから最小化) を絶対パスで入れる。
+  `<ANCHOR>/.beads`(台帳) と `$HOME/.cache/bdw-locks`(bdw flock 鍵の専用 lock dir・既定値は
+  scribe 以外の bd writer と byte 一致する収束点・sc-xs2。parent を丸ごとでなく専用 dir のみ最小化) を絶対パスで入れる。
   cwd(worktree) と linked worktree の共有 `.git` は sandbox 既定で writable(列挙不要)。
 
 > spike ハーネス `run-spike.sh` は spike 目的達成後 deadcode として削除した(commit 71bf862 で凍結・sc-18q)。
@@ -42,13 +42,15 @@ spike ハーネス(commit 71bf862)で 5/5 PASS(全て ran=yes ＝ genuine):
 | b2 `$HOME`(リポ外) | block | PASS(層2 外壁) |
 
 ⟹ CC sandbox は worktree-local `settings.local.json` の allowWrite 境界を OS レベルで強制する。
-正当な cross-dir 書込み(cwd/.beads/runtime の lock subdir)は通り、外への書込みは封じる。
+正当な cross-dir 書込み(cwd/.beads/専用 lock dir)は通り、外への書込みは封じる。
 
-> **sc-da0（runtime grant 最小化・上表 a3 の更新）**: spike 当時(2026-06-18)は `$XDG_RUNTIME_DIR` を
-> 丸ごと allowWrite に入れていたが、bdw が要るのは flock 鍵 1 ファイルのみ。現在は専用サブdir
-> `$XDG_RUNTIME_DIR/scribe-bdw`（bdw の lock_dir と同式）のみを grant し、他の runtime socket
-> (dbus/wayland/agent) を sandboxed worker から書込み不可にした。bwrap の bind-before-exist のため
-> `scribe-spawn.sh` が worker 起動前にこの subdir を事前生成する。
+> **sc-da0 → sc-xs2（grant 最小化 + lock_dir 収束・上表 a3 の更新）**: spike 当時(2026-06-18)は
+> `$XDG_RUNTIME_DIR` を丸ごと allowWrite に入れていたが、bdw が要るのは flock 鍵 1 ファイルのみ。
+> sc-da0 で専用サブdir のみへ最小化し、**sc-xs2(2026-06-21)で lock_dir を `$HOME/.cache/bdw-locks`
+> （scribe 以外の bd writer = orch/uns bdw と byte 一致）へ収束**させた（旧 `$XDG_RUNTIME_DIR/scribe-bdw`
+> は base 違い + subdir 付与で構造分岐し lost-update を生んでいた）。grant は依然この専用 lock dir
+> （bdw の `scribe_bdw_lock_dir()` と同式）のみで parent を丸ごと開けない。bwrap の bind-before-exist の
+> ため `scribe-spawn.sh` が worker 起動前にこの dir を事前生成する。
 
 ## 本番反映(実装済み: direct-gen)
 
