@@ -353,6 +353,22 @@ _mk_main_and_linked() {
   [[ "$output" != *"conversation_id"* ]]
 }
 
+# sc-qos: 復路の完了シグナル形式化。grill-consult が STATUS 行(grilling/done/blocked)で
+# admin に完了・中断を感知させ、決定は逐次 append する(バッチ厳禁)。
+@test "spawn(grill-consult): STATUS 行規約(grilling/done/blocked)と逐次 append が prompt に注入される(sc-qos)" {
+  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  printf 'x\n' > "$ctx"
+  run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
+  rm -f "$ctx"
+  [ "$status" -eq 0 ]
+  # admin が完了・中断を感知する STATUS 行規約(D2)。
+  [[ "$output" == *"STATUS: grilling"* ]]
+  [[ "$output" == *"STATUS: done"* ]]
+  [[ "$output" == *"STATUS: blocked"* ]]
+  # 逐次 append(バッチ厳禁)の明示補強(D4 床)。
+  [[ "$output" == *"逐次"* ]]
+}
+
 @test "spawn(grill-consult): read-only 限定緩和は厳密 — 自 grill-issue notes のみ可・graph 構造と tracked コードは不可" {
   ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
   printf 'x\n' > "$ctx"
