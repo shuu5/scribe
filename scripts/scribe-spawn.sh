@@ -221,7 +221,11 @@ GRILL
 
 ## handoff（scribe 連携・これだけ）
 - 着手: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $TOPIC --claim\`
-- 決定が固まる度: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $TOPIC --append-notes "決定: …（理由・却下案・残論点）"\`（admin が \`bd show $TOPIC\` で監視）
+- **決定が固まる度に逐次**（バッチ厳禁＝中断時の損失を1論点に抑える）: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $TOPIC --append-notes "決定: …（理由・却下案・残論点）"\`（admin が \`bd show $TOPIC\` で監視）
+- **STATUS 行（admin が完了・中断を感知する唯一の合図）**: 進捗の節目で \`--append-notes\` に \`STATUS:\` 行を必ず混ぜる（admin はこれを見て close を判断する。STATUS は「読みにきて」の合図で、close は admin の notes 目視＝STATUS を書き忘れても取りこぼさない）:
+  - grill 中（facet が1つ決まる度）: \`STATUS: grilling (n/N facet 確定)\`
+  - 全 facet 確定で grill 完了: \`STATUS: done — 全 facet 確定\`
+  - admin の情報・判断待ちで詰まったら: \`STATUS: blocked — 要admin: <理由>\`
 - read-only（例外は自 grill-issue $TOPIC の claim/append-notes のみ・bdw 経由）: tracked コード/ファイル編集・bd create/dep/close/dolt push・spawn・push はしない（admin の領分）。
 GRILL
     else
