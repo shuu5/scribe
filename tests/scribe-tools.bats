@@ -16,6 +16,7 @@ setup() {
   GUARD="$SCRIPTS/scribe-origin-guard.sh"
   LIB="$SCRIPTS/lib/scribe-lib.sh"
   BDW="$SCRIPTS/bdw"
+  WATCH="$SCRIPTS/grill-status-watch.sh"
   HOOKS="$SCRIPTS/hooks"
   HOOKS_JSON="$REPO_ROOT/hooks/hooks.json"
   # bd を実在検証スタブへ差し替え（実 graph 不要）。
@@ -1628,4 +1629,187 @@ _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
   run -127 env BDW_BD_BIN=/nonexistent-bd-xyz "$BDW" show un-x
   [ "$status" -eq 127 ]
   [[ "$output" == *"not found"* ]]
+}
+
+# ---------- grill-status-watch.sh（sc-bka: STATUS poll 通知・read-only watcher）----------
+# 無限監視ループ（loop + sleep）は叩かず、load-bearing な抽出/判定の seam（--extract / --classify / --fetch）を
+# 合成 JSON で決定論的に検証する（実 bd を叩かない＝既存スタブ流儀に倣う）。STATUS の SSOT は sc-qos 成果物。
+
+@test "grill-status-watch(--extract): notes 最後の STATUS 行を抽出（複数 STATUS は last を採る）" {
+  run bash "$WATCH" --extract <<<'[{"notes":"決定: A\nSTATUS: grilling (1/3)\n決定: B\nSTATUS: grilling (2/3)"}]'
+  [ "$status" -eq 0 ]
+  [[ "$output" == "STATUS: grilling (2/3)" ]]
+}
+
+@test "grill-status-watch(--extract): notes が null なら no-notes（落ちない）" {
+  run bash "$WATCH" --extract <<<'[{"notes":null}]'
+  [ "$status" -eq 0 ]
+  [[ "$output" == "no-notes" ]]
+}
+
+@test "grill-status-watch(--extract): notes フィールド欠如でも no-notes（bd の空 notes 省略・verified）" {
+  run bash "$WATCH" --extract <<<'[{"id":"sc-x","title":"t"}]'
+  [ "$status" -eq 0 ]
+  [[ "$output" == "no-notes" ]]
+}
+
+@test "grill-status-watch(--extract): notes はあるが STATUS 行が無ければ no-status" {
+  run bash "$WATCH" --extract <<<'[{"notes":"決定: A のみ（STATUS 未記入）"}]'
+  [ "$status" -eq 0 ]
+  [[ "$output" == "no-status" ]]
+}
+
+@test "grill-status-watch(--classify): done / blocked は terminal・grilling は ongoing" {
+  run bash "$WATCH" --classify "STATUS: done — 全 facet 確定"
+  [[ "$output" == "terminal" ]]
+  run bash "$WATCH" --classify "STATUS: blocked — 要admin: X"
+  [[ "$output" == "terminal" ]]
+  run bash "$WATCH" --classify "STATUS: grilling (1/3)"
+  [[ "$output" == "ongoing" ]]
+}
+
+# 回帰（sc-bka F1/F3）: 終端判定は canonical の STATUS 値（`STATUS:` 直後のキーワード）に前方アンカーする。
+# grilling 行の自由文末尾に done/blocked の語が混ざっても terminal 誤判定してはならない
+# （部分一致 *done*|*blocked* だと早期 exit 0 して watcher が黙って死ぬ）。
+@test "grill-status-watch(--classify): grilling 行 prose の done/blocked を terminal 誤判定しない（回帰）" {
+  run bash "$WATCH" --classify "STATUS: grilling — facet done で確認待ち"
+  [[ "$output" == "ongoing" ]]
+  run bash "$WATCH" --classify "STATUS: grilling (2/3) — A は done だが残り 1"
+  [[ "$output" == "ongoing" ]]
+  run bash "$WATCH" --classify "STATUS: grilling — blocked な検討事項を整理"
+  [[ "$output" == "ongoing" ]]
+  # 逆: blocked 理由文に done が混ざっても、先頭キーワードが blocked なら terminal を維持する。
+  run bash "$WATCH" --classify "STATUS: blocked — 要admin: done の facet 残り"
+  [[ "$output" == "terminal" ]]
+}
+
+# 回帰（sc-bka F2/F5/F6）: bd が配列でない error-object / notes 非文字列 / 壊れた JSON を stdout に
+# 返しても extract_status は jq を非ゼロ終了させず no-notes に潰す（set -e 下で loop を殺さない＝acceptance(4)）。
+@test "grill-status-watch(--extract): bd error-object（非配列）は no-notes・jq を落とさない（回帰）" {
+  run bash "$WATCH" --extract <<<'{"error":"no issues found matching the provided IDs","schema_version":1}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == "no-notes" ]]
+}
+
+@test "grill-status-watch(--extract): notes が非文字列（数値）でも no-notes・落ちない（回帰）" {
+  run bash "$WATCH" --extract <<<'[{"notes":123}]'
+  [ "$status" -eq 0 ]
+  [[ "$output" == "no-notes" ]]
+}
+
+@test "grill-status-watch(--extract): 壊れた JSON（parse error）でも no-notes・落ちない（回帰）" {
+  run bash "$WATCH" --extract <<<'garbage not json'
+  [ "$status" -eq 0 ]
+  [[ "$output" == "no-notes" ]]
+}
+
+# 回帰（sc-bka F4）: watch_loop の通知・自己終了（受入1・3 の core）を 1 周で決定論的に検証する。
+# GRILL_WATCH_JSON_FILE フックで固定 JSON を返し、interval=0 で 1 周だけ回す（timeout 併用で安全網）。
+@test "grill-status-watch(loop): terminal STATUS を 1 周で検知し通知して exit 0 自己終了（受入3）" {
+  f="$(mktemp)"
+  printf '%s' '[{"notes":"STATUS: blocked — 要admin: 設計確認"}]' > "$f"
+  run timeout 5 env GRILL_WATCH_JSON_FILE="$f" bash "$WATCH" sc-x 0
+  rm -f "$f"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[sc-x] STATUS changed: STATUS: blocked — 要admin: 設計確認"* ]]
+}
+
+@test "grill-status-watch(--fetch): GRILL_WATCH_JSON_FILE フックで bd を叩かず STATUS を取る（fetch seam）" {
+  f="$(mktemp)"
+  printf '%s' '[{"notes":"STATUS: blocked — 要admin: 設計確認"}]' > "$f"
+  run env GRILL_WATCH_JSON_FILE="$f" bash "$WATCH" --fetch sc-x
+  rm -f "$f"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "STATUS: blocked — 要admin: 設計確認" ]]
+}
+
+@test "grill-status-watch: 引数なしは usage を出す（exit 0・READ-only 強調）" {
+  run bash "$WATCH"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"READ-only"* ]]
+  [[ "$output" == *"grill-status-watch.sh"* ]]
+}
+
+# GRILL_WATCH_JSON_CMD seam: poll の度に「次の行の JSON」を返すスクリプトを生成する。
+# 状態ファイルにカウンタを持たせ、呼ばれる度に NL 区切りの k 行目を stdout へ出す（k++）。
+# これで grilling→grilling(n+1)→done のような非終端遷移・dedup を 1 プロセス内で再現する（sc-bka F1/F4/F2）。
+_make_step_cmd() {
+  local sf="$1"; shift            # 状態ファイル（カウンタ保持）
+  local lines="$1"                # NL 区切りの JSON シーケンス（ヒアドキュメント等で渡す）
+  local lf; lf="$(mktemp)"
+  # 末尾改行を必ず付ける（wc -l は改行数を数えるため、改行無し末尾行が欠落するのを防ぐ）。
+  printf '%s\n' "$lines" > "$lf"
+  printf '0' > "$sf"
+  # 末尾行を超えたら最終行を返し続ける（loop が最後の STATUS で安定する）。
+  printf 'i=$(cat %q); n=$(wc -l < %q); [ "$i" -lt "$n" ] || i=$((n-1)); sed -n "$((i+1))p" %q; echo $((i+1)) > %q' \
+    "$sf" "$lf" "$lf" "$sf"
+}
+
+# 回帰（sc-bka F1/F4）: 非終端 STATUS の変化を通知しつつ loop を継続し、終端で初めて exit 0 する。
+# grilling(1/3)→grilling(2/3)→done の 3 遷移を JSON_CMD で順送りし、3 通知＋最後に自己終了を固定する。
+@test "grill-status-watch(loop): 非終端変化を逐次通知し継続、終端 done で exit 0（F1/F4 変化検知）" {
+  sf="$(mktemp)"
+  cmd="$(_make_step_cmd "$sf" \
+'[{"notes":"STATUS: grilling (1/3)"}]
+[{"notes":"STATUS: grilling (2/3)"}]
+[{"notes":"STATUS: done — 全 facet 確定"}]')"
+  run timeout 5 env GRILL_WATCH_JSON_CMD="$cmd" bash "$WATCH" sc-x 0
+  rm -f "$sf"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[sc-x] STATUS changed: STATUS: grilling (1/3)"* ]]
+  [[ "$output" == *"[sc-x] STATUS changed: STATUS: grilling (2/3)"* ]]
+  [[ "$output" == *"[sc-x] STATUS changed: STATUS: done — 全 facet 確定"* ]]
+  # 通知は 3 行ちょうど（grilling の dedup 漏れや余計な再通知が無い）。
+  [ "$(printf '%s\n' "$output" | grep -c 'STATUS changed:')" -eq 3 ]
+}
+
+# 回帰（sc-bka F1/F4 dedup）: 同一 STATUS が連続したら 2 度目以降は通知しない。
+# grilling(1/3)×2 → done と順送りし、grilling は 1 回しか通知されないことを固定する。
+@test "grill-status-watch(loop): 同一 STATUS 連続は再通知しない dedup（F1/F4）" {
+  sf="$(mktemp)"
+  cmd="$(_make_step_cmd "$sf" \
+'[{"notes":"STATUS: grilling (1/3)"}]
+[{"notes":"STATUS: grilling (1/3)"}]
+[{"notes":"STATUS: done — 確定"}]')"
+  run timeout 5 env GRILL_WATCH_JSON_CMD="$cmd" bash "$WATCH" sc-x 0
+  rm -f "$sf"
+  [ "$status" -eq 0 ]
+  # grilling は 1 回・done は 1 回（連続同値の grilling を 2 度通知しない）。
+  [ "$(printf '%s\n' "$output" | grep -c 'STATUS changed: STATUS: grilling (1/3)')" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -c 'STATUS changed: STATUS: done')" -eq 1 ]
+}
+
+# 回帰（sc-bka F2）: bd の一過性失敗で no-notes に潰れても、復帰時に同一 STATUS を spurious re-notify しない。
+# grilling → no-notes(bd 失敗) → 同 grilling → done と順送りし、grilling 通知は 1 回だけであることを固定する。
+@test "grill-status-watch(loop): bd 一過性失敗→復帰で変化していない STATUS を再通知しない（F2）" {
+  sf="$(mktemp)"
+  cmd="$(_make_step_cmd "$sf" \
+'[{"notes":"STATUS: grilling (1/3)"}]
+{"error":"transient bd failure"}
+[{"notes":"STATUS: grilling (1/3)"}]
+[{"notes":"STATUS: done — 確定"}]')"
+  run timeout 5 env GRILL_WATCH_JSON_CMD="$cmd" bash "$WATCH" sc-x 0
+  rm -f "$sf"
+  [ "$status" -eq 0 ]
+  # bd 失敗をまたいでも grilling は 1 回しか通知されない（no-notes を遷移として扱わない）。
+  [ "$(printf '%s\n' "$output" | grep -c 'STATUS changed: STATUS: grilling (1/3)')" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -c 'STATUS changed: STATUS: done')" -eq 1 ]
+}
+
+# 回帰（sc-bka F3）: 非数値 interval は loop 突入前に弾く（return 2）。sleep で set -e クラッシュしない。
+@test "grill-status-watch(loop): 非数値 interval を弾き死なない（F3・acceptance4 拡張）" {
+  f="$(mktemp)"
+  printf '%s' '[{"notes":"STATUS: grilling (1/3)"}]' > "$f"
+  run timeout 5 env GRILL_WATCH_JSON_FILE="$f" bash "$WATCH" sc-x abc
+  rm -f "$f"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"interval must be a non-negative integer: abc"* ]]
+}
+
+# 回帰（sc-bka 確認ラウンド）: 単一ダッシュの未知オプション（-x / -fetch typo 等）を unknown option として
+# 弾く。`--*)` だけだと単一ダッシュが id 扱いで watch_loop に落ち、実 bd を叩いて無音で無限ブロックする。
+@test "grill-status-watch: 単一ダッシュの未知オプション(-x)を弾く（typo で無限ループに落ちない）" {
+  run timeout 5 bash "$WATCH" -x
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unknown option: -x"* ]]
 }
