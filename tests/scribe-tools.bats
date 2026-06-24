@@ -17,6 +17,7 @@ setup() {
   LIB="$SCRIPTS/lib/scribe-lib.sh"
   BDW="$SCRIPTS/bdw"
   WATCH="$SCRIPTS/grill-status-watch.sh"
+  PROBE="$SCRIPTS/scribe-env-probe.sh"
   HOOKS="$SCRIPTS/hooks"
   HOOKS_JSON="$REPO_ROOT/hooks/hooks.json"
   # bd を実在検証スタブへ差し替え（実 graph 不要）。
@@ -58,7 +59,7 @@ _mk_main_and_linked() {
 
 # ---------- bash -n（全 script 構文）----------
 @test "bash -n: 全 script が構文 OK" {
-  for f in "$SPAWN" "$GATE" "$SELFTEST" "$CLEANUP" "$GUARD" "$BDW" "$SCRIPTS/lib/scribe-lib.sh"; do
+  for f in "$SPAWN" "$GATE" "$SELFTEST" "$CLEANUP" "$GUARD" "$BDW" "$PROBE" "$SCRIPTS/lib/scribe-lib.sh"; do
     run bash -n "$f"
     [ "$status" -eq 0 ]
   done
@@ -198,6 +199,7 @@ _mk_main_and_linked() {
   [[ "$output" != *"bdw"* ]]
   [[ "$output" != *"cell-quality"* ]]
   [[ "$output" != *"selftest-"* ]]
+  [[ "$output" != *"scribe-env-probe"* ]]
   # consult テンプレの肝（read-only 規律・記憶系のみ write）は出る。
   [[ "$output" == *"設計議論"* ]]
   [[ "$output" == *"read-only"* ]]
@@ -301,6 +303,23 @@ _mk_main_and_linked() {
   [[ "$output" == *"selfTestCmd"* ]]                # selfTestCmd 必須の明示
   [[ "$output" == *"autoFix"* ]]                    # autoFix=true 固定（review→自動 fix を回す）
   [[ "$output" == *"doImplement"* ]]                # doImplement/doPlan=false 固定（gate review のみ・実装/計画しない）
+}
+
+# sc-sau: worker prompt に env 健全性 gate（scribe-env-probe.sh の plant/verify + STATUS:blocked 配線）が焼ける。
+# folio 0264028f の「env 劣化で self-verify 誤 PASS」を worker 自身が done 前に検出する fail-closed gate。
+@test "spawn(sc-sau): worker prompt に env-probe gate（plant/verify/--also-tmp/STATUS:blocked）が焼ける" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"scribe-env-probe.sh"* ]]        # env 健全性 probe helper
+  [[ "$output" == *"plant"* ]]                       # sentinel を植える
+  [[ "$output" == *"verify"* ]]                      # 別 Bash 呼出しで読み戻す（cross-call 永続）
+  [[ "$output" == *"--also-tmp"* ]]                  # /tmp 面（folio の現場）も検査
+  [[ "$output" == *"ENV_DEGRADED"* ]]                # 劣化判定で分岐
+  [[ "$output" == *"STATUS: blocked"* ]]             # 劣化時は done を申告せず blocked を bdw で書く
+  # review#1 critical 回帰: --base はリテラル HEAD でなく spawn 時点の解決済み SHA を焼く
+  # （HEAD..HEAD=常に 0 commit で健全 worker を誤 blocked にしない・un-k02 同型）。
+  [[ "$output" != *"--base HEAD"* ]]
+  [[ "$output" =~ --base[[:space:]][0-9a-f]{40} ]]
 }
 
 # sc-5wu: build_prompt が焼く scribe plugin script 参照（selftest-args/bdw）が相対パスだと、worker cwd=
@@ -1812,4 +1831,135 @@ _make_step_cmd() {
   run timeout 5 bash "$WATCH" -x
   [ "$status" -eq 2 ]
   [[ "$output" == *"unknown option: -x"* ]]
+}
+
+# ============================================================
+# scribe-env-probe.sh（sc-sau・worker env 健全性 fail-closed probe）
+# folio incident 0264028f: CC infra の Bash 非永続で self-verify が誤 PASS した。本 probe は
+# plant→（別 Bash 呼出しの）verify で cross-call 永続を検出し、--base で 0-commit を検出する。
+# ============================================================
+
+# probe 用の hermetic な worktree+tmp-sentinel 環境。stdout に "<worktree>\t<tmp-sentinel>"。
+_mk_probe_env() {
+  local wt tmp
+  wt="$(cd "$(mktemp -d)" && pwd -P)"
+  tmp="$(mktemp -u)"   # 未作成パス（plant が作る）
+  printf '%s\t%s\n' "$wt" "$tmp"
+}
+
+@test "env-probe: 未知モードを fail-loud（plant|verify 以外）" {
+  run "$PROBE" frob --worktree /tmp
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"未知のモード"* ]]
+}
+
+@test "env-probe: 引数なしで usage（非0）" {
+  run "$PROBE"
+  [ "$status" -ne 0 ]
+}
+
+@test "env-probe(plant): --worktree 必須" {
+  run "$PROBE" plant
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--worktree"* ]]
+}
+
+@test "env-probe(plant): token を stdout に出し sentinel を書く" {
+  pe="$(_mk_probe_env)"; wt="${pe%%$'\t'*}"; tmp="${pe#*$'\t'}"
+  run env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=TOK123 "$PROBE" plant --worktree "$wt"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TOK123"* ]]
+  [ "$(cat "$wt/.scribe-envprobe")" = "TOK123" ]
+  [ "$(cat "$tmp")" = "TOK123" ]
+  rm -rf "$wt" "$tmp"
+}
+
+@test "env-probe(verify): 健全（sentinel 残存・token 一致）→ ENV_OK exit 0 + sentinel 掃除" {
+  pe="$(_mk_probe_env)"; wt="${pe%%$'\t'*}"; tmp="${pe#*$'\t'}"
+  env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=TOK123 "$PROBE" plant --worktree "$wt" >/dev/null
+  run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token TOK123 --worktree "$wt" --also-tmp
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ENV_OK"* ]]
+  [ ! -f "$wt/.scribe-envprobe" ]   # 健全時は sentinel を掃除する
+  rm -rf "$wt" "$tmp"
+}
+
+@test "env-probe(verify): worktree sentinel 消失（cross-call 非永続）→ ENV_DEGRADED exit 3" {
+  pe="$(_mk_probe_env)"; wt="${pe%%$'\t'*}"; tmp="${pe#*$'\t'}"
+  env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=TOK123 "$PROBE" plant --worktree "$wt" >/dev/null
+  rm -f "$wt/.scribe-envprobe"   # 呼出し間で消えた状況を模す
+  run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token TOK123 --worktree "$wt"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"ENV_DEGRADED"* ]]
+  [[ "$output" == *"非永続"* ]]
+  rm -rf "$wt" "$tmp"
+}
+
+@test "env-probe(verify): token 不一致 → ENV_DEGRADED exit 3" {
+  pe="$(_mk_probe_env)"; wt="${pe%%$'\t'*}"; tmp="${pe#*$'\t'}"
+  env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=TOK123 "$PROBE" plant --worktree "$wt" >/dev/null
+  run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token WRONG --worktree "$wt"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"ENV_DEGRADED"* ]]
+  rm -rf "$wt" "$tmp"
+}
+
+@test "env-probe(verify): --also-tmp で tmp sentinel 消失 → ENV_DEGRADED exit 3（folio の現場面）" {
+  pe="$(_mk_probe_env)"; wt="${pe%%$'\t'*}"; tmp="${pe#*$'\t'}"
+  env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=TOK123 "$PROBE" plant --worktree "$wt" >/dev/null
+  rm -f "$tmp"   # /tmp 面だけ消えた
+  run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token TOK123 --worktree "$wt" --also-tmp
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"tmp"* ]]
+  rm -rf "$wt"
+}
+
+@test "env-probe(verify): --token 必須" {
+  wt="$(cd "$(mktemp -d)" && pwd -P)"
+  run "$PROBE" verify --worktree "$wt"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--token"* ]]
+  rm -rf "$wt"
+}
+
+@test "env-probe(verify --base): base..HEAD が 0 commit → ENV_DEGRADED exit 4" {
+  read -r main linked < <(_mk_main_and_linked)
+  base="$(git -C "$main" rev-parse HEAD)"   # linked は init commit のみ＝base と同一 → 0 commit
+  tmp="$(mktemp -u)"
+  env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=T "$PROBE" plant --worktree "$linked" >/dev/null
+  run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token T --worktree "$linked" --base "$base"
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"0 commit"* ]]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main" "$tmp"
+}
+
+@test "env-probe(verify --base): commit あり → ENV_OK exit 0" {
+  read -r main linked < <(_mk_main_and_linked)
+  base="$(git -C "$linked" rev-parse HEAD)"
+  git -C "$linked" commit -q --allow-empty -m work   # base..HEAD に 1 commit
+  tmp="$(mktemp -u)"
+  env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=T "$PROBE" plant --worktree "$linked" >/dev/null
+  run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token T --worktree "$linked" --base "$base"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ENV_OK"* ]]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main" "$tmp"
+}
+
+# review#4/#7 回帰: degraded（exit 3）でも trap で sentinel を残さない（worktree/tmp を汚さない）。
+@test "env-probe(verify): degraded でも trap で sentinel を残さない（git add 巻き込み防止）" {
+  pe="$(_mk_probe_env)"; wt="${pe%%$'\t'*}"; tmp="${pe#*$'\t'}"
+  env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=TOK123 "$PROBE" plant --worktree "$wt" >/dev/null
+  run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token WRONG --worktree "$wt" --also-tmp
+  [ "$status" -eq 3 ]
+  [ ! -f "$wt/.scribe-envprobe" ]   # degraded 経路でも trap EXIT が掃除する
+  [ ! -f "$tmp" ]
+  rm -rf "$wt"
+}
+
+# review#4 回帰: env-probe sentinel が .gitignore で ignore され worker の git add に巻き込まれない。
+@test "gitignore: .scribe-envprobe を ignore する（worker の git add 巻き込み防止）" {
+  run git -C "$REPO_ROOT" check-ignore .scribe-envprobe
+  [ "$status" -eq 0 ]
 }
