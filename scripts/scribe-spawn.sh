@@ -338,6 +338,11 @@ WORKTREE="$REPO/.worktrees/$BRANCH"             # <repo>/.worktrees/spawn/<id>-H
 
 # --- 3. task prompt 生成（protocol.md §2）---
 build_prompt() {
+  # env-probe の base は spawn 時点の commit を SHA へ凍結して焼く。既定 BASE="HEAD" をリテラルで
+  # 焼くと verify 時の `HEAD..HEAD`=常に 0 commit になり健全 worker を誤 blocked にする（un-k02 同型・
+  # review#1 critical）。scribe_git で GIT_DIR/GIT_WORK_TREE 継承を隔離して解決（sc-e1w）。
+  local _probe_base
+  _probe_base="$(scribe_git -C "$REPO" rev-parse "$BASE" 2>/dev/null || printf '%s' "$BASE")"
   cat <<PROMPT
 あなたは scribe worker cell（issue $ID）。この issue を end-to-end で完遂する。応答は日本語。
 
@@ -352,6 +357,10 @@ build_prompt() {
   自己点検 args は \`"$SCRIPT_DIR/scribe-selftest-args.sh" --worktree "$WORKTREE" --anchor "$ANCHOR" --self-test <selfTestCmd> $ID\` で 1 コマンド化済み
   （\`doImplement\`/\`doPlan\`=false・\`autoFix\`=true・\`selfTestCmd\` 必須を固定。手作業で args を組まない。**\`--anchor\` は必須**＝bd graph 所在は worktree cwd では解決しないため省くと die）。
 - **報告に WF 返り値 JSON + \`receivedArgs\` を必須**で含める（args 解決の成否を admin が一次監査できるように）。
+- **env 健全性 gate（fail-closed・CC infra の Bash 非永続を検出／folio 0264028f）**: self-report（cell-quality 呼出し・bd close）の前に env 劣化を検出する。cell-quality の self-test fail-closed は test の「失敗」しか守らず、env 劣化による「誤 PASS」は塞げないため。
+  - 着手の最初に**別 Bash 呼出し**で \`"$SCRIPT_DIR/scribe-env-probe.sh" plant --worktree "$WORKTREE"\` を実行し、**出力 token を文脈に控える**（shell 変数は Bash 呼出し間で消えるので文字列として控える）。
+  - **self-report の直前**に**別 Bash 呼出し**で \`"$SCRIPT_DIR/scribe-env-probe.sh" verify --token <控えた token> --worktree "$WORKTREE" --base $_probe_base --also-tmp\` を実行する。
+  - \`ENV_DEGRADED\`（呼出し間で sentinel 消失／base..HEAD が 0 commit）なら **done を申告せず** \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $ID --append-notes "STATUS: blocked — env degraded（CC infra の Bash 非永続・要admin）: <ENV_DEGRADED の理由>"\` を書いて停止する（回避策を打たない＝worker では直せない・admin が reliable env で引き取る）。
 - bd write は必ず \`bdw\` 経由で直列化: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" <subcmd>\`（自 issue の進捗のみ）。
 
 ## 禁止（protocol.md §2/§3）
