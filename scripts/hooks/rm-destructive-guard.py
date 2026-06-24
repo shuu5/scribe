@@ -59,8 +59,16 @@ import time
 # ロジックを複製しており、トークナイザを直す際に rm と git の検出が静かに乖離するセキュリティ境界の保守
 # ハザードだった（un-0gu F13）。これを import 一本化で解消。
 # lib ロード不能 → fail-open（guard 無効化を loud に通知。複雑な guard が全 Bash を brick するのを防ぐ）。
+# cmdtokens consume preamble（テンプレ ~/.claude/plugins/cmdtokens/templates/cmdtokens-consume.py を inline）。
+# canonical cmdtokens を解決して import するだけ。CMDTOKENS_LIB で上書き可（既定 = plugin 標準配置）。
+# 非絶対値は os.path.isabs で弾き既定へ落とす＝非空の相対値が expanduser 後も相対のまま sys.path に入り cwd
+# 相対解決され、警告すら出ず誤った cmdtokens.py を load する silent poison import を回避（orch-a9y で検出した欠陥の修正）。
+_CMDTOKENS_DEFAULT_LIB = os.path.expanduser("~/.claude/plugins/cmdtokens/lib")
+_cmdtokens_lib = os.path.expanduser(os.environ.get("CMDTOKENS_LIB") or _CMDTOKENS_DEFAULT_LIB)
+if not os.path.isabs(_cmdtokens_lib):  # 非絶対(空/相対/whitespace) → cwd 相対 poison を避け既定へ
+    _cmdtokens_lib = _CMDTOKENS_DEFAULT_LIB
 try:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib"))
+    sys.path.insert(0, _cmdtokens_lib)
     from cmdtokens import (
         SHELLS, VAR_OR_SUBST,
         parse_statements, peel, shlex_safe, strip_redirections, track_cd,
