@@ -260,11 +260,22 @@ PROMPT
   ENV_LINE="export SCRIBE_ROLE=consult"
   # consult は --bd-id を渡さない設計のため、放置すると cld-spawn の window 名が汎用命名（git 状態由来の
   # wt-<repo>-<branch>-…）へ落ち、fleet-monitor/人間が consult を判別できない（admin C5 live finding・un-01h）。
-  # window 名は consult-HHMMSS（毎回新規）にし prefix `consult-` で識別する。固定 `consult` は cld-spawn の
-  # find_existing_window が完全一致で既存 window を reuse → exit 0（偽成功・env-file 非 source で
-  # SCRIBE_ROLE=consult 未注入）する fail-open を招く（gate wf_d3777d26 CONFIRMED）。あわせて --force-new で
-  # reuse 経路を構造的に封鎖し、能動起動の入口が必ず新セッションを立てることを保証する。
-  CONSULT_WINDOW="consult-$(date +%H%M%S)"
+  # window 名の規約（prefix `consult-` で識別・fleet-monitor 照合 / sc-3pq L3=A案・grill 確定 2026-06-24）:
+  #   - grill-consult（--context 指定で grill-issue=$TOPIC が在る）→ consult-<grill-issue>。wt-<id> と同型の
+  #     id 完全一致命名にし、fleet-monitor / degraded watcher が「どの grill-issue の consult が沈黙したか」を
+  #     一意に紐付けられるようにする。grill-issue は in_progress（grill-consult が bd notes へ決定を書く）ゆえ
+  #     board に正しく点灯する。
+  #   - plain consult（grill-issue 無し）→ consult-HHMMSS（id が無いので時刻で一意化）。read-only の議題参照
+  #     issue は in_progress とは限らず board を誤点灯しうるため id 紐付けしない。
+  # いずれも固定 `consult`（定数）は避ける: cld-spawn の find_existing_window が完全一致で既存 window を reuse →
+  #   exit 0（偽成功・env-file 非 source で SCRIBE_ROLE=consult 未注入）する fail-open を招く（gate wf_d3777d26
+  #   CONFIRMED）。reuse の構造封鎖は下記 --force-new が担う（window 名の毎回一意性に依存しない＝同一 grill-issue の
+  #   中断リカバリ再 spawn〔§7〕でも --force-new が新規セッションを保証する）。
+  if [[ -n "$CONTEXT_FILE" && -n "$TOPIC" ]]; then
+    CONSULT_WINDOW="consult-$TOPIC"            # grill-consult: id 紐付け（fleet-monitor 照合・sc-3pq A案）
+  else
+    CONSULT_WINDOW="consult-$(date +%H%M%S)"   # plain consult: id 無し→時刻フォールバック
+  fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     if [[ -n "$CONTEXT_FILE" ]]; then
@@ -280,7 +291,7 @@ PROMPT
     echo "[plan] $CLD_SPAWN --cd $ANCHOR --model $MODEL --window-name $CONSULT_WINDOW --force-new --env-file \"\$ENV_FILE\" \"<consult テンプレ本文>\""
     echo "[plan] rm -f \"\$ENV_FILE\"   # source 済みなので spawn 後に消す（anchor に残さない）"
     echo "[plan] (consult は worktree を作らない / --bd-id を渡さない / worker prompt を出さない＝role 契約)"
-    echo "[plan] window 名 = --window-name $CONSULT_WINDOW（毎回新規・prefix consult- で識別）+ --force-new（reuse 経路封鎖=偽成功/SCRIBE_ROLE 未注入防止・un-01h gate）"
+    echo "[plan] window 名 = --window-name $CONSULT_WINDOW（grill-issue 在りは consult-<grill-issue> で id 紐付け・無しは consult-HHMMSS・prefix consult- で識別・sc-3pq A案）+ --force-new（reuse 経路封鎖=偽成功/SCRIBE_ROLE 未注入防止・un-01h gate）"
     echo "[plan] --- consult テンプレ（role-context-spec §2.3）---"
     build_consult_prompt | sed 's/^/         | /'
     exit 0
