@@ -71,3 +71,36 @@ settings は worktree の git exclude(`info/exclude`)へ冪等追記して ephem
 - ✅ docs(protocol.md)へ socat 前提 + opt-in 反映済: `docs/protocol.md` の「sandbox opt-in」節が `bubblewrap`+`socat` 必須・apparmor userns 緩和のトレードオフを明記。
 
 この spike-record に未完項目は残っていない（本番反映は上記「本番反映(実装済み: direct-gen)」節＝production・後続の最小化は sc-da0）。
+
+## sandbox 内の実操作 e2e (sc-7n1)
+
+spike の境界 assert(上表 a1/a2/b1/b2)は**生ファイル書込み**までだった。`verify-sandbox-e2e.sh` は
+その先 — sandboxed worker の**実操作**が allowWrite 境界を通って*永続*するか — を埋める:
+
+- **git commit → 共有 .git に永続**（linked worktree の `.git` は `$ANCHOR/.git`＝cwd の外だが、CC
+  sandbox 既定で writable。allowWrite への列挙不要を**実証**＝gen-sandbox の前提が正しいことを裏取り）。
+- **bd close → `<ANCHOR>/.beads` に永続**（明示 allowWrite + lock_dir grant が効く）。
+- **block-side control → allowWrite 外（anchor 直下）への書込みが外壁に拒否される**（spike の b1 を 1 点継承）。
+  これが無いと sandbox を無効化しても上 2 つは PASS し『境界を*通って*永続』を実証できない（boundary-vacuous）。
+  3 つ揃って初めて「外壁が genuine に効いた状態で実操作が永続する」を意味する。
+
+方式は spike 同様 **実 Claude Code(`claude -p`)を worktree で起動**し CC 自身の bwrap を適用させる
+（自前 bwrap を組まない＝CC 実体との乖離なし）。完全 hermetic（`mktemp -d` の使い捨て temp anchor +
+独立 bd 台帳。実 scribe の repo/.beads は触らない）。前提が欠ければ rc=77 で skip。
+
+```
+bash scripts/sandbox-spike/verify-sandbox-e2e.sh          # 単発（deps 要・PASS=3 FAIL=0 が green）
+SCRIBE_SANDBOX_E2E=1 bats tests/scribe-tools.bats         # 回帰の opt-in lane で実走
+```
+
+既定の `bats tests/scribe-tools.bats` は CC を起動せずハーネスの契約のみ host 非依存に lock する。
+
+### ⚠️ 注意: sandbox 下で `git add -A` は失敗する（sc-yqa・P2 bug）
+
+e2e 実証中に判明（verified）: CC sandbox は worker の cwd 直下に既知 dotfile（`.bash_profile`
+`.bashrc` `.gitconfig` `.gitmodules` `.profile` `.zshrc` `.mcp.json` `.idea` `.vscode` 等）を
+**`/dev/null` character special device** として null-mount し無害化する。git は device の add を拒否する
+ため、**sandbox 内の `git add -A` / `git add .` は rc=128 で失敗** → staging 空 → commit が空/失敗する。
+本ハーネスも `git add -A` を**特定 path add に変更**して回避している（上記行 61 の「worker の `git add -A`
+で巻き込まない」前提は sandbox 下では成立しない＝worker 規約側の手当てが要る・追跡 `bd sc-yqa`）。
+`git add <特定path>` は成功する。

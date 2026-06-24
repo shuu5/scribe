@@ -18,6 +18,7 @@ setup() {
   BDW="$SCRIPTS/bdw"
   WATCH="$SCRIPTS/grill-status-watch.sh"
   PROBE="$SCRIPTS/scribe-env-probe.sh"
+  E2E="$SCRIPTS/sandbox-spike/verify-sandbox-e2e.sh"
   HOOKS="$SCRIPTS/hooks"
   HOOKS_JSON="$REPO_ROOT/hooks/hooks.json"
   # bd を実在検証スタブへ差し替え（実 graph 不要）。
@@ -621,6 +622,113 @@ _mk_main_and_linked() {
   run bash -c "ls \"$wt/.claude/\".settings.* 2>/dev/null | wc -l | tr -d ' '"
   [ "$output" = "0" ]
   git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+}
+
+# ---------- sandbox e2e: sandboxed worker の git commit + bd close 永続（sc-7n1）----------
+# 上の sandbox テスト(108-165, 572-624)は dry-run plan / gen JSON / 実 materialization までを pin するが、
+# sandboxed worker の *実操作*（git commit が共有 .git に / bd close が .beads に永続するか）は未 assert
+# だった（spike の run-spike.sh は deadcode 削除済・commit 71bf862）。verify-sandbox-e2e.sh が実 CC
+# (`claude -p`)を起動してこれを埋める(sc-7n1)。本 bats は **CC を起動せず**ハーネスの契約を host 非依存に
+# lock する（実 e2e は重い＋auth/deps 依存ゆえ既定 suite に入れない。deps と SCRIBE_SANDBOX_E2E=1 が
+# 揃った時のみ末尾の opt-in lane が実走する）。実害: 片側 assert 退行・vacuous guard 欠落・dotfile
+# null-mount 回避(sc-yqa)の退行を検出できないと「sandbox で動くつもりの worker」が空 commit を出す。
+# ハーネスパス $E2E は setup() で定義（$SCRIPTS は setup() 後にしか確定しないため top-level 不可）。
+
+@test "sandbox-e2e(sc-7n1): ハーネスが存在し実行可能・構文健全" {
+  [ -x "$E2E" ]
+  run bash -n "$E2E"
+  [ "$status" -eq 0 ]
+}
+
+@test "sandbox-e2e(sc-7n1): git commit と bd close の両 verdict と実 claude -p 呼出を持つ（片側退行・自前 bwrap 化を捕捉）" {
+  # 同じ文字列がコメントにも在るため **非コメント行限定** で verdict と実 claude -p 呼出を pin する。
+  # 緩い substring 照合だと実コードを消してもコメント残置で GREEN になる（gate sc-7n1 blocking#2）。
+  run grep -cE '^[^#]*verdict (PASS|FAIL) "git commit:' "$E2E"
+  [ "$status" -eq 0 ]; [ "$output" -ge 1 ]
+  run grep -cE '^[^#]*verdict (PASS|FAIL) "bd close:' "$E2E"
+  [ "$status" -eq 0 ]; [ "$output" -ge 1 ]
+  run grep -cE '^[^#]*claude -p' "$E2E"        # 実呼出行（真の e2e・自前 bwrap モデルでない）
+  [ "$status" -eq 0 ]; [ "$output" -ge 1 ]
+}
+
+@test "sandbox-e2e(sc-7n1): block-side control を実ファイル artifact で assert（narration 耐性・順序非依存・gate round2/3）" {
+  # allow-side(commit/bd close)だけだと sandbox を無効化しても PASS する。外壁が genuine に効くことを 1 点 assert する。
+  run grep -cE '^[^#]*verdict (PASS|FAIL) "block-side control:' "$E2E"
+  [ "$status" -eq 0 ]; [ "$output" -ge 1 ]
+  # WORKER_CMD は allowWrite 外(OUTSIDE)へ書込みを試み、worker 自身が成否を判定して cwd 内の実ファイル INBOUND に blocked/wrote を残す。
+  run grep -n 'WORKER_CMD=' "$E2E"
+  [[ "$output" == *"\$OUTSIDE"* ]]
+  [[ "$output" == *"printf wrote > '\$INBOUND'"* ]]
+  [[ "$output" == *"printf blocked > '\$INBOUND'"* ]]
+  # printf(失敗が期待値)の後は `&&` でなく `;` で必ず自己判定へ繋ぐ（AND ゲートすると INBOUND が永久に書かれず PASS=3 不能・gate round2#2）。
+  [[ "$output" == *"2>/dev/null; ["* ]]
+  [[ "$output" != *"2>/dev/null && ["* ]]
+  # OUTSIDE は anchor 直下(allowWrite 外)・INBOUND は cwd($WT)内(sandbox writable=real artifact を残せる)。
+  run grep -n 'OUTSIDE=' "$E2E"; [[ "$output" == *"ANCHOR"* ]]
+  run grep -n 'INBOUND=' "$E2E"; [[ "$output" == *"WT"* ]]
+  # narration 耐性(gate round3#1): block_result は stdout grep でなく **INBOUND 実ファイルの cat** から得る(command-echo に汚染されない)。
+  run grep -cE 'block_result="\$\(cat "\$INBOUND"' "$E2E"
+  [ "$status" -eq 0 ]; [ "$output" -ge 1 ]
+  # PASS は『INBOUND==blocked かつ OUTSIDE 不在』の連言のみ=分岐順非依存(gate round3#2)。INBOUND 空(未実行)→FAIL で vacuous 閉塞。
+  run grep -cE 'block_result" == blocked && ! -e "\$OUTSIDE"' "$E2E"
+  [ "$status" -eq 0 ]; [ "$output" -ge 1 ]
+  run grep -c '実行証跡(INBOUND)なし' "$E2E"
+  [ "$status" -eq 0 ]; [ "$output" -ge 1 ]
+}
+
+@test "sandbox-e2e(sc-7n1): deps 不在は rc=77 skip し bwrap/socat/claude を gate する（host 非依存の回帰を保つ）" {
+  run cat "$E2E"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"exit 77"* ]]
+  [[ "$output" == *"command -v claude"* ]]
+  [[ "$output" == *"command -v bwrap"* ]]
+  [[ "$output" == *"command -v socat"* ]]   # socat 欠如で CC 起動拒否=全 assert 無効化（spike で判明）
+}
+
+@test "sandbox-e2e(sc-7n1): vacuous-PASS guard（token の echo+grep 配線まで）を持つ" {
+  run cat "$E2E"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TOK_GIT="* ]]
+  [[ "$output" == *"TOK_BD="* ]]
+  [[ "$output" == *"vacuous"* ]]
+  # 代入だけでなくガード配線（WORKER_CMD で echo・CC 出力を grep・token 欠落で FAIL 分岐）も pin（gate sc-7n1 minor#3）。
+  run grep -n 'WORKER_CMD=' "$E2E"
+  [[ "$output" == *"echo \$TOK_GIT"* ]]
+  [[ "$output" == *"echo \$TOK_BD"* ]]
+  run grep -cE 'grep -q "\$TOK_(GIT|BD)"' "$E2E"
+  [ "$status" -eq 0 ]; [ "$output" -ge 2 ]
+  run grep -cE '\$(git|bd)_ran" != yes' "$E2E"   # token 欠落→FAIL 分岐（偽 PASS を確実に倒す）
+  [ "$status" -eq 0 ]; [ "$output" -ge 2 ]
+}
+
+@test "sandbox-e2e(sc-7n1): hermetic（mktemp + cleanup trap + 自前 bd init・実台帳を mutate しない）" {
+  run cat "$E2E"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mktemp -d"* ]]
+  [[ "$output" == *"trap cleanup EXIT"* ]]
+  [[ "$output" == *"bd init"* ]]       # temp anchor を自前で初期化（実 scribe .beads を触らない）
+}
+
+@test "sandbox-e2e(sc-7n1): worker の git add は -A でなく特定 path（sc-yqa: sandbox dotfile null-mount 回避を固定）" {
+  # CC sandbox は cwd の dotfile を /dev/null char-dev に null-mount し `git add -A` を rc=128 で落とす(sc-yqa)。
+  # ハーネスの worker コマンド(WORKER_CMD)は marker を特定 add する。-A/. への退行を **WORKER_CMD 行に限定して**禁止
+  # する（ファイル全体には sc-yqa 解説コメントが `git add -A` を含むため、行限定でないと誤 RED になる）。
+  run grep -n 'WORKER_CMD=' "$E2E"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"git add '\$MARKER'"* ]]
+  [[ "$output" != *"git add -A"* ]]
+  [[ "$output" != *"git add ."* ]]
+}
+
+@test "sandbox-e2e(sc-7n1/opt-in live): deps+SCRIBE_SANDBOX_E2E=1 のとき実 e2e が PASS する" {
+  [ "${SCRIBE_SANDBOX_E2E:-0}" = "1" ] || skip "実 e2e は SCRIBE_SANDBOX_E2E=1 のときのみ（実 CC 起動・重い・auth 要）"
+  run timeout 320 bash "$E2E"
+  # ハーネスは deps(claude/bwrap/socat/bd/jq/userns)不足を rc=77 で skip する。bats もそれを skip 扱いにして
+  # 「deps 揃わぬ host で偽 RED」を防ぐ（gate sc-7n1 minor#1: 旧版は claude/bwrap/socat/userns しか pre-gate せず
+  # bd/jq 欠落で rc=77→FAIL になった。dep set を二重化せず rc=77 を一次の skip 源にする）。
+  [ "$status" -eq 77 ] && skip "ハーネスが前提未満で skip(rc=77)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PASS=3 FAIL=0"* ]]   # allow-side 2 + block-side control 1
 }
 
 # ---------- spawn: worker prompt に anchor 絶対パスを焼き込む（un-gjr）----------
