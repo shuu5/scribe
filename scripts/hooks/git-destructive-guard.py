@@ -29,8 +29,17 @@ import re
 import json
 import subprocess
 
+# cmdtokens consume preamble（テンプレ ~/.claude/plugins/cmdtokens/templates/cmdtokens-consume.py を inline）。
+# canonical cmdtokens(cmdtokens plugin の単一 SSOT)を解決して import するだけの薄い層。CMDTOKENS_LIB で
+# 上書き可（既定 = plugin 標準配置）。非絶対値は os.path.isabs で弾き既定へ落とす＝非空の相対値が expanduser
+# 後も相対のまま sys.path に入り cwd 相対解決され、警告すら出ず誤った cmdtokens.py を load する silent poison
+# import を回避（orch-a9y/bd-write-guard の独立 gate で検出した欠陥の修正）。
+_CMDTOKENS_DEFAULT_LIB = os.path.expanduser("~/.claude/plugins/cmdtokens/lib")
+_cmdtokens_lib = os.path.expanduser(os.environ.get("CMDTOKENS_LIB") or _CMDTOKENS_DEFAULT_LIB)
+if not os.path.isabs(_cmdtokens_lib):  # 非絶対(空/相対/whitespace) → cwd 相対 poison を避け既定へ
+    _cmdtokens_lib = _CMDTOKENS_DEFAULT_LIB
 try:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib"))
+    sys.path.insert(0, _cmdtokens_lib)
     from cmdtokens import iter_commands, long_opt_abbrev
 except Exception as e:  # lib ロード不能 → fail-open（guard 無効化を loud に通知）
     sys.stderr.write(f"[git-guard] cannot load cmdtokens lib, failing open: {e}\n")
