@@ -373,6 +373,27 @@ _mk_main_and_linked() {
   [[ "$output" != *"conversation_id"* ]]
 }
 
+# sc-3pq L3=A案(grill 確定 2026-06-24): grill-consult window は consult-<grill-issue> で id 紐付けし、
+# fleet-monitor / degraded watcher が「どの grill-issue の consult が沈黙したか」を完全一致で拾えるようにする。
+# plain consult(--context 無し)は consult-HHMMSS のまま(test 223/236 が保証)＝この id 命名は grill-consult 限定。
+@test "spawn(grill-consult): window 名は consult-<grill-issue> で id 紐付けする(sc-3pq A案・fleet-monitor 照合)" {
+  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  printf 'x\n' > "$ctx"
+  run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
+  rm -f "$ctx"
+  [ "$status" -eq 0 ]
+  cld_line="$(echo "$output" | grep -E 'cld-spawn --cd')"
+  # grill-consult は consult-<grill-issue>(=consult-un-consult)＝wt-<id> と同型の id 完全一致命名。
+  [[ "$cld_line" == *"--window-name consult-un-consult"* ]]
+  # HHMMSS フォールバックには落ちない(grill-issue があるので id 命名する)。
+  re='--window-name consult-[0-9]{6}'
+  [[ ! "$cld_line" =~ $re ]]
+  # reuse 偽成功の構造封鎖は --force-new(window 名の毎回一意性に非依存・中断リカバリ再 spawn でも新規保証)。
+  [[ "$cld_line" == *"--force-new"* ]]
+  # consult 設計どおり --bd-id は渡さない(window 名に id を焼くだけ)。
+  [[ "$cld_line" != *"--bd-id"* ]]
+}
+
 # sc-qos: 復路の完了シグナル形式化。grill-consult が STATUS 行(grilling/done/blocked)で
 # admin に完了・中断を感知させ、決定は逐次 append する(バッチ厳禁)。
 @test "spawn(grill-consult): STATUS 行規約(grilling/done/blocked)と逐次 append が prompt に注入される(sc-qos)" {
