@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# scribe-add — sandbox 下の `git add -A` 代替（sc-yqa）。cwd(=worktree)の変更を stage する。
+#
+# 問題: CC 組込み sandbox(SCRIBE_SANDBOX=1)は worker cwd の既知 dotfile(.bashrc/.gitconfig/.mcp.json 等 11)と
+#   .claude 設定(.claude/agents/commands/hooks/skills/workflows/routines/launch.json/scheduled_tasks.json/
+#   settings.json の 9)を /dev/null character special device として null-mount し無害化する(verified・本 host
+#   実測 / GH#17258,#17087 / doobidoo 48ddb387)。git は device の add を拒否する('can only add regular files…')
+#   ため、素の `git add -A` / `git add .` は rc=128 で死に staging 空 → commit が空/失敗(degraded worker)。
+#   null-mount は CC のセキュリティ機構で **設定で外せず**(verified・sc-yqa grill の C 棄却)、対象リストは CC
+#   バージョン依存で公式未文書化(増減しうる)。
+#
+# 解(B): 名前リストに結合せず **ファイル型** で device(char/block 等の非通常ファイル)を弾き、通常ファイルと
+#   symlink を stage する。CC が null-mount を増減しても壊れない(drift しない)・共有 info/exclude を汚さない(非 sandbox
+#   worktree への漏れゼロ＝sc-yqa 論点3 を完全解消)。worker は `cd <worktree> && scribe-add && git commit -m …`
+#   で使う(worker prompt §2・SCRIBE_SANDBOX 時のみ規律注入)。手癖で `git add -A` に戻れば loud に rc=128 で死に、
+#   §5 step1/§6 の 0-commit 検出網が salvage に回す(サイレント漏れより安全)。
+#
+# fail-closed: git リポジトリでなければ非0(exit 2)。stage 処理が回れば exit 0（空 stage でも commit 側が
+#   "nothing to commit" で fail-closed に倒れ 0-commit 検出網が捕捉する）。
+# 設計判断の SSOT = docs/protocol.md §2 / verify-sandbox-e2e.sh が e2e 番人(sc-yqa 4b)。
+set -uo pipefail
+
+git rev-parse --git-dir >/dev/null 2>&1 \
+  || { echo "scribe-add: git リポジトリではありません（cwd=$(pwd)）" >&2; exit 2; }
+
+# 1) 追跡ファイルの変更/削除を stage。device 化した稀な追跡ファイルは --ignore-errors で読み飛ばす。
+git add -u --ignore-errors >/dev/null 2>&1 || true
+
+# 2) 未追跡の **通常ファイル + symlink** を stage。`[ -h ] || [ -f ]` が device(char/block/fifo/socket)だけを型で弾く。
+#    `[ -f ]` 単独だと symlink を deref するため dangling/->dir/->device の symlink を黙って取りこぼす(git は symlink を
+#    リンク先の有効性に依らず mode 120000 で commit 可能)ので、deref しない `[ -h ]`(symlink そのものを判定)を OR する
+#    (sc-yqa gate blocking#2)。`git ls-files -o` は fifo/socket を元々列挙しないため型ガードの実弁別対象は symlink。
+#    --exclude-standard は .gitignore/info/exclude/core.excludesFile を尊重するので settings.local.json 等は元から外れる。
+#    限界: 未追跡のネスト git repo / 中身が列挙されない単一ディレクトリ entry は stage しない(worker はネスト repo を
+#    作らない前提・sc-yqa gate minor)。char-device 特有の rc=128 回避は root を要し単体不可ゆえ e2e(実 sandbox)が番人。
+n=0
+while IFS= read -r -d '' f; do
+  { [ -h "$f" ] || [ -f "$f" ]; } && git add -- "$f" >/dev/null 2>&1 && n=$((n+1))
+done < <(git ls-files -o --exclude-standard -z)
+
+echo "scribe-add: 未追跡の通常ファイル $n 件 + 追跡変更を stage（CC null-mount の非通常ファイルは型で除外）" >&2
+exit 0

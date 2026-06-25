@@ -354,6 +354,13 @@ build_prompt() {
   # review#1 critical）。scribe_git で GIT_DIR/GIT_WORK_TREE 継承を隔離して解決（sc-e1w）。
   local _probe_base
   _probe_base="$(scribe_git -C "$REPO" rev-parse "$BASE" 2>/dev/null || printf '%s' "$BASE")"
+  # sandbox 時のみ: stage は git add -A でなく scribe-add（非通常ファイルを型で弾く）を使う規律（sc-yqa の B）。
+  # 二重引用符で組み立て $SCRIPT_DIR/$WORKTREE を実パスへ展開する（backtick はエスケープして literal 保持）。
+  local _sandbox_add_note=""
+  if [[ "${SCRIBE_SANDBOX:-0}" == "1" ]]; then
+    _sandbox_add_note="
+- **sandbox 下の stage（sc-yqa）**: この worker は OS sandbox 下。CC が cwd の既知 dotfile/.claude 設定を /dev/null character device 化し \`git add -A\` を rc=128 で落とす（空 commit=degraded）。stage は \`git add -A\` でなく **\"$SCRIPT_DIR/scribe-add\"**（非通常ファイルを型で弾いて残りの変更を stage）を使い、\`cd \"$WORKTREE\" && \"$SCRIPT_DIR/scribe-add\" && git commit -m ...\` の形で commit する（空 commit を避ける）。"
+  fi
   cat <<PROMPT
 あなたは scribe worker cell（issue $ID）。この issue を end-to-end で完遂する。応答は日本語。
 
@@ -372,7 +379,7 @@ build_prompt() {
   - 着手の最初に**別 Bash 呼出し**で \`"$SCRIPT_DIR/scribe-env-probe.sh" plant --worktree "$WORKTREE"\` を実行し、**出力 token を文脈に控える**（shell 変数は Bash 呼出し間で消えるので文字列として控える）。
   - **self-report の直前**に**別 Bash 呼出し**で \`"$SCRIPT_DIR/scribe-env-probe.sh" verify --token <控えた token> --worktree "$WORKTREE" --base $_probe_base --also-tmp\` を実行する。
   - \`ENV_DEGRADED\`（呼出し間で sentinel 消失／base..HEAD が 0 commit）なら **done を申告せず** \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $ID --append-notes "STATUS: blocked — env degraded（CC infra の Bash 非永続・要admin）: <ENV_DEGRADED の理由>"\` を書いて停止する（回避策を打たない＝worker では直せない・admin が reliable env で引き取る）。
-- bd write は必ず \`bdw\` 経由で直列化: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" <subcmd>\`（自 issue の進捗のみ）。
+- bd write は必ず \`bdw\` 経由で直列化: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" <subcmd>\`（自 issue の進捗のみ）。$_sandbox_add_note
 
 ## 禁止（protocol.md §2/§3）
 - \`bd create\` / \`bd dep\` / assignment / \`bd dolt push\`（graph・同期点は admin の所有物）。
@@ -436,15 +443,11 @@ if [[ "${SCRIBE_SANDBOX:-0}" == "1" ]]; then
   else
     rm -f "$_sb_tmp"; scribe_die "sandbox settings.local.json の生成に失敗（SCRIBE_SANDBOX=1）: $WORKTREE"
   fi
-  # 生成した settings.local.json を ephemeral に保つ（worker の git add -A で巻き込まない）。repo の
-  # tracked .gitignore でなく worktree の git exclude へ冪等追記する＝全マシン/全ユーザー（CI・他ホスト・
-  # machine-local ~/.config/git/ignore を持たない環境）でも効かせる。info/exclude は共有 common-dir。
-  _sb_excl="$(git -C "$WORKTREE" rev-parse --git-path info/exclude 2>/dev/null || true)"
-  if [[ -n "$_sb_excl" ]]; then
-    mkdir -p "$(dirname "$_sb_excl")" 2>/dev/null || true
-    grep -qxF '**/.claude/settings.local.json' "$_sb_excl" 2>/dev/null \
-      || printf '%s\n' '**/.claude/settings.local.json' >> "$_sb_excl"
-  fi
+  # 生成した settings.local.json を ephemeral に保つ（worker の stage に巻き込まない・sc-1gu）。info/exclude は
+  # 共有 common-dir へ冪等追記する（scribe-lib の単一実装＝本番と test で drift しない）。CC sandbox が cwd の
+  # 既知 dotfile/.claude 設定を /dev/null device 化する件（sc-yqa）は info/exclude でなく scribe-add（型で弾く
+  # stage ラッパ）が担う＝CC のリスト churn に無関係・共有 exclude の広い漏れを避ける（E→B 切替・sc-yqa grill）。
+  scribe_sandbox_write_exclude "$WORKTREE"
   # bwrap が allowWrite path を bind 前に存在要求しうる（deduced・sc-da0）。gen が grant した書込み
   # 許可 path（専用 lock dir = 既定 $HOME/.cache/bdw-locks・sc-xs2 で orch/uns bdw と収束）を worker
   # 起動前に事前生成する。formula を再実装せず生成済み settings の allowWrite から読む＝gen と drift
