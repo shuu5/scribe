@@ -660,7 +660,7 @@ _mk_main_and_linked() {
   [[ "$output" == *"\$OUTSIDE"* ]]
   [[ "$output" == *"printf wrote > '\$INBOUND'"* ]]
   [[ "$output" == *"printf blocked > '\$INBOUND'"* ]]
-  # printf(失敗が期待値)の後は `&&` でなく `;` で必ず自己判定へ繋ぐ（AND ゲートすると INBOUND が永久に書かれず PASS=3 不能・gate round2#2）。
+  # printf(失敗が期待値)の後は `&&` でなく `;` で必ず自己判定へ繋ぐ（AND ゲートすると INBOUND が永久に書かれず 全 PASS 不能・gate round2#2）。
   [[ "$output" == *"2>/dev/null; ["* ]]
   [[ "$output" != *"2>/dev/null && ["* ]]
   # OUTSIDE は anchor 直下(allowWrite 外)・INBOUND は cwd($WT)内(sandbox writable=real artifact を残せる)。
@@ -709,15 +709,102 @@ _mk_main_and_linked() {
   [[ "$output" == *"bd init"* ]]       # temp anchor を自前で初期化（実 scribe .beads を触らない）
 }
 
-@test "sandbox-e2e(sc-7n1): worker の git add は -A でなく特定 path（sc-yqa: sandbox dotfile null-mount 回避を固定）" {
-  # CC sandbox は cwd の dotfile を /dev/null char-dev に null-mount し `git add -A` を rc=128 で落とす(sc-yqa)。
-  # ハーネスの worker コマンド(WORKER_CMD)は marker を特定 add する。-A/. への退行を **WORKER_CMD 行に限定して**禁止
-  # する（ファイル全体には sc-yqa 解説コメントが `git add -A` を含むため、行限定でないと誤 RED になる）。
+@test "sandbox-e2e(sc-yqa/4b): commit 経路は scribe-add・negative control(素の git add -A)で B の必要性を実証" {
+  # commit 経路は scribe-add(SADD)→git commit。素の git add -A で stage→commit する退行を禁止。
+  # さらに negative control: scribe-add の前に素の git add -A を 1 度走らせ rc を NEGCTL に記録し、それが実 sandbox の
+  # char-device で *失敗* することを assert する(counterfactual=B の必要性/退行は loud fail を実証・gate blocking#1)。
   run grep -n 'WORKER_CMD=' "$E2E"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"git add '\$MARKER'"* ]]
-  [[ "$output" != *"git add -A"* ]]
-  [[ "$output" != *"git add ."* ]]
+  [[ "$output" == *"'\$SADD' && git commit"* ]]      # positive: scribe-add→commit
+  [[ "$output" != *"git add -A && git commit"* ]]    # 退行(git add -A で stage→commit)していない
+  [[ "$output" != *"git add '\$MARKER'"* ]]          # 旧 sidestep にも退行していない
+  [[ "$output" == *"\$NEGCTL"* ]]                     # negative control が NEGCTL に rc を記録
+  # SADD は scribe-add の実体(本番と同じ)を指す。
+  run grep -cE '^[^#]*SADD="\$HERE/\.\./scribe-add"' "$E2E"
+  [ "$status" -eq 0 ]; [ "$output" -ge 1 ]
+  # negative control の verdict を持つ(素の git add -A の失敗で B の必要性を実証)。
+  run grep -cE '^[^#]*verdict (PASS|FAIL) "negative control:' "$E2E"
+  [ "$status" -eq 0 ]; [ "$output" -ge 1 ]
+}
+
+# ---------- sc-yqa: scribe-add（sandbox 下の git add -A 代替・型で device を弾く）----------
+# CC sandbox は worker cwd の既知 dotfile(11) + .claude 設定(agents/commands/skills 等 9)を /dev/null char-device
+# 化し `git add -A` を rc=128 で落とす(空 commit=degraded)。設定で外せず(verified)リストは CC バージョン依存。
+# scribe-add は **device(非通常ファイル)に git add を一切かけない**(型で除外)ため、null-mount 集合が増減しても壊れない・
+# 共有 info/exclude を汚さない(漏れゼロ)。型ガードの実弁別対象は **symlink**(git ls-files -o は fifo/socket を元々列挙
+# しないため fifo は型ガードに届かない=minor#1)。単体テストは symlink で型ガードを駆動し、char-device 特有の rc=128
+# 回避は root を要し単体不可ゆえ e2e(実 sandbox)が唯一の番人。
+@test "sc-yqa(scribe-add): 存在し実行可能・構文健全" {
+  [ -x "$SCRIPTS/scribe-add" ]
+  run bash -n "$SCRIPTS/scribe-add"
+  [ "$status" -eq 0 ]
+}
+
+@test "sc-yqa(scribe-add): 通常ファイルと symlink を stage し非通常ファイルは弾く・fail しない" {
+  local r; r="$SCRIBE_TEST_CWD"
+  ( cd "$r" && : > real.txt && ln -s /nonexistent/tgt dlink && mkdir realdir && ln -s realdir dirlink && mkfifo fifo.dev )
+  # 型ガードの実弁別対象は symlink(git ls-files -o は fifo を列挙しないため fifo は届かない)。`[ -h ]||[ -f ]` が
+  # dangling/->dir symlink を deref せず stage することを固定する(gate blocking#2 の回帰防止)。char-device 特有の
+  # rc=128 回避は root 不可ゆえ e2e(実 sandbox)が唯一の番人。
+  run bash -c "cd '$r' && '$SCRIPTS/scribe-add'"
+  [ "$status" -eq 0 ]
+  run git -C "$r" diff --cached --name-only
+  [[ "$output" == *"real.txt"* ]]   # 通常ファイル
+  [[ "$output" == *"dlink"* ]]      # dangling symlink を取りこぼさない(git は mode 120000 で commit 可)
+  [[ "$output" == *"dirlink"* ]]    # dir を指す symlink も stage
+  [[ "$output" != *"fifo.dev"* ]]   # 非通常ファイルは stage しない
+  ( cd "$r" && rm -f fifo.dev dlink dirlink && rm -rf realdir )
+}
+
+@test "sc-yqa(scribe-add): 追跡ファイルの変更も stage する（git add -u 相当）" {
+  local r; r="$SCRIBE_TEST_CWD"
+  ( cd "$r" && : > t.txt && git add t.txt && git commit -q -m seed && printf x > t.txt )  # 追跡ファイルを変更
+  run bash -c "cd '$r' && '$SCRIPTS/scribe-add'"
+  [ "$status" -eq 0 ]
+  run git -C "$r" diff --cached --name-only
+  [[ "$output" == *"t.txt"* ]]                     # 追跡変更が stage される
+}
+
+@test "sc-yqa(scribe-add): 追跡ファイルが device 化しても --ignore-errors で他の追跡変更を stage し exit 0" {
+  # gate minor#4: tracked path が null-mount で device 化した分岐(git add -u --ignore-errors)を固定する。
+  local r; r="$SCRIBE_TEST_CWD"
+  ( cd "$r" && : > good.txt && : > bad.txt && git add good.txt bad.txt && git commit -q -m seed \
+       && printf x > good.txt && rm bad.txt && mkfifo bad.txt )   # good=変更 / bad=tracked path を device 化
+  run bash -c "cd '$r' && '$SCRIPTS/scribe-add'"
+  [ "$status" -eq 0 ]                              # device 化した追跡 path が在っても exit 0(--ignore-errors 分岐)
+  run git -C "$r" diff --cached --name-only
+  [[ "$output" == *"good.txt"* ]]                  # 他の追跡変更は stage される
+  ( cd "$r" && rm -f bad.txt )
+}
+
+@test "sc-yqa(scribe-add): git リポジトリでなければ fail-loud(非0)" {
+  local d; d="$(mktemp -d)"
+  run bash -c "cd '$d' && '$SCRIPTS/scribe-add'"
+  [ "$status" -ne 0 ]
+  rm -rf "$d"
+}
+
+@test "sc-yqa(scribe-add): settings.local.json は除外があれば stage しない(info/exclude 尊重)" {
+  local r; r="$SCRIBE_TEST_CWD"
+  bash -c "source '$LIB' && scribe_sandbox_write_exclude '$r'"   # **/.claude/settings.local.json を除外
+  ( cd "$r" && mkdir -p .claude && : > .claude/settings.local.json && : > keep.txt )
+  run bash -c "cd '$r' && '$SCRIPTS/scribe-add'"
+  [ "$status" -eq 0 ]
+  run git -C "$r" diff --cached --name-only
+  [[ "$output" == *"keep.txt"* ]]
+  [[ "$output" != *"settings.local.json"* ]]       # 除外尊重(--exclude-standard)で ephemeral 維持
+}
+
+@test "sc-yqa(B 規律): worker prompt の scribe-add 規律は SCRIBE_SANDBOX=1 のときだけ注入される" {
+  # 非 sandbox: 注入されない(通常 worker は素の git で良い)。
+  run "$SPAWN" --dry-run --anchor "$REPO_ROOT" un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"sandbox 下の stage（sc-yqa）"* ]]
+  # sandbox: scribe-add を使えと注入される(絶対パス付き)。
+  run env SCRIBE_SANDBOX=1 "$SPAWN" --dry-run --anchor "$REPO_ROOT" un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sandbox 下の stage（sc-yqa）"* ]]
+  [[ "$output" == *"$SCRIPTS/scribe-add"* ]]
 }
 
 @test "sandbox-e2e(sc-7n1/opt-in live): deps+SCRIBE_SANDBOX_E2E=1 のとき実 e2e が PASS する" {
@@ -728,7 +815,7 @@ _mk_main_and_linked() {
   # bd/jq 欠落で rc=77→FAIL になった。dep set を二重化せず rc=77 を一次の skip 源にする）。
   [ "$status" -eq 77 ] && skip "ハーネスが前提未満で skip(rc=77)"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"PASS=3 FAIL=0"* ]]   # allow-side 2 + block-side control 1
+  [[ "$output" == *"PASS=4 FAIL=0"* ]]   # allow-side 2 + block-side 1 + negative control 1
 }
 
 # ---------- spawn: worker prompt に anchor 絶対パスを焼き込む（un-gjr）----------

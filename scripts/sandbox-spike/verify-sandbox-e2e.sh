@@ -46,6 +46,7 @@ gitc() { env -u GIT_DIR -u GIT_WORK_TREE git "$@"; }
 
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 GEN="$HERE/gen-sandbox-settings.sh"
+SADD="$HERE/../scribe-add"   # sc-yqa B: sandbox 下の git add -A 代替(型で device を弾く stage ラッパ)。worker が実走する。
 # shellcheck source=../lib/scribe-lib.sh
 source "$HERE/../lib/scribe-lib.sh"
 
@@ -94,6 +95,10 @@ echo "throwaway issue = $ISSUE"
 gitc -C "$ANCHOR" worktree add -q "$WT" -b e2e-branch >/dev/null 2>&1 || die "worktree add 失敗"
 mkdir -p "$WT/.claude"
 "$GEN" "$WT" > "$WT/.claude/settings.local.json" || die "settings 生成失敗"
+# settings.local.json を info/exclude へ除外する(sc-1gu・本番 scribe-spawn と同じ)。CC null-mount device の件は
+# 下の WORKER_CMD が scribe-add(型で弾く stage ラッパ・sc-yqa B)を実走して扱う＝それが効くこと、かつ CC が
+# null-mount を増やしても scribe-add は型ベースゆえ壊れないことを実 sandbox で実証する(sc-yqa 4b の robust 版)。
+scribe_sandbox_write_exclude "$WT"
 # bwrap の bind-before-exist 対策: grant 済 lock dir を worker 起動前に実在させる(本番 scribe-spawn と同じ)。
 mkdir -p "$(scribe_bdw_lock_dir)" 2>/dev/null || true
 echo "--- settings.local.json ---"; cat "$WT/.claude/settings.local.json"
@@ -105,9 +110,12 @@ echo "--- settings.local.json ---"; cat "$WT/.claude/settings.local.json"
 TOK_GIT="SC7N1_GIT_RAN"
 TOK_BD="SC7N1_BD_RAN"
 COMMIT_MSG="sc7n1-e2e-commit-$$"
-# git add は marker 1 ファイルだけを対象にする(`git add -A` は CC sandbox が cwd ビューへ注入する
-# 特殊ファイル(.bash_profile = socket 等)を拾って `can only add regular files...` で落ちるため。
-# sc-7n1 の assert は「sandboxed worker の commit が共有 .git に永続するか」ゆえ特定 add で十分・確定的)。
+# worker は **scribe-add**(sc-yqa B・非通常ファイルを型で弾く stage ラッパ)を使う。素の `git add -A` は CC の
+# null-mount char-device(.bashrc / .claude/agents 等)で rc=128 死する。scribe-add は device に `git add` を一切
+# かけず(型で除外)marker だけ stage→commit が共有 .git に永続する。CC が null-mount を増やしても型ベースゆえ壊れない(4b robust)。
+# negative control(gate blocking#1): scribe-add の前に **素の git add -A** を 1 度走らせ rc を NEGCTL に記録する。
+# これで『scribe-add が必須(git add -A は実 sandbox の char-device で rc=128 死)』と『退行=loud fail(検出網が捕捉)』を
+# counterfactual で実証する。git reset で index を戻してから scribe-add(positive)へ進むので positive path は汚さない。
 MARKER="sc7n1-e2e-marker.txt"
 # block-side control: cwd($WT)の外かつ allowWrite([<anchor>/.beads, lock_dir])外の anchor 直下。
 # sandbox 外壁が効いていれば書込みは拒否され OUTSIDE は出来ない(spike の b1=anchor-root と同型)。$TMP 配下ゆえ無害。
@@ -119,9 +127,10 @@ OUTSIDE="$ANCHOR/sc7n1-OUTSIDE-marker.txt"
 # worker が書込み成否を自己判定して 'blocked'/'wrote' を残す。narration は stdout を汚すだけでファイルは作らないので
 # false-FAIL が消え、判定は「INBOUND==blocked かつ OUTSIDE 不在」の連言=分岐順非依存になる。
 INBOUND="$WT/sc7n1-blockresult.txt"
+NEGCTL="$WT/sc-yqa-negctl-rc.txt"   # negative control: 素の git add -A の rc を worker が書く(sc-yqa gate blocking#1)
 # printf は外壁で *失敗* するのが期待値ゆえ `&&` で繋がず `;` で必ず自己判定へ進む(失敗を AND ゲートすると INBOUND が
-# 永久に書かれず PASS=3 が達成不能)。worker が OUTSIDE 実在を自己判定し INBOUND に blocked/wrote を書く。
-WORKER_CMD="cd '$WT' && printf 'e2e\n' > '$MARKER' && git add '$MARKER' && git commit -q -m '$COMMIT_MSG' && echo $TOK_GIT; bd close '$ISSUE' >/dev/null 2>&1 && echo $TOK_BD; printf x > '$OUTSIDE' 2>/dev/null; [ -e '$OUTSIDE' ] && printf wrote > '$INBOUND' || printf blocked > '$INBOUND'"
+# 永久に書かれず 全 PASS が達成不能)。worker が OUTSIDE 実在を自己判定し INBOUND に blocked/wrote を書く。
+WORKER_CMD="cd '$WT' && printf 'e2e\n' > '$MARKER'; git add -A >/dev/null 2>&1; printf '%s' \$? > '$NEGCTL'; git reset -q >/dev/null 2>&1; '$SADD' && git commit -q -m '$COMMIT_MSG' && echo $TOK_GIT; bd close '$ISSUE' >/dev/null 2>&1 && echo $TOK_BD; printf x > '$OUTSIDE' 2>/dev/null; [ -e '$OUTSIDE' ] && printf wrote > '$INBOUND' || printf blocked > '$INBOUND'"
 
 before="$(gitc -C "$WT" rev-parse HEAD)"
 echo "--- 実 CC を sandbox で起動(git commit + bd close + 外壁 block control)---"
@@ -137,6 +146,8 @@ commit_msg="$(gitc -C "$WT" log -1 --format=%s 2>/dev/null || true)"
 issue_state="$( cd "$ANCHOR" && bd show "$ISSUE" 2>/dev/null || true )"
 # block-side の execution 証跡 = worker が cwd 内 INBOUND に残した実ファイル(narration では作られない)。
 block_result="$(cat "$INBOUND" 2>/dev/null || true)"
+# negative control の実行証跡 = worker が NEGCTL に書いた 素の git add -A の rc(空=未実行)。
+negctl_rc="$(cat "$NEGCTL" 2>/dev/null || true)"
 
 pass=0; fail=0; verdict() { [[ "$1" == PASS ]] && pass=$((pass+1)) || fail=$((fail+1)); printf '  [%s] %s\n' "$1" "$2"; }
 
@@ -168,10 +179,21 @@ else
   verdict FAIL "block-side control: 実行証跡(INBOUND)なし=未実行の疑い(vacuous-PASS 防止・block_result='$block_result')"
 fi
 
+# negative control(sc-yqa gate blocking#1): 素の git add -A が同一 sandbox の null-mount char-device で *失敗* する
+# ことを実走で示す。これが無いと『scribe-add が効いた』と『git add -A でも通った』を区別できず B の必要性が
+# 未実証(boundary-vacuous)。rc!=0=失敗=退行は loud(0-commit 検出網が捕捉)/ rc==0=git add -A でも通る(B 不要の懸念)。
+if [[ -n "$negctl_rc" && "$negctl_rc" != 0 ]]; then
+  verdict PASS "negative control: 素の git add -A は null-mount char-device で rc=$negctl_rc 失敗(=scribe-add 必須・退行は loud fail→0-commit 検出網)"
+elif [[ "$negctl_rc" == 0 ]]; then
+  verdict FAIL "negative control: 素の git add -A が rc=0 で通った=B の必要性が未実証(boundary-vacuous)"
+else
+  verdict FAIL "negative control: rc 記録なし=未実行の疑い(vacuous-PASS 防止)"
+fi
+
 if [[ "$fail" -ne 0 ]]; then
   echo "--- 診断: CC 出力(sandbox 内の実行ログ) ---"
   printf '%s\n' "$CC_OUT" | sed 's/^/  | /'
-  echo "  (flags: git_ran=$git_ran bd_ran=$bd_ran block_result='$block_result' outside_exists=$([[ -e "$OUTSIDE" ]] && echo yes || echo no))"
+  echo "  (flags: git_ran=$git_ran bd_ran=$bd_ran block_result='$block_result' negctl_rc='$negctl_rc' outside_exists=$([[ -e "$OUTSIDE" ]] && echo yes || echo no))"
 fi
 
 echo "--- result ---"
