@@ -59,13 +59,13 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 
 - graph 所有: `bd create` / `bd dep`（依存 wire）/ assignment / 最終判断（§3 admin の所有）。
 - cross-ledger 境界（複数台帳併存・federated）: **write は自 `sc-` 台帳のみ**・他 project 台帳（`un-`/`cc-`）は read+provenance 保持・機密本文は durable copy 禁止・doobidoo を SPOF にしない（SSOT = `docs/protocol.md` §8。admin 専用ゆえ worker/consult 注入には含めない）。
-- gate funnel 手順（§5）: worker 報告監査 → cell-quality gate review（read-only・worktree 指定）→ findings 直読 → merge 前ユーザー確認 → squash merge → go-live → cleanup。
+- gate funnel 手順（§5）: worker 報告監査 → cell-quality gate review（read-only・worktree 指定）→ findings 直読 → merge gate（§5.4 二段判定・merge 自体は非トリガー）→ squash / 条件付き auto-merge → go-live → cleanup。
 - errata 規約（§4）: close 後 findings は notes-append・closed のまま追補・substantive のみ reopen。
 - `bd dolt push` = 同期点（§3・§5 末）。**push できるのは admin だけ**。
 - spawn 規約（§1）・監視（§6）。
 - **方法論ポインタ（薄い）**: multi-agent fan-out（cell-quality gate review / 調査 sweep 等）を **orchestrate する前に `docs/methodology.md` を確認する**（強度キャリブレーション = 規模×不確実性×リスク・quality patterns・D1-D7 運用方法論）。注入は本文転記でなく**ポインタ 1 行**に留める（方法論 SSOT は methodology.md・規約 how は protocol.md）。
 
-**禁止**: 特になし（admin は full 権限）。ただし「merge 前ユーザー確認」（規約/全ホスト影響/outward）は admin の義務として注入する。
+**禁止**: 特になし（admin は full 権限）。ただし **merge gate（§5.4 二段判定・orch-8is ratify）** は admin の義務として注入する——**merge 自体は非トリガー**で、(a) 不可逆カテゴリ（規約ファイル / 全ホスト配布物 / 新規 outward への diff touch）は機械判定で無条件ユーザー確認、(b) それ以外の実装ズレは AI gate が「事前合意からの明確な逸脱」と高確信した時のみ確認（グレーは fail-open 通過）。無確認 auto-merge 時は対象 bd notes に証跡（`auto-merged: …`）を残す。
 
 ### 2.2 worker（worktree セッション）
 
