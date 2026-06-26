@@ -150,6 +150,26 @@ const _rawBaseRef = (typeof A.baseRef === 'string' && A.baseRef.trim()) || ''
 // HEAD@{1} 等の正当 ref を含む)だけ許可し、それ以外を含む不正値は空扱い→merge-base フォールバックへ倒す
 // (trust boundary 内ゆえ RCE でないが、malformed ref の self-inflicted な壊れた bash / false EMPTY_DIFF を防ぐ)。
 const baseRef = /^[A-Za-z0-9._/~^@{}-]+$/.test(_rawBaseRef) ? _rawBaseRef : ''
+// scribeAddPath(sc-u4u): gated autoFix が confirmed を修正後コミットする際、Fix/implement agent が stage に
+// 使う道具パス。CC sandbox は cwd の既知 dotfile/.claude を /dev/null character device 化し `git add -A` を
+// rc=128 で落とす(sc-yqa)。供給時は Fix/implement の stage を `git add -A` でなく scribe-add(非通常ファイルを型で
+// 弾く薄ラッパ)に固定する=default-on で全 worker が踏む autoFix 経路の degraded(取りこぼし/失敗)を deterministic
+// に塞ぐ。selftest-args が常時供給(scribe-add は git add -A の安全上位互換ゆえ SCRIBE_SANDBOX 検出に依らず渡せる)。
+// 未供給(直接呼出・admin の read-only gate=Fix 非発火)は現挙動を維持(完全後方互換)。プロンプトに埋め agent が
+// shell 実行するため、baseRef と同じく path 安全文字のみ許可し不正値は空へ倒す(self-inflicted な壊れた command を防ぐ)。
+// baseRef と同じ trim 変種で正規化する(whitespace-only を未供給=空へ畳み warn しない=同種 path フィールドの対称)。
+const _rawScribeAdd = (typeof A.scribeAddPath === 'string' && A.scribeAddPath.trim()) || ''
+const scribeAddPath = /^[A-Za-z0-9._/-]+$/.test(_rawScribeAdd) ? _rawScribeAdd : ''
+// 供給されたが検証を外れた場合(非空 かつ regex 不一致=稀な空白/非ASCII を含む exotic install path 等)は loud に warn
+// する(sc-u4u gate の有用提案)。空 fallback は「未供給=意図的 legacy(後方互換)」と「供給されたが reject」を同一に縮退
+// させ、後者では scribe-add 固定が無音で外れる。これを silent にせず可視化する。【posture 明示】これは warn のみで
+// autoFix は止めず legacy 経路で続行する fail-open(selfTestCmd 欠落で canAutoFix=false=autoFix 自体を無効化する
+// fail-closed とは failure-posture が逆。両者は「log で可視化する」点だけが同形)。よって『決定論』は『reject されても
+// degraded を loud に表面化し silent にしない(可視化)』の意味で、reject を防ぐ強い保証ではない。退行の最終 salvage は
+// §5 step1/§6 の 0-commit 検出網。許可集合は trust-boundary 内ゆえ意図的に保守的(worktree も未 quote 補間=同 posture)。
+if (_rawScribeAdd && !scribeAddPath) {
+  log(`警告: scribeAddPath が path 安全文字を外れ無効化(${_rawScribeAdd.slice(0, 60)})。autoFix/implement が走る run では stage が scribe-add 固定でなく旧経路へ後退する(sandbox では git add -A の rc=128 死 risk・fail-open=autoFix は続行)。install path を ASCII-clean にするか args を見直すこと。`)
+}
 const MODEL = A.model || 'opus' // substantive 既定 = opus(cheap→opus 格上げ)
 const maxRounds = Number.isInteger(A.maxRounds) && A.maxRounds > 0 ? A.maxRounds : 3 // hard cap
 // ── (D2) opus 並列 cap(un-3yc): review fan-out / verify parallel(= opus 経路)の同時実行を args で絞る。
@@ -422,11 +442,16 @@ function planPrompt() {
 }
 
 function implementPrompt(refinedAcceptance) {
+  // commitNote: scribeAddPath 供給時は stage を `git add -A` でなく scribe-add に固定する(sc-u4u)。
+  // sandbox では `git add -A` が /dev/null device 化された dotfile で rc=128 死し commit を取りこぼす。
+  const commitNote = scribeAddPath
+    ? `受入基準を満たすことを目標にする。コミットはこの段階で行ってよい(worktree 内)。**stage は \`git add -A\` を使わず \`${scribeAddPath}\`** で行う(CC sandbox は cwd の既知 dotfile/.claude を /dev/null device 化し \`git add -A\` を rc=128 で落とす・sc-yqa。scribe-add は非通常ファイルを型で弾く sandbox-safe な薄ラッパ): \`cd "${worktree}" && "${scribeAddPath}" && git commit -m ...\` の形で stage→commit する。`
+    : `受入基準を満たすことを目標にする。コミットはこの段階で行ってよい(worktree 内)。`
   return `${ctxBlock()}
 ${refinedAcceptance ? `\n精緻化された受入基準:\n${refinedAcceptance}\n` : ''}
 このセルを worktree ${worktree} で実装せよ。
 - 既存コードの規約(命名・コメント密度・イディオム)に合わせる。
-- 受入基準を満たすことを目標にする。コミットはこの段階で行ってよい(worktree 内)。
+- ${commitNote}
 - 破壊的操作・anchor の main 離脱は禁止。秘密情報を混入しない。
 完了したら何を実装したか簡潔に返せ。`
 }
@@ -499,6 +524,12 @@ function fixPrompt(confirmedBlocking, roundDiff) {
   const list = confirmedBlocking
     .map((f, i) => `${i + 1}. [${f.severity}] ${f.title} @ ${f.location}\n   理由: ${f.rationale}${f.suggestedFix ? `\n   提案: ${f.suggestedFix}` : ''}`)
     .join('\n')
+  // stageStep: scribeAddPath 供給時は stage を `git add -A` でなく scribe-add に固定する(sc-u4u)。
+  // sandbox では `git add -A` が /dev/null device 化された dotfile で rc=128 死し amend が失敗→degraded。
+  // 正確なコマンド形で渡し agent の compliance を最大化する(snapshotPrompt と同じ明示コマンド方式)。
+  const stageStep = scribeAddPath
+    ? `PASS したら実装コミットへ取り込む(amended=true)。**stage は \`git add -A\` を使うな**——CC sandbox では cwd の既知 dotfile/.claude が /dev/null character device 化され \`git add -A\` が rc=128 で落ちる(sc-yqa)。次の正確なコマンドで stage→amend せよ: \`cd "${worktree}" && "${scribeAddPath}" && git commit --amend --no-edit\`(直前に自分のコミットが無ければ \`git commit --amend\` でなく \`git commit -m ...\`)。\`${scribeAddPath}\` は非通常ファイルを型で弾いて通常ファイル/symlink のみ stage する sandbox-safe な薄ラッパ。`
+    : `PASS したら実装コミットへ \`git commit --amend --no-edit\`(無ければ通常コミット)で取り込む(amended=true)。`
   return `${ctxBlock()}
 
 worktree ${worktree} で、以下の **confirmed(反証されなかった) critical/major findings のみ** を修正せよ。
@@ -515,7 +546,7 @@ ${roundDiff || '(worktree の現状を確認して修正)'}
 手順(fail-closed ゲート):
 1. confirmed findings を修正する。
 2. self-test を実行する: \`${selfTestCmd}\`
-   - PASS したら実装コミットへ \`git commit --amend --no-edit\`(無ければ通常コミット)で取り込む(amended=true)。
+   - ${stageStep}
    - FAIL したら **amend せず停止**し、selfTestPassed=false で報告する(回避策を打たない=fail-closed)。
 3. 破壊的操作・force push・anchor の main 離脱は禁止。
 

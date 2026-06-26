@@ -1063,6 +1063,19 @@ _mk_main_and_linked() {
   [ "$status" -ne 0 ]
 }
 
+# sc-u4u: WF の gated autoFix(Fix/implement agent)が commit 前に stage する経路を sandbox-safe 化する。
+# selftest-args は scribeAddPath を **常に**（SCRIBE_SANDBOX 検出に依らず）出力し、WF へ scribe-add の絶対パス
+# を渡す。scribe-add は `git add -A` の安全上位互換ゆえ非 sandbox でも等価＝常時供給が決定論的（default-on 移行を
+# フラグから decouple）。これが脱落すると default-on で全 worker の autoFix 経路が sandbox の null-mount device で
+# rc=128 死し degraded（取りこぼし）になる回帰なので pin する。
+@test "selftest-args(sc-u4u): scribeAddPath が常に絶対パスで scribe-add を指す（WF autoFix を sandbox-safe 化）" {
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'bats tests/foo.bats' un-4nm
+  [ "$status" -eq 0 ]
+  sap="$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["scribeAddPath"])')"
+  [[ "$sap" == /*/scribe-add ]]   # 絶対パスで scribe-add を指す（相対だと worker cwd で解決せず die）
+  [ -x "$sap" ]                    # 実在し実行可能（型ベース stage ラッパ＝scribe-add 自体の +x も同時に守る）
+}
+
 @test "selftest-args: --self-test 未指定で fail-loud（autoFix の fail-closed ゲート必須）" {
   run "$SELFTEST" --dry-run --worktree /tmp/wt un-4nm
   [ "$status" -ne 0 ]
@@ -1124,6 +1137,46 @@ _mk_main_and_linked() {
   grep -Eq 'isFable.*/fable/i' "$WF"
   # 旧 exact-match 集合へ退化していない（派生 fable 名の取りこぼし=二重 fail-open を再発させない）。
   ! grep -q 'FABLE_ALIASES' "$WF"
+}
+
+# ---------- WF autoFix の sandbox-safe stage（cell-quality.workflow.js・sc-u4u）----------
+# WF の gated autoFix は confirmed 修正後 Fix agent が `git commit --amend` で取り込むが、その stage 経路に
+# scribe-add 規律が無いと、sandbox(default-on の全 worker)で agent が `git add -A` を打ち null-mount device で
+# rc=128 死→amend 失敗→degraded になる（sc-yqa の refuted finding が default-on で prerequisite に昇格）。
+# 対処: scribeAddPath を受けたら Fix/implement の stage を scribe-add に固定する。挙動 unit は repo に node test
+# 機構が無い（top-level await/return ゆえ node --check も不可）ため source-level で構造を pin する。
+@test "cell-quality WF(sc-u4u): scribeAddPath を path 検証して受け、Fix/implement の stage を scribe-add に固定する分岐を持つ" {
+  WF="$REPO_ROOT/workflows/cell-quality.workflow.js"
+  [ -f "$WF" ]
+  # args から受け、baseRef と同じ path-安全文字 hardening で検証する（不正値→空 fallback）。
+  grep -q 'A\.scribeAddPath' "$WF"
+  grep -q '_rawScribeAdd' "$WF"
+  grep -q 'const scribeAddPath' "$WF"
+  # Fix(stageStep) / implement(commitNote) の双方が scribeAddPath で stage を分岐する。
+  grep -q 'stageStep' "$WF"
+  grep -q 'commitNote' "$WF"
+  # 供給時の分岐が `git add -A` を明示的に避ける（prohibition が在る＝穴を塞ぐ意図を pin）。
+  grep -Fq 'git add -A' "$WF"
+  # 供給されたが path 検証を外れた(非空 reject)場合は loud に warn する＝silent な旧経路後退を可視化する
+  # （sc-u4u gate の有用提案を採用。空 fallback が「未供給=legacy」と「reject」を縮退させる穴を loud 化）。
+  grep -q '_rawScribeAdd && !scribeAddPath' "$WF"
+  grep -q '警告: scribeAddPath' "$WF"
+}
+
+# sc-u4u gate round2 採用: WF 側 scribeAddPath 検証は上のテストで *存在* を grep pin するだけで *挙動* を実行検証
+# していなかった（selftest-args 側 1071-1078 は python3 で実値 assert する非対称）。WF ソースから検証 regex
+# リテラルを抽出して node -e で実走させ、valid な install path を通し exotic(空白/非ASCII)を弾くことを behavioral
+# に pin する（regex を再実装せず *実体* を叩く＝condition 反転/regex 破損の回帰を grep が見逃しても赤くする）。
+@test "cell-quality WF(sc-u4u): scribeAddPath 検証 regex が valid を通し exotic(空白/非ASCII)を弾く（behavioral・実体 regex を実行）" {
+  WF="$REPO_ROOT/workflows/cell-quality.workflow.js"
+  [ -f "$WF" ]
+  # `const scribeAddPath = /…/.test(…)` 行から regex リテラル `/…/` を抽出（再実装でなく実体）。
+  re="$(grep -E 'const scribeAddPath = /' "$WF" | sed -E 's#^.*= (/.*/)\.test.*#\1#')"
+  [ -n "$re" ]
+  [[ "$re" == /*/ ]]   # 抽出が regex リテラル形である（抽出失敗で空/別物を node へ渡さない）
+  # 実体 regex で valid(ASCII-clean な install path)→true・exotic(空白/非ASCII/相対は別議論)→false を実行検証。
+  run node -e "const re=$re; const ok=re.test('/home/u/.claude/plugins/scribe/scripts/scribe-add'); const bad1=re.test('/home/My User/scribe-add'); const bad2=re.test('/home/josé/scribe-add'); process.exit((ok && !bad1 && !bad2) ? 0 : 1)"
+  [ "$status" -eq 0 ]
 }
 
 # ---------- DESC 合成の lib 抽出（scribe_synthesize_issue_desc・sc-2m0 facet2）----------
