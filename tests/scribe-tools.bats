@@ -140,6 +140,31 @@ _mk_main_and_linked() {
   [[ "$output" =~ ^spawn/un-4nm-[0-9]{6}$ ]]
 }
 
+# sc-te9（sc-498 litmus payload・admin salvage）: scribe_normalize_bd_id（spawn/gate-args/selftest-args/
+# cleanup 全道具が呼ぶ id 正規化の核）を直接 source して各枝を pin（先頭#剥がし/前後空白trim/dotted id通過/
+# .. traversal・スラッシュ拒否）。実装は scripts/lib/scribe-lib.sh（無変更）。worker1 が degraded で未達→admin 引取（§6）。
+@test "lib(sc-te9): scribe_normalize_bd_id は先頭 # を剥がし前後空白を trim する" {
+  run bash -c 'source "$1"; scribe_normalize_bd_id "$2"' _ "$LIB" '#un-4nm'
+  [ "$status" -eq 0 ]
+  [ "$output" = "un-4nm" ]
+  run bash -c 'source "$1"; scribe_normalize_bd_id "$2"' _ "$LIB" '  un-4nm  '
+  [ "$status" -eq 0 ]
+  [ "$output" = "un-4nm" ]
+}
+
+@test "lib(sc-te9): scribe_normalize_bd_id は dotted id（un-3sh.3.5）を通す" {
+  run bash -c 'source "$1"; scribe_normalize_bd_id "$2"' _ "$LIB" 'un-3sh.3.5'
+  [ "$status" -eq 0 ]
+  [ "$output" = "un-3sh.3.5" ]
+}
+
+@test "lib(sc-te9): scribe_normalize_bd_id は .. traversal / スラッシュ を非0 で弾く" {
+  run bash -c 'source "$1"; scribe_normalize_bd_id "$2"' _ "$LIB" '../evil'
+  [ "$status" -ne 0 ]
+  run bash -c 'source "$1"; scribe_normalize_bd_id "$2"' _ "$LIB" 'un..evil'
+  [ "$status" -ne 0 ]
+}
+
 # ---------- spawn: sandbox opt-in（SCRIBE_SANDBOX=1・sc-1gu）----------
 @test "spawn(sandbox): gen-sandbox-settings.sh は failIfUnavailable + .beads先頭 allowWrite の valid JSON を出す" {
   run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$SCRIBE_TEST_CWD"
