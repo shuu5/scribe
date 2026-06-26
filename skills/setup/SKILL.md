@@ -117,12 +117,15 @@ git rm --cached --ignore-unmatch .beads/issues.jsonl .beads/interactions.jsonl
 ```
 
 ### CLAUDE.md ポインタ（#9）— 無いときだけ追加（bd マーカー無し）
+
+> **この注入テンプレは「縮退時の最小フォールバック」として意図的に PRIME と一部 overlap する**（bd 運用ルールの SSOT は `.beads/PRIME.md`・SessionStart hook が毎セッション注入。本ポインタは bd 未導入で PRIME がまだ注入されない過渡期だけの最小安全網）。ゆえに**逐語の理由文・版番号は持たせない**（持たせると PRIME 変更時に stale 化するドリフト源になる＝本テンプレが防ごうとしている重複そのもの）。詳細・理由は PRIME が SSOT で、食い違ったら PRIME が優先。テンプレ更新時はこの最小性を保つこと。
+
 ```markdown
 ## Beads Issue Tracker (bd) + scribe
 
-タスク追跡は **bd (beads)**。SessionStart hook が `bd prime` で bd 基礎の文脈を毎セッション注入する（SSOT = `.beads/PRIME.md`）。本節は bd 未導入時のフォールバック。
+タスク追跡は **bd (beads)**。SessionStart hook が `bd prime` で bd 基礎の文脈を毎セッション注入する（**運用ルールと詳細の SSOT = `.beads/PRIME.md`**）。本節は PRIME が注入されない bd 未導入時だけの最小フォールバック。
 
-- **タスク = beads / 知識 = doobidoo**: 永続・横断の作業は bd issue で追跡。知見は doobidoo に保存し、**`bd remember/recall/memories` は使わない**。
+- **タスク = beads / 知識 = doobidoo**: 永続・横断の作業は bd issue で追跡。知見は doobidoo に保存し、**`bd remember/recall/memories` は使わない**（理由・詳細は PRIME）。
 - **役割を帯びた規約（誰が create/dep/close/dolt push するか・終了プロトコル）の SSOT は scribe plugin の role 別 SessionStart 注入**（admin / worker / consult）。PRIME は role 中立な基礎のみを持つ。
 ```
 
