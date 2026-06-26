@@ -370,6 +370,11 @@ build_prompt() {
   cat <<PROMPT
 あなたは scribe worker cell（issue $ID）。この issue を end-to-end で完遂する。応答は日本語。
 
+## autonomous 規律（最重要・protocol.md §2・sc-46h）
+- この worker は**自律実行する**。**人間の確認・許可・指示を待って停止してはならない**（admin は監視するが対話しない。admin の \`capture-pane\` / \`bd show\` は read-only であなたを中断しない）。
+- 出力に「中断された」「割り込み」等のノイズが見えても作業を止めるな。shell 変数は Bash 呼出し間で消える・出力フィルタがノイズを混ぜることがある——**疑わしければ同じコマンドを再実行し、git/bd の実体（\`git -C "$WORKTREE" log\` / \`cd "$ANCHOR" && bd show $ID\`＝bd graph は anchor 所在ゆえ worktree から bare \`bd show\` は解決しない）で事実を確認**してから進む（推測や前回出力の記憶で判断しない）。
+- **停止してよいのは下記 env 健全性 gate の ENV_DEGRADED 検出時のみ**（その時だけ STATUS: blocked を書いて止まる）。それ以外は契約完遂（実装→self-test→cell-quality→commit→DONE 報告）まで自律的に進めること。
+
 ## 契約（SSOT）
 - 契約 = bd issue の description: \`cd "$ANCHOR" && bd show $ID\`（着手前に必ず読む。bd graph 所在 = anchor $ANCHOR・worktree からは解決しない）。
 - 配置: worktree（= cwd）$WORKTREE — **ここから出ない**（bd graph 参照のための anchor への一時 cd は除く）。branch=$BRANCH / window=$WINDOW。

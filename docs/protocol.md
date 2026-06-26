@@ -74,6 +74,7 @@ worker を Claude Code 組込み bwrap sandbox に封じたいときは `SCRIBE_
 
 admin が worker に渡す起動 prompt（spawn の最初の inject）が満たすべき規約。
 
+- **autonomous 規律（最重要・bd sc-46h）**: worker は**自律実行**し、**人間の確認・許可・指示を待って停止してはならない**（admin は監視するが対話しない＝admin の `capture-pane` / `bd show` は read-only で worker を中断しない）。出力に「中断された」「割り込み」等のノイズが見えても止まらず、疑わしければ同じコマンドを再実行し **git/bd の実体**（`git -C <worktree> log` / `cd <anchor> && bd show <id>`）で事実を確認してから進む（推測や前回出力の記憶で判断しない）。**停止してよいのは env 健全性 gate の `ENV_DEGRADED` 検出時のみ**（その時だけ `STATUS: blocked` を書いて止まる）。背景: sc-498 litmus で worker1 が早期に確認待ちで idle 化し fleet を詰まらせた（admin nudge で回復）。根本原因の出力汚染（cmdtokens 系・cross-project）は本規律では緩和に留まり、hallucinated 完了は Layer2（admin の commit-count 独立照合・§5 step1）と sc-16i（自己 close→gate-pending）が backstop として捕捉する。
 - **編集可スコープの明示**: worker が触ってよいパス境界を prompt で明示する（例: 「編集可は新規リポ配下のみ・コピー元は読むだけ」）。スコープ外の編集を求める後続要求は worker が自分で拒否できるようにする。
 - **anchor 絶対パスを焼き込む**: worker の cwd は **worktree** であり、そこからは anchor の bd graph（`.beads`）が解決しない。よって契約参照（`bd show`）と bdw 規律行（§3）に **anchor（bd graph 所在）の絶対パスを埋め**、worker が `cd` 先を自力発見せずに済むようにする。spawn ヘルパー（`scripts/scribe-spawn.sh`）は `--anchor`（既定 cwd）を絶対パスへ正規化して保持済みの `$ANCHOR` を `build_prompt` に焼き込む。
 - **tests 同梱（test-first）**: worker は実装に対する self-test を**自分で用意**し、リポ直下に置く。pilot では `selftest-<id>.local.sh`（untracked・コミットしない・fail-closed）の形で運用した。

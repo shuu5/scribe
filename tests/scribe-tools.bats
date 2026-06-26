@@ -372,6 +372,32 @@ _mk_main_and_linked() {
   [[ "$output" == *"bd create"* ]]
 }
 
+# sc-46h: worker は autonomous に動く＝確認待ちで停止しない。sc-498 litmus で worker1 が「どうしますか?」と
+# 確認待ち idle 化し fleet を詰まらせた穴を prompt 規律で塞ぐ。停止は ENV_DEGRADED 時のみ・監視ノイズで止まらない。
+@test "spawn(sc-46h): worker prompt に autonomous 規律(確認待ち停止禁止・停止は ENV_DEGRADED のみ)が焼ける" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"autonomous 規律"* ]]
+  [[ "$output" == *"確認・許可・指示を待って停止してはならない"* ]]
+  # 停止条件は ENV_DEGRADED のみ（autonomy が env 健全性 gate の停止と矛盾しないことの pin）。独立 2 文で
+  # 各 [[ ]] を errexit に効かせる（`&&` 連結は errexit 免除で fail-open になりうる＝sc-3lj gate の教訓）。
+  [[ "$output" == *"停止してよいのは"* ]]
+  [[ "$output" == *"ENV_DEGRADED 検出時のみ"* ]]
+  # 実体確認の bd は anchor cd 付き（worktree から bare bd show は bd graph を解決しない・sc-46h gate blocking）。
+  # $ANCHOR は heredoc で展開されるため、修正で入れた安定 prose で pin する。
+  [[ "$output" == *"bd graph は anchor 所在ゆえ worktree から bare"* ]]
+}
+
+# sc-46h: autonomous 規律の本文 SSOT は docs/protocol.md §2（ツール側だけに最重要規律の正本を持たない＝
+# リポの SSOT 契約。scribe-spawn ヘッダ「道具は規約をコード化するだけ」を守る）。docs からの脱落を pin する。
+@test "docs(sc-46h): protocol.md §2 に autonomous 規律が SSOT 化されている" {
+  grep -q 'autonomous 規律' "$REPO_ROOT/docs/protocol.md"
+  grep -q '確認・許可・指示を待って停止してはならない' "$REPO_ROOT/docs/protocol.md"
+  # 停止条件(load-bearing)も docs 側で pin する（spawn 側 assert と対称・docs だけ停止規範が drift しても捕捉）。
+  grep -q '停止してよいのは' "$REPO_ROOT/docs/protocol.md"
+  grep -q 'ENV_DEGRADED' "$REPO_ROOT/docs/protocol.md"
+}
+
 # 上の positive テストは cell-quality/receivedArgs/bdw のみ assert し、build_prompt が焼く
 # selftest-args 呼出（cell-quality の自己点検 args 1 コマンド化）を pin しない＝行の脱落/改変が
 # 緑通過する純 test-gap（sc-e22）。dry-run prompt 出力に selftest-args の核要素が焼けることを pin する。
