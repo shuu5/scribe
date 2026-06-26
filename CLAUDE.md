@@ -4,8 +4,9 @@ scribe は per-project opt-in の Claude Code plugin（admin / worker / consult 
 
 ## タスク追跡 = beads (bd) / 知識 = doobidoo
 
-- **タスク → bd（beads, prefix `sc-`）**: 永続・横断の作業は bd issue で追跡。SessionStart hook が `bd prime` で基礎文脈を毎セッション注入する（SSOT = `.beads/PRIME.md`）。bd は **v1.0.4 にピン**（`bd upgrade` / `npm install -g @beads/bd` 禁止・upstream #4259）。
-- **知識・知見 → doobidoo**（`mcp__doobidoo__memory_store` / `memory_search`）。**`bd remember` / `bd recall` / `bd memories` は使わない**（consolidation 機構が無く肥大化する）。beads はタスク専用。
+- **タスク → bd（beads, prefix `sc-`）／ 知識・知見 → doobidoo**（`mcp__doobidoo__memory_store` / `memory_search`）。beads はタスク専用。
+- **bd 運用の全ルールと詳細の SSOT は `.beads/PRIME.md`**（SessionStart hook が `bd prime` で毎セッション注入する）。`bd remember`/`recall`/`memories` の不使用・bd のバージョンピン・並列 write の直列化などの運用ルールと理由（版番号・issue 番号を含む）はすべてそこに一本化し、本 CLAUDE.md は重複コピーを持たない（コピーすると PRIME 変更時に stale 化するドリフト源になる）。
+- **役割を帯びた規約の SSOT は scribe role 別 SessionStart 注入**（下記「役割規約の SSOT」節）。
 
 ## 役割規約の SSOT（CLAUDE.md に本文を重複させない）
 
