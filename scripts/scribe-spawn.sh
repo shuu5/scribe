@@ -53,8 +53,12 @@ source "$SCRIPT_DIR/lib/scribe-lib.sh"
 # cld-spawn の所在（テスト時は SCRIBE_CLD_SPAWN でスタブ差し替え）。
 CLD_SPAWN="${SCRIBE_CLD_SPAWN:-$HOME/.claude/plugins/session/scripts/cld-spawn}"
 # sandbox settings 生成器の所在（テスト時は SCRIBE_SANDBOX_GEN でスタブ差し替え＝gen 失敗注入用。
-# 既定は本番ヘルパ＝SCRIBE_SANDBOX opt-in 時の挙動 byte 不変。CLD_SPAWN と同型の testability seam）。
+# 既定は本番ヘルパ＝sandbox 時の挙動 byte 不変。CLD_SPAWN と同型の testability seam）。
 SANDBOX_GEN="${SCRIBE_SANDBOX_GEN:-$SCRIPT_DIR/sandbox-spike/gen-sandbox-settings.sh}"
+# sandbox dep-preflight 道具の所在（テスト時は SCRIBE_SANDBOX_PREFLIGHT でスタブ差し替え＝deps 欠如注入用。
+# 既定は本番ヘルパ。CLD_SPAWN / SANDBOX_GEN と同型の testability seam。sc-u53 default-on の安全弁＝
+# deps 欠如 host で worker を sandbox 化できないとき fail-loud / fallback を決める検査の入口）。
+SANDBOX_PREFLIGHT="${SCRIBE_SANDBOX_PREFLIGHT:-$SCRIPT_DIR/scribe-sandbox-preflight.sh}"
 # grill-me SKILL.md の所在（grill-consult が grill 方法論を verbatim 注入する元・テスト時は SCRIBE_GRILL_SKILL で差し替え）。
 # sc-swc: grill-consult は grill-me を paraphrase せず本スキル本文をそのまま焼き込む（mechanism b＝drift しない・劣化再実装を撤去）。
 GRILL_SKILL="${SCRIBE_GRILL_SKILL:-$HOME/.claude/skills/grill-me/SKILL.md}"
@@ -347,6 +351,15 @@ BRANCH="$(scribe_branch_name "$ID")"            # spawn/<id>-HHMMSS
 WINDOW="$(scribe_window_name "$ID")"            # wt-<id>
 WORKTREE="$REPO/.worktrees/$BRANCH"             # <repo>/.worktrees/spawn/<id>-HHMMSS
 
+# --- sandbox は既定 on（opt-out 化・sc-u53）---
+# 旧仕様（default off・SCRIBE_SANDBOX=1 で opt-in）から反転。worker を OS sandbox に**既定で**封じる。
+# 明示 opt-out は SCRIBE_SANDBOX=0 のみ（"0" のときだけ off・未指定/その他は on）。SANDBOX_ON を一度だけ計算し、
+# build_prompt（--also-tmp / scribe-add 規律）・emit_plan・実 materialization が全てこの 1 変数を読む（DRY＝
+# 4 箇所のインライン判定が drift しない）。dep-preflight（下記・実 spawn 経路）が deps 欠如時に SANDBOX_ON を
+# 0 へ降格しうる（fallback）ため、build_prompt はその降格後の値を見る（呼出は materialization より後）。
+SANDBOX_ON=1
+[[ "${SCRIBE_SANDBOX:-}" == "0" ]] && SANDBOX_ON=0
+
 # --- 3. task prompt 生成（protocol.md §2）---
 build_prompt() {
   # env-probe の base は spawn 時点の commit を SHA へ凍結して焼く。既定 BASE="HEAD" をリテラルで
@@ -359,11 +372,11 @@ build_prompt() {
   # verify --also-tmp がその不在を誤って ENV_DEGRADED と判定する。worktree sentinel チェック（常時・主シグナル）で
   # 十分なので sandbox 時は --also-tmp を落とす。非 sandbox（/tmp writable）は従来どおり --also-tmp を維持（後方互換）。
   local _also_tmp_flag=" --also-tmp"
-  [[ "${SCRIBE_SANDBOX:-0}" == "1" ]] && _also_tmp_flag=""
+  [[ "$SANDBOX_ON" == "1" ]] && _also_tmp_flag=""
   # sandbox 時のみ: stage は git add -A でなく scribe-add（非通常ファイルを型で弾く）を使う規律（sc-yqa の B）。
   # 二重引用符で組み立て $SCRIPT_DIR/$WORKTREE を実パスへ展開する（backtick はエスケープして literal 保持）。
   local _sandbox_add_note=""
-  if [[ "${SCRIBE_SANDBOX:-0}" == "1" ]]; then
+  if [[ "$SANDBOX_ON" == "1" ]]; then
     _sandbox_add_note="
 - **sandbox 下の stage（sc-yqa）**: この worker は OS sandbox 下。CC が cwd の既知 dotfile/.claude 設定を /dev/null character device 化し \`git add -A\` を rc=128 で落とす（空 commit=degraded）。stage は \`git add -A\` でなく **\"$SCRIPT_DIR/scribe-add\"**（非通常ファイルを型で弾いて残りの変更を stage）を使い、\`cd \"$WORKTREE\" && \"$SCRIPT_DIR/scribe-add\" && git commit -m ...\` の形で commit する（空 commit を避ける）。"
   fi
@@ -410,7 +423,7 @@ MONITOR_CMD="tmux capture-pane -p -t \"\$WID\" | tail -n 3   # busy regex: '… 
 emit_plan() {
   echo "[plan] scribe-spawn: issue=$ID（実在検証 OK）"
   echo "[plan] git -C $REPO worktree add -b $BRANCH $WORKTREE $BASE"
-  [[ "${SCRIBE_SANDBOX:-0}" == "1" ]] && echo "[plan] sandbox: $WORKTREE/.claude/settings.local.json を生成（SCRIBE_SANDBOX=1・bwrap 外壁。CLD_PATH/launcher は不変＝本番経路 byte 同一）"
+  [[ "$SANDBOX_ON" == "1" ]] && echo "[plan] sandbox: $WORKTREE/.claude/settings.local.json を生成（SCRIBE_SANDBOX 既定 on・opt-out は SCRIBE_SANDBOX=0。bwrap 外壁。CLD_PATH/launcher は不変＝spawn 行 byte 同一）。実 spawn 時に dep-preflight（deps 欠如→SCRIBE_SANDBOX_FALLBACK=1 で警告付き非 sandbox / 無ければ fail-loud・sc-u53）"
   echo "[plan] scribe_capture_origin $REPO $WORKTREE   # canonical origin を per-worktree marker へ捕捉（un-1n1・gate §5 verify 用）"
   echo "[plan] $CLD_SPAWN --cd $WORKTREE --bd-id $ID --model $MODEL \"<task prompt>\""
   echo "[plan] monitor（window ID @N 参照・dotted id の tmux -t 衝突回避）:"
@@ -426,6 +439,29 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 # ===== 実行（real）=====
+
+# --- sandbox dep-preflight（sc-u53・default-on の安全弁）---
+# default-on では deps 欠如 host で settings.local.json の failIfUnavailable により worker が起動拒否される。
+# worktree を作る **前** に deps を preflight する（fail-loud で orphan worktree を残さない）。欠如時:
+#   - SCRIBE_SANDBOX_FALLBACK=1 を置いた host → 警告して非 sandbox で続行（SANDBOX_ON=0 へ降格・build_prompt も追従）。
+#   - それ以外 → fail-loud で停止（黙って無防備に走らせない＝scribe の fail-closed 規律・sc-u53 ユーザー確定）。
+# 明示 SCRIBE_SANDBOX=0（opt-out）は SANDBOX_ON=0 ゆえこのブロックを通らない＝旧 byte 経路へ素通り。
+# preflight は seam（SANDBOX_PREFLIGHT）経由＝テストで deps 欠如を注入できる。欠落理由は stdout で受ける。
+if [[ "$SANDBOX_ON" == "1" ]]; then
+  if ! _preflight_reason="$("$SANDBOX_PREFLIGHT" 2>/dev/null)"; then
+    if [[ "${SCRIBE_SANDBOX_FALLBACK:-0}" == "1" ]]; then
+      echo "scribe: warn: sandbox deps 欠如（${_preflight_reason}）だが SCRIBE_SANDBOX_FALLBACK=1 → 非 sandbox で続行します（この worker は OS sandbox の外で走ります）。" >&2
+      SANDBOX_ON=0
+    else
+      scribe_die "sandbox deps 欠如で worker を sandbox 化できません（default-on・sc-u53）: ${_preflight_reason}
+  対処のいずれか:
+    (1) deps を入れる（bubblewrap / socat / userns 緩和。手順は scripts/sandbox-spike/README.md）。
+    (2) この host で非 sandbox 実行を意図するなら SCRIBE_SANDBOX=0 を明示する（1 回限りの opt-out）。
+    (3) この host で恒久的に『deps 欠如時は警告付き非 sandbox』にするなら SCRIBE_SANDBOX_FALLBACK=1 を置く。"
+    fi
+  fi
+fi
+
 git -C "$REPO" worktree add -b "$BRANCH" "$WORKTREE" "$BASE"
 
 # --- origin 健全性ガード: canonical origin を per-worktree marker へ捕捉（un-1n1・protocol.md §1/§5）---
@@ -440,20 +476,22 @@ else
   echo "scribe: warn: origin の捕捉に失敗（gate §5 の origin 健全性 verify が skip される）: worktree=$WORKTREE" >&2
 fi
 
-# --- sandbox opt-in（SCRIBE_SANDBOX=1・sc-1gu）: worker を OS レベル bwrap sandbox に封じる ---
+# --- sandbox materialization（既定 on・opt-out=SCRIBE_SANDBOX=0・sc-1gu/sc-u53）: worker を OS レベル bwrap sandbox に封じる ---
 # git worktree add 済みの worktree に .claude/settings.local.json を生成し、worker(cwd=worktree)の
 # Bash subprocess を「自 worktree + 共有 .git + anchor の .beads + bdw 鍵($HOME/.cache/bdw-locks)」へ限定する。
-# CLD_PATH/cld-spawn/launcher は一切触らない＝opt-in 未指定時は本番経路 byte 不変。前提=bubblewrap +
-# socat + apparmor_restrict_unprivileged_userns=0。依存欠如時は failIfUnavailable で worker が起動拒否。
-if [[ "${SCRIBE_SANDBOX:-0}" == "1" ]]; then
-  # == "1" の文字列比較（[[ -eq ]] の算術評価は非数値で die・算術インジェクションを許すため避ける）。
-  mkdir -p "$WORKTREE/.claude" || scribe_die "sandbox: .claude ディレクトリ作成に失敗（SCRIBE_SANDBOX=1）: $WORKTREE"
+# CLD_PATH/cld-spawn/launcher は一切触らない＝spawn 行は sandbox 有無で byte 不変。前提=bubblewrap +
+# socat + userns（apparmor profile / sysctl いずれか）。**deps 欠如はこのブロックの前の dep-preflight が
+# 既に処理済み**（fail-loud で停止 or SCRIBE_SANDBOX_FALLBACK=1 で SANDBOX_ON=0 へ降格）＝ここに来る時点で
+# SANDBOX_ON=1 なら deps は充足している。
+if [[ "$SANDBOX_ON" == "1" ]]; then
+  # "1" の文字列比較（[[ -eq ]] の算術評価は非数値で die・算術インジェクションを許すため避ける）。
+  mkdir -p "$WORKTREE/.claude" || scribe_die "sandbox: .claude ディレクトリ作成に失敗（sandbox 既定 on・opt-out=SCRIBE_SANDBOX=0）: $WORKTREE"
   # 一時ファイルへ生成し成功時のみ atomic mv（gen が途中失敗しても半端な settings を残さない）。
   _sb_tmp="$(mktemp "$WORKTREE/.claude/.settings.XXXXXX")" || scribe_die "sandbox: 一時ファイル作成に失敗: $WORKTREE/.claude"
   if "$SANDBOX_GEN" "$WORKTREE" > "$_sb_tmp"; then
     mv -f "$_sb_tmp" "$WORKTREE/.claude/settings.local.json"
   else
-    rm -f "$_sb_tmp"; scribe_die "sandbox settings.local.json の生成に失敗（SCRIBE_SANDBOX=1）: $WORKTREE"
+    rm -f "$_sb_tmp"; scribe_die "sandbox settings.local.json の生成に失敗（sandbox 既定 on・opt-out=SCRIBE_SANDBOX=0）: $WORKTREE"
   fi
   # 生成した settings.local.json を ephemeral に保つ（worker の stage に巻き込まない・sc-1gu）。info/exclude は
   # 共有 common-dir へ冪等追記する（scribe-lib の単一実装＝本番と test で drift しない）。CC sandbox が cwd の
@@ -471,7 +509,7 @@ if [[ "${SCRIBE_SANDBOX:-0}" == "1" ]]; then
       fi
     done < <(jq -r '.sandbox.filesystem.allowWrite[]?' "$WORKTREE/.claude/settings.local.json" 2>/dev/null || true)
   fi
-  echo "sandbox: worker を bwrap sandbox に封じます（SCRIBE_SANDBOX=1・settings=$WORKTREE/.claude/settings.local.json）"
+  echo "sandbox: worker を bwrap sandbox に封じます（既定 on・opt-out=SCRIBE_SANDBOX=0・settings=$WORKTREE/.claude/settings.local.json）"
 fi
 
 PROMPT_TEXT="$(build_prompt)"

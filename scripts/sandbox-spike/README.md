@@ -1,7 +1,7 @@
-# sandbox-spike (sc-1gu) — sandbox opt-in 本番ヘルパー + 実証 spike 記録
+# sandbox-spike (sc-1gu) — sandbox 本番ヘルパー（既定 on・opt-out=`SCRIBE_SANDBOX=0`・sc-u53）+ 実証 spike 記録
 
 > ディレクトリ名は `sandbox-spike` のまま据え置く（sc-2m0 facet3・案C軽量）が、`gen-sandbox-settings.sh`
-> は実証 spike を経て **本番反映済みの opt-in 本番ヘルパー**（下記「本番反映」節）。本ファイルは
+> は実証 spike を経て **本番反映済みの本番ヘルパー（既定 on・opt-out=`SCRIBE_SANDBOX=0`・sc-u53）**（下記「本番反映」節）。本ファイルは
 > その本番ヘルパーの仕様 + 実証 spike（2026-06-18 検証済み）の記録を兼ねる。
 
 scribe worker を **OS レベル sandbox**(Claude Code 組込み bubblewrap)で封じ込められるか、
@@ -14,9 +14,24 @@ CC 組込み sandbox は次の3つを要求する(spike で実測):
 1. `bubblewrap`(`apt install bubblewrap`)
 2. **`socat`**(`apt install socat`) — network proxy 用。**欠けると `failIfUnavailable` で CC が起動拒否**し
    コマンドが一切走らない(spike 初回はこれで全 assert が無効化された)。
-3. `kernel.apparmor_restrict_unprivileged_userns=0`(Ubuntu 24.04)。`/etc/sysctl.d/` に置いて
-   `sudo sysctl --system`。**ホスト全体の userns ハードニングを外す**ため、マルチユーザーホストでは
-   security トレードオフを承知の上で。ロールバック = その conf を rm して再 `sysctl --system`。
+3. **userns が使えること** — 次のどちらかの方式（判定は方式に依らず実プローブで行う・下記）:
+   - `kernel.apparmor_restrict_unprivileged_userns=0`(Ubuntu 24.04)。`/etc/sysctl.d/` に置いて
+     `sudo sysctl --system`。**ホスト全体の userns ハードニングを外す**ため、マルチユーザーホストでは
+     security トレードオフを承知の上で。ロールバック = その conf を rm して再 `sysctl --system`。
+   - **bwrap への targeted apparmor profile**（ホスト全体の sysctl を緩めず bwrap だけに userns を許可）。
+     マルチユーザーホストはこちらが安全（global sysctl=1 のまま sandbox が成立する）。
+   判定は方式に依らず **実プローブ** `bwrap --ro-bind / / --unshare-user true` で行う＝global sysctl 値は
+   読まない（profile 方式で false-negative になるため）。実体 = `scribe_sandbox_preflight`（scribe-lib.sh）。
+
+### 既定 on（opt-out）+ dep-preflight（sc-u53）
+
+worker は **既定で** sandbox 化される（`SCRIBE_SANDBOX=0` で opt-out・本番 spawn 行は byte 不変）。default-on
+ゆえ deps 欠如 host では spawn が **worktree を作る前**に `scribe-sandbox-preflight.sh` で先回り検査し（bwrap/socat/userns
+〔実プローブ〕に加え **jq**＝settings 生成器 `gen-sandbox-settings.sh` の hard 依存も検査する。jq 不在を見落とすと
+worktree add 後に gen が落ち orphan を残す・round3 gate）、欠如時は
+**fail-loud で停止**する（黙って無防備に走らせない＝fail-closed・sc-u53 ユーザー確定）。`SCRIBE_SANDBOX_FALLBACK=1`
+を置いた host **だけ**警告付きで非 sandbox 続行する（明示エスケープ）。手動 fleet チェック =
+`scripts/scribe-sandbox-preflight.sh`（充足 exit 0 / 欠如 exit 1 + 欠落理由を stdout）。
 
 ## スクリプト
 
@@ -54,9 +69,12 @@ spike ハーネス(commit 71bf862)で 5/5 PASS(全て ran=yes ＝ genuine):
 
 ## 本番反映(実装済み: direct-gen)
 
-`SCRIBE_SANDBOX=1` opt-in 時、`scripts/scribe-spawn.sh` が `git worktree add` 後に
+> **sc-u53 更新**: 本番は default-on（opt-out=`SCRIBE_SANDBOX=0`）へ反転済み。現行の opt-out/preflight セマンティクスの
+> SSOT は本ファイル冒頭「### 既定 on（opt-out）+ dep-preflight（sc-u53）」節。以下は sc-1gu 当時（opt-in）の direct-gen 反映記録。
+
+worker spawn 時（既定 on・`SCRIBE_SANDBOX=0` で opt-out・sc-u53）、`scripts/scribe-spawn.sh` が `git worktree add` 後に
 `gen-sandbox-settings.sh` で worktree の `.claude/settings.local.json` を**直接生成**する
-(`CLD_PATH`/cld-spawn/launcher は触らない＝opt-in 未指定時は本番経路 byte 不変)。生成した
+(`CLD_PATH`/cld-spawn/launcher は触らない＝opt-out 時は本番経路 byte 不変)。生成した
 settings は worktree の git exclude(`info/exclude`)へ冪等追記して ephemeral に保つ
 (worker の `git add -A` で巻き込まない・全マシン/全ユーザーで効かせる)。
 
@@ -68,7 +86,7 @@ settings は worktree の git exclude(`info/exclude`)へ冪等追記して ephem
 
 **旧「残」項目は完了済み（sc-jqd で source of record と突合）**:
 - ✅ live opt-in の end-to-end spawn 実証(D7 c/d): `sc-1gu` で「live e2e で worker が sandboxed に boot」を実証済（commit 71bf862 / 4d16943 / 5bbd57a）。
-- ✅ docs(protocol.md)へ socat 前提 + opt-in 反映済: `docs/protocol.md` の「sandbox opt-in」節が `bubblewrap`+`socat` 必須・apparmor userns 緩和のトレードオフを明記。
+- ✅ docs(protocol.md)へ socat 前提反映済: `docs/protocol.md` の「sandbox（既定 on・opt-out=SCRIBE_SANDBOX=0）」節（sc-u53 で旧「sandbox opt-in」から改名）が `bubblewrap`+`socat`+userns 必須・dep-preflight・fallback を明記。
 
 この spike-record に未完項目は残っていない（本番反映は上記「本番反映(実装済み: direct-gen)」節＝production・後続の最小化は sc-da0）。
 

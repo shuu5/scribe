@@ -244,3 +244,31 @@ scribe_restore_origin() {
     scribe_git -C "$repo" remote add origin "$expected"       # 削除ケース（再作成）
   fi
 }
+
+# scribe_sandbox_preflight → SCRIBE_SANDBOX worker の OS sandbox **機構** deps を検査（sc-u53・default-on の安全弁）。
+#   揃えば exit 0（stdout 何も出さない）。欠ければ **最初の欠落理由を stdout に machine-readable で echo** して非0
+#   （caller が fail-loud / fallback のメッセージに織り込めるように）。
+#   検査対象は sandbox を成立させる前提のみ:
+#     - bubblewrap（外壁本体）
+#     - socat（CC sandbox の network proxy。欠けると failIfUnavailable で worker が一切起動しない＝sc-1gu 実測）
+#     - jq（settings 生成器 gen-sandbox-settings.sh の **hard 依存**＝jq 不在で gen が exit 2。spawn で jq を無条件に
+#       使うのは sandbox materialization 経路〔gen 呼出〕のみで非 sandbox 経路は jq を一切使わない＝jq は sandbox
+#       機構固有の前提。これを preflight が見落とすと『bwrap/socat/userns は揃うが jq 不在』host で worktree add 後に
+#       gen が落ち orphan worktree を残す＝preflight の orphan 防止不変条件を破る・sc-u53 round3 gate confirmed）
+#     - userns を **実プローブ**で確認（`bwrap --ro-bind / / --unshare-user true`）。
+#   userns は global sysctl（kernel.apparmor_restrict_unprivileged_userns）を **読まない**: host が
+#   targeted apparmor profile 方式（sysctl=1 のまま bwrap だけ userns 許可）でも sysctl 緩和方式でも、
+#   「実際に userns を作れるか」だけを見る＝両方式で信頼できる唯一の signal（sysctl 読みは profile 方式で
+#   false-negative を出す）。verify-sandbox-e2e.sh の skip プローブと同じ判定式。
+#   claude/bd 等の worker 一般 deps はここでは検査しない（sandbox の有無に依らず要る＝sandbox 可否の gate ではない。
+#   jq は上記のとおり sandbox materialization 固有の hard 依存ゆえ検査対象に含める）。
+scribe_sandbox_preflight() {
+  local b
+  for b in bwrap socat jq; do
+    command -v "$b" >/dev/null 2>&1 || { printf '%s が不在' "$b"; return 1; }
+  done
+  # userns 実プローブ（apparmor profile / sysctl どちらの方式でも、通れば OK）。
+  bwrap --ro-bind / / --unshare-user true 2>/dev/null \
+    || { printf 'bwrap が userns を作れない（apparmor profile / sysctl 緩和が未反映）'; return 1; }
+  return 0
+}

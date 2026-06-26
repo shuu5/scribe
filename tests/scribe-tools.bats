@@ -182,24 +182,96 @@ _mk_main_and_linked() {
   [[ "$output" == *"--model opus"* ]]
 }
 
-@test "spawn(sandbox): SCRIBE_SANDBOX 未指定なら sandbox 節を一切出さない（opt-in gating・本番 byte 不変の核）" {
+@test "spawn(sandbox/sc-u53): 既定（SCRIBE_SANDBOX 未指定）で sandbox 節を出す（default-on・opt-out 化）" {
   run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"settings.local.json"* ]]   # 既定で sandbox materialization を plan に出す（旧 default-off から反転・sc-u53）
+  [[ "$output" == *"--bd-id un-4nm"* ]]
+  [[ "$output" == *"--model opus"* ]]
+}
+
+@test "spawn(sandbox/sc-u53): SCRIBE_SANDBOX=0 で sandbox 節を出さない（明示 opt-out で旧 byte 経路へ戻る）" {
+  SCRIBE_SANDBOX=0 run "$SPAWN" --dry-run un-4nm
   [ "$status" -eq 0 ]
   [[ "$output" != *"settings.local.json"* ]]
   [[ "$output" == *"--bd-id un-4nm"* ]]
   [[ "$output" == *"--model opus"* ]]
 }
 
-@test "spawn(sandbox): SCRIBE_SANDBOX 有無で cld-spawn の spawn 行は byte 同一（substring でなく full-line で pin）" {
+@test "spawn(sandbox/sc-u53): SCRIBE_SANDBOX=0(opt-out) と既定(on) で cld-spawn の spawn 行は byte 同一（full-line で pin）" {
   # worktree タイムスタンプ(spawn/un-4nm-HHMMSS)だけ正規化し、spawn 行の完全一致を直接 assert する。
-  run "$SPAWN" --dry-run un-4nm
+  # sandbox の有無で settings.local.json の生成は変わるが、cld-spawn 起動行（CLD_PATH/launcher）は不変＝
+  # 「opt-out で本番 byte 旧経路へ戻る」不変条件を default-on 前提で pin（旧『SCRIBE_SANDBOX 有無』を再定義・sc-u53）。
+  SCRIBE_SANDBOX=0 run "$SPAWN" --dry-run un-4nm
   [ "$status" -eq 0 ]
-  plain="$(printf '%s\n' "$output" | grep -F 'cld-spawn --cd' | sed -E 's#un-4nm-[0-9]+#un-4nm-TS#')"
-  SCRIBE_SANDBOX=1 run "$SPAWN" --dry-run un-4nm
+  optout="$(printf '%s\n' "$output" | grep -F 'cld-spawn --cd' | sed -E 's#un-4nm-[0-9]+#un-4nm-TS#')"
+  run "$SPAWN" --dry-run un-4nm   # 既定 = sandbox on
   [ "$status" -eq 0 ]
-  sb="$(printf '%s\n' "$output" | grep -F 'cld-spawn --cd' | sed -E 's#un-4nm-[0-9]+#un-4nm-TS#')"
-  [ -n "$plain" ]
-  [ "$plain" == "$sb" ]   # SCRIBE_SANDBOX で spawn 行は 1 byte も変わらない
+  defon="$(printf '%s\n' "$output" | grep -F 'cld-spawn --cd' | sed -E 's#un-4nm-[0-9]+#un-4nm-TS#')"
+  [ -n "$optout" ]
+  [ "$optout" == "$defon" ]   # sandbox 有無で spawn 行は 1 byte も変わらない
+}
+
+# ---------- sandbox dep-preflight（default-on の安全弁・sc-u53）----------
+@test "lib(sc-u53): scribe_sandbox_preflight は deps 欠如で非0 + 欠落理由を stdout に返す（PATH 隠蔽で host 非依存）" {
+  # PATH を空にして bwrap/socat を不可視化→ command -v が外れ「不在」理由を返す（実 bwrap を host から消さずに検査）。
+  run env PATH=/nonexistent /bin/bash -c "source '$LIB'; scribe_sandbox_preflight"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"が不在"* ]]
+}
+
+@test "preflight(sc-u53): scribe-sandbox-preflight.sh は deps 充足 host で exit 0（欠如 host は skip）" {
+  command -v bwrap >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 \
+    && bwrap --ro-bind / / --unshare-user true 2>/dev/null || skip "sandbox deps 未満（この host は対象外）"
+  run "$SCRIPTS/scribe-sandbox-preflight.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "lib(sc-u53): scribe_sandbox_preflight は jq 不在を sandbox 固有依存として検出する（bwrap/socat 可視のまま jq だけ隠す・round3）" {
+  # jq は gen-sandbox-settings.sh の hard 依存＝sandbox 機構固有。bwrap/socat が揃っても jq 不在なら preflight が
+  # 非0 を返し materialization で gen が落ち orphan を残す前に止めることを pin（round3 gate confirmed の回帰防止）。
+  # bwrap/socat はダミー実行体で command -v を満たすだけ（loop が jq の手前を通過するため・userns 実プローブには
+  # 到達しない＝host 非依存）。
+  local fakebin="$BATS_TEST_TMPDIR/fakebin"
+  mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/bwrap"; chmod +x "$fakebin/bwrap"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/socat"; chmod +x "$fakebin/socat"
+  # jq は意図的に置かない。
+  run env PATH="$fakebin" /bin/bash -c "source '$LIB'; scribe_sandbox_preflight"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"jq が不在"* ]]
+}
+
+@test "spawn(preflight/sc-u53): default-on で deps 欠如かつ FALLBACK 無し → fail-loud で die（worktree を作らない）" {
+  local repo failstub noop
+  repo="$SCRIBE_TEST_CWD"
+  failstub="$(mktemp)"; printf '#!/usr/bin/env bash\nprintf "TESTDEP が不在"; exit 1\n' > "$failstub"; chmod +x "$failstub"
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  run env SCRIBE_SANDBOX_PREFLIGHT="$failstub" SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$failstub" "$noop"
+  [ "$status" -ne 0 ]                                  # fail-loud（黙って無防備に走らせない）
+  [[ "$output" == *"sandbox deps 欠如"* ]]             # 理由
+  [[ "$output" == *"TESTDEP が不在"* ]]                # preflight の stdout を die メッセージへ織り込む
+  [[ "$output" == *"SCRIBE_SANDBOX=0"* ]]              # opt-out 案内
+  [[ "$output" == *"SCRIBE_SANDBOX_FALLBACK=1"* ]]     # fallback 案内
+  [ ! -d "$repo/.worktrees/spawn/un-4nm-101010" ]      # worktree add より前に die＝orphan を作らない
+}
+
+@test "spawn(preflight/sc-u53): deps 欠如 + SCRIBE_SANDBOX_FALLBACK=1 → 警告して非 sandbox で続行（settings 生成せず）" {
+  local repo failstub noop wt
+  repo="$SCRIBE_TEST_CWD"
+  failstub="$(mktemp)"; printf '#!/usr/bin/env bash\nprintf "TESTDEP が不在"; exit 1\n' > "$failstub"; chmod +x "$failstub"
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  wt="$repo/.worktrees/spawn/un-4nm-101010"
+  run env SCRIBE_SANDBOX_PREFLIGHT="$failstub" SCRIBE_SANDBOX_FALLBACK=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$failstub" "$noop"
+  [ "$status" -eq 0 ]                                  # 続行（spawn は成功する）
+  [[ "$output" == *"SCRIBE_SANDBOX_FALLBACK=1"* ]]     # 警告に明示
+  [[ "$output" == *"OS sandbox の外"* ]]               # 非 sandbox である旨を loud に警告
+  [ ! -f "$wt/.claude/settings.local.json" ]           # 非 sandbox＝settings.local.json を生成しない
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
 }
 
 # ---------- sandbox /tmp read-only 互換（sc-3lj・sc-498 G1）----------
@@ -223,8 +295,8 @@ _mk_main_and_linked() {
   [[ "$output" != *"--also-tmp"* ]]                     # sandbox では --also-tmp 無し（worktree sentinel で十分）
 }
 
-@test "spawn(sc-3lj): 非 sandbox の worker prompt は env-probe verify に --also-tmp を保つ（後方互換）" {
-  run "$SPAWN" --dry-run un-4nm
+@test "spawn(sc-3lj/sc-u53): 非 sandbox（SCRIBE_SANDBOX=0 opt-out）の worker prompt は env-probe verify に --also-tmp を保つ（後方互換）" {
+  SCRIBE_SANDBOX=0 run "$SPAWN" --dry-run un-4nm
   [ "$status" -eq 0 ]
   [[ "$output" == *"--also-tmp"* ]]
 }
@@ -415,7 +487,8 @@ _mk_main_and_linked() {
 # sc-sau: worker prompt に env 健全性 gate（scribe-env-probe.sh の plant/verify + STATUS:blocked 配線）が焼ける。
 # folio 0264028f の「env 劣化で self-verify 誤 PASS」を worker 自身が done 前に検出する fail-closed gate。
 @test "spawn(sc-sau): worker prompt に env-probe gate（plant/verify/--also-tmp/STATUS:blocked）が焼ける" {
-  run "$SPAWN" --dry-run un-4nm
+  # --also-tmp は非 sandbox 面ゆえ opt-out 経路で確認（default-on では sandbox 化で --also-tmp が落ちる・sc-u53）。
+  SCRIBE_SANDBOX=0 run "$SPAWN" --dry-run un-4nm
   [ "$status" -eq 0 ]
   [[ "$output" == *"scribe-env-probe.sh"* ]]        # env 健全性 probe helper
   [[ "$output" == *"plant"* ]]                       # sentinel を植える
@@ -659,7 +732,9 @@ _mk_main_and_linked() {
   repo="$SCRIBE_TEST_CWD"   # setup() の temp git repo（init コミット済み）
   fail_stub="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 7\n' > "$fail_stub"; chmod +x "$fail_stub"
   wt="$repo/.worktrees/spawn/un-4nm-101010"
-  run env SCRIBE_CLD_SPAWN="$fail_stub" SCRIBE_HHMMSS=101010 \
+  # sc-u53: cld-spawn 失敗→orphan は sandbox と直交ゆえ SCRIBE_SANDBOX=0(opt-out)で非 sandbox 経路に固定する
+  #（default-on の preflight/materialization を通さない＝host 非依存 + 実 $HOME/.cache/bdw-locks 汚染なし）。
+  run env SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$fail_stub" SCRIBE_HHMMSS=101010 \
       "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
   rm -f "$fail_stub"
   # cld-spawn の exit code（7）を上流へ伝える（fail-loud）。
@@ -687,7 +762,9 @@ _mk_main_and_linked() {
   repo="$SCRIBE_TEST_CWD"   # setup() の temp git repo（init コミット済み）
   noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
   wt="$repo/.worktrees/spawn/un-4nm-101010"
-  run env SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" BDW_LOCK_DIR="$BATS_TEST_TMPDIR/rt" SCRIBE_HHMMSS=101010 \
+  # sc-u53: default-on の dep-preflight を passing stub(noop=exit0)で stub し host 非依存にする
+  #（materialization 経路の検証が host の bwrap/socat/userns 有無に依存しないように）。
+  run env SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_PREFLIGHT="$noop" BDW_LOCK_DIR="$BATS_TEST_TMPDIR/rt" SCRIBE_HHMMSS=101010 \
       "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
   rm -f "$noop"
   [ "$status" -eq 0 ]
@@ -717,7 +794,8 @@ _mk_main_and_linked() {
   # SCRIBE_SANDBOX_GEN(=CLD_SPAWN と同型 seam)で gen を失敗 stub に差し替え、spawn の die+temp掃除枝を駆動。
   genfail="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 5\n' > "$genfail"; chmod +x "$genfail"
   wt="$repo/.worktrees/spawn/un-4nm-101010"
-  run env SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_GEN="$genfail" SCRIBE_HHMMSS=101010 \
+  # sc-u53: preflight は passing stub(noop)で通し、materialization の gen 失敗枝だけを駆動する（host 非依存）。
+  run env SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_PREFLIGHT="$noop" SCRIBE_SANDBOX_GEN="$genfail" SCRIBE_HHMMSS=101010 \
       "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
   rm -f "$noop" "$genfail"
   # gen 失敗 → scribe_die で非0 終了（cld-spawn 到達前）・理由を stderr に明示。
@@ -901,13 +979,13 @@ _mk_main_and_linked() {
   [[ "$output" != *"settings.local.json"* ]]       # 除外尊重(--exclude-standard)で ephemeral 維持
 }
 
-@test "sc-yqa(B 規律): worker prompt の scribe-add 規律は SCRIBE_SANDBOX=1 のときだけ注入される" {
-  # 非 sandbox: 注入されない(通常 worker は素の git で良い)。
-  run "$SPAWN" --dry-run --anchor "$REPO_ROOT" un-4nm
+@test "sc-yqa(B 規律/sc-u53): worker prompt の scribe-add 規律は sandbox 時に注入される（既定 on・SCRIBE_SANDBOX=0 で外れる）" {
+  # 非 sandbox（明示 opt-out）: 注入されない(通常 worker は素の git で良い)。
+  run env SCRIBE_SANDBOX=0 "$SPAWN" --dry-run --anchor "$REPO_ROOT" un-4nm
   [ "$status" -eq 0 ]
   [[ "$output" != *"sandbox 下の stage（sc-yqa）"* ]]
-  # sandbox: scribe-add を使えと注入される(絶対パス付き)。
-  run env SCRIBE_SANDBOX=1 "$SPAWN" --dry-run --anchor "$REPO_ROOT" un-4nm
+  # 既定（default-on）: scribe-add を使えと注入される(絶対パス付き)。
+  run "$SPAWN" --dry-run --anchor "$REPO_ROOT" un-4nm
   [ "$status" -eq 0 ]
   [[ "$output" == *"sandbox 下の stage（sc-yqa）"* ]]
   [[ "$output" == *"$SCRIPTS/scribe-add"* ]]

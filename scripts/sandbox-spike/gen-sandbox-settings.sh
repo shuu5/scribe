@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# gen-sandbox-settings.sh — sc-1gu sandbox opt-in の本番ヘルパー: worker の .claude/settings.local.json
-# (Claude Code 組込み bwrap sandbox 設定) を stdout へ出力する（SCRIBE_SANDBOX=1 で scribe-spawn.sh が起動）。
+# gen-sandbox-settings.sh — sc-1gu sandbox の本番ヘルパー（既定 on・opt-out=SCRIBE_SANDBOX=0・sc-u53）: worker の .claude/settings.local.json
+# (Claude Code 組込み bwrap sandbox 設定) を stdout へ出力する（scribe-spawn.sh が既定で生成・SCRIBE_SANDBOX=0 で opt-out）。
 #
 # scribe worker(cwd=worktree) の Bash subprocess を OS レベルで封じ、書込みを次へ限定する:
 #   - cwd(worktree) + 配下           … sandbox 既定で writable(列挙不要)
