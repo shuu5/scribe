@@ -1779,6 +1779,81 @@ _pre_cmd() {  # <guard-script-basename> → 該当 PreToolUse[Bash] hook の com
   done
 }
 
+# ---------- cmdtokens consume preamble の解決分岐を回帰網へ pin（sc-ehv / orch-j55・由来 orch-iqz/orch-a9y/orch-2nz）----------
+# 2 guard の lib import は「CMDTOKENS_LIB env override → expanduser → os.path.isabs ガードで非絶対値を
+# 既定 plugin lib へ落とす → import」のテンプレ方式に載せ替えられた。この preamble は import 時に 1 度だけ
+# 走り、guard 内蔵 --self-test は module ロード後のロジックしか叩かない＝preamble の解決分岐は self-test/上の
+# wire テストでは一切実行されない。結果、本変更の核心セキュリティ性質（isabs ガードによる cwd 相対 poison
+# import 回避＝orch-a9y/bd-write-guard gate で検出した欠陥の修正）が『緑のまま退行しうる』状態だった。
+# ここで preamble を新規プロセスごとに走らせ、3 分岐（相対/poison→既定 fallback、絶対 override、不在 abs→
+# fail-open）を回帰網へ入れる。各ケースは hook と同形の JSON を stdin で渡し exit code/stderr を pin する。
+_PREAMBLE_FAILOPEN_MSG="cannot load cmdtokens lib, failing open"
+_run_guard_env() {  # <guard-basename> <cmd> <json_cwd> <envassign|""> <proc_cwd|"">  → status=$?,output(stderr) を返す
+  local guard="$HOOKS/$1" cmd="$2" json_cwd="$3" envassign="$4" proc_cwd="$5"
+  local jf; jf="$(mktemp)"
+  python3 -c 'import json,sys; open(sys.argv[3],"w").write(json.dumps({"tool_name":"Bash","tool_input":{"command":sys.argv[1]},"cwd":sys.argv[2]}))' \
+    "$cmd" "$json_cwd" "$jf"
+  if [ -n "$proc_cwd" ]; then
+    run --separate-stderr bash -c "cd '$proc_cwd' && env $envassign python3 '$guard' < '$jf'"
+  else
+    run --separate-stderr bash -c "env $envassign python3 '$guard' < '$jf'"
+  fi
+  rm -f "$jf"
+}
+
+@test "preamble(sc-ehv): CMDTOKENS_LIB=相対値 → isabs ガードで既定へ落ち block（poison/fail-open しない）" {
+  for spec in "git-destructive-guard.py|git push -f" "rm-destructive-guard.py|rm -rf /"; do
+    local g="${spec%%|*}" c="${spec#*|}"
+    _run_guard_env "$g" "$c" /tmp "CMDTOKENS_LIB=some/rel/path" ""
+    [ "$status" -eq 2 ]
+    [[ "$stderr" != *"$_PREAMBLE_FAILOPEN_MSG"* ]]
+  done
+}
+
+@test "preamble(sc-ehv / orch-a9y 修正の核心): CMDTOKENS_LIB='.' を poison cmdtokens.py 入り cwd で叩いても poison を import せず block" {
+  local poison; poison="$(mktemp -d /tmp/scehv-poison.XXXXXX)"
+  printf 'raise RuntimeError("POISONED cmdtokens loaded")\n' > "$poison/cmdtokens.py"
+  for spec in "git-destructive-guard.py|git push -f" "rm-destructive-guard.py|rm -rf /"; do
+    local g="${spec%%|*}" c="${spec#*|}"
+    _run_guard_env "$g" "$c" /tmp "CMDTOKENS_LIB=." "$poison"
+    [ "$status" -eq 2 ]
+    [[ "$stderr" != *"POISONED"* ]]
+    [[ "$stderr" != *"$_PREAMBLE_FAILOPEN_MSG"* ]]
+  done
+  rm -rf "$poison"
+}
+
+@test "preamble(sc-ehv): CMDTOKENS_LIB='' → or 既定 fallback で block（空文字でも既定解決）" {
+  for spec in "git-destructive-guard.py|git push -f" "rm-destructive-guard.py|rm -rf /"; do
+    local g="${spec%%|*}" c="${spec#*|}"
+    _run_guard_env "$g" "$c" /tmp "CMDTOKENS_LIB=" ""
+    [ "$status" -eq 2 ]
+    [[ "$stderr" != *"$_PREAMBLE_FAILOPEN_MSG"* ]]
+  done
+}
+
+@test "preamble(sc-ehv): CMDTOKENS_LIB=<repo lib 絶対パス> override が効き block（isabs=真 分岐）" {
+  local repo_lib_dir="$HOOKS/lib"
+  for spec in "git-destructive-guard.py|git push -f" "rm-destructive-guard.py|rm -rf /"; do
+    local g="${spec%%|*}" c="${spec#*|}"
+    _run_guard_env "$g" "$c" /tmp "CMDTOKENS_LIB=$repo_lib_dir" ""
+    [ "$status" -eq 2 ]
+    [[ "$stderr" != *"$_PREAMBLE_FAILOPEN_MSG"* ]]
+  done
+}
+
+@test "preamble(sc-ehv): CMDTOKENS_LIB=<cmdtokens.py 不在の絶対 dir> → fail-open exit0 + [git-guard]/[rm-guard] loud stderr" {
+  local badabs="$BATS_TEST_TMPDIR/nonexistent-cmdtokens-scehv"
+  _run_guard_env "git-destructive-guard.py" "git push -f" /tmp "CMDTOKENS_LIB=$badabs" ""
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"[git-guard]"* ]]
+  [[ "$stderr" == *"$_PREAMBLE_FAILOPEN_MSG"* ]]
+  _run_guard_env "rm-destructive-guard.py" "rm -rf /" /tmp "CMDTOKENS_LIB=$badabs" ""
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"[rm-guard]"* ]]
+  [[ "$stderr" == *"$_PREAMBLE_FAILOPEN_MSG"* ]]
+}
+
 @test "bdw/gen-sandbox: lock_dir formula が scribe-lib.sh の scribe_bdw_lock_dir に集約（sc-imu・drift 防止）" {
   # 生 formula の手書き複製が bdw/gen に残っていない（複製は片側 drift で sandbox 外壁が bdw flock を
   # block→bd write 破壊。1関数へ集約して構造的に drift 不能化）。grep -l は一致ファイルを出すので不一致=非0。
