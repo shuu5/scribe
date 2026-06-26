@@ -202,6 +202,33 @@ _mk_main_and_linked() {
   [ "$plain" == "$sb" ]   # SCRIBE_SANDBOX で spawn 行は 1 byte も変わらない
 }
 
+# ---------- sandbox /tmp read-only 互換（sc-3lj・sc-498 G1）----------
+# sandbox 下では CC が /tmp を read-only にする。(A) grill-consult の context 一時ファイルが /tmp 直書きだと
+# worker の bats 自己点検（sandbox 内）で mktemp が die し RED 化する→$BATS_TEST_TMPDIR(bats 保証の書込可)へ寄せた。
+# (B) env-probe verify の --also-tmp が /tmp sentinel を要求し read-only で誤 ENV_DEGRADED→sandbox 時は落とす。
+@test "tests(sc-3lj): bats に sandbox で die する /tmp 直書き(mktemp の /tmp テンプレート)が残っていない" {
+  # CC sandbox は \$TMPDIR を session temp へ向け cwd+session-temp 外の書込みを拒否する。明示 /tmp への mktemp は
+  # worker の sandbox bats 自己点検で die し false-RED を生む(sc-498 worker2 実証)。実 file を grep し本ガード自身の
+  # 行は GUARD-SELF-SENTINEL で除外する(自己マッチ防止)。`! grep` でなく run+空文字 assert で errexit 免除の罠も避ける。
+  run bash -c 'grep -nE "[$][(]mktemp [^)]*/tmp/" "$1" | grep -v GUARD-SELF-SENTINEL' _ "$BATS_TEST_DIRNAME/scribe-tools.bats"  # GUARD-SELF-SENTINEL
+  [ "$output" = "" ]
+  # grill-consult の context 一時が $BATS_TEST_TMPDIR ベースに置換されていることの正の確認（置換が実際に入った証跡）。
+  grep -q 'BATS_TEST_TMPDIR/scribe-ctx' "$BATS_TEST_DIRNAME/scribe-tools.bats"
+}
+
+@test "spawn(sc-3lj): SCRIBE_SANDBOX=1 の worker prompt は env-probe verify から --also-tmp を落とす（read-only /tmp 誤 ENV_DEGRADED 回避）" {
+  SCRIBE_SANDBOX=1 run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'scribe-env-probe.sh" verify'* ]]   # env-probe verify 行は在る
+  [[ "$output" != *"--also-tmp"* ]]                     # sandbox では --also-tmp 無し（worktree sentinel で十分）
+}
+
+@test "spawn(sc-3lj): 非 sandbox の worker prompt は env-probe verify に --also-tmp を保つ（後方互換）" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--also-tmp"* ]]
+}
+
 # ---------- sandbox-spike 'spike' 文言の本番ヘルパー手当て（sc-2m0 facet3・案C軽量）----------
 # 実害: 'spike' 語が **本番ヘルパー** gen-sandbox-settings.sh（scribe-spawn.sh の SCRIBE_SANDBOX=1
 # opt-in が起動）を experimental と誤認させる可読性問題。ディレクトリ scripts/sandbox-spike/ は
@@ -401,7 +428,7 @@ _mk_main_and_linked() {
 # --context は「焼いて死ぬ pre-bake」から「admin 集約 brief を grill 材料に受け取りユーザーと対話 grill する
 # grill-consult」へ意味が変わった。pre-bake 自体は admin が回す dynamic Workflow へ移管(consult から撤去)。
 @test "spawn(grill-consult): --context + grill-issue で brief 焼き込み + bd notes handoff(bdw 経由)が prompt に注入される" {
-  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  ctx="$(mktemp "$BATS_TEST_TMPDIR/scribe-ctx-XXXXXX.md")"
   printf 'ADMIN_BRIEF_SENTINEL\n' > "$ctx"
   run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
   rm -f "$ctx"
@@ -431,7 +458,7 @@ _mk_main_and_linked() {
 # fleet-monitor / degraded watcher が「どの grill-issue の consult が沈黙したか」を完全一致で拾えるようにする。
 # plain consult(--context 無し)は consult-HHMMSS のまま(test 223/236 が保証)＝この id 命名は grill-consult 限定。
 @test "spawn(grill-consult): window 名は consult-<grill-issue> で id 紐付けする(sc-3pq A案・fleet-monitor 照合)" {
-  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  ctx="$(mktemp "$BATS_TEST_TMPDIR/scribe-ctx-XXXXXX.md")"
   printf 'x\n' > "$ctx"
   run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
   rm -f "$ctx"
@@ -451,7 +478,7 @@ _mk_main_and_linked() {
 # sc-qos: 復路の完了シグナル形式化。grill-consult が STATUS 行(grilling/done/blocked)で
 # admin に完了・中断を感知させ、決定は逐次 append する(バッチ厳禁)。
 @test "spawn(grill-consult): STATUS 行規約(grilling/done/blocked)と逐次 append が prompt に注入される(sc-qos)" {
-  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  ctx="$(mktemp "$BATS_TEST_TMPDIR/scribe-ctx-XXXXXX.md")"
   printf 'x\n' > "$ctx"
   run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
   rm -f "$ctx"
@@ -465,7 +492,7 @@ _mk_main_and_linked() {
 }
 
 @test "spawn(grill-consult): read-only 限定緩和は厳密 — 自 grill-issue notes のみ可・graph 構造と tracked コードは不可" {
-  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  ctx="$(mktemp "$BATS_TEST_TMPDIR/scribe-ctx-XXXXXX.md")"
   printf 'x\n' > "$ctx"
   run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
   rm -f "$ctx"
@@ -483,7 +510,7 @@ _mk_main_and_linked() {
 # 旧 grill-consult は grill-me を言い換え load-bearing ルール(ポップアップ禁止・1論点1問)を落としていた
 # (dogfood で露呈)。注入の機構を fixture stub の sentinel で hermetic に検証する。
 @test "spawn(grill-consult): grill-me SKILL.md を verbatim 注入する(paraphrase でなく本文・sc-swc)" {
-  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  ctx="$(mktemp "$BATS_TEST_TMPDIR/scribe-ctx-XXXXXX.md")"
   printf 'x\n' > "$ctx"
   run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
   rm -f "$ctx"
@@ -499,7 +526,7 @@ _mk_main_and_linked() {
 }
 
 @test "spawn(grill-consult): grill-me SKILL.md 不在は fail-loud(grill-me 本文無しで grill-consult を spawn しない・sc-swc)" {
-  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  ctx="$(mktemp "$BATS_TEST_TMPDIR/scribe-ctx-XXXXXX.md")"
   printf 'x\n' > "$ctx"
   export SCRIBE_GRILL_SKILL=/tmp/scribe-no-such-grill-skill.md
   run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
@@ -510,7 +537,7 @@ _mk_main_and_linked() {
 }
 
 @test "spawn(grill-consult): F2 は構造解消 — 第三者データ出典は保険として残り旧 pre-bake 専任文言は消える" {
-  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  ctx="$(mktemp "$BATS_TEST_TMPDIR/scribe-ctx-XXXXXX.md")"
   printf 'x\n' > "$ctx"
   run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
   rm -f "$ctx"
@@ -525,7 +552,7 @@ _mk_main_and_linked() {
 }
 
 @test "spawn(grill-consult): --context は worker モードでは consult 専用 die(worker は grill-consult しない)" {
-  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  ctx="$(mktemp "$BATS_TEST_TMPDIR/scribe-ctx-XXXXXX.md")"
   printf 'x\n' > "$ctx"
   run "$SPAWN" --dry-run --context "$ctx" un-4nm
   rm -f "$ctx"
@@ -535,7 +562,7 @@ _mk_main_and_linked() {
 }
 
 @test "spawn(grill-consult): --context は grill-issue id 必須で fail-loud(handoff 先の bd notes を定められない)" {
-  ctx="$(mktemp /tmp/scribe-ctx-XXXXXX.md)"
+  ctx="$(mktemp "$BATS_TEST_TMPDIR/scribe-ctx-XXXXXX.md")"
   printf 'x\n' > "$ctx"
   run "$SPAWN" --dry-run --consult --context "$ctx"
   rm -f "$ctx"
@@ -552,7 +579,7 @@ _mk_main_and_linked() {
 }
 
 @test "spawn(grill-consult): --context にディレクトリを渡すと fail-loud(空 brief のまま起動する fail-safe ギャップ防御・review wf_a92a624f)" {
-  dir="$(mktemp -d /tmp/scribe-ctx-dir-XXXXXX)"
+  dir="$(mktemp -d "$BATS_TEST_TMPDIR/scribe-ctx-dir-XXXXXX")"
   run "$SPAWN" --dry-run --consult --context "$dir" un-consult
   rmdir "$dir"
   # -r 単体ならディレクトリは truthy で通過してしまう。-f で弾けていることを確認。
@@ -1864,7 +1891,7 @@ _run_guard_env() {  # <guard-basename> <cmd> <json_cwd> <envassign|""> <proc_cwd
 }
 
 @test "preamble(sc-ehv / orch-a9y 修正の核心): CMDTOKENS_LIB='.' を poison cmdtokens.py 入り cwd で叩いても poison を import せず block" {
-  local poison; poison="$(mktemp -d /tmp/scehv-poison.XXXXXX)"
+  local poison; poison="$(mktemp -d "$BATS_TEST_TMPDIR/scehv-poison.XXXXXX")"
   printf 'raise RuntimeError("POISONED cmdtokens loaded")\n' > "$poison/cmdtokens.py"
   for spec in "git-destructive-guard.py|git push -f" "rm-destructive-guard.py|rm -rf /"; do
     local g="${spec%%|*}" c="${spec#*|}"

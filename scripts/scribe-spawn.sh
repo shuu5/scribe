@@ -354,6 +354,12 @@ build_prompt() {
   # review#1 critical）。scribe_git で GIT_DIR/GIT_WORK_TREE 継承を隔離して解決（sc-e1w）。
   local _probe_base
   _probe_base="$(scribe_git -C "$REPO" rev-parse "$BASE" 2>/dev/null || printf '%s' "$BASE")"
+  # env-probe verify の /tmp sentinel チェック（--also-tmp）は sandbox 下で外す（sc-3lj）。CC sandbox は /tmp を
+  # read-only にするため plant の /tmp sentinel は best-effort で書けず（scribe-env-probe が warn して継続）、
+  # verify --also-tmp がその不在を誤って ENV_DEGRADED と判定する。worktree sentinel チェック（常時・主シグナル）で
+  # 十分なので sandbox 時は --also-tmp を落とす。非 sandbox（/tmp writable）は従来どおり --also-tmp を維持（後方互換）。
+  local _also_tmp_flag=" --also-tmp"
+  [[ "${SCRIBE_SANDBOX:-0}" == "1" ]] && _also_tmp_flag=""
   # sandbox 時のみ: stage は git add -A でなく scribe-add（非通常ファイルを型で弾く）を使う規律（sc-yqa の B）。
   # 二重引用符で組み立て $SCRIPT_DIR/$WORKTREE を実パスへ展開する（backtick はエスケープして literal 保持）。
   local _sandbox_add_note=""
@@ -377,7 +383,7 @@ build_prompt() {
 - **報告に WF 返り値 JSON + \`receivedArgs\` を必須**で含める（args 解決の成否を admin が一次監査できるように）。
 - **env 健全性 gate（fail-closed・CC infra の Bash 非永続を検出／folio 0264028f）**: self-report（cell-quality 呼出し・gate-pending ラベル付与）の前に env 劣化を検出する。cell-quality の self-test fail-closed は test の「失敗」しか守らず、env 劣化による「誤 PASS」は塞げないため。
   - 着手の最初に**別 Bash 呼出し**で \`"$SCRIPT_DIR/scribe-env-probe.sh" plant --worktree "$WORKTREE"\` を実行し、**出力 token を文脈に控える**（shell 変数は Bash 呼出し間で消えるので文字列として控える）。
-  - **self-report の直前**に**別 Bash 呼出し**で \`"$SCRIPT_DIR/scribe-env-probe.sh" verify --token <控えた token> --worktree "$WORKTREE" --base $_probe_base --also-tmp\` を実行する。
+  - **self-report の直前**に**別 Bash 呼出し**で \`"$SCRIPT_DIR/scribe-env-probe.sh" verify --token <控えた token> --worktree "$WORKTREE" --base $_probe_base$_also_tmp_flag\` を実行する。
   - \`ENV_DEGRADED\`（呼出し間で sentinel 消失／base..HEAD が 0 commit）なら **done を申告せず** \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $ID --append-notes "STATUS: blocked — env degraded（CC infra の Bash 非永続・要admin）: <ENV_DEGRADED の理由>"\` を書いて停止する（回避策を打たない＝worker では直せない・admin が reliable env で引き取る）。
 - bd write は必ず \`bdw\` 経由で直列化: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" <subcmd>\`（自 issue の進捗のみ）。$_sandbox_add_note
 - **完了は gate-pending ラベル + DONE 報告（自己 close しない・§4 反転）**: 実装 + self-test pass + PR/commit + 上記 env-probe verify が揃ったら、\`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $ID --add-label gate-pending\` で自 issue に **gate-pending ラベル**を付与し、PR 番号 / commit / WF 返り値を添えて DONE を報告する。**自分で \`bd close\` しない**——close は admin が gate+merge を済ませた後に行う（worker の自己 close は admin の gate 待ち検知をすり抜ける＝orch-ol0 反転）。
