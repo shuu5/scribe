@@ -213,7 +213,7 @@ A↔B 差分（ここだけ）:
 ### 確定（worker↔beads = B/hybrid）
 
 - **administrator(anchor)** が所有: issue 作成・依存グラフ・assignment・最終判断・**`bd dolt push`/remote 同期点**。
-- **worker(worktree)** は自分が claim した issue の進捗/status を **auto-share DB に直接書く**（`bd update --claim` / `--append-notes` / `bd close`・sc-4kb: 破壊的 `--notes` でなく追記の `--append-notes`）。
+- **worker(worktree)** は自分が claim した issue の進捗/status を **auto-share DB に直接書く**（`bd update --claim` / `--append-notes` / `gate-pending` ラベル付与・sc-4kb: 破壊的 `--notes` でなく追記の `--append-notes`）。**自 issue の close はしない**（admin が gate+merge 後に close＝orch-ol0 反転・protocol §4）。
 - ＝ **beads 自体が live なタスク共有ボード**。supervise ループ（§10）は `bd ready`/status を主信号に read。
 - 競合は bd の dolt-server が serialize + worktree-native + hash-ID 衝突回避で 3-5 worker は想定内。bottleneck 化したら **admin-batched 書込（A 案）に fallback**。
 - 却下 A（admin 単一 writer・worker は issue ID 参照のみ）: 保守的・実証済み（ubuntu-note-system 現行）だが、LLM 実装 worker は「自分で claim して進捗を書く」が自然なので B 採用。
@@ -346,7 +346,7 @@ v0 の最重要設計判断。**role 別に注入内容を分割する**:
 | role | 配置 | 注入内容（要旨） |
 |---|---|---|
 | **admin** | anchor（orchestrator セッション） | プロトコル全文（graph 所有 = `bd create`/`dep`/assignment / gate funnel / errata 規約 / `bd dolt push` = 同期点） |
-| **worker** | worktree（`.worktrees/<branch>`） | 自 issue の write のみ（`bd update --claim` / `--append-notes` / `bd close`）+ bdw 並列直列化規律 + **`bd create` / `bd dep` / `bd dolt push` の明示禁止** |
+| **worker** | worktree（`.worktrees/<branch>`） | 自 issue の write のみ（`bd update --claim` / `--append-notes` / `gate-pending` ラベル・**close はしない**＝admin が merge 後）+ bdw 並列直列化規律 + **`bd create` / `bd dep` / `bd dolt push` / `bd close` の明示禁止** |
 | **consult** | anchor 同居可（read-only セッション） | 設計議論・grill 専用。記憶系（doobidoo + auto-memory）のみ write 可。bd・リポ tracked ファイル・`bd dolt push`・spawn は禁止。相談サマリ保存義務。**緩和**: grill-consult（admin が `--context` brief で spawn）のみ自 grill-issue の `bd update --claim`/`--append-notes` を bdw 経由 write 可（close は admin 専有）＝ role-context-spec §2.3。起動テンプレの SSOT は role-context-spec §2.3（scribe plugin へ移設完了・sc-aop。docs/session-orchestration-strategy.md §6 は原典トレース用） |
 
 **role 別分割の根拠（verified・構造原因の発見）**: 現状 `bd prime` の SessionStart hook が**全セッション（worker 含む）へ無条件**に「非自明な作業は着手前に `bd create`」を注入している。これは B/hybrid の「worker は graph を操作しない（`bd create`/`dep` しない・notes 提案 → admin 起票）」と**矛盾**しており、**worker の `bd create` 逸脱の構造原因**である（2026-06-10 に 1 件の逸脱を prompt 明記で解消した実績がある＝注入の問題と確認）。対処 = role 別注入（上表）。`bd prime` の一律注入と role 別注入の重複解消（PRIME 縮小 or 注入順序）は **案 A（PRIME を bd 基礎へ縮小 + role 別注入）で決定・実装済**（SSOT = role-context-spec §0・本リポ PRIME は role 中立・sc-aop）。
