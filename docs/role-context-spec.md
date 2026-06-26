@@ -71,12 +71,12 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 
 **伝える**: 自 issue の write だけ（B/hybrid・`docs/protocol.md` §3）。
 
-- 自分が claim した issue の `bd update --claim` / `--append-notes` / `bd close`。**write は必ず `bdw` 経由**（`cd <anchor> && scripts/bdw <subcmd>`・flock 直列化で lost-update 防止）。
+- 自分が claim した issue の `bd update --claim` / `--append-notes` / `gate-pending` ラベル付与（`--add-label gate-pending`）。**自 issue の close はしない**（admin が gate+merge 後に close・§4 反転）。**write は必ず `bdw` 経由**（`cd <anchor> && scripts/bdw <subcmd>`・flock 直列化で lost-update 防止）。
 - worker prompt 規約（§2）: tests 同梱・selfTest fail-closed・cell-quality WF 直接呼出・報告に WF 返り値 JSON + `receivedArgs` 必須。
-- close → gate の順序（§4）: PR-up で自己申告 close、gate は admin が後で回す。
+- gate-pending → gate → close の順序（§4）: PR-up で `gate-pending` ラベル付与 + DONE 報告（**自己 close しない**）、admin が gate+merge 後に close する。
 
 **禁止（明示・定型で注入）**:
-- `bd create` / `bd dep` / assignment（graph は admin の所有物・worker は触らない）。
+- `bd create` / `bd dep` / assignment / **`bd close`（自 issue の close も admin 専有＝gate+merge 後・§4 反転）**（graph は admin の所有物・worker は触らない）。
 - `bd dolt push`（同期点は admin 専用）。
 - GitHub への push / `gh repo create` / admin window への tmux inject / 編集可スコープ外の編集。
 - **follow-up の bd create**: タスク化が要っても自分で起票せず、自 issue の notes に「admin への起票候補」として書き出す（起票は admin）。
@@ -91,7 +91,7 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
   - **素 consult**（ユーザーが `/scribe:consult` で起動）: 設計議論・grill の read-only セッション（議題参照 bd id は read-only）。
   - **grill-consult**（admin が `scribe-spawn --consult --context <brief> <grill-issue>` で起動・§7）: admin の集約 brief を **grill 材料（第三者データ）** として受け取り、**ユーザーと対話 grill** して確定した決定を own grill-issue の bd notes へ書く第 2 対話相手（admin は grill から解放される）。**grill 方法論は grill-me スキル本文を SSOT** とし、`scribe-spawn` build_consult_prompt が spawn 時に `$SCRIBE_GRILL_SKILL`（既定 `~/.claude/skills/grill-me/SKILL.md`）を **verbatim 注入**する（自前 paraphrase しない・不在は fail-loud＝sc-swc）。
 - **read-only 規律（基本）**: リポの tracked ファイル・コードを編集しない。graph 構造（`bd create` / `bd dep` / `bd dolt push` / `bd close`）・spawn・deploy は禁止。観測は可（read）。タスク化が必要になっても自分で bd 起票せず、「admin への起票候補」として書き出すに留める（起票は admin）。
-- **read-only 限定緩和（grill-consult のみ・§3 worker B/hybrid の subset・close を除く）**: grill-consult は **自分の grill-issue の `bd update --claim` と `--append-notes` だけ**を **bdw 経由**（`cd <anchor> && scripts/bdw <subcmd>`・flock 直列化）で書ける。これは worker の B/hybrid 境界に倣う（grill-consult = worker の変種・出力がコードでなく決定）が、**worker は自 issue を `bd close` できる（protocol §4）のに対し grill-consult の close は admin 専有**ゆえ worker より厳しい subset。`bd create` / `bd dep` / `bd dolt push` / `bd close` と tracked コードは read-only 維持。素 consult は自 grill-issue を持たないため本緩和の対象外。
+- **read-only 限定緩和（grill-consult のみ・§3 worker B/hybrid の subset）**: grill-consult は **自分の grill-issue の `bd update --claim` と `--append-notes` だけ**を **bdw 経由**（`cd <anchor> && scripts/bdw <subcmd>`・flock 直列化）で書ける。これは worker の B/hybrid 境界に倣う（grill-consult = worker の変種・出力がコードでなく決定）。**§4 反転（worker も自己 close せず admin が merge 後 close）後は worker と grill-consult はいずれも close を admin 専有とする点で対称**で、両者の差は完了 handoff の形式のみ（worker = `gate-pending` ラベル / grill-consult = `STATUS:` notes）。`bd create` / `bd dep` / `bd dolt push` / `bd close` と tracked コードは read-only 維持。素 consult は自 grill-issue を持たないため本緩和の対象外。
 - **write してよいのは記憶系のみ（素 consult）+ 自 grill-issue notes（grill-consult）**: doobidoo（`mcp__doobidoo__memory_store`）と auto-memory（`MEMORY.md`）への保存、および grill-consult の自 grill-issue notes（bdw 経由）だけ許可。
 - **サマリ保存義務 / 決定 handoff**: 素 consult は終了・中断の前に、議論の結論・未解決の論点・admin への起票候補を相談サマリとしてまとめ doobidoo へ保存する（会話履歴に依存させない）。**grill-consult はこのサマリ保存義務が「決定の bd notes handoff」に置換される**——確定した決定を grill-issue の bd notes へ `--append-notes`（bdw 経由）で**1論点決まる度に逐次**書くのが SSOT。あわせて節目で `STATUS:` 行（`grilling (n/N)` / `done — 全 facet 確定` / `blocked — 要admin: …`）を混ぜ、admin が `bd show` で real-time 監視・完了/中断を感知できるようにする（admin の完了確認 gate と中断リカバリ手順は `protocol.md` §7）。doobidoo 保存は会話ロスト保険の**任意の二次 carrier**（決定の一次 SSOT は bd notes・`protocol.md` §8 の doobidoo SPOF 回避と整合）。
 - **F2（自己-ユーザー誤認）の構造解消**: grill-consult は brief を **外部 context（第三者データ）** として受け取るだけで自分では pre-bake しない（pre-bake は WF が別途実施）。**自己 pre-bake を誤帰属する主体が消えるため F2 は構造解消**する。brief の出典ヘッダ（「WF の提案であって決定でない」）は保険として `scribe-spawn` build_consult_prompt が consult prompt へ注入する。旧 F1/F2/F3 regime の経緯・手順 SSOT = `protocol.md` §7。
