@@ -112,6 +112,34 @@ _mk_main_and_linked() {
   [[ "$output" == *"spawn/un-3sh.3.5-"* ]]
 }
 
+# ---------- lib: scribe_branch_name 直接ユニット（sc-b8j・関数を source して叩く）----------
+# 上の spawn dry-run 群は spawn ヘルパー経由で命名を観るが、ここは scribe_branch_name を
+# 直接 source して叩き、HHMMSS 決定論注入の precedence（第2引数 > SCRIBE_HHMMSS > date +%H%M%S）
+# の 3 枝を単体で pin する（protocol.md §1 の spawn/<id>-HHMMSS 命名規約）。
+@test "lib(sc-b8j): scribe_branch_name は SCRIBE_HHMMSS env 注入で spawn/<id>-HHMMSS を決定論生成" {
+  run env SCRIBE_HHMMSS=101010 bash -c 'source "$1"; scribe_branch_name "$2"' _ "$LIB" un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == "spawn/un-4nm-101010" ]]
+}
+
+@test "lib(sc-b8j): scribe_branch_name は第2引数 hhmmss を使い env より優先する" {
+  # 第2引数注入: env 注入と同結果（spawn/<id>-101010）。ambient SCRIBE_HHMMSS を env -u で隔離し
+  # 第2引数の単独効力を ambient 状態から独立に表明する（tests 1/3 と同じ hermetic 方針・setup L29-30）。
+  run env -u SCRIBE_HHMMSS bash -c 'source "$1"; scribe_branch_name "$2" "$3"' _ "$LIB" un-4nm 101010
+  [ "$status" -eq 0 ]
+  [[ "$output" == "spawn/un-4nm-101010" ]]
+  # 第2引数は SCRIBE_HHMMSS env を上書きする（${2:-${SCRIBE_HHMMSS:-}} の precedence を pin）。
+  run env SCRIBE_HHMMSS=999999 bash -c 'source "$1"; scribe_branch_name "$2" "$3"' _ "$LIB" un-4nm 101010
+  [ "$status" -eq 0 ]
+  [[ "$output" == "spawn/un-4nm-101010" ]]
+}
+
+@test "lib(sc-b8j): scribe_branch_name は注入なしで spawn/<id>-+6桁の date フォールバック" {
+  run env -u SCRIBE_HHMMSS bash -c 'source "$1"; scribe_branch_name "$2"' _ "$LIB" un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^spawn/un-4nm-[0-9]{6}$ ]]
+}
+
 # ---------- spawn: sandbox opt-in（SCRIBE_SANDBOX=1・sc-1gu）----------
 @test "spawn(sandbox): gen-sandbox-settings.sh は failIfUnavailable + .beads先頭 allowWrite の valid JSON を出す" {
   run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$SCRIBE_TEST_CWD"
