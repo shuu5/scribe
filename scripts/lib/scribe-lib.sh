@@ -249,6 +249,10 @@ scribe_restore_origin() {
 #       使うのは sandbox materialization 経路〔gen 呼出〕のみで非 sandbox 経路は jq を一切使わない＝jq は sandbox
 #       機構固有の前提。これを preflight が見落とすと『bwrap/socat/userns は揃うが jq 不在』host で worktree add 後に
 #       gen が落ち orphan worktree を残す＝preflight の orphan 防止不変条件を破る・sc-u53 round3 gate confirmed）
+#     - canonical bdw（beads-bdw plugin）解決可否（sc-vae cutover で gen-sandbox-settings.sh が lock_dir を
+#       `scripts/bdw lock-dir`〔shim→canonical〕で解決する **spawn-time hard 依存**になった。jq と同型で、これを見落とすと
+#       『bwrap/socat/jq/userns は揃うが plugin 未配備』host で worktree add 後に gen が fail-closed→orphan worktree を残す
+#       ＝同じ orphan 防止不変条件の再違反。gen と同一解決経路〔shim→canonical→resolve_lock_dir〕を踏ませて drift を避ける）
 #     - userns を **実プローブ**で確認（`bwrap --ro-bind / / --unshare-user true`）。
 #   userns は global sysctl（kernel.apparmor_restrict_unprivileged_userns）を **読まない**: host が
 #   targeted apparmor profile 方式（sysctl=1 のまま bwrap だけ userns 許可）でも sysctl 緩和方式でも、
@@ -261,6 +265,18 @@ scribe_sandbox_preflight() {
   for b in bwrap socat jq; do
     command -v "$b" >/dev/null 2>&1 || { printf '%s が不在' "$b"; return 1; }
   done
+  # canonical bdw（beads-bdw plugin）解決可否を gen と同一経路で先回り検査する（sc-vae cutover・REQUIRED-1）。
+  # gen-sandbox-settings.sh は lock_dir を `scripts/bdw lock-dir`（shim→canonical）で解決する spawn-time hard 依存に
+  # なったため、未配備なら worktree add の前にここで fail-loud させる（通すと gen が worktree add 後に fail-closed→orphan
+  # worktree を残す＝jq round3 と構造同型の不変条件再違反）。`bdw lock-dir` 実行で chain 全体（BEADS_BDW 解決→canonical
+  # →resolve_lock_dir）を検査＝単なる存在チェックより強く、gen と drift しない。bdw shim は本 lib と同じ scripts/ 配下。
+  local _bdw_dir _bdw
+  _bdw_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" || _bdw_dir=""
+  _bdw="${_bdw_dir:+$_bdw_dir/bdw}"
+  if [ -z "$_bdw" ] || ! "$_bdw" lock-dir >/dev/null 2>&1; then
+    printf 'canonical bdw が解決不能（beads-bdw plugin 未配備 or BEADS_BDW 未設定／scripts/bdw lock-dir 失敗）'
+    return 1
+  fi
   # userns 実プローブ（apparmor profile / sysctl どちらの方式でも、通れば OK）。
   bwrap --ro-bind / / --unshare-user true 2>/dev/null \
     || { printf 'bwrap が userns を作れない（apparmor profile / sysctl 緩和が未反映）'; return 1; }

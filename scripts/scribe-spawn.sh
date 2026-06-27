@@ -491,7 +491,18 @@ if [[ "$SANDBOX_ON" == "1" ]]; then
   if "$SANDBOX_GEN" "$WORKTREE" > "$_sb_tmp"; then
     mv -f "$_sb_tmp" "$WORKTREE/.claude/settings.local.json"
   else
-    rm -f "$_sb_tmp"; scribe_die "sandbox settings.local.json の生成に失敗（sandbox 既定 on・opt-out=SCRIBE_SANDBOX=0）: $WORKTREE"
+    # gen 失敗時は worktree add 済み＝orphan が残る。cld-spawn 失敗路（下記）と対称に、真因ヒントと cleanup を案内して
+    # fail-loud する（defense-in-depth: 最頻 trigger〔plugin/jq 不在〕は preflight が worktree add 前に止めるが、ここに
+    # 来た場合も orphan path・真因・復旧コマンドを surface して no-force 保守姿勢と整合させる）。
+    rm -f "$_sb_tmp"
+    {
+      echo "scribe: error: sandbox settings.local.json の生成に失敗（gen-sandbox-settings.sh・sandbox 既定 on・opt-out=SCRIBE_SANDBOX=0）。"
+      echo "scribe: 真因の候補: jq 不在 / canonical bdw（beads-bdw plugin）未配備で 'scripts/bdw lock-dir' 失敗（sc-vae cutover で gen の spawn-time 依存）。通常は preflight が両者を worktree add 前に検出する。"
+      echo "scribe: worktree が orphan として残っています（自動削除はしません＝force 禁止・確認必須ポリシー）: $WORKTREE"
+      echo "scribe: 掃除するには（force 系を使わない確認プロンプト付き cleanup）:"
+      echo "         $SCRIPT_DIR/scribe-cleanup.sh --repo \"$REPO\" --worktree \"$WORKTREE\" --branch \"$BRANCH\" --window \"$WINDOW\" $ID"
+    } >&2
+    exit 1
   fi
   # 生成した settings.local.json を ephemeral に保つ（worker の stage に巻き込まない・sc-1gu）。info/exclude は
   # 共有 common-dir へ冪等追記する（scribe-lib の単一実装＝本番と test で drift しない）。CC sandbox が cwd の

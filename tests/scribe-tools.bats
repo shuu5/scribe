@@ -242,6 +242,20 @@ _mk_main_and_linked() {
   [[ "$output" == *"jq が不在"* ]]
 }
 
+@test "lib(sc-vae): scribe_sandbox_preflight は canonical bdw 不在を検出する（gen の spawn-time 依存・worktree add 前に止める・REQUIRED-1）" {
+  # cutover で gen-sandbox が lock_dir を `scripts/bdw lock-dir`(shim→canonical)で解決する spawn-time hard 依存に
+  # なった。bwrap/socat/jq は揃うが canonical bdw 不在(BEADS_BDW=不正パス)の host で preflight が非0+理由を返し、
+  # worktree add 後に gen が fail-closed→orphan を残す前に止めることを pin（jq round3 と構造同型の不変条件再違反を塞ぐ）。
+  # bwrap/socat/jq はダミーで command -v を満たす（canonical probe は bin loop の後ゆえ到達）。canonical probe は bin
+  # loop と userns 実プローブの間に置くため userns には到達しない（host 非依存）。bash/env 解決のため実 PATH を温存する。
+  local fakebin="$BATS_TEST_TMPDIR/fakebin-canon"
+  mkdir -p "$fakebin"
+  local b; for b in bwrap socat jq; do printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$b"; chmod +x "$fakebin/$b"; done
+  run env PATH="$fakebin:$PATH" BEADS_BDW=/nonexistent-canonical-xyz /bin/bash -c "source '$LIB'; scribe_sandbox_preflight"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"canonical bdw"* ]]
+}
+
 @test "spawn(preflight/sc-u53): default-on で deps 欠如かつ FALLBACK 無し → fail-loud で die（worktree を作らない）" {
   local repo failstub noop
   repo="$SCRIBE_TEST_CWD"
@@ -758,6 +772,7 @@ _mk_main_and_linked() {
 # settings.local.json が worker commit に漏れても検出できない（README が ephemeral 維持を不変条件と明記）。
 # facet3(上記) と同じく cld-spawn を no-op stub に差し替えて実 spawn を駆動し、生成物を assert する。
 @test "spawn(sandbox/sc-s68): SCRIBE_SANDBOX=1 実経路で settings.local.json を atomic 生成・temp 残無・worker 巻添え防止" {
+  _need_canonical_bdw  # sc-vae: 実 gen が bdw lock-dir(shim→canonical)を呼ぶゆえ plugin 不在 host は skip(SHOULD a・host 非依存維持)
   local repo wt noop
   repo="$SCRIBE_TEST_CWD"   # setup() の temp git repo（init コミット済み）
   noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
@@ -2072,6 +2087,17 @@ _run_guard_env() {  # <guard-basename> <cmd> <json_cwd> <envassign|""> <proc_cwd
   [[ "$output" != *"show un-x"* ]]   # bd（echo スタブ）は実行されていない
 }
 
+@test "bdw(shim/drift): 実行ロジックが canonical templates/bdw-shim と byte 一致（template drift を捕捉・不在時 skip・SHOULD b）" {
+  # cutover の主旨＝3 copy drift（uns/scriptorium/scribe）撲滅。shim の実行ロジック（set -uo pipefail 以降）は plugin の
+  # templates/bdw-shim と byte 一致に保つ契約（ヘッダ comment は repo 固有可・scriptorium 先例と同様）。将来 template が
+  # 変わって scribe shim が追従し損ねる drift を本テストで捕捉する（構造 test の grep subset は別パス/別 fail-closed 文言の
+  # drift を見逃すため byte 比較で補う）。template 不在の host/CI では skip（e2e の deps skip と同型）。
+  local tmpl="${BEADS_BDW_TEMPLATE:-$HOME/.claude/plugins/beads-bdw/templates/bdw-shim}"
+  [ -f "$tmpl" ] || skip "canonical templates/bdw-shim not found ($tmpl)"
+  run diff <(sed -n '/^set -uo pipefail/,$p' "$BDW") <(sed -n '/^set -uo pipefail/,$p' "$tmpl")
+  [ "$status" -eq 0 ]
+}
+
 # ---------- bdw: flock-serialized B/hybrid の中核ロジックを pin（sc-i9b member 2）----------
 # sc-vae cutover 後は scripts/bdw が canonical bdw（beads-bdw plugin）へ exec する shim になったため、
 # 以下は shim→canonical を貫く **integration test** として残す（READ/WRITE 分岐ロジックの実装は canonical 側）。
@@ -2082,8 +2108,13 @@ _run_guard_env() {  # <guard-basename> <cmd> <json_cwd> <envassign|""> <proc_cwd
 #   - WRITE / 未知    → flock 取得後 exec のため lock 1 個（直列化路）
 # 各 @test は使い捨ての空 lock dir を作って観測する。cwd は setup() の temp git repo。
 _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
+# sc-vae cutover で scripts/bdw は canonical(beads-bdw plugin)へ exec する shim になった。以下の integration
+# test は shim→canonical を貫くため canonical が無い host/CI では実行不能 → red 退行でなく clean skip する
+# （test 移植性回復・e2e の deps skip と同型・SHOULD(a)）。各 integration @test 冒頭で呼ぶ。
+_need_canonical_bdw() { [ -x "${BEADS_BDW:-$HOME/.claude/plugins/beads-bdw/bin/bdw}" ] || skip "canonical beads-bdw plugin not installed (BEADS_BDW)"; }
 
 @test "bdw: READ allowlist（show）は無ロックで素通し（lock 0 個・args 透過）" {
+  _need_canonical_bdw
   local ld; ld="$(mktemp -d)"
   run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" show un-x
   [ "$status" -eq 0 ]
@@ -2093,6 +2124,7 @@ _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
 }
 
 @test "bdw: WRITE（update --claim）は flock 取得路（lock 1 個・args 透過）" {
+  _need_canonical_bdw
   local ld; ld="$(mktemp -d)"
   run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" update un-x --claim
   [ "$status" -eq 0 ]
@@ -2102,6 +2134,7 @@ _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
 }
 
 @test "bdw: WRITE（close）は flock 取得路（lock 1 個）" {
+  _need_canonical_bdw
   local ld; ld="$(mktemp -d)"
   run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" close un-x
   [ "$status" -eq 0 ]
@@ -2110,6 +2143,7 @@ _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
 }
 
 @test "bdw: 未知サブコマンドは fail-closed で flock 取得路（lock 1 個・allowlist 漏れ=直列化）" {
+  _need_canonical_bdw
   local ld; ld="$(mktemp -d)"
   run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" frobnicate x
   [ "$status" -eq 0 ]
@@ -2118,6 +2152,7 @@ _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
 }
 
 @test "bdw: WRITE は flock 取得失敗で fail-closed（実排他を観測・lock file 在＝取得済 を証明しない）" {
+  _need_canonical_bdw
   # 上の WRITE @test 群は「lock file が在る」しか見ない。だが canonical bdw（via shim）の `exec 9>lock_file` は
   # flock 取得の成否に依らず lock file を無条件生成するので、`flock -w` が回帰で消えても
   # それらは緑のまま通る（lock file 在 ≠ 排他が効いている）。本 @test は実際の相互排他を観測する:
@@ -2146,6 +2181,7 @@ _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
 }
 
 @test "bdw: 値取り global flag（--actor）の値を subcommand と誤認しない（--actor close show → READ・lock 0）" {
+  _need_canonical_bdw
   # --actor の値が write subcmd 名（close）でも次トークンとして読み飛ばし、真の subcmd=show を採る。
   # skip_next が壊れると subcmd=close と誤認 → WRITE lock になる。lock 0 でそれを pin。
   local ld; ld="$(mktemp -d)"
@@ -2156,6 +2192,7 @@ _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
 }
 
 @test "bdw: 値取り global flag（--db）の値を subcommand と誤認しない（--db close show → READ・lock 0）" {
+  _need_canonical_bdw
   # 契約 member(2) が名指しで pin を要求する 3 つ目の value-taking flag。--db の値が write subcmd 名
   # （close）でも次トークンとして読み飛ばし、真の subcmd=show を採る。canonical bdw（via shim）の flag case 一覧から --db が
   # 回帰で落ちると subcmd=close と誤認 → WRITE lock になる。lock 0 でそれを pin（--actor と対称）。
@@ -2167,6 +2204,7 @@ _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
 }
 
 @test "bdw: 値取り global flag（--directory）の値を subcommand と誤認しない（--directory close show → READ・lock 0）" {
+  _need_canonical_bdw
   # 同 skip_next case 分岐（canonical bdw via shim）の網羅を完成させる。--directory の値（close）を読み飛ばし真の subcmd=show
   # を採る。case 一覧から --directory が落ちれば subcmd=close 誤認 → WRITE lock。lock 0 でそれを pin。
   local ld; ld="$(mktemp -d)"
@@ -2177,6 +2215,7 @@ _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
 }
 
 @test "bdw: 値取り global flag（-C）は値を飛ばし真の subcommand を採る（-C path update → WRITE・lock 1）" {
+  _need_canonical_bdw
   # -C の値（/tmp/x）を飛ばした上で update を subcmd と認識する＝flag-skip が真の subcmd を食わない。
   local ld; ld="$(mktemp -d)"
   run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" -C /tmp/x update un-y --claim
@@ -2186,6 +2225,7 @@ _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
 }
 
 @test "bdw: boolean flag（-f）を値取りと誤読しない（-f show → READ・lock 0）" {
+  _need_canonical_bdw
   # -f は boolean。次トークン show を値として食わない（食えば subcmd=un-x→未知→WRITE lock）。lock 0 で pin。
   local ld; ld="$(mktemp -d)"
   run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" -f show un-x
@@ -2195,6 +2235,7 @@ _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
 }
 
 @test "bdw: bd 不在は exit 127 で fail-loud（write を実行しない）" {
+  _need_canonical_bdw
   run -127 env BDW_BD_BIN=/nonexistent-bd-xyz "$BDW" show un-x
   [ "$status" -eq 127 ]
   [[ "$output" == *"not found"* ]]
