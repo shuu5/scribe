@@ -100,7 +100,8 @@ mkdir -p "$WT/.claude"
 # null-mount を増やしても scribe-add は型ベースゆえ壊れないことを実 sandbox で実証する(sc-yqa 4b の robust 版)。
 scribe_sandbox_write_exclude "$WT"
 # bwrap の bind-before-exist 対策: grant 済 lock dir を worker 起動前に実在させる(本番 scribe-spawn と同じ)。
-mkdir -p "$(scribe_bdw_lock_dir)" 2>/dev/null || true
+# lock_dir は canonical bdw に問い合わせる(sc-vae cutover: SSOT 一本化・gen-sandbox の allowWrite と同 contract)。
+mkdir -p "$("$HERE/../bdw" lock-dir)" 2>/dev/null || true
 echo "--- settings.local.json ---"; cat "$WT/.claude/settings.local.json"
 
 # 3) sandboxed worker(実 CC)に 1 コマンドを走らせる。allow-side(git commit/bd close)と block-side

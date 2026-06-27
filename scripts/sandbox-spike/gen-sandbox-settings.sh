@@ -22,7 +22,8 @@
 #   (scribe-lib.sh:scribe_owning_repo と同等。GIT_DIR/GIT_WORK_TREE 継承は env -u で隔離)。
 set -euo pipefail
 
-# lock_dir formula(D4 合意の SSOT)を bdw と共有するため scribe-lib.sh を source(sc-imu)。
+# scribe-lib.sh を source するのは scribe_owning_repo(下の anchor 逆算)のためのみ(sc-vae cutover で
+# lock_dir 共有目的の source は不要化。lock_dir の SSOT は canonical bdw＝下の `bdw lock-dir` 参照)。
 _GEN_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 # shellcheck source=../lib/scribe-lib.sh
 source "$_GEN_DIR/../lib/scribe-lib.sh"
@@ -36,12 +37,14 @@ anchor="$(scribe_owning_repo "$wt")" \
   || { echo "gen-sandbox-settings: anchor 逆算に失敗(git worktree 外?): $wt" >&2; exit 3; }
 
 uid="$(id -u)"
-# bdw(scripts/bdw)が flock 鍵を置く dir と**同一の SSOT** を使う(sc-imu: scribe-lib.sh の scribe_bdw_lock_dir。
-# 旧: 両ファイルに同式を手書き複製していたが片側 drift で sandbox 外壁が bdw flock を block し bd write が
-# 壊れるため1関数へ集約)。grant は専用 lock dir(既定 $HOME/.cache/bdw-locks・sc-xs2 で orch/uns bdw と収束)
-# のみ＝parent(`$HOME/.cache` 等)を丸ごと grant せず、sandboxed worker が触れる範囲を最小化する。
-# bwrap が bind 前に path 存在を要求しうるため、scribe-spawn.sh が worker 起動前にこの dir を mkdir する。
-lock_dir="$(scribe_bdw_lock_dir)"
+# bdw(scripts/bdw)が flock 鍵を置く dir を**そのまま** consume する(sc-vae cutover: lock_dir の SSOT は
+# canonical bdw に一本化＝`bdw lock-dir` が解決済み dir を stdout に出す contract。旧 scribe-lib.sh の
+# ローカル lock_dir 解決関数の手書き複製は drift 源ゆえ廃止し、bdw 自身に問い合わせて構造的に byte 一致させる)。
+# `$_GEN_DIR/../bdw` = scripts/bdw shim→canonical へ exec。set -euo pipefail 下ゆえ失敗時は自動 fail-closed。
+# grant は専用 lock dir(既定 $HOME/.cache/bdw-locks・sc-xs2 で orch/uns bdw と収束)のみ＝parent(`$HOME/.cache`
+# 等)を丸ごと grant せず、sandboxed worker が触れる範囲を最小化する。bwrap が bind 前に path 存在を要求しうる
+# ため、scribe-spawn.sh が worker 起動前にこの dir を mkdir する。
+lock_dir="$("$_GEN_DIR/../bdw" lock-dir)"
 beads_dir="$anchor/.beads"
 
 jq -n \

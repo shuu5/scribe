@@ -84,16 +84,10 @@ scribe_synthesize_issue_desc() {
 # scribe_window_name <id> → wt-<id>（protocol.md §1 命名規約）。
 scribe_window_name() { printf 'wt-%s' "$1"; }
 
-# scribe_bdw_lock_dir → bdw の flock 鍵を置く専用 dir（gen-sandbox の sandbox allowWrite と**同一**＝
-# 全 bd writer + sandbox 外壁の D4 合意の SSOT・sc-imu で集約）。
-#   既定 `$HOME/.cache/bdw-locks` は scribe **以外**の bd writer（orch/uns の scripts/bdw）と byte 完全一致
-#   させる（sc-xs2: 旧 `${XDG_RUNTIME_DIR:-/tmp}/scribe-bdw` は base 違い＋`/scribe-bdw` subdir 付与で
-#   構造分岐し、同一台帳へ同時 write する scribe worker と非 scribe writer が別 lock を掴んで flock 直列化が
-#   黙って破れ lost-update する P1 を生んでいた。`BDW_LOCK_DIR` override も subdir を足さず直接使う＝
-#   env で base を揃えれば確実に収束する）。`$HOME/.cache/bdw-locks` は専用の狭い lock dir ゆえ sandbox
-#   allowWrite の最小化原則（旧 sc-da0：runtime dir 丸ごとを grant しない）は維持される。
-# 呼び出し側は結果に対し必要なら mkdir/段階フォールバックを行う（runtime 挙動は呼び出し側の責務）。
-scribe_bdw_lock_dir() { printf '%s' "${BDW_LOCK_DIR:-$HOME/.cache/bdw-locks}"; }
+# NOTE(sc-vae cutover): bdw の lock dir 解決関数はここから削除した。lock_dir の SSOT は canonical bdw
+#   （beads-bdw plugin）へ一本化され、consumer（gen-sandbox-settings.sh / verify-sandbox-e2e.sh）は
+#   `scripts/bdw lock-dir`（shim→canonical へ exec し解決済み dir を stdout）で問い合わせる。旧ローカル
+#   関数はこの 3 copy drift（uns/scriptorium/scribe）撲滅の orch-wvd 合意で不要化した（単一SSOT化の本旨）。
 
 # scribe_git <git-args...> → GIT_DIR/GIT_WORK_TREE の継承干渉を隔離して git を呼ぶ（sc-e1w で集約。
 # worker 等が GIT_DIR を export した環境でも -C 指定先のリポを正しく解く＝隔離の付け忘れを構造防止）。

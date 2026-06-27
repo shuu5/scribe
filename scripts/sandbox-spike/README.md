@@ -64,8 +64,9 @@ spike ハーネス(commit 71bf862)で 5/5 PASS(全て ran=yes ＝ genuine):
 > sc-da0 で専用サブdir のみへ最小化し、**sc-xs2(2026-06-21)で lock_dir を `$HOME/.cache/bdw-locks`
 > （scribe 以外の bd writer = orch/uns bdw と byte 一致）へ収束**させた（旧 `$XDG_RUNTIME_DIR/scribe-bdw`
 > は base 違い + subdir 付与で構造分岐し lost-update を生んでいた）。grant は依然この専用 lock dir
-> （bdw の `scribe_bdw_lock_dir()` と同式）のみで parent を丸ごと開けない。bwrap の bind-before-exist の
-> ため `scribe-spawn.sh` が worker 起動前にこの dir を事前生成する。
+> （**sc-vae cutover で lock_dir SSOT は canonical bdw〔beads-bdw plugin〕へ一本化。gen-sandbox は
+> `scripts/bdw lock-dir` で問い合わせて byte 一致させる**）のみで parent を丸ごと開けない。bwrap の
+> bind-before-exist のため `scribe-spawn.sh` が worker 起動前にこの dir を事前生成する。
 
 ## 本番反映(実装済み: direct-gen)
 

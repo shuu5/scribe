@@ -2038,25 +2038,47 @@ _run_guard_env() {  # <guard-basename> <cmd> <json_cwd> <envassign|""> <proc_cwd
   [[ "$stderr" == *"$_PREAMBLE_FAILOPEN_MSG"* ]]
 }
 
-@test "bdw/gen-sandbox: lock_dir formula が scribe-lib.sh の scribe_bdw_lock_dir に集約（sc-imu・drift 防止）" {
-  # 生 formula の手書き複製が bdw/gen に残っていない（複製は片側 drift で sandbox 外壁が bdw flock を
-  # block→bd write 破壊。1関数へ集約して構造的に drift 不能化）。grep -l は一致ファイルを出すので不一致=非0。
-  # sc-xs2: formula を orch/uns bdw と収束（${BDW_LOCK_DIR:-$HOME/.cache/bdw-locks}）。生 formula は
-  # `${...}` 展開構文で識別し、doc コメント中の散文 `(BDW_LOCK_DIR:-…)` を誤検出しない。
-  run grep -lE '\$\{BDW_LOCK_DIR:-.*\.cache/bdw-locks' "$BDW" "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh"
-  [ "$status" -ne 0 ]
-  # 両者が共有関数 scribe_bdw_lock_dir を呼ぶ。
-  grep -q 'scribe_bdw_lock_dir' "$BDW"
-  grep -q 'scribe_bdw_lock_dir' "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh"
-  # SSOT は scribe-lib.sh の関数定義（生 formula はここだけ）。
-  grep -qE 'scribe_bdw_lock_dir\(\).*BDW_LOCK_DIR.*\.cache/bdw-locks' "$LIB"
+@test "bdw cutover(sc-vae): bdw=logic-free shim / gen+e2e は bdw lock-dir を consume / scribe-lib に lock_dir 関数なし" {
+  # cutover の構造不変条件（旧 'lock_dir formula を scribe_bdw_lock_dir に集約' を置換）。lock_dir の SSOT は
+  # canonical bdw（beads-bdw plugin）へ一本化され、scribe 側は shim→canonical を consume するだけ＝3 copy
+  # drift（uns/scriptorium/scribe）を撲滅した。判定は bare token でなく「直列化ロジックの実体」で行う
+  # （header コメントが歴史 provenance として 'flock' 等の語を含みうるため・scriptorium shim 先例と同様）。
+  # (a) scripts/bdw = logic ゼロの shim: canonical 解決(_CANON)と exec を含み、直列化ロジック（flock 取得・
+  #     fd9 lock open）・lib source 文・旧ローカル lock 関数参照を一切含まない。
+  grep -q '_CANON' "$BDW"
+  grep -qE 'exec "\$_CANON" "\$@"' "$BDW"
+  run grep -qE 'flock -w' "$BDW";              [ "$status" -ne 0 ]
+  run grep -q 'exec 9>' "$BDW";                [ "$status" -ne 0 ]
+  run grep -qE '^[[:space:]]*source ' "$BDW";  [ "$status" -ne 0 ]
+  run grep -q 'scribe_bdw_lock_dir' "$BDW";    [ "$status" -ne 0 ]
+  # (b) gen-sandbox / verify-sandbox-e2e は `bdw lock-dir`（shim→canonical）を consume し、旧ローカル関数を呼ばない。
+  grep -qE '/bdw" lock-dir' "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh"
+  run grep -q 'scribe_bdw_lock_dir' "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh"; [ "$status" -ne 0 ]
+  grep -qE '/bdw" lock-dir' "$E2E"
+  run grep -q 'scribe_bdw_lock_dir' "$E2E"; [ "$status" -ne 0 ]
+  # (c) scribe-lib.sh は lock_dir 解決関数を定義しない（dead code 削除＝単一SSOT化の本旨）。
+  run grep -q 'scribe_bdw_lock_dir' "$LIB"; [ "$status" -ne 0 ]
+}
+
+@test "bdw(shim): canonical 不在は fail-closed（exit 1・bd 不実行・診断 stderr）" {
+  # shim の核心: canonical が解決できなければ bd write を素通しさせず loud に止める（直列化を外して実行は
+  # しない＝静かな lost-update 復活を防ぐ）。BEADS_BDW を非存在パスへ向け、bd（echo スタブ）が実行されない
+  # こと・exit 1・stderr に診断が出ることを pin する。素通し回帰が起きれば bd が走り output に 'show un-x'
+  # が混じる＝本 @test が落ちる。
+  run env BEADS_BDW=/nonexistent-canonical-xyz BDW_BD_BIN=echo "$BDW" show un-x
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"canonical bdw not found"* ]]
+  [[ "$output" == *"fail-closed"* ]]
+  [[ "$output" != *"show un-x"* ]]   # bd（echo スタブ）は実行されていない
 }
 
 # ---------- bdw: flock-serialized B/hybrid の中核ロジックを pin（sc-i9b member 2）----------
-# bd 実体を echo に差し替え（BDW_BD_BIN=echo）て実 Dolt write を起こさず、READ/WRITE 経路の
-# 分岐だけを検証する。判定の観測点 = BDW_LOCK_DIR 直下に `bd-write-*.lock`（sc-xs2: override は
+# sc-vae cutover 後は scripts/bdw が canonical bdw（beads-bdw plugin）へ exec する shim になったため、
+# 以下は shim→canonical を貫く **integration test** として残す（READ/WRITE 分岐ロジックの実装は canonical 側）。
+# bd 実体を echo に差し替え（BDW_BD_BIN=echo・shim が exec で canonical へ継承）て実 Dolt write を起こさず、
+# READ/WRITE 経路の分岐だけを検証する。判定の観測点 = BDW_LOCK_DIR 直下に `bd-write-*.lock`（sc-xs2: override は
 # subdir を足さず直接使う＝orch/uns bdw と収束）が作られたか。
-#   - READ allowlist  → exec が lock 作成より前（L66）に走るため lock 0 個（無ロック素通し）
+#   - READ allowlist  → exec が lock 作成より前に走るため lock 0 個（無ロック素通し）
 #   - WRITE / 未知    → flock 取得後 exec のため lock 1 個（直列化路）
 # 各 @test は使い捨ての空 lock dir を作って観測する。cwd は setup() の temp git repo。
 _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
@@ -2096,8 +2118,8 @@ _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
 }
 
 @test "bdw: WRITE は flock 取得失敗で fail-closed（実排他を観測・lock file 在＝取得済 を証明しない）" {
-  # 上の WRITE @test 群は「lock file が在る」しか見ない。だが bdw L89 `exec 9>lock_file` は
-  # flock 取得の成否に依らず lock file を無条件生成するので、L90 `flock -w` が回帰で消えても
+  # 上の WRITE @test 群は「lock file が在る」しか見ない。だが canonical bdw（via shim）の `exec 9>lock_file` は
+  # flock 取得の成否に依らず lock file を無条件生成するので、`flock -w` が回帰で消えても
   # それらは緑のまま通る（lock file 在 ≠ 排他が効いている）。本 @test は実際の相互排他を観測する:
   # 別プロセスに同一 lock を保持させたまま bdw WRITE を BDW_LOCK_TIMEOUT=1 で起動し、取得失敗で
   # 非 0 終了し bd を実行しない（fail-closed）ことを assert する。flock が外れれば bdw は素通しで
@@ -2135,7 +2157,7 @@ _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
 
 @test "bdw: 値取り global flag（--db）の値を subcommand と誤認しない（--db close show → READ・lock 0）" {
   # 契約 member(2) が名指しで pin を要求する 3 つ目の value-taking flag。--db の値が write subcmd 名
-  # （close）でも次トークンとして読み飛ばし、真の subcmd=show を採る。bdw L55 の case 一覧から --db が
+  # （close）でも次トークンとして読み飛ばし、真の subcmd=show を採る。canonical bdw（via shim）の flag case 一覧から --db が
   # 回帰で落ちると subcmd=close と誤認 → WRITE lock になる。lock 0 でそれを pin（--actor と対称）。
   local ld; ld="$(mktemp -d)"
   run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" --db close show un-x
@@ -2145,7 +2167,7 @@ _bdw_locks() { ls "$1"/bd-write-*.lock 2>/dev/null | wc -l | tr -d ' '; }
 }
 
 @test "bdw: 値取り global flag（--directory）の値を subcommand と誤認しない（--directory close show → READ・lock 0）" {
-  # 同 skip_next case 分岐（L55）の網羅を完成させる。--directory の値（close）を読み飛ばし真の subcmd=show
+  # 同 skip_next case 分岐（canonical bdw via shim）の網羅を完成させる。--directory の値（close）を読み飛ばし真の subcmd=show
   # を採る。case 一覧から --directory が落ちれば subcmd=close 誤認 → WRITE lock。lock 0 でそれを pin。
   local ld; ld="$(mktemp -d)"
   run env BDW_BD_BIN=echo BDW_LOCK_DIR="$ld" "$BDW" --directory close show un-x
