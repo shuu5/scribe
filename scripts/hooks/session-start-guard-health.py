@@ -153,6 +153,11 @@ def _build_banner(ct, bdw):
         "⚠️ ------------------------------------------------------------------",
     ]
     if not ct[0]:
+        # over-attribution は意図的な safe-side（per-guard ground truth ではない）: probe は両 guard import の
+        # 和集合 API を 1 回試行するため、部分ロード（片方の guard が要る API だけ欠落）でも両 guard を DISABLED
+        # と列挙しうる。これは安全側（over-warn）で、**guard が実際に落ちるのに「OK」と言う false-negative は
+        # 構造的に出ない**（和集合のどれか 1 つでも欠ければ banner を出す）。per-guard の厳密判定は本 hook の
+        # 目的（silent な無効化を loud 化する）に対して過剰ゆえ採らない。
         lines += [
             "⚠️  [cmdtokens] plugin lib をロードできません。これに依存する destructive",
             "⚠️  guard が **DISABLED（fail-open＝破壊コマンド素通し）** で silent に無効化:",
@@ -211,7 +216,14 @@ def main():
     if "--self-test" in sys.argv:
         return run_self_test()
     # SessionStart hook JSON を stdin から読む（cwd を抽出）。tty なら読まない（block 回避）。
-    raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+    # **closed stdin（fd 0 が閉じた状態で起動）への防御**: CPython は fd 0 が閉じていると sys.stdin=None で
+    # 初期化するため、素の sys.stdin.isatty() は AttributeError を送出し sys.exit(main()) まで伝播して die する
+    # （「決して die しない・常に exit0」契約違反・sc-ovq orchestrator gate で実機再現）。None ガード + try/except
+    # で空文字に degrade する（空/garbage/huge//dev/null は元から正常 degrade・die するのは closed stdin のみ）。
+    try:
+        raw = "" if (sys.stdin is None or sys.stdin.isatty()) else sys.stdin.read()
+    except Exception:
+        raw = ""
     try:
         data = json.loads(raw) if raw.strip() else {}
         cwd = data.get("cwd") or os.getcwd()

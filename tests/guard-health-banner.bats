@@ -122,6 +122,17 @@ run_hook() {
     [ -z "$output" ]
 }
 
+@test "(iv-b) closed stdin(0<&-) でも exit0・traceback 無し（決して die しない契約・sc-ovq orchestrator gate）" {
+    # fd 0 を閉じて起動すると CPython は sys.stdin=None で初期化し、素の sys.stdin.isatty() が
+    # AttributeError を送出して die しうる（「常に exit0・決して die しない」契約違反）。None ガードで
+    # degrade することを pin する（修正前は RED=traceback+rc1 / 後は GREEN）。非 ledger cwd から走らせ
+    # self-scope no-op で出力を決定論的に空へ（host の plugin 配備に依存させない）。
+    run bash -c "cd '$TEST_TMPDIR' && python3 '$HOOK' 0<&-"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Traceback"* ]]
+    [ -z "$output" ]
+}
+
 @test "(v) in-process --self-test が green(durable coverage pin)" {
     run python3 "$HOOK" --self-test
     [ "$status" -eq 0 ]
