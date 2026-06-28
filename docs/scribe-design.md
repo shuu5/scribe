@@ -338,6 +338,7 @@ twill 資産は **コードを流用せず原則のみ継承**:
    - gate 起動ヘルパー（cell-quality WF 呼出）。
    - cleanup（worktree / branch / window 掃除）。
 3. **role 判定つき SessionStart 文脈注入（3 role）**: admin / worker / consult の 3 role それぞれに必要な文脈だけを SessionStart hook で注入する。SessionStart hook に role 宣言機構は無いため**実行時 guard で分離**する: worker = cwd が `.worktrees/` 配下か判定 / consult = 明示シグナル（env or window 名）/ admin = anchor。
+   - **2 本目の SessionStart hook = plugin health-check（`session-start-guard-health.py`・bd sc-ovq）**: scribe が consume する canonical plugin（cmdtokens / beads-bdw）の不在を loud 化する。cmdtokens 不在で git/rm destructive guard が fail-open（破壊コマンド素通し）に、beads-bdw 不在で `scripts/bdw` が fail-closed（bd write 不可・sandbox-off worker は zombie 化）に silent 劣化するため、scribe session（`dolt_database=='sc'`）でのみ ⚠️ banner を stdout 注入する（self-scope helper = `scripts/hooks/lib/scribe_session.py`・常に exit0 degrade）。orchestrator 側 scriptorium の同型 guard-health hook（cmdtokens 版・bd orch-hos）を port し beads-bdw probe を加えたもの。全ホスト配布物（固いカテゴリ③）。
 
 ### 3 role と role 別 PRIME 分割
 

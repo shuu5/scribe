@@ -260,21 +260,46 @@ scribe_restore_origin() {
 #   false-negative を出す）。verify-sandbox-e2e.sh の skip プローブと同じ判定式。
 #   claude/bd 等の worker 一般 deps はここでは検査しない（sandbox の有無に依らず要る＝sandbox 可否の gate ではない。
 #   jq は上記のとおり sandbox materialization 固有の hard 依存ゆえ検査対象に含める）。
+# scribe_canonical_bdw_ok → canonical beads-bdw（plugin）が `scripts/bdw lock-dir` で到達可能か検査する（sc-ovq）。
+#   到達可 → exit 0（stdout 何も出さない）。不能 → 欠落理由を stdout に machine-readable で echo して非0
+#   （caller が fail-loud / fallback メッセージへ織り込めるように＝preflight の他項目と同じ出力契約）。
+#
+#   probe の SSOT（sc-ovq で抽出）: 従来 scribe_sandbox_preflight にインラインだった canonical bdw probe を
+#   独立関数へ括り出した。理由 = canonical bdw は **sandbox の有無に依らず worker が必ず使う一般依存**であり、
+#   sandbox 機構固有の前提（bwrap/socat/jq/userns）とは責務が異なる。これを sandbox-ON 限定の preflight だけに
+#   置くと、SCRIBE_SANDBOX=0（opt-out）経路は preflight を通らず、plugin 不在 host で sandbox-off worker が
+#   起動してしまい、全 bd write が shim fail-closed で台帳に残らない **zombie worker** を生む（sc-ovq）。
+#   よって scribe-spawn.sh は本関数を **spawn 前に ON/OFF 両経路で無条件に**呼ぶ。preflight も本関数を呼ぶ
+#   （sandbox-ON 経路の defense-in-depth＝standalone preflight 道具/テストでも bdw 不在を報告する）。両 caller が
+#   同一関数を共有するため drift しない。
+#
+#   検査方式（gen と同一経路＝drift 回避）: gen-sandbox-settings.sh が lock_dir を `scripts/bdw lock-dir`
+#   （shim→canonical）で解決する spawn-time hard 依存になった（sc-vae）。本関数も同じ `bdw lock-dir` を実行し、
+#   chain 全体（BEADS_BDW 解決→canonical→resolve_lock_dir）を検査する＝単なる存在チェックより強い。bdw shim は
+#   本 lib と同じ scripts/ 配下（../bdw）。
+scribe_canonical_bdw_ok() {
+  local _bdw_dir _bdw
+  _bdw_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" || _bdw_dir=""
+  _bdw="${_bdw_dir:+$_bdw_dir/bdw}"
+  if [ -z "$_bdw" ] || ! "$_bdw" lock-dir >/dev/null 2>&1; then
+    printf 'canonical bdw が解決不能（beads-bdw plugin 未配備 or BEADS_BDW 未設定／scripts/bdw lock-dir 失敗）'
+    return 1
+  fi
+  return 0
+}
+
 scribe_sandbox_preflight() {
   local b
   for b in bwrap socat jq; do
     command -v "$b" >/dev/null 2>&1 || { printf '%s が不在' "$b"; return 1; }
   done
   # canonical bdw（beads-bdw plugin）解決可否を gen と同一経路で先回り検査する（sc-vae cutover・REQUIRED-1）。
-  # gen-sandbox-settings.sh は lock_dir を `scripts/bdw lock-dir`（shim→canonical）で解決する spawn-time hard 依存に
-  # なったため、未配備なら worktree add の前にここで fail-loud させる（通すと gen が worktree add 後に fail-closed→orphan
-  # worktree を残す＝jq round3 と構造同型の不変条件再違反）。`bdw lock-dir` 実行で chain 全体（BEADS_BDW 解決→canonical
-  # →resolve_lock_dir）を検査＝単なる存在チェックより強く、gen と drift しない。bdw shim は本 lib と同じ scripts/ 配下。
-  local _bdw_dir _bdw
-  _bdw_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" || _bdw_dir=""
-  _bdw="${_bdw_dir:+$_bdw_dir/bdw}"
-  if [ -z "$_bdw" ] || ! "$_bdw" lock-dir >/dev/null 2>&1; then
-    printf 'canonical bdw が解決不能（beads-bdw plugin 未配備 or BEADS_BDW 未設定／scripts/bdw lock-dir 失敗）'
+  # 実体は共有関数 scribe_canonical_bdw_ok（sc-ovq で抽出＝probe の単一 SSOT）。preflight は sandbox-ON 経路の
+  # defense-in-depth として残すが、**worker 一般依存としての無条件 bdw 検査は scribe-spawn.sh が spawn 前に ON/OFF
+  # 両経路で先に走らせる**（sc-ovq・sandbox-off zombie worker 防止）。両者が同じ関数を呼ぶため drift しない。
+  local _bdw_reason
+  if ! _bdw_reason="$(scribe_canonical_bdw_ok)"; then
+    printf '%s' "$_bdw_reason"
     return 1
   fi
   # userns 実プローブ（apparmor profile / sysctl どちらの方式でも、通れば OK）。
