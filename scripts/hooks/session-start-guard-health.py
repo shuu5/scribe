@@ -212,6 +212,17 @@ def _run(cwd):
     return _build_banner(ct, bdw)
 
 
+def _safe_cwd():
+    """os.getcwd() は cwd が削除済みだと FileNotFoundError を投げる。main() の except 経路では
+    getcwd が try の外にあり、cwd 削除済み + garbage/空 stdin の degenerate edge で例外が伝播して
+    traceback+exit1 で die しうる（「常に exit0・決して die しない」契約違反・orch-k33）。例外時は
+    必ず存在する "/" へ degrade する（walk-up が即 root 到達で no-op＝silent・誤注入なし）。"""
+    try:
+        return os.getcwd()
+    except Exception:
+        return "/"
+
+
 def main():
     if "--self-test" in sys.argv:
         return run_self_test()
@@ -226,9 +237,9 @@ def main():
         raw = ""
     try:
         data = json.loads(raw) if raw.strip() else {}
-        cwd = data.get("cwd") or os.getcwd()
+        cwd = data.get("cwd") or _safe_cwd()
     except Exception:
-        cwd = os.getcwd()  # parse 失敗 → fail-open で $PWD（die しない）
+        cwd = _safe_cwd()  # parse 失敗 / cwd 削除 → fail-open で safe cwd（die しない）
     try:
         out = _run(cwd)
     except Exception:
@@ -340,6 +351,19 @@ def run_self_test():
         os.makedirs(outside)
         set_env(ct_absent, bdw_absent)
         check(_run(outside) == "", "(vii) 台帳外(.beads 皆無) → no-op")
+
+        # (viii) _safe_cwd: os.getcwd() が例外でも die せず "/" へ degrade(deleted-cwd 契約・orch-k33)。
+        #   非vacuous: 例外時は "/" / 正常時は実 cwd を返す＝degrade と正常を弁別する。
+        def _raise_fnf(*a, **k):
+            raise FileNotFoundError("cwd deleted (self-test)")
+        _real_getcwd = os.getcwd
+        try:
+            os.getcwd = _raise_fnf
+            check(_safe_cwd() == "/", "(viii) _safe_cwd: getcwd 例外時 '/' へ degrade(die しない)")
+        finally:
+            os.getcwd = _real_getcwd
+        check(_safe_cwd() == os.getcwd(),
+              "(viii) _safe_cwd: 正常時は実 cwd を返す(non-vacuous・degrade と弁別)")
 
         # 非vacuous: 同一 scribe session で present は無音・absent は banner = 検出器が状態を弁別する。
         check(out_ok == "" and out_ct != "" and out_bdw != "",

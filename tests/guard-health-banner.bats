@@ -133,6 +133,23 @@ run_hook() {
     [ -z "$output" ]
 }
 
+@test "(iv-c) cwd 削除済み + garbage/空 stdin でも die しない(exit0・traceback 無し・orch-k33)" {
+    # main() の except 経路の os.getcwd() が try 外にあり、cwd 削除済みだと FileNotFoundError が伝播し
+    # traceback+exit1 で die しうる（「常に exit0・決して die しない」契約違反）。_safe_cwd() で "/" へ
+    # degrade することを pin する（修正前は RED=traceback+rc1 / 後は GREEN）。
+    # 削除する cwd は subshell に閉じ込め、bats 本体の cwd を壊さない。
+    # (a) garbage stdin: json.loads 失敗 → except → getcwd(try 外)で die しうる。
+    run bash -c 'd=$(mktemp -d -t ghk33-XXXXXX); cd "$d" && rmdir "$d" && printf "not json {{{" | python3 "$1" 2>&1' _ "$HOOK"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Traceback"* ]]
+    [[ "$output" != *"FileNotFoundError"* ]]
+    # (b) 空 stdin: data={} → `data.get("cwd") or getcwd()`(try 内)で die しうる。
+    run bash -c 'd=$(mktemp -d -t ghk33-XXXXXX); cd "$d" && rmdir "$d" && printf "" | python3 "$1" 2>&1' _ "$HOOK"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Traceback"* ]]
+    [[ "$output" != *"FileNotFoundError"* ]]
+}
+
 @test "(v) in-process --self-test が green(durable coverage pin)" {
     run python3 "$HOOK" --self-test
     [ "$status" -eq 0 ]
