@@ -84,16 +84,10 @@ scribe_synthesize_issue_desc() {
 # scribe_window_name <id> → wt-<id>（protocol.md §1 命名規約）。
 scribe_window_name() { printf 'wt-%s' "$1"; }
 
-# scribe_bdw_lock_dir → bdw の flock 鍵を置く専用 dir（gen-sandbox の sandbox allowWrite と**同一**＝
-# 全 bd writer + sandbox 外壁の D4 合意の SSOT・sc-imu で集約）。
-#   既定 `$HOME/.cache/bdw-locks` は scribe **以外**の bd writer（orch/uns の scripts/bdw）と byte 完全一致
-#   させる（sc-xs2: 旧 `${XDG_RUNTIME_DIR:-/tmp}/scribe-bdw` は base 違い＋`/scribe-bdw` subdir 付与で
-#   構造分岐し、同一台帳へ同時 write する scribe worker と非 scribe writer が別 lock を掴んで flock 直列化が
-#   黙って破れ lost-update する P1 を生んでいた。`BDW_LOCK_DIR` override も subdir を足さず直接使う＝
-#   env で base を揃えれば確実に収束する）。`$HOME/.cache/bdw-locks` は専用の狭い lock dir ゆえ sandbox
-#   allowWrite の最小化原則（旧 sc-da0：runtime dir 丸ごとを grant しない）は維持される。
-# 呼び出し側は結果に対し必要なら mkdir/段階フォールバックを行う（runtime 挙動は呼び出し側の責務）。
-scribe_bdw_lock_dir() { printf '%s' "${BDW_LOCK_DIR:-$HOME/.cache/bdw-locks}"; }
+# NOTE(sc-vae cutover): bdw の lock dir 解決関数はここから削除した。lock_dir の SSOT は canonical bdw
+#   （beads-bdw plugin）へ一本化され、consumer（gen-sandbox-settings.sh / verify-sandbox-e2e.sh）は
+#   `scripts/bdw lock-dir`（shim→canonical へ exec し解決済み dir を stdout）で問い合わせる。旧ローカル
+#   関数はこの 3 copy drift（uns/scriptorium/scribe）撲滅の orch-wvd 合意で不要化した（単一SSOT化の本旨）。
 
 # scribe_git <git-args...> → GIT_DIR/GIT_WORK_TREE の継承干渉を隔離して git を呼ぶ（sc-e1w で集約。
 # worker 等が GIT_DIR を export した環境でも -C 指定先のリポを正しく解く＝隔離の付け忘れを構造防止）。
@@ -255,6 +249,10 @@ scribe_restore_origin() {
 #       使うのは sandbox materialization 経路〔gen 呼出〕のみで非 sandbox 経路は jq を一切使わない＝jq は sandbox
 #       機構固有の前提。これを preflight が見落とすと『bwrap/socat/userns は揃うが jq 不在』host で worktree add 後に
 #       gen が落ち orphan worktree を残す＝preflight の orphan 防止不変条件を破る・sc-u53 round3 gate confirmed）
+#     - canonical bdw（beads-bdw plugin）解決可否（sc-vae cutover で gen-sandbox-settings.sh が lock_dir を
+#       `scripts/bdw lock-dir`〔shim→canonical〕で解決する **spawn-time hard 依存**になった。jq と同型で、これを見落とすと
+#       『bwrap/socat/jq/userns は揃うが plugin 未配備』host で worktree add 後に gen が fail-closed→orphan worktree を残す
+#       ＝同じ orphan 防止不変条件の再違反。gen と同一解決経路〔shim→canonical→resolve_lock_dir〕を踏ませて drift を避ける）
 #     - userns を **実プローブ**で確認（`bwrap --ro-bind / / --unshare-user true`）。
 #   userns は global sysctl（kernel.apparmor_restrict_unprivileged_userns）を **読まない**: host が
 #   targeted apparmor profile 方式（sysctl=1 のまま bwrap だけ userns 許可）でも sysctl 緩和方式でも、
@@ -267,6 +265,18 @@ scribe_sandbox_preflight() {
   for b in bwrap socat jq; do
     command -v "$b" >/dev/null 2>&1 || { printf '%s が不在' "$b"; return 1; }
   done
+  # canonical bdw（beads-bdw plugin）解決可否を gen と同一経路で先回り検査する（sc-vae cutover・REQUIRED-1）。
+  # gen-sandbox-settings.sh は lock_dir を `scripts/bdw lock-dir`（shim→canonical）で解決する spawn-time hard 依存に
+  # なったため、未配備なら worktree add の前にここで fail-loud させる（通すと gen が worktree add 後に fail-closed→orphan
+  # worktree を残す＝jq round3 と構造同型の不変条件再違反）。`bdw lock-dir` 実行で chain 全体（BEADS_BDW 解決→canonical
+  # →resolve_lock_dir）を検査＝単なる存在チェックより強く、gen と drift しない。bdw shim は本 lib と同じ scripts/ 配下。
+  local _bdw_dir _bdw
+  _bdw_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" || _bdw_dir=""
+  _bdw="${_bdw_dir:+$_bdw_dir/bdw}"
+  if [ -z "$_bdw" ] || ! "$_bdw" lock-dir >/dev/null 2>&1; then
+    printf 'canonical bdw が解決不能（beads-bdw plugin 未配備 or BEADS_BDW 未設定／scripts/bdw lock-dir 失敗）'
+    return 1
+  fi
   # userns 実プローブ（apparmor profile / sysctl どちらの方式でも、通れば OK）。
   bwrap --ro-bind / / --unshare-user true 2>/dev/null \
     || { printf 'bwrap が userns を作れない（apparmor profile / sysctl 緩和が未反映）'; return 1; }

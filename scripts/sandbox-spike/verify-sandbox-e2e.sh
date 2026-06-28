@@ -47,6 +47,8 @@ gitc() { env -u GIT_DIR -u GIT_WORK_TREE git "$@"; }
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 GEN="$HERE/gen-sandbox-settings.sh"
 SADD="$HERE/../scribe-add"   # sc-yqa B: sandbox 下の git add -A 代替(型で device を弾く stage ラッパ)。worker が実走する。
+BDW_SHIM="$HERE/../bdw"      # sc-vae: bd write は bdw shim 経由(shim→canonical plugin)。allow-side で実走し、bwrap sandbox 内から
+                             # canonical($HOME/.claude/plugins/beads-bdw/bin/bdw)を read/exec して直列化 write できるか(in-sandbox 到達)を直接 pin する。
 # shellcheck source=../lib/scribe-lib.sh
 source "$HERE/../lib/scribe-lib.sh"
 
@@ -100,7 +102,8 @@ mkdir -p "$WT/.claude"
 # null-mount を増やしても scribe-add は型ベースゆえ壊れないことを実 sandbox で実証する(sc-yqa 4b の robust 版)。
 scribe_sandbox_write_exclude "$WT"
 # bwrap の bind-before-exist 対策: grant 済 lock dir を worker 起動前に実在させる(本番 scribe-spawn と同じ)。
-mkdir -p "$(scribe_bdw_lock_dir)" 2>/dev/null || true
+# lock_dir は canonical bdw に問い合わせる(sc-vae cutover: SSOT 一本化・gen-sandbox の allowWrite と同 contract)。
+mkdir -p "$("$HERE/../bdw" lock-dir)" 2>/dev/null || true
 echo "--- settings.local.json ---"; cat "$WT/.claude/settings.local.json"
 
 # 3) sandboxed worker(実 CC)に 1 コマンドを走らせる。allow-side(git commit/bd close)と block-side
@@ -130,7 +133,9 @@ INBOUND="$WT/sc7n1-blockresult.txt"
 NEGCTL="$WT/sc-yqa-negctl-rc.txt"   # negative control: 素の git add -A の rc を worker が書く(sc-yqa gate blocking#1)
 # printf は外壁で *失敗* するのが期待値ゆえ `&&` で繋がず `;` で必ず自己判定へ進む(失敗を AND ゲートすると INBOUND が
 # 永久に書かれず 全 PASS が達成不能)。worker が OUTSIDE 実在を自己判定し INBOUND に blocked/wrote を書く。
-WORKER_CMD="cd '$WT' && printf 'e2e\n' > '$MARKER'; git add -A >/dev/null 2>&1; printf '%s' \$? > '$NEGCTL'; git reset -q >/dev/null 2>&1; '$SADD' && git commit -q -m '$COMMIT_MSG' && echo $TOK_GIT; bd close '$ISSUE' >/dev/null 2>&1 && echo $TOK_BD; printf x > '$OUTSIDE' 2>/dev/null; [ -e '$OUTSIDE' ] && printf wrote > '$INBOUND' || printf blocked > '$INBOUND'"
+# bd close は **bdw shim 経由**($BDW_SHIM close→shim が canonical を exec して flock 直列化)で実走する(sc-vae: in-sandbox の
+# canonical 到達+書込みを直接 pin。bare `bd close` だと shim→plugin を通らず到達性を検証できなかった)。
+WORKER_CMD="cd '$WT' && printf 'e2e\n' > '$MARKER'; git add -A >/dev/null 2>&1; printf '%s' \$? > '$NEGCTL'; git reset -q >/dev/null 2>&1; '$SADD' && git commit -q -m '$COMMIT_MSG' && echo $TOK_GIT; '$BDW_SHIM' close '$ISSUE' >/dev/null 2>&1 && echo $TOK_BD; printf x > '$OUTSIDE' 2>/dev/null; [ -e '$OUTSIDE' ] && printf wrote > '$INBOUND' || printf blocked > '$INBOUND'"
 
 before="$(gitc -C "$WT" rev-parse HEAD)"
 echo "--- 実 CC を sandbox で起動(git commit + bd close + 外壁 block control)---"
@@ -160,11 +165,12 @@ elif [[ "$before" != "$after" && "$commit_msg" == "$COMMIT_MSG" ]]; then
 else
   verdict FAIL "git commit: 反映されず(before=$before after=$after msg='$commit_msg')"
 fi
-# bd close: token が出て・anchor 側 bd show が CLOSED → .beads dolt に永続。
+# bd close(bdw shim 経由): token が出て・anchor 側 bd show が CLOSED → sandbox 内から canonical plugin を exec して
+#   flock 直列化 write が .beads dolt に永続(sc-vae: in-sandbox の canonical 到達+書込みを実証)。
 if [[ "$bd_ran" != yes ]]; then
-  verdict FAIL "bd close: CC が走った証跡(token)なし(vacuous-PASS 防止)"
+  verdict FAIL "bdw close: CC が走った証跡(token)なし(vacuous-PASS 防止／in-sandbox で canonical 不到達の疑い)"
 elif grep -qi 'closed' <<<"$issue_state"; then
-  verdict PASS "bd close: anchor .beads に永続($ISSUE = CLOSED)"
+  verdict PASS "bdw close(shim→canonical): sandbox 内から plugin 到達+直列化 write が anchor .beads に永続($ISSUE = CLOSED)"
 else
   verdict FAIL "bd close: closed 化が永続せず(state: $(grep -iE 'open|closed' <<<"$issue_state" | head -1))"
 fi
