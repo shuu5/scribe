@@ -440,6 +440,24 @@ fi
 
 # ===== 実行（real）=====
 
+# --- canonical bdw 無条件 preflight（sc-ovq・sandbox-off zombie worker 防止）---
+# bdw（scripts/bdw shim→canonical beads-bdw plugin）は **sandbox の有無に依らず worker が必ず使う**一般依存
+# （worker の自 issue 進捗 write は全て bdw 経由・protocol.md §3）。canonical 不在なら shim は fail-closed で
+# 停止し、worker の全 bd write が台帳に残らない＝**zombie worker**（commit はするが進捗が graph に一切反映されない）。
+# 旧コードは bdw 到達性を sandbox-ON 限定の dep-preflight 内でだけ検査していたため、SCRIBE_SANDBOX=0（opt-out）
+# 経路はそこを通らず、plugin 不在 host で sandbox-off worker が黙って zombie 化していた（sc-ovq）。
+# よって worktree add の **前**に、ON/OFF どちらの経路でも無条件に bdw 到達性を検査し、不能なら worker 起動前に
+# fail-loud で止める（orphan worktree も zombie worker も作らない）。検査は scribe-lib の共有関数
+# scribe_canonical_bdw_ok（gen / sandbox preflight と同一の `scripts/bdw lock-dir` 経路＝drift しない）。
+# テスト時は BEADS_BDW=不正パスで shim を fail-closed に倒して非vacuous に注入できる（seam 不要＝実 shim を実走）。
+if ! _bdw_reason="$(scribe_canonical_bdw_ok)"; then
+  scribe_die "canonical bdw に到達できず worker を起動できません（sandbox の有無に依らず worker は bdw を使う・sc-ovq）: ${_bdw_reason}
+  対処のいずれか:
+    (1) beads-bdw plugin を配備する: ln -sfn ~/projects/local-projects/beads-bdw ~/.claude/plugins/beads-bdw
+    (2) canonical bin/bdw を環境変数で指定する: export BEADS_BDW=/abs/path/to/beads-bdw/bin/bdw
+  （未配備のまま spawn すると worker の全 bd write が shim fail-closed で台帳に残らない zombie worker になります）"
+fi
+
 # --- sandbox dep-preflight（sc-u53・default-on の安全弁）---
 # default-on では deps 欠如 host で settings.local.json の failIfUnavailable により worker が起動拒否される。
 # worktree を作る **前** に deps を preflight する（fail-loud で orphan worktree を残さない）。欠如時:

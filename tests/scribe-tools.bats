@@ -26,6 +26,14 @@ setup() {
   export BD_STUB_OK_IDS="un-4nm un-consult un-3sh.3.5"
   # cld-spawn は dry-run では実行されない。echo を決定論化するため固定値を入れる。
   export SCRIBE_CLD_SPAWN="cld-spawn"
+  # sc-ovq: spawn は real-exec 冒頭で **無条件に**（ON/OFF 両経路で）canonical bdw 到達性を検査する
+  # （zombie worker 防止）。bdw 非依存の spawn テスト（preflight/fallback/orphan/gen 失敗枝）が host の
+  # plugin 配備に左右されないよう、`lock-dir` で exit0 する present スタブを 1 つ用意する（テストは
+  # BEADS_BDW="$BDW_PRESENT_STUB" でこれを使う＝host 非依存維持）。bdw 不在を注入するテストは BEADS_BDW を
+  # 明示上書きする（_need_canonical_bdw で実 canonical を要するテストには使わない＝そちらは skip 規律のまま）。
+  BDW_PRESENT_STUB="$BATS_TEST_TMPDIR/bdw-present-stub"
+  printf '#!/usr/bin/env bash\n[ "$1" = lock-dir ] && { echo "%s/locks"; exit 0; }\nexit 0\n' "$BATS_TEST_TMPDIR" > "$BDW_PRESENT_STUB"
+  chmod +x "$BDW_PRESENT_STUB"
   # grill-consult は grill-me SKILL.md を verbatim 注入する（sc-swc・mechanism b）。テストは hermetic に
   # するためホストの実 skill でなく fixture stub を読ませる（注入の機構＝sentinel が焼かれるかを検証）。
   export SCRIBE_GRILL_SKILL="$FIXTURES/grill-me-stub.md"
@@ -256,12 +264,46 @@ _mk_main_and_linked() {
   [[ "$output" == *"canonical bdw"* ]]
 }
 
+# ---------- canonical bdw 無条件 preflight（sandbox-off zombie worker 防止・sc-ovq）----------
+@test "lib(sc-ovq): scribe_canonical_bdw_ok は present で exit0(無出力)・absent で非0+理由（probe の SSOT 抽出）" {
+  # 共有関数（spawn の無条件検査 と sandbox preflight が共有する probe の SSOT）。BEADS_BDW で canonical を
+  # 切り替え、shim→canonical→lock-dir の chain 全体を実走する（gen と同一経路＝drift しない）。
+  # present: lock-dir で exit0 する stub。absent: 不正パス→shim fail-closed(非0)。
+  run env BEADS_BDW="$BDW_PRESENT_STUB" /bin/bash -c "source '$LIB'; scribe_canonical_bdw_ok"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]                                     # present は無出力（preflight の他項目と同じ出力契約）
+  run env BEADS_BDW=/nonexistent-canonical-xyz /bin/bash -c "source '$LIB'; scribe_canonical_bdw_ok"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"canonical bdw"* ]]                 # 欠落理由を stdout に machine-readable で返す
+}
+
+@test "spawn(sc-ovq): sandbox-off(SCRIBE_SANDBOX=0) でも canonical bdw 不在を spawn 前に検出し fail-loud（worktree を作らない=zombie 防止）" {
+  # 非vacuous（mutation）: SCRIBE_SANDBOX=0 は sandbox dep-preflight を **skip** する経路ゆえ、旧コードは
+  # この経路で canonical bdw 不在を一切検出せず、plugin 不在 host で sandbox-off worker が起動し全 bd write が
+  # shim fail-closed で台帳に残らない zombie worker を生んでいた。本テストは BEADS_BDW=不正パスで bdw を不在に
+  # し、SCRIBE_SANDBOX=0 でも spawn が **worktree add の前**に fail-loud で die することを pin する。無条件
+  # bdw 検査を spawn から外すと(mutation) このテストは worktree が作られ status!=0 が崩れて RED 化する。
+  local repo noop wt
+  repo="$SCRIBE_TEST_CWD"
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  wt="$repo/.worktrees/spawn/un-4nm-101010"
+  run env BEADS_BDW=/nonexistent-canonical-xyz SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop"
+  [ "$status" -ne 0 ]                                  # fail-loud（黙って zombie を起動しない）
+  [[ "$output" == *"canonical bdw"* ]]                 # 真因
+  [[ "$output" == *"zombie"* ]]                        # zombie worker 化を明示
+  [[ "$output" == *"BEADS_BDW"* ]]                     # 復旧 hint
+  [ ! -d "$wt" ]                                       # worktree add より前に die＝orphan/zombie を作らない
+  [[ "$output" != *"spawned: issue=un-4nm"* ]]         # happy-path 行は出ない
+}
+
 @test "spawn(preflight/sc-u53): default-on で deps 欠如かつ FALLBACK 無し → fail-loud で die（worktree を作らない）" {
   local repo failstub noop
   repo="$SCRIBE_TEST_CWD"
   failstub="$(mktemp)"; printf '#!/usr/bin/env bash\nprintf "TESTDEP が不在"; exit 1\n' > "$failstub"; chmod +x "$failstub"
   noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
-  run env SCRIBE_SANDBOX_PREFLIGHT="$failstub" SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX_PREFLIGHT="$failstub" SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
       "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
   rm -f "$failstub" "$noop"
   [ "$status" -ne 0 ]                                  # fail-loud（黙って無防備に走らせない）
@@ -278,7 +320,7 @@ _mk_main_and_linked() {
   failstub="$(mktemp)"; printf '#!/usr/bin/env bash\nprintf "TESTDEP が不在"; exit 1\n' > "$failstub"; chmod +x "$failstub"
   noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
   wt="$repo/.worktrees/spawn/un-4nm-101010"
-  run env SCRIBE_SANDBOX_PREFLIGHT="$failstub" SCRIBE_SANDBOX_FALLBACK=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX_PREFLIGHT="$failstub" SCRIBE_SANDBOX_FALLBACK=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
       "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
   rm -f "$failstub" "$noop"
   [ "$status" -eq 0 ]                                  # 続行（spawn は成功する）
@@ -748,7 +790,7 @@ _mk_main_and_linked() {
   wt="$repo/.worktrees/spawn/un-4nm-101010"
   # sc-u53: cld-spawn 失敗→orphan は sandbox と直交ゆえ SCRIBE_SANDBOX=0(opt-out)で非 sandbox 経路に固定する
   #（default-on の preflight/materialization を通さない＝host 非依存 + 実 $HOME/.cache/bdw-locks 汚染なし）。
-  run env SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$fail_stub" SCRIBE_HHMMSS=101010 \
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$fail_stub" SCRIBE_HHMMSS=101010 \
       "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
   rm -f "$fail_stub"
   # cld-spawn の exit code（7）を上流へ伝える（fail-loud）。
@@ -810,7 +852,7 @@ _mk_main_and_linked() {
   genfail="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 5\n' > "$genfail"; chmod +x "$genfail"
   wt="$repo/.worktrees/spawn/un-4nm-101010"
   # sc-u53: preflight は passing stub(noop)で通し、materialization の gen 失敗枝だけを駆動する（host 非依存）。
-  run env SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_PREFLIGHT="$noop" SCRIBE_SANDBOX_GEN="$genfail" SCRIBE_HHMMSS=101010 \
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_PREFLIGHT="$noop" SCRIBE_SANDBOX_GEN="$genfail" SCRIBE_HHMMSS=101010 \
       "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
   rm -f "$noop" "$genfail"
   # gen 失敗 → scribe_die で非0 終了（cld-spawn 到達前）・理由を stderr に明示。

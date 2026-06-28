@@ -3,6 +3,7 @@
   "_comment_safety": "command は『参照先 script が存在し実行可能なときだけ実行する』安全形。SCRIPT を [ -x ] でガードし、未存在(symlink 未登録の現状や CLAUDE_PLUGIN_ROOT 異常時)でも `|| true` で必ず成功する(fail-open)。これは『存在しない script を無条件実行して全セッションを壊す』ことを構造的に防ぐため。C2 は雛形の command を温存(バイト不変)したまま参照先 script を実装した。script 側も spec/doc 不在・判定不能で exit 0 degrade する二重 fail-safe。",
   "_comment_scope": "本セル(C1)は wire(hooks.json の形)だけを置き、hook の実 script は書かない(= C2 の領分)。PostToolUse diagnostics hook(scribe-design.md §11)は v0 堀 OFF のため未配線(v1+)。",
   "_comment_guard": "PreToolUse[Bash]=git-destructive-guard.py(sc-erd) + rm-destructive-guard.py(sc-nfs)。両者とも uns から re-home し cmdtokens lib を共用。SessionStart と違い command に `|| true` を付けない(guard の exit2=block を必ず伝播させるため。consistency-fix で || true を足すと guard が無効化されるので禁止)。script 不在/非実行時のみ if/else で exit 0=fail-open。global(~/.claude)guard との二重発火は block 冪等で安全。rm-guard の DATA_ROOTS はマシン固有ゆえ既定空+SCRIBE_RM_GUARD_DATA_ROOTS env opt-in(構造的保護は host-agnostic)。git-guard の scribe-anchor 認識(.claude-plugin plugin.json name=='scribe' 署名)は本 plugin のみが持ち uns 非導入ホストでの自己防護を成す。",
+  "_comment_guard_health": "SessionStart 2 本目=session-start-guard-health.py(sc-ovq)。scribe が consume する canonical plugin(cmdtokens / beads-bdw)の不在を SessionStart stdout の ⚠️ banner で loud 化する health-check。**banner hook ゆえ role-inject と同形の非ブロック fail-safe(`[ -x ]`+`|| true`)で wire する**(PreToolUse guard の `|| true` 禁止規約とは別物=guard は exit2=block を伝播させるが、本 hook は exit0 degrade で決して die しない)。self-scope は dolt_database=='sc' 精密判定(scripts/hooks/lib/scribe_session.py)で foreign(orchestrator の orch 等)へ誤注入しない。両 canonical 配備済ホストでは silent(無音)。",
   "hooks": {
     "SessionStart": [
       {
@@ -10,6 +11,11 @@
           {
             "type": "command",
             "command": "SCRIPT=\"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/session-start-role-inject.sh\"; [ -x \"$SCRIPT\" ] && \"$SCRIPT\" || true",
+            "timeout": 10000
+          },
+          {
+            "type": "command",
+            "command": "SCRIPT=\"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/session-start-guard-health.py\"; [ -x \"$SCRIPT\" ] && python3 \"$SCRIPT\" || true",
             "timeout": 10000
           }
         ]
