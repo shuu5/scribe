@@ -157,7 +157,7 @@ case "$role" in
             exit 0
         fi
         _scribe_header
-        echo "あなたは scribe admin(anchor / orchestrator セッション)です。graph の所有者・gate funnel の実行者・唯一の bd dolt push 同期点です。以下のプロトコル全文が役割規約の SSOT です。"
+        echo "あなたは scribe admin(anchor)です。graph の所有者・gate funnel の実行者・唯一の bd dolt push 同期点です。以下のプロトコル全文が役割規約の SSOT です。"
         echo ""
         cat "$PROTOCOL_DOC"
         ;;

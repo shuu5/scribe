@@ -19,7 +19,7 @@
 監視(§6) は spawn 〜 close まで全域で走る。
 ```
 
-- **admin = anchor（orchestrator セッション）**。graph の所有者であり、唯一の `bd dolt push` 同期点。
+- **admin = anchor**。graph の所有者であり、唯一の `bd dolt push` 同期点。
 - **worker = worktree セッション**。自 issue の進捗だけを書き、graph は触らない（§3 B/hybrid）。
 - 役割の env 判定仕様は `docs/role-context-spec.md`（`SCRIBE_ROLE` > cwd `.worktrees/` 判定 > anchor 既定）。
 - **needs-user タスク**（worker 着手不可・人間判断依存）は通常フローに乗らず §7 の解決フロー（WF pre-bake → grill-consult → admin 起票/着手）へ分岐する。
