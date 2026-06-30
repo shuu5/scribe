@@ -257,7 +257,7 @@ PROMPT
     fi
   }
 
-  # env-file は **anchor working tree の外**（/tmp 配下）に作る。anchor は admin orchestrator の cwd で
+  # env-file は **anchor working tree の外**（/tmp 配下）に作る。anchor は admin の cwd で
   # あり、そこに artifact を残すと anchor リポを汚し誤コミット経路になる（道具自身が read-only 契約の
   # 起動器なのに anchor を汚す非対称を避ける）。cld-spawn は env-file を launcher へ source 済みなので
   # spawn 後に rm して消える＝anchor に何も残さない。dry-run は実ファイルを作らずパスだけ案内する。

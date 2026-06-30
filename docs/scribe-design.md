@@ -346,7 +346,7 @@ v0 の最重要設計判断。**role 別に注入内容を分割する**:
 
 | role | 配置 | 注入内容（要旨） |
 |---|---|---|
-| **admin** | anchor（orchestrator セッション） | プロトコル全文（graph 所有 = `bd create`/`dep`/assignment / gate funnel / errata 規約 / `bd dolt push` = 同期点） |
+| **admin** | anchor | プロトコル全文（graph 所有 = `bd create`/`dep`/assignment / gate funnel / errata 規約 / `bd dolt push` = 同期点） |
 | **worker** | worktree（`.worktrees/<branch>`） | 自 issue の write のみ（`bd update --claim` / `--append-notes` / `gate-pending` ラベル・**close はしない**＝admin が merge 後）+ bdw 並列直列化規律 + **`bd create` / `bd dep` / `bd dolt push` / `bd close` の明示禁止** |
 | **consult** | anchor 同居可（read-only セッション） | 設計議論・grill 専用。記憶系（doobidoo + auto-memory）のみ write 可。bd・リポ tracked ファイル・`bd dolt push`・spawn は禁止。相談サマリ保存義務。**緩和**: grill-consult（admin が `--context` brief で spawn）のみ自 grill-issue の `bd update --claim`/`--append-notes` を bdw 経由 write 可（close は admin 専有）＝ role-context-spec §2.3。起動テンプレの SSOT は role-context-spec §2.3（scribe plugin へ移設完了・sc-aop。docs/session-orchestration-strategy.md §6 は原典トレース用） |
 

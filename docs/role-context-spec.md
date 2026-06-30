@@ -53,7 +53,7 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 
 ## 2. role 別 注入内容仕様
 
-### 2.1 admin（anchor / orchestrator セッション）
+### 2.1 admin（anchor）
 
 **伝える**: プロトコル全文（`docs/protocol.md` 全節）。admin は graph の所有者であり funnel の実行者なので、全手順を持つ。
 
