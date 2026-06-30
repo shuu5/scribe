@@ -323,7 +323,7 @@ _link_bin_without_awk() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"## 2. worker prompt 規約"* ]]
     [[ "$output" == *"## 3. B/hybrid 役割境界"* ]]
-    [[ "$output" == *"## 4. close → gate → errata 規約"* ]]
+    [[ "$output" == *"## 4. gate-pending → gate → close → errata 規約"* ]]
     [[ "$output" != *"## 1. spawn 規約"* ]]
     [[ "$output" != *"## 5. gate funnel 手順"* ]]
     [[ "$output" != *"## 6. 監視"* ]]
