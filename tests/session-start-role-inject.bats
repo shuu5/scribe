@@ -29,6 +29,12 @@ setup() {
     ANCHOR_JSON="{\"cwd\":\"$ANCHOR_DIR\"}"
     EMPTY_JSON='{}'
 
+    # --- CC-native worktree cwd(.claude/worktrees/ 配下・sc-vwm)。先頭ドット無しゆえ
+    #     旧 glob `*/.worktrees/*` に一致せず独立 arm `*/.claude/worktrees/*` で worker 判定する。 ---
+    CC_WT_DIR="$BATS_TEST_TMPDIR/proj/.claude/worktrees/x-1"
+    mkdir -p "$CC_WT_DIR/.beads"
+    CC_WT_JSON="{\"cwd\":\"$CC_WT_DIR\"}"
+
     # --- .beads 無し cwd(注入ゼロ検証用・scribe 管轄外プロジェクト相当) ---
     NOBEADS_DIR="$BATS_TEST_TMPDIR/nobeads"
     NOBEADS_WT="$BATS_TEST_TMPDIR/nobeads/.worktrees/spawn/y-1"
@@ -102,6 +108,29 @@ inject() {
     run --separate-stderr inject - "$REPO" "$WT_JSON"
     [ "$status" -eq 0 ]
     [[ "$output" == *"role=worker"* ]]
+}
+
+# ---- CC-native worktree(.claude/worktrees/)の worker 判定(sc-vwm・orch-d6b G6) ----
+# `.claude/worktrees/` は先頭ドット無しゆえ `*/.worktrees/*` に一致しない(独立 arm が必要)。
+# detect_basis="cwd .claude/worktrees/" の assertion が第2 arm の発火を証明する(第1 arm との disjoint)。
+@test "role: cwd が .claude/worktrees/ 配下(CC-native・env 無し) → worker (sc-vwm)" {
+    run --separate-stderr inject - "$REPO" "$CC_WT_JSON"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=worker"* ]]
+    [[ "$output" == *"cwd .claude/worktrees/"* ]]
+}
+
+@test "優先順: env(consult) > cwd(.claude/worktrees) — CC worktree cwd でも consult が勝つ (sc-vwm)" {
+    run --separate-stderr inject consult "$REPO" "$CC_WT_JSON"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=consult"* ]]
+}
+
+@test "guard(.beads 有・CC-native worktree): worker は従来どおり注入する(§2/§3/§4) (sc-vwm)" {
+    run --separate-stderr inject - "$REPO" "$CC_WT_JSON"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=worker"* ]]
+    [[ "$output" == *"## 2. worker prompt 規約"* ]]
 }
 
 @test "degrade: 未知の SCRIBE_ROLE は無視され cwd 判定へ(worktree→worker)・stderr 警告" {

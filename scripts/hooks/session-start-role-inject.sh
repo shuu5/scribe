@@ -16,7 +16,9 @@
 #   1. env SCRIBE_ROLE が認識可能な role(admin|worker|consult) → それを採用
 #      （一次は consult の明示焼き込み=C3 ヘルパーが --env-file で行う。worker の
 #        admin/consult 上書きが必要なら env で明示できる設計でよい・spec §1 注記）
-#   2. cwd が .worktrees/ 配下 → worker（worktree = worker の構造的マーカー）
+#   2. cwd が .worktrees/ または .claude/worktrees/（CC-native worktree）配下 → worker
+#      （worktree = worker の構造的マーカー。scribe-spawn は .worktrees/ 配下に作るが、
+#        CC-native worktree〔EnterWorktree 等〕は .claude/worktrees/ 配下ゆえ両方拾う）
 #   3. 既定（上記いずれにも当たらない・anchor 無印） → admin
 #   ※ SCRIBE_ROLE=none は既知の opt-out: role 注入を抑止し無出力 exit 0（degrade せず warning も出さない）。
 #     別レイヤ(自前 .beads の orchestrator 等)が scribe role 注入を受けないための明示シグナル（spec §1.1）
@@ -139,8 +141,9 @@ esac
 
 if [ -z "$role" ]; then
     case "$hook_cwd" in
-        */.worktrees/*) role="worker"; detect_basis="cwd .worktrees/" ;;
-        *)              role="admin";  detect_basis="既定(anchor 無印)" ;;
+        */.worktrees/*)        role="worker"; detect_basis="cwd .worktrees/" ;;
+        */.claude/worktrees/*) role="worker"; detect_basis="cwd .claude/worktrees/" ;;
+        *)                     role="admin";  detect_basis="既定(anchor 無印)" ;;
     esac
 fi
 

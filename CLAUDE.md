@@ -12,7 +12,7 @@ scribe は per-project opt-in の Claude Code plugin（admin / worker / consult 
 
 役割を帯びた規約（誰が `bd create` / `dep` / `dolt push` / close するか・gate funnel・終了プロトコル）の本文 SSOT は **本リポの `docs/` と role 別 SessionStart 注入**。CLAUDE.md はポインタのみを持つ（`docs/protocol.md` 前文・`docs/role-context-spec.md` §0 が「CLAUDE.md は本文重複を持たずポインタに縮小」と規定）。
 
-- **役割判定**（実装 `scripts/hooks/session-start-role-inject.sh` / 仕様 SSOT `docs/role-context-spec.md`）: ① `SCRIBE_ROLE=consult` → consult、② cwd が `.worktrees/` 配下 → worker、③ anchor 無印 → admin（既定）。
+- **役割判定**（実装 `scripts/hooks/session-start-role-inject.sh` / 仕様 SSOT `docs/role-context-spec.md`）: ① `SCRIBE_ROLE=consult` → consult、② cwd が `.worktrees/` または `.claude/worktrees/`（CC-native worktree）配下 → worker、③ anchor 無印 → admin（既定）。
 - **admin プロトコル手順（how）** = `docs/protocol.md`（spawn / worker prompt 規約 / B-hybrid 境界 / close→gate→errata / gate funnel / 監視）。
 - **ワークフロー方法論**（ultracode 強度・品質パターン・D1–D7）= `docs/methodology.md`。
 - **設計の why** = `docs/scribe-design.md`（scribe 側が現行 SSOT）。
