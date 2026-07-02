@@ -2599,6 +2599,48 @@ _mk_probe_env() {
   rm -rf "$wt" "$tmp"
 }
 
+@test "env-probe(plant・sc-zin): git リポで sentinel を info/exclude へ冪等登録し git 追跡から外す（verify 前の commit 混入を防ぐ）" {
+  wt="$(cd "$(mktemp -d)" && pwd -P)"; git -C "$wt" -c init.defaultBranch=main init -q
+  tmp="$(mktemp -u)"
+  env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=TOK "$PROBE" plant --worktree "$wt" >/dev/null
+  # 撒かれた sentinel は git の untracked 一覧に出てこない（info/exclude が効く＝scribe-add/素の git add -A 両経路で除外）
+  run git -C "$wt" status --porcelain --untracked-files=all
+  [[ "$output" != *".scribe-envprobe"* ]]
+  [ "$(grep -cxF '.scribe-envprobe' "$wt/.git/info/exclude")" -eq 1 ]
+  # 冪等: 二度目の plant でも info/exclude は 1 行のまま
+  env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=TOK2 "$PROBE" plant --worktree "$wt" >/dev/null
+  [ "$(grep -cxF '.scribe-envprobe' "$wt/.git/info/exclude")" -eq 1 ]
+  rm -rf "$wt" "$tmp"
+}
+
+@test "env-probe(plant・sc-zin): 非 git worktree では info/exclude 登録を no-op で飛ばし plant 本務は成功する（best-effort）" {
+  pe="$(_mk_probe_env)"; wt="${pe%%$'\t'*}"; tmp="${pe#*$'\t'}"   # _mk_probe_env は非 git tmpdir
+  run env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=TOK "$PROBE" plant --worktree "$wt"
+  [ "$status" -eq 0 ]                      # git 解決不能でも plant 本務は死なない
+  [ "$(cat "$wt/.scribe-envprobe")" = "TOK" ]
+  rm -rf "$wt" "$tmp"
+}
+
+@test "scribe_write_exclude(sc-zin): 任意 pattern を info/exclude へ冪等追記・非 git は no-op（return 0）" {
+  r="$(cd "$(mktemp -d)" && pwd -P)"; git -C "$r" -c init.defaultBranch=main init -q
+  run bash -c 'source "$1"; scribe_write_exclude "$2" ".scribe-envprobe"' _ "$LIB" "$r"
+  [ "$status" -eq 0 ]
+  [ "$(grep -cxF '.scribe-envprobe' "$r/.git/info/exclude")" -eq 1 ]
+  bash -c 'source "$1"; scribe_write_exclude "$2" ".scribe-envprobe"' _ "$LIB" "$r"   # 二度目=冪等
+  [ "$(grep -cxF '.scribe-envprobe' "$r/.git/info/exclude")" -eq 1 ]
+  n="$(cd "$(mktemp -d)" && pwd -P)"
+  run bash -c 'source "$1"; scribe_write_exclude "$2" "X"' _ "$LIB" "$n"
+  [ "$status" -eq 0 ]                      # 非 git は die せず no-op（fail-open で呼び出し元を殺さない）
+  rm -rf "$r" "$n"
+}
+
+@test "scribe_sandbox_write_exclude(sc-zin): ラッパ化後も settings.local.json を info/exclude へ追記（後方互換）" {
+  r="$(cd "$(mktemp -d)" && pwd -P)"; git -C "$r" -c init.defaultBranch=main init -q
+  bash -c 'source "$1"; scribe_sandbox_write_exclude "$2"' _ "$LIB" "$r"
+  grep -qxF '**/.claude/settings.local.json' "$r/.git/info/exclude"
+  rm -rf "$r"
+}
+
 @test "env-probe(verify): 健全（sentinel 残存・token 一致）→ ENV_OK exit 0 + sentinel 掃除" {
   pe="$(_mk_probe_env)"; wt="${pe%%$'\t'*}"; tmp="${pe#*$'\t'}"
   env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=TOK123 "$PROBE" plant --worktree "$wt" >/dev/null

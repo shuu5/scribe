@@ -93,22 +93,29 @@ scribe_window_name() { printf 'wt-%s' "$1"; }
 # worker 等が GIT_DIR を export した環境でも -C 指定先のリポを正しく解く＝隔離の付け忘れを構造防止）。
 scribe_git() { env -u GIT_DIR -u GIT_WORK_TREE git "$@"; }
 
+# scribe_write_exclude <worktree> <pattern> → <worktree> の共有 info/exclude へ <pattern> を **冪等**追記する
+#   汎用ヘルパー（sc-zin で scribe_sandbox_write_exclude から一般化）。info/exclude は共有 common-dir（解決は
+#   scribe_git で GIT_DIR/GIT_WORK_TREE 継承隔離）。解決不能なら no-op(return 0)。tracked .gitignore を汚さず
+#   commit されず、scribe-add(--exclude-standard) と素の `git add -A` の両経路で <pattern> を除外する。
+scribe_write_exclude() {
+  local wt="${1:?worktree required}" pattern="${2:?pattern required}"
+  local excl
+  excl="$(scribe_git -C "$wt" rev-parse --git-path info/exclude 2>/dev/null)" || return 0
+  [[ -n "$excl" ]] || return 0
+  # --git-path は cwd 相対（例 .git/info/exclude）を返しうる。wt 基準の絶対へ正規化し、呼び出し側 cwd が
+  # worktree でなくても正しい info/exclude へ書く（linked worktree では common-dir の絶対を返すので前置しない）。
+  [[ "$excl" = /* ]] || excl="$wt/$excl"
+  mkdir -p "$(dirname "$excl")" 2>/dev/null || true
+  grep -qxF "$pattern" "$excl" 2>/dev/null || printf '%s\n' "$pattern" >> "$excl"
+}
+
 # scribe_sandbox_write_exclude <worktree> → sandbox worker の settings.local.json を <worktree> の info/exclude へ
 #   **冪等**追記する（sc-1gu・worker の stage に巻き込まない）。本番 scribe-spawn と test verify-sandbox-e2e が共有。
-#   info/exclude は共有 common-dir（解決は scribe_git で GIT_DIR/GIT_WORK_TREE 継承隔離）。解決不能なら no-op(return 0)。
 #   注（sc-yqa）: CC sandbox の null-mount dotfile/.claude 設定（char-device）への対処は **info/exclude でなく**
 #     `scripts/scribe-add`（非通常ファイルを型で弾く stage ラッパ）が担う。E 案（info/exclude に dotfile を列挙）は
 #     CC が `.claude/*`（普通にコミットされる設定）も null-mount すると e2e で判明し、共有 exclude の漏れが広く
 #     CC のリスト churn に脆いため B 案（scribe-add）へ切替えた（sc-yqa grill）。本関数は settings.local.json のみ扱う。
-scribe_sandbox_write_exclude() {
-  local wt="${1:?worktree required}"
-  local excl
-  excl="$(scribe_git -C "$wt" rev-parse --git-path info/exclude 2>/dev/null)" || return 0
-  [[ -n "$excl" ]] || return 0
-  mkdir -p "$(dirname "$excl")" 2>/dev/null || true
-  grep -qxF '**/.claude/settings.local.json' "$excl" 2>/dev/null \
-    || printf '%s\n' '**/.claude/settings.local.json' >> "$excl"
-}
+scribe_sandbox_write_exclude() { scribe_write_exclude "${1:?worktree required}" '**/.claude/settings.local.json'; }
 
 # scribe_window_id <window-name> → tmux window 名から window_id(@N) を解決（無ければ空。dotted bd id の
 # `-t` 区切り衝突を避けるため以後の tmux -t は @N で行う・protocol.md §1。sc-e1w で spawn/cleanup から集約）。
