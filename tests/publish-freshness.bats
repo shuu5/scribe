@@ -174,6 +174,47 @@ BDW
   [[ "$output" == *"必要"* ]]
 }
 
+@test "publish-freshness: check は bd list に --limit 0 を渡す（既定50件の silent 打ち切り防止）" {
+  local cap="$STUB_DIR/list-args.txt"
+  local stub="$STUB_DIR/bd-listcap.sh"
+  cat > "$stub" <<STUB
+#!/usr/bin/env bash
+if [ "\$1" = list ]; then printf '%s\n' "\$*" >> "$cap"; echo '[]'; exit 0; fi
+exit 0
+STUB
+  chmod +x "$stub"
+  run env SCRIBE_BD="$stub" "$FRESH" check
+  [ "$status" -eq 0 ]
+  run cat "$cap"
+  [[ "$output" == *"--limit 0"* ]]
+}
+
+@test "publish-freshness: mark-published の WRITE は --anchor スコープで実行される（read=ANCHOR/write=cwd 非対称防止）" {
+  local anchor cwd cap
+  anchor="$(cd "$(mktemp -d)" && pwd -P)"
+  cwd="$(cd "$(mktemp -d)" && pwd -P)"
+  cap="$STUB_DIR/bdw-pwd.txt"
+  local bd; bd="$(_make_bd_stub '[]')"
+  _set_bead sc-a "2026-07-02T10:00:00Z" "x" '["federate-publish"]'
+  local bdw="$STUB_DIR/bdw-pwd.sh"
+  cat > "$bdw" <<BDW
+#!/usr/bin/env bash
+pwd -P > "$cap"
+exit 0
+BDW
+  chmod +x "$bdw"
+  run bash -c "cd '$cwd' && SCRIBE_BD='$bd' SCRIBE_BDW='$bdw' '$FRESH' mark-published sc-a --anchor '$anchor'"
+  [ "$status" -eq 0 ]
+  run cat "$cap"
+  [ "$output" = "$anchor" ]   # WRITE は cwd ではなく --anchor で走った
+}
+
+@test "publish-freshness: check は anchor 不在を bd 不在と区別して warn+exit0" {
+  run env SCRIBE_BD=/bin/true "$FRESH" check --anchor "$STUB_DIR/no-such-anchor"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"anchor ディレクトリが存在しません"* ]]
+}
+
 @test "publish-freshness: mark-published は label 不在でも warn しつつ記録する（advisory）" {
   local bd; bd="$(_make_bd_stub '[]')"
   _set_bead sc-nl "2026-07-02T10:00:00Z" "x" '["other-label"]'

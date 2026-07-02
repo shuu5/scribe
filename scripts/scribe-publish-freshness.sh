@@ -117,8 +117,16 @@ def parse_iso(ts):
     except (ValueError, TypeError):
         return None
 
-# federate-publish 候補 id を取得（READ・§3 で bdw 不要）。
-r = run_bd(["list", "--label", label, "--json"])
+# --anchor typo 等（存在しない graph 所在）は infra 不調（bd 不在）と別物ゆえ、正確な warn で区別する
+# （非block・exit 0 は維持＝FileNotFoundError を『bd バイナリ不在』へ誤帰属しない）。
+if not os.path.isdir(anchor):
+    sys.stderr.write("scribe: warn: anchor ディレクトリが存在しません（--anchor を確認・鮮度 check を skip）: %s\n" % anchor)
+    sys.exit(0)
+
+# federate-publish 候補 id を取得（READ・§3 で bdw 不要）。--limit 0=無制限（bd list の既定 limit=50 による
+# silent 打ち切りを防ぎ、非 closed の**全** federate-publish bead を走査する＝§5 step8 の exhaustive 契約。
+# closed=公開済完了ゆえ drift 対象外＝既定の非 closed フィルタは意図どおり）。
+r = run_bd(["list", "--label", label, "--json", "--limit", "0"])
 if r.returncode != 0:
     sys.stderr.write("scribe: warn: `bd list --label %s --json` が失敗（鮮度 check を skip）: %s\n"
                      % (label, (r.stderr or "").strip()))
@@ -192,7 +200,10 @@ cmd_mark_published() {
       "$norm" "$PUBLISH_LABEL" >&2
   fi
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  "$BDW" update "$norm" --append-notes "${MARKER_KEY}: ${ts}" >/dev/null \
+  # WRITE も read（L186 実在検証 / L189 label check）と同じく **anchor スコープ**で行う（cwd でなく ANCHOR の
+  # graph へ書く）。bd/bdw の graph 解決は cwd 依存ゆえ、cd せず書くと --anchor 修飾時に read=ANCHOR/write=cwd の
+  # 非対称になり provenance を別 graph へ誤記録する。scribe-spawn.sh の `cd "$ANCHOR" && bdw update` 規約に一致させる。
+  ( cd "$ANCHOR" && "$BDW" update "$norm" --append-notes "${MARKER_KEY}: ${ts}" ) >/dev/null \
     || scribe_die "bdw append-notes に失敗しました: $norm"
   printf 'scribe: %s に publish provenance を記録しました: %s: %s\n' "$norm" "$MARKER_KEY" "$ts"
 }
