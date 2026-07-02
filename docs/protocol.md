@@ -261,6 +261,7 @@ scribe admin が複数 project の台帳が併存する環境（orchestrator 配
 - **read 方向の情報分離**: foreign 台帳を read して自 `sc-` bead / worker prompt / doobidoo へ**転記する際は、出所・audience・確度・要確認フラグを保持する**（どの project の誰の主張かを落とさない＝混線・誤帰属の防止）。**他 project の機密本文（運営数値・資金・特許・COI 等）は `-C` 直読みに留め durable copy を作らない**（自台帳 notes・doobidoo へ機密本文を保存しない＝漏洩面を増やさない）。
 - **origin verify は §5 が SSOT**: cross-repo の worker が push する経路の origin URL 健全性 verify/restore（`scribe-origin-guard.sh {capture,verify,restore}`）は **§5（push 前 verify）** に既出。cross-ledger でも同じ gate chain を push 前に必ず通す（本節は再掲せずポインタに留める）。
 - **doobidoo（知識系）を SPOF にしない**: cross-ledger handoff の durable leg は **doobidoo より per-project bead（自台帳 notes）を一次**にする。`memory_search` 失敗で着手を止めない・`memory_quality` 評価は skip 可（best-effort）。doobidoo は知識の二次 carrier であって、タスクの真実源（= bd）ではない。
+- **公開面ラベル規約（federation・orchestrator SSOT を受容・`orch-7my`(b) courier）**: federation 公開面の候補検知は notes の ad-hoc 正規表現走査でなく**ラベルの完全一致**で行う（規約 SSOT は orchestrator = top-spec §5.1・`orch-b4b`。scribe は本規約を**受容・周知するだけで enforce しない**＝機械強制は持たない）。scribe が federation へ公開候補として出す `sc-` bead には平ラベル **`federate-publish`** を付ける（orchestrator が `bd list --label federate-publish` の exact-match で拾う）。**`reconcile-published`** は orchestrator が `orch-` 側に付ける逆 leg ラベル（foreign 公開候補を ingest し公開面へ出し戻し cross-rig dep を張った印）ゆえ **scribe は付けない**。両ラベルは orchestrator の `orch-reconciliation-parity.sh`（read-only・detect のみ）が exact-match で照合する published surface の最小定義で、env `ORCH_RECON_PUBLISH_LABEL` / `ORCH_RECON_FOREIGN_LABEL` で orchestrator 側が上書き可。**cross-project 合意前提ゆえ本受容の確定は orchestrator gate を経る**（scribe 単独確定はしない）。
 
 > 一次出典: doobidoo `9be93364`（uns admin → scribe cross-ledger handoff: un-ao2 split・un-jcn A/B）・`cfd599dc`（federated 設計）・`115521de`（実隔離＝各層自身の bd-write-guard が機械強制し、scribe role 注入は cosmetic/advisory。本 §8 の writer 規律は admin が従う protocol 規約であって機械強制ではない）。
 
@@ -279,6 +280,7 @@ scribe admin が複数 project の台帳が併存する環境（orchestrator 配
 | bd un-it7 notes | v0 実装 epic（5 cell 分解・spawn ヘルパー設計引き継ぎ） |
 | bd un-cbi notes | spawn 命名規約 producer 追従・dotted id の tmux -t 衝突 live finding・worker receivedArgs 報告実例 |
 | doobidoo `9be93364` / `cfd599dc` | cross-ledger handoff（uns admin → scribe）: federated 規律（§8）= 自台帳のみ write・read 方向の provenance/機密分離・doobidoo SPOF 回避 |
+| orch top-spec §5.1 / `orch-b4b` / courier `orch-7my`(b) | 公開面ラベル規約（federation・§8）: `federate-publish`（scribe 公開候補）/ `reconcile-published`（orchestrator 逆 leg）・exact-match・scribe は受容周知のみで enforce せず・確定は orchestrator gate |
 | scribe-design.md | 設計の why（§8 B/hybrid・§9 通信・§10 監視・§14 v0 スコープ） |
 
 > 設計の細部に疑義が出たら、本書ではなく上記 doobidoo の原典を recall して確認すること（本書は実証ログ・notes を成文化した how 文書）。
