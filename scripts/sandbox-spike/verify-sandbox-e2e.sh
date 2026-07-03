@@ -96,7 +96,9 @@ echo "throwaway issue = $ISSUE"
 # 2) linked worktree + sandbox settings.local.json(gen が temp anchor の .beads を grant)
 gitc -C "$ANCHOR" worktree add -q "$WT" -b e2e-branch >/dev/null 2>&1 || die "worktree add 失敗"
 mkdir -p "$WT/.claude"
-"$GEN" "$WT" > "$WT/.claude/settings.local.json" || die "settings 生成失敗"
+# 真の anchor を明示渡し（sc-lkg・本番 scribe-spawn と同経路）。同一リポ e2e なので逆算でも一致するが、
+# 明示パスを実走して gen の第2引数 contract を e2e でも exercise する。
+"$GEN" "$WT" "$ANCHOR" > "$WT/.claude/settings.local.json" || die "settings 生成失敗"
 # settings.local.json を info/exclude へ除外する(sc-1gu・本番 scribe-spawn と同じ)。CC null-mount device の件は
 # 下の WORKER_CMD が scribe-add(型で弾く stage ラッパ・sc-yqa B)を実走して扱う＝それが効くこと、かつ CC が
 # null-mount を増やしても scribe-add は型ベースゆえ壊れないことを実 sandbox で実証する(sc-yqa 4b の robust 版)。
