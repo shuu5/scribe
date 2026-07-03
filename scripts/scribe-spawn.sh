@@ -18,11 +18,11 @@
 #   よって consult モードでは:
 #     - **worktree を作らない / worker prompt を出さない / --bd-id を渡さない**（role 契約遵守）。
 #       `--cd` は anchor（cwd）を指す＝worktree ではない（consult は anchor 同居）。
-#     - anchor（cwd）で `cld-spawn --model opus --env-file <SCRIBE_ROLE=consult> "<consult テンプレ本文>"`。
+#     - anchor（cwd）で `cld-spawn --model <fable 既定・不可時 opus> --env-file <SCRIBE_ROLE=consult> "<consult テンプレ本文>"`。
 #       consult テンプレは read-only 規律・記憶系のみ write・サマリ保存義務のみ（bdw/selftest/cell-quality を含まない）。
 #     - SCRIBE_ROLE=consult を --env-file で注入（C2 の role 判定が最優先で読む side）。env-file は
 #       **anchor working tree の外**（/tmp）に作り spawn 後に rm する＝anchor リポを汚さない（read-only 起動器の自浄）。
-#     - model は基本 opus・ユーザー指定時のみ fable 可（role-context-spec §2.3 の唯一の fable 例外。worker は fable 厳禁）。
+#     - model は既定 fable・利用不可時のみ opus へ loud fallback（sc-9q6・role-context-spec §2.3。--model 明示が優先・worker は fable 厳禁）。
 #   bd id は consult では **任意の議題参照**（read-only な `bd show` のみ・worktree/branch には焼かない）。
 #
 # 既知バグ防御（un-ivb・別セル）: 現行 cld-spawn は未知オプションを PROMPT に落とす。
