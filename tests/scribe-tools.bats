@@ -291,6 +291,39 @@ _mk_beads() {
   [ "$optout" == "$defon" ]   # sandbox 有無で spawn 行は 1 byte も変わらない
 }
 
+# ---------- fail-open 硬化（sc-7oj: FO-1 opt-out loud 化 / FO-4 dry-run 可視化 / FO-2 アテステーション）----------
+@test "spawn(sc-7oj/FO-4): SCRIBE_SANDBOX=0 の dry-run は opt-out 縮退を可視化する（無防備で走る旨 + sticky 警告）" {
+  # 旧 emit_plan は opt-out 時に sandbox 行を一切出さず、--dry-run 監査で「非 sandbox で走る」ことが不可視だった
+  # （FO-4 監査ギャップ）。opt-out 縮退行が出ること・env 継承 sticky の注意喚起が入ることを pin する。mutation
+  # （emit_plan の opt-out 行を消す）で本テストは RED 化する。既存の「opt-out で sandbox 節を出さない」不変条件
+  # （下の byte-identity / settings.local.json 非出力テスト）とは両立する＝opt-out 行は literal settings.local.json を含まない。
+  SCRIBE_SANDBOX=0 run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OPT-OUT"* ]]                       # 縮退経路が可視
+  [[ "$output" == *"OS sandbox の**外**"* ]]           # 無防備で走る旨を明示
+  [[ "$output" == *"sticky"* ]]                        # env 継承で sticky 化する注意喚起
+  [[ "$output" != *"settings.local.json"* ]]           # opt-out 行は sandbox 設定生成を含意しない（旧 byte 経路の不変条件を保つ）
+}
+
+@test "spawn(sc-7oj/FO-1): SCRIBE_SANDBOX=0 の実経路は stderr に loud opt-out 警告を出す（silent fleet degrade 防止）" {
+  # FO-1 本命: 明示 opt-out は env 継承で sticky 化し無警告で fleet 全体を非 sandbox 化しうる。実 spawn（cld-spawn
+  # は noop stub）で opt-out 警告が出ること・spawn 自体は成功することを pin する。mutation（FO-1 警告ブロック削除）で
+  # 警告 assert が RED 化する。worktree は実生成されるため後始末する（test 388/fallback と同型の実経路テスト）。
+  local repo noop wt
+  repo="$SCRIBE_TEST_CWD"
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  wt="$repo/.worktrees/spawn/un-4nm-101010"
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop"
+  [ "$status" -eq 0 ]                                   # opt-out は縮退であって失敗ではない（spawn は成功する）
+  [[ "$output" == *"OPT-OUT"* ]]                        # loud 警告
+  [[ "$output" == *"OS sandbox の**外**"* ]]            # 非 sandbox である旨
+  [[ "$output" == *"sticky"* ]]                         # env 継承 sticky の注意喚起
+  [ ! -f "$wt/.claude/settings.local.json" ]            # opt-out＝settings.local.json を生成しない（旧 byte 経路）
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+}
+
 # ---------- sandbox dep-preflight（default-on の安全弁・sc-u53）----------
 @test "lib(sc-u53): scribe_sandbox_preflight は deps 欠如で非0 + 欠落理由を stdout に返す（PATH 隠蔽で host 非依存）" {
   # PATH を空にして bwrap/socat を不可視化→ command -v が外れ「不在」理由を返す（実 bwrap を host から消さずに検査）。
@@ -1113,6 +1146,33 @@ _make_noop_cld_spawn() {
   [ ! -f "$wt/.claude/settings.local.json" ]
   run bash -c "ls \"$wt/.claude/\".settings.* 2>/dev/null | wc -l | tr -d ' '"
   [ "$output" = "0" ]
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+}
+
+@test "spawn(sc-7oj/FO-2): gen が強制キーを欠く valid JSON を吐いたら実行時アテステーションで die（silent fail-open 防止）" {
+  # FO-2: gen が（stub 差替え / 手編集 drift で）valid JSON だが sandbox 強制キー（enabled=true 等）を欠く settings を
+  # 吐くと、旧コードは materialize してそのまま worker を「sandbox 済み」と信じて起動＝silent fail-open だった。
+  # gen stub を enabled=false の valid JSON で exit0（gen 失敗テストと違い mv は成功する）にし、materialize 後の
+  # アテステーションが die させることを pin する。mutation（アテステーション削除）で status!=0 が崩れ RED 化する。
+  local repo wt noop genbad
+  repo="$SCRIBE_TEST_CWD"
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  # valid JSON だが enabled=false（強制キー不成立）。gen は exit0 ゆえ mv は成功し、アテステーションが捕える。
+  genbad="$(mktemp)"
+  cat > "$genbad" <<'STUB'
+#!/usr/bin/env bash
+echo '{"sandbox":{"enabled":false,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"filesystem":{"allowWrite":["/tmp"]}}}'
+exit 0
+STUB
+  chmod +x "$genbad"
+  wt="$repo/.worktrees/spawn/un-4nm-101010"
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_PREFLIGHT="$noop" SCRIBE_SANDBOX_GEN="$genbad" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop" "$genbad"
+  [ "$status" -ne 0 ]                                   # 黙って非 sandbox worker を起動せず fail-loud
+  [[ "$output" == *"アテステーション失敗"* ]]          # 真因
+  [[ "$output" == *"強制キー"* ]]                       # どの不変条件が破れたか
+  [[ "$output" != *"spawned: issue=un-4nm"* ]]          # cld-spawn（happy-path）へは到達しない
   git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
 }
 
