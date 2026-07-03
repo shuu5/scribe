@@ -458,6 +458,24 @@ _mk_main_and_linked() {
   [[ "$output" != *"--force-new"* ]]
 }
 
+# ---------- spawn: 対話 tool 物理封鎖（orch-4dm / H5・無人 worker cell）----------
+@test "spawn: worker cell は cld-spawn へ --disallowed-tools AskUserQuestion,ExitPlanMode を渡す（H5・無人 window の対話 tool 物理封鎖）" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  # カンマ連結の **単一トークン**（空白 split しない＝1 argv verbatim）。cc-session gate round-1 で
+  # 分割 fail-open が CONFIRMED ゆえ、value を分割せず 1 要素で透過することが load-bearing。
+  [[ "$output" == *"--disallowed-tools AskUserQuestion,ExitPlanMode"* ]]
+  # PROMPT より前に置く（cld-spawn が claude 末尾 <tools...> へ再配置する契約・起動行内順序は PROMPT 前で可）。
+  cld_line="$(printf '%s\n' "$output" | grep -F 'cld-spawn --cd')"
+  [[ "$cld_line" == *"--disallowed-tools AskUserQuestion,ExitPlanMode"*"<task prompt>"* ]]
+}
+
+@test "spawn: consult は --disallowed-tools を渡さない（有人 grill が本務・worker との非対称・H5 は worker cell 限定）" {
+  run "$SPAWN" --dry-run --consult un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"--disallowed-tools"* ]]
+}
+
 @test "spawn: 非 consult では env-file を注入しない" {
   run "$SPAWN" --dry-run un-4nm
   [ "$status" -eq 0 ]

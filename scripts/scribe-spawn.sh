@@ -62,6 +62,15 @@ SANDBOX_PREFLIGHT="${SCRIBE_SANDBOX_PREFLIGHT:-$SCRIPT_DIR/scribe-sandbox-prefli
 # grill-me SKILL.md の所在（grill-consult が grill 方法論を verbatim 注入する元・テスト時は SCRIBE_GRILL_SKILL で差し替え）。
 # sc-swc: grill-consult は grill-me を paraphrase せず本スキル本文をそのまま焼き込む（mechanism b＝drift しない・劣化再実装を撤去）。
 GRILL_SKILL="${SCRIBE_GRILL_SKILL:-$HOME/.claude/skills/grill-me/SKILL.md}"
+# worker cell へ物理封鎖する対話 tool（orch-4dm / H5・user ratified 機構チェーン orch-z7g ④）。worker cell は
+# 無人 window（human is not attending）ゆえ、admin 監視下で対話 UI を出しても誰も答えられず window が固まり
+# bead-truth poll から不可視になる。worker prompt の prose ban（build_prompt「人間の確認を待って停止するな」）に
+# 加え、claude 起動フラグとして物理封鎖する（H5・prose 層と二重化）。cld-spawn 側 passthrough は cc-session
+# PR#32 で land 済（DISALLOWED_TOOLS+=("$2") ＝分割せず 1 要素蓄積）。**この値は 1 argv verbatim で cld-spawn へ
+# 渡す**（cc-session gate round-1 で分割 fail-open が CONFIRMED＝claude は括弧認識で自分で split するので、
+# こちら側で空白/カンマ split すると内部空白 spec が壊れ silent fail-open する）。consult は有人 grill が本務ゆえ
+# 対象外（worker cell 起動行のみに付与）。
+WORKER_DISALLOWED_TOOLS="AskUserQuestion,ExitPlanMode"
 
 usage() {
   cat <<'EOF'
@@ -425,7 +434,7 @@ emit_plan() {
   echo "[plan] git -C $REPO worktree add -b $BRANCH $WORKTREE $BASE"
   [[ "$SANDBOX_ON" == "1" ]] && echo "[plan] sandbox: $WORKTREE/.claude/settings.local.json を生成（SCRIBE_SANDBOX 既定 on・opt-out は SCRIBE_SANDBOX=0。bwrap 外壁。CLD_PATH/launcher は不変＝spawn 行 byte 同一）。実 spawn 時に dep-preflight（deps 欠如→SCRIBE_SANDBOX_FALLBACK=1 で警告付き非 sandbox / 無ければ fail-loud・sc-u53）"
   echo "[plan] scribe_capture_origin $REPO $WORKTREE   # canonical origin を per-worktree marker へ捕捉（un-1n1・gate §5 verify 用）"
-  echo "[plan] $CLD_SPAWN --cd $WORKTREE --bd-id $ID --model $MODEL \"<task prompt>\""
+  echo "[plan] $CLD_SPAWN --cd $WORKTREE --bd-id $ID --model $MODEL --disallowed-tools $WORKER_DISALLOWED_TOOLS \"<task prompt>\""
   echo "[plan] monitor（window ID @N 参照・dotted id の tmux -t 衝突回避）:"
   echo "         $MONITOR_RESOLVE"
   echo "         $MONITOR_CMD"
@@ -551,7 +560,11 @@ PROMPT_TEXT="$(build_prompt)"
 # `|| _rc=$?` で実 exit code を捕捉（set -e 下でも中断させず、案内を出してから伝播）。成功時は
 # 下記案内を出さず従来の "spawned:" 経路へ抜ける＝happy-path 出力は byte 不変。
 _cld_rc=0
-"$CLD_SPAWN" --cd "$WORKTREE" --bd-id "$ID" --model "$MODEL" "$PROMPT_TEXT" || _cld_rc=$?
+# --disallowed-tools は 1 argv verbatim（"$WORKER_DISALLOWED_TOOLS" を分割せず）で透過する（orch-4dm / H5・
+# 上記定数コメント参照＝分割 fail-open は cc-session gate round-1 で CONFIRMED）。cld-spawn は末尾 PROMPT の
+# 直前でこれを消費する（cld-spawn は --disallowed-tools を claude の末尾可変長 <tools...> として自身の起動行
+# 末尾へ再配置するため、scribe 側の引数順は PROMPT 前であれば可）。
+"$CLD_SPAWN" --cd "$WORKTREE" --bd-id "$ID" --model "$MODEL" --disallowed-tools "$WORKER_DISALLOWED_TOOLS" "$PROMPT_TEXT" || _cld_rc=$?
 if [[ "$_cld_rc" -ne 0 ]]; then
   {
     echo "scribe: error: cld-spawn が失敗しました（exit=$_cld_rc）。worker は起動していません。"
