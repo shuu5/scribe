@@ -459,21 +459,48 @@ _mk_main_and_linked() {
 }
 
 # ---------- spawn: 対話 tool 物理封鎖（orch-4dm / H5・無人 worker cell）----------
-@test "spawn: worker cell は cld-spawn へ --disallowed-tools AskUserQuestion,ExitPlanMode を渡す（H5・無人 window の対話 tool 物理封鎖）" {
+@test "spawn: worker cell は cld-spawn へ --disallowed-tools \"AskUserQuestion,ExitPlanMode\" を渡す（H5・無人 window の対話 tool 物理封鎖）" {
   run "$SPAWN" --dry-run un-4nm
   [ "$status" -eq 0 ]
-  # カンマ連結の **単一トークン**（空白 split しない＝1 argv verbatim）。cc-session gate round-1 で
+  # カンマ連結の **単一トークン**（空白 split しない＝1 argv verbatim）を引用付きで表示。cc-session gate round-1 で
   # 分割 fail-open が CONFIRMED ゆえ、value を分割せず 1 要素で透過することが load-bearing。
-  [[ "$output" == *"--disallowed-tools AskUserQuestion,ExitPlanMode"* ]]
+  # 注: これは dry-run(emit_plan) の [plan] 表示検査。実 invocation 行の quoting は下の source-guard test が守る
+  #     （dry-run 文字列では実 argv 境界を証明できないため・gate finding orch-4dm-review [low]）。
+  [[ "$output" == *'--disallowed-tools "AskUserQuestion,ExitPlanMode"'* ]]
   # PROMPT より前に置く（cld-spawn が claude 末尾 <tools...> へ再配置する契約・起動行内順序は PROMPT 前で可）。
   cld_line="$(printf '%s\n' "$output" | grep -F 'cld-spawn --cd')"
-  [[ "$cld_line" == *"--disallowed-tools AskUserQuestion,ExitPlanMode"*"<task prompt>"* ]]
+  [[ "$cld_line" == *'--disallowed-tools "AskUserQuestion,ExitPlanMode"'*'<task prompt>'* ]]
 }
 
-@test "spawn: consult は --disallowed-tools を渡さない（有人 grill が本務・worker との非対称・H5 は worker cell 限定）" {
+@test "spawn: 実 cld-spawn invocation 行は --disallowed-tools 値を二重引用する（1 argv 保証・unquote 退行を静的に禁止・gate finding orch-4dm-review [low]）" {
+  # dry-run は emit_plan（別関数）を叩くため実 invocation 行(scribe-spawn.sh の \"\$CLD_SPAWN\" … 行)の quoting を
+  # 証明できない。実 invocation 行は worktree add / sandbox / tmux 依存で hermetic に駆動できない（本ファイルは
+  # 実 spawn をしない設計）。そこで source を静的 assert し「値が unquote されると内部空白 spec が split して
+  # silent fail-open」する退行を guard する（cc-session gate round-1 CONFIRMED の fail-open 再来を封じる）。
+  run grep -F -- '--disallowed-tools "$WORKER_DISALLOWED_TOOLS"' "$SPAWN"
+  [ "$status" -eq 0 ]
+  # 実起動行（"$CLD_SPAWN" で始まる行）にその引用形が在ることまで固定（dry-run echo の \" 形と別物であることを担保）。
+  run bash -c 'grep -E "^\"\\\$CLD_SPAWN\".*--disallowed-tools \"\\\$WORKER_DISALLOWED_TOOLS\"" "$1"' _ "$SPAWN"
+  [ "$status" -eq 0 ]
+}
+
+@test "spawn: consult は cld-spawn launch 行に --disallowed-tools を渡さない（plain + grill-consult 両方・worker との非対称・H5 は worker cell 限定）" {
+  # sibling consult test(404/422/435)と同じく launch 行(cld-spawn --cd)に grep を絞る（output 全体でなく起動行を検査）。
+  # plain consult
   run "$SPAWN" --dry-run --consult un-consult
   [ "$status" -eq 0 ]
-  [[ "$output" != *"--disallowed-tools"* ]]
+  cld_line="$(printf '%s\n' "$output" | grep -E 'cld-spawn --cd')"
+  [[ -n "$cld_line" ]]
+  [[ "$cld_line" != *"--disallowed-tools"* ]]
+  # grill-consult(--context brief)も同一 launch 行を共有＝封鎖されないことを明示カバー（gate finding orch-4dm-review [nit]）。
+  ctx="$(mktemp "$BATS_TEST_TMPDIR/scribe-ctx-XXXXXX.md")"
+  printf 'BRIEF\n' > "$ctx"
+  run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
+  rm -f "$ctx"
+  [ "$status" -eq 0 ]
+  cld_line="$(printf '%s\n' "$output" | grep -E 'cld-spawn --cd')"
+  [[ -n "$cld_line" ]]
+  [[ "$cld_line" != *"--disallowed-tools"* ]]
 }
 
 @test "spawn: 非 consult では env-file を注入しない" {

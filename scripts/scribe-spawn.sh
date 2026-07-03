@@ -434,7 +434,10 @@ emit_plan() {
   echo "[plan] git -C $REPO worktree add -b $BRANCH $WORKTREE $BASE"
   [[ "$SANDBOX_ON" == "1" ]] && echo "[plan] sandbox: $WORKTREE/.claude/settings.local.json を生成（SCRIBE_SANDBOX 既定 on・opt-out は SCRIBE_SANDBOX=0。bwrap 外壁。CLD_PATH/launcher は不変＝spawn 行 byte 同一）。実 spawn 時に dep-preflight（deps 欠如→SCRIBE_SANDBOX_FALLBACK=1 で警告付き非 sandbox / 無ければ fail-loud・sc-u53）"
   echo "[plan] scribe_capture_origin $REPO $WORKTREE   # canonical origin を per-worktree marker へ捕捉（un-1n1・gate §5 verify 用）"
-  echo "[plan] $CLD_SPAWN --cd $WORKTREE --bd-id $ID --model $MODEL --disallowed-tools $WORKER_DISALLOWED_TOOLS \"<task prompt>\""
+  # 値は引用して表示する（実 invocation 行 §下記と同じく 1 argv であることを dry-run 監査でも視覚化する。
+  # 将来 WORKER_DISALLOWED_TOOLS が内部空白を持つ spec〔例 Bash(git push:*)〕を含む場合に「2 引数」と誤読
+  # させない・gate finding orch-4dm-review [nit]）。
+  echo "[plan] $CLD_SPAWN --cd $WORKTREE --bd-id $ID --model $MODEL --disallowed-tools \"$WORKER_DISALLOWED_TOOLS\" \"<task prompt>\""
   echo "[plan] monitor（window ID @N 参照・dotted id の tmux -t 衝突回避）:"
   echo "         $MONITOR_RESOLVE"
   echo "         $MONITOR_CMD"
