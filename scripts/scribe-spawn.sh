@@ -468,10 +468,14 @@ emit_plan() {
   echo "[plan] git -C $REPO worktree add -b $BRANCH $WORKTREE $BASE"
   [[ "$SANDBOX_ON" == "1" ]] && echo "[plan] sandbox: $WORKTREE/.claude/settings.local.json を生成（SCRIBE_SANDBOX 既定 on・opt-out は SCRIBE_SANDBOX=0。bwrap 外壁。CLD_PATH/launcher は不変＝spawn 行 byte 同一）。実 spawn 時に dep-preflight（deps 欠如→SCRIBE_SANDBOX_FALLBACK=1 で警告付き非 sandbox / 無ければ fail-loud・sc-u53）"
   echo "[plan] scribe_capture_origin $REPO $WORKTREE   # canonical origin を per-worktree marker へ捕捉（un-1n1・gate §5 verify 用）"
+  echo "[plan] worker env-file（/tmp・全 worker 無条件・worktree add より前に mktemp・spawn 後 rm。edit-write-guard の activation+境界 signal・sc-649）:"
+  echo "         WORKER_ENV_FILE=\$(mktemp /tmp/scribe-worker-XXXXXX.env)"
+  echo "         { source '${CLD_ENV_FILE:-\$HOME/.cld-env}' ...（ホスト既定 env を chain-source＝認証/秘密を保つ・gate round4）; export SCRIBE_WORKER=1; export SCRIBE_WORKTREE=%q（$WORKTREE・%q=source-safe） } > \"\$WORKER_ENV_FILE\""
   # 値は引用して表示する（実 invocation 行 §下記と同じく 1 argv であることを dry-run 監査でも視覚化する。
   # 将来 WORKER_DISALLOWED_TOOLS が内部空白を持つ spec〔例 Bash(git push:*)〕を含む場合に「2 引数」と誤読
-  # させない・gate finding orch-4dm-review [nit]）。
-  echo "[plan] $CLD_SPAWN --cd $WORKTREE --bd-id $ID --model $MODEL --disallowed-tools \"$WORKER_DISALLOWED_TOOLS\" \"<task prompt>\""
+  # させない・gate finding orch-4dm-review [nit]）。--env-file は全 worker（sandbox on/off 問わず）無条件ゆえ
+  # opt-out と既定で spawn 行は等しく byte 不変（sc-649）。
+  echo "[plan] $CLD_SPAWN --cd $WORKTREE --bd-id $ID --model $MODEL --disallowed-tools \"$WORKER_DISALLOWED_TOOLS\" --env-file \"\$WORKER_ENV_FILE\" \"<task prompt>\""
   echo "[plan] monitor（window ID @N 参照・dotted id の tmux -t 衝突回避）:"
   echo "         $MONITOR_RESOLVE"
   echo "         $MONITOR_CMD"
@@ -525,6 +529,35 @@ if [[ "$SANDBOX_ON" == "1" ]]; then
     fi
   fi
 fi
+
+# --- worker-immutable な signal を CC プロセス env へ注入（sc-649・全 worker 無条件） ---
+# edit-write-guard.py（PreToolUse[Edit|Write|NotebookEdit|MultiEdit]）は SCRIBE_WORKER=1 のときだけ発火し、
+# 書込み先を SCRIBE_WORKTREE（= この worktree 絶対パス）の外なら exit2 で block する（bwrap は Bash のみ封じ
+# built-in ファイル編集は素通し＝security-audit SBX-ESC-1）。両 env は worker が改変できない（Bash の export は
+# hook が継承する CC プロセス env に効かない）＝**活性化も境界も worker-immutable**（git 構造を信用すると worker が
+# `<worktree>/.git` を非再帰 rm して境界を anchor へ広げられる＝gate round2 の boundary escalation を排除）。
+# **sandbox on/off に依らず全 worker へ無条件注入**（opt-out でも Edit/Write は worktree に縛る＝host 依存ゼロの
+# path guard・かつ opt-out と既定の spawn 行は等しく --env-file を持ち byte 不変）。env-file は anchor/worktree を
+# 汚さない /tmp に作り spawn 後 rm（cld-spawn が wait-ready 後に返る＝launcher が source 済みゆえ安全・consult と
+# 同式）。**`git worktree add` より前**に mktemp する＝mktemp 失敗で orphan worktree を作らない（gate round2 minor）。
+WORKER_ENV_FILE="$(mktemp /tmp/scribe-worker-XXXXXX.env)" || scribe_die "worker env-file の作成に失敗しました（mktemp）"
+trap 'rm -f "$WORKER_ENV_FILE"' EXIT   # 異常終了でも /tmp に残さない
+# cld-spawn は env-file を **shell source** する（dotenv parse でない）ため、パス値は %q で source-safe に
+# エスケープする（空白/メタ文字入り worktree パスでの語分割による境界破壊・$()/backtick の source-time
+# インジェクションを防ぐ・gate round3）。%q は source 時に原値へ復元される。
+# **ホスト既定 env-file を chain-source する**（gate round4）: cld-spawn の env-file 解決は排他（--env-file を
+# 渡すと `${CLD_ENV_FILE:-$HOME/.cld-env}` の既定 source を置換する）。worker は隔離対象ではなく、従来
+# --env-file 無しで既定 env（認証/秘密＝session plugin CLAUDE.md 規約）を source していた。その挙動を保つため
+# 既定 env-file を先に chain-source してから SCRIBE signal を export する（source 対象は host 所有の信頼ファイル）。
+_worker_def_env="${CLD_ENV_FILE:-$HOME/.cld-env}"
+# 先頭チルダを $HOME へ展開する（cld-spawn:278 の既定 env 解決と parity）。%q は `~` をエスケープするため、
+# CLD_ENV_FILE がリテラル `~`（例: quoted export・systemd/docker env 定義）を含むと展開されず既定 env を
+# 無音で取りこぼす（認証/秘密喪失の狭域再導入・gate round5）。source する前にここで展開しておく。
+_worker_def_env="${_worker_def_env/#\~/$HOME}"
+{
+  [[ -n "$_worker_def_env" ]] && printf 'source %q 2>/dev/null || true\n' "$_worker_def_env"
+  printf 'export SCRIBE_WORKER=1\nexport SCRIBE_WORKTREE=%q\n' "$WORKTREE"
+} > "$WORKER_ENV_FILE"
 
 git -C "$REPO" worktree add -b "$BRANCH" "$WORKTREE" "$BASE"
 
@@ -604,7 +637,7 @@ _cld_rc=0
 # 上記定数コメント参照＝分割 fail-open は cc-session gate round-1 で CONFIRMED）。cld-spawn は末尾 PROMPT の
 # 直前でこれを消費する（cld-spawn は --disallowed-tools を claude の末尾可変長 <tools...> として自身の起動行
 # 末尾へ再配置するため、scribe 側の引数順は PROMPT 前であれば可）。
-"$CLD_SPAWN" --cd "$WORKTREE" --bd-id "$ID" --model "$MODEL" --disallowed-tools "$WORKER_DISALLOWED_TOOLS" "$PROMPT_TEXT" || _cld_rc=$?
+"$CLD_SPAWN" --cd "$WORKTREE" --bd-id "$ID" --model "$MODEL" --disallowed-tools "$WORKER_DISALLOWED_TOOLS" --env-file "$WORKER_ENV_FILE" "$PROMPT_TEXT" || _cld_rc=$?
 if [[ "$_cld_rc" -ne 0 ]]; then
   {
     echo "scribe: error: cld-spawn が失敗しました（exit=$_cld_rc）。worker は起動していません。"
