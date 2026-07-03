@@ -153,3 +153,4 @@ git status --short
 ## 注意
 - グローバル hook（SessionStart `bd prime` / SessionEnd 自動 push / 破壊的 bd guard）は machine 全体で有効。本スキルは**プロジェクト側**のみ収束させる。
 - **役割を帯びた規約本文の SSOT は scribe plugin**（`docs/protocol.md` / `docs/role-context-spec.md`）。本 skill は bd 基礎の収束と PRIME の role 中立同期までを担い、role 別の振る舞いは scribe の SessionStart 注入に委ねる。
+- **sandbox host 依存は本 skill の対象外**（リポ状態でなく host 状態ゆえ）: worker spawn は既定で OS sandbox 化される（default-on・opt-out=`SCRIBE_SANDBOX=0`・sc-u53）ため、その host には `bubblewrap`/`socat`/`jq` と userns 許可（multi-user は bwrap への標的 apparmor profile が安全・単一ユーザーは sysctl 緩和）が要る。未充足だと最初の worker spawn が worktree 作成前に fail-loud で止まる。`scripts/scribe-sandbox-preflight.sh`（充足 exit 0）で事前確認し、導入手順は `scripts/sandbox-spike/README.md`。

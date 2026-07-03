@@ -19,7 +19,27 @@ CC 組込み sandbox は次の3つを要求する(spike で実測):
      `sudo sysctl --system`。**ホスト全体の userns ハードニングを外す**ため、マルチユーザーホストでは
      security トレードオフを承知の上で。ロールバック = その conf を rm して再 `sysctl --system`。
    - **bwrap への targeted apparmor profile**（ホスト全体の sysctl を緩めず bwrap だけに userns を許可）。
-     マルチユーザーホストはこちらが安全（global sysctl=1 のまま sandbox が成立する）。
+     **マルチユーザーホストはこちらが推奨**（global sysctl=1 のまま sandbox が成立し、他ユーザーの攻撃面を
+     広げない）。CC 公式 docs（`code.claude.com/docs/en/sandboxing`）の profile を verbatim で置く:
+     ```bash
+     # /etc/apparmor.d/bwrap に配置（要 sudo）
+     sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'
+     abi <abi/4.0>,
+     include <tunables/global>
+
+     profile bwrap /usr/bin/bwrap flags=(unconfined) {
+       userns,
+       include if exists <local/bwrap>
+     }
+     EOF
+     sudo systemctl reload apparmor
+     # 検証: bwrap --ro-bind / / --unshare-user echo ok  → "ok"
+     # ロールバック: sudo apparmor_parser -R /etc/apparmor.d/bwrap && sudo rm /etc/apparmor.d/bwrap
+     #   （`systemctl reload` は削除済み profile を kernel から unload しない＝reload だけでは posture が
+     #    復元されない。先に apparmor_parser -R で in-kernel profile を revoke してから rm する。）
+     ```
+     （bwrap のパスが `/usr/bin/bwrap` でない場合は `profile bwrap <path> flags=(unconfined)` 行の
+     `<path>` を実パスに合わせる。）
    判定は方式に依らず **実プローブ** `bwrap --ro-bind / / --unshare-user true` で行う＝global sysctl 値は
    読まない（profile 方式で false-negative になるため）。実体 = `scribe_sandbox_preflight`（scribe-lib.sh）。
 

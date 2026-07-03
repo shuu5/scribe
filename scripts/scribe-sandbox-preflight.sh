@@ -25,6 +25,6 @@ if reason="$(scribe_sandbox_preflight)"; then
 else
   # 欠落理由は stdout（spawn の seam が捕捉する）。人間向けの文脈は stderr。
   printf '%s\n' "$reason"
-  echo "scribe-sandbox-preflight: FAIL — $reason（詳細・導入手順は scripts/sandbox-spike/README.md）" >&2
+  echo "scribe-sandbox-preflight: FAIL — $reason（詳細・導入手順は $SCRIPT_DIR/sandbox-spike/README.md）" >&2
   exit 1
 fi
