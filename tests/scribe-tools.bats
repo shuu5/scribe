@@ -181,6 +181,38 @@ _mk_main_and_linked() {
   echo "$output" | jq -e '(.sandbox.filesystem.allowWrite|length)==2 and (.sandbox.filesystem.allowWrite[0]|endswith("/.beads"))' >/dev/null
 }
 
+@test "spawn(sandbox/sc-lkg): cross-repo で gen は明示 anchor(第2引数)の .beads を grant する（逆算は repo 側を誤 grant＝negative control）" {
+  # cross-repo cell（scribe-spawn --repo X --anchor Y・X≠Y）の再現: worktree は repo X 側に在り、
+  # 真の bd graph は別リポ anchor Y に在る。gen の第2引数（明示 anchor）が無いと逆算で X を誤 grant する。
+  local repoX anchorY wt
+  repoX="$(cd "$(mktemp -d)" && pwd -P)"
+  git -C "$repoX" -c init.defaultBranch=main init -q
+  git -C "$repoX" config user.email t@e; git -C "$repoX" config user.name t
+  git -C "$repoX" commit -q --allow-empty -m init
+  anchorY="$(cd "$(mktemp -d)" && pwd -P)"          # 真の bd graph 所在（repo X とは別リポ）
+  mkdir -p "$anchorY/.beads"
+  wt="$repoX/.worktrees/cell"
+  git -C "$repoX" worktree add -q -b cell-branch "$wt" >/dev/null
+
+  # (a) negative control: anchor 未指定＝逆算 → repo X の .beads を誤 grant（sc-lkg バグの再現＝修正の counterfactual）
+  run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$wt"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg x "$repoX/.beads" '.sandbox.filesystem.allowWrite[0]==$x' >/dev/null
+
+  # (b) fix: 真の anchor Y を第2引数で明示 → Y の .beads を grant（worker の bdw が真 graph へ書ける）
+  run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$wt" "$anchorY"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg y "$anchorY/.beads" '.sandbox.filesystem.allowWrite[0]==$y' >/dev/null
+
+  rm -rf "$repoX" "$anchorY"
+}
+
+@test "spawn(sandbox/sc-lkg): gen は存在しない --anchor(第2引数)を fail-loud で弾く（誤ったパスを黙って grant しない）" {
+  run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$SCRIBE_TEST_CWD" "/nonexistent/anchor/path"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"ディレクトリではありません"* ]]
+}
+
 @test "spawn(sandbox): SCRIBE_SANDBOX=1 の worker dry-run は settings.local.json 生成を plan に出す（spawn 行は不変）" {
   SCRIBE_SANDBOX=1 run "$SPAWN" --dry-run un-4nm
   [ "$status" -eq 0 ]
@@ -990,6 +1022,35 @@ _make_noop_cld_spawn() {
   # sc-da0: bwrap の bind-before-exist 対策で spawn が lock dir を事前生成する（grant 済 path が実在）。
   [ -d "$BATS_TEST_TMPDIR/rt" ]
   git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+}
+
+@test "spawn(sandbox/sc-lkg): cross-repo 実経路で settings.local.json の allowWrite が真の --anchor の .beads を指す（scribe-spawn の forwarding regress を integration 層で捕捉）" {
+  # sc-lkg の欠陥本体は scribe-spawn が真の --anchor を gen へ渡さないこと。gen 単体テスト(上)は
+  # gen の挙動を pin するが、scribe-spawn:555 が旧 `"$SANDBOX_GEN" "$WORKTREE"` へ regress しても
+  # gen 単体テストは緑のまま＝silent 再発しうる。ここは **実 gen を scribe-spawn 経由で実走**し、
+  # repo≠anchor（cross-repo cell）で allowWrite[0] が真の anchorY/.beads になることを assert する。
+  local repoX anchorY wt noop
+  repoX="$SCRIBE_TEST_CWD"                          # worktree を作るリポ（= --repo X）
+  anchorY="$(cd "$(mktemp -d)" && pwd -P)"          # 真の bd graph（= --anchor Y・repo X とは別）
+  git -C "$anchorY" -c init.defaultBranch=main init -q
+  git -C "$anchorY" config user.email t@e; git -C "$anchorY" config user.name t
+  git -C "$anchorY" commit -q --allow-empty -m init
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  wt="$repoX/.worktrees/spawn/un-4nm-101010"
+  # 実 gen を走らせる（gen は stub しない）。preflight/cld-spawn のみ noop・bdw は present stub で host 非依存。
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_PREFLIGHT="$noop" \
+      BDW_LOCK_DIR="$BATS_TEST_TMPDIR/rt" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repoX" --anchor "$anchorY" un-4nm
+  rm -f "$noop"
+  [ "$status" -eq 0 ]
+  [ -f "$wt/.claude/settings.local.json" ]
+  # 核心 assert: 真の anchorY/.beads を grant（repoX/.beads を誤 grant しない＝forwarding が効いている）。
+  run jq -e --arg y "$anchorY/.beads" '.sandbox.filesystem.allowWrite[0] == $y' "$wt/.claude/settings.local.json"
+  [ "$status" -eq 0 ]
+  run jq -e --arg x "$repoX/.beads" '.sandbox.filesystem.allowWrite[0] != $x' "$wt/.claude/settings.local.json"
+  [ "$status" -eq 0 ]
+  git -C "$repoX" worktree remove --force "$wt" 2>/dev/null || true
+  rm -rf "$anchorY"
 }
 
 @test "spawn(sandbox/sc-s68): gen 失敗時は die（非0）し settings.local.json を残さず temp も後始末する" {

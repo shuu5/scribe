@@ -551,8 +551,11 @@ if [[ "$SANDBOX_ON" == "1" ]]; then
   # "1" の文字列比較（[[ -eq ]] の算術評価は非数値で die・算術インジェクションを許すため避ける）。
   mkdir -p "$WORKTREE/.claude" || scribe_die "sandbox: .claude ディレクトリ作成に失敗（sandbox 既定 on・opt-out=SCRIBE_SANDBOX=0）: $WORKTREE"
   # 一時ファイルへ生成し成功時のみ atomic mv（gen が途中失敗しても半端な settings を残さない）。
+  # 真の "$ANCHOR"（--anchor で正規化済み絶対パス）を gen へ**明示**渡す（sc-lkg）。cross-repo cell
+  # （--repo X --anchor Y・X≠Y）では worktree は repo X 側ゆえ gen の逆算 anchor=X になり allowWrite が
+  # 誤った .beads を grant してしまう（真の bd graph=Y へ書けず worker の bdw が read-only で失敗）。
   _sb_tmp="$(mktemp "$WORKTREE/.claude/.settings.XXXXXX")" || scribe_die "sandbox: 一時ファイル作成に失敗: $WORKTREE/.claude"
-  if "$SANDBOX_GEN" "$WORKTREE" > "$_sb_tmp"; then
+  if "$SANDBOX_GEN" "$WORKTREE" "$ANCHOR" > "$_sb_tmp"; then
     mv -f "$_sb_tmp" "$WORKTREE/.claude/settings.local.json"
   else
     # gen 失敗時は worktree add 済み＝orphan が残る。cld-spawn 失敗路（下記）と対称に、真因ヒントと cleanup を案内して
