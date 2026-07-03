@@ -535,11 +535,11 @@ _mk_main_and_linked() {
   [[ "$cld_line" != *"--disallowed-tools"* ]]
 }
 
-@test "spawn: 非 consult では env-file を注入しない" {
+@test "spawn: worker は consult env（SCRIBE_ROLE=consult）を注入しない（worker 用 env-file は SCRIBE_WORKER=1・sc-649）" {
   run "$SPAWN" --dry-run un-4nm
   [ "$status" -eq 0 ]
-  [[ "$output" != *"SCRIBE_ROLE=consult"* ]]
-  [[ "$output" != *"--env-file"* ]]
+  [[ "$output" != *"SCRIBE_ROLE=consult"* ]]   # worker は consult role env を持たない
+  [[ "$output" == *"SCRIBE_WORKER=1"* ]]        # worker 用 env-file は SCRIBE_WORKER=1（sc-649・consult とは別物）
 }
 
 # ---------- spawn: 防御 ----------
@@ -2938,4 +2938,219 @@ _mk_probe_env() {
 @test "gitignore: .scribe-envprobe を ignore する（worker の git add 巻き込み防止）" {
   run git -C "$REPO_ROOT" check-ignore .scribe-envprobe
   [ "$status" -eq 0 ]
+}
+
+# ---------- PreToolUse[Edit|Write|NotebookEdit|MultiEdit] guard（sc-649・SBX-ESC-1 封じ込め穴埋め）----------
+# scribe worker の built-in ファイル編集を worktree 境界へ縛る（bwrap は Bash のみ封じるため）。活性化は
+# spawn 注入の worker-immutable env `SCRIBE_WORKER=1` のみ（filesystem content を読まない=self-disable 不能）。
+# $SCRIPTS は setup() 後に確定するためヘルパで解決。
+_ewguard() { printf '%s' "$SCRIPTS/hooks/edit-write-guard.py"; }
+
+# anchor + linked worker worktree の fixture（git 構造のみ。活性化は env ゆえ .beads は不要）。
+# stdout に "<anchor>\t<worktree>"。in-tree .beads を仕込みたいテストは wt に自前で作る。
+_mk_wt() {
+  local anchor wt
+  anchor="$(cd "$(mktemp -d)" && pwd -P)"
+  git -C "$anchor" -c init.defaultBranch=main init -q
+  git -C "$anchor" config user.email t@e; git -C "$anchor" config user.name t
+  git -C "$anchor" commit -q --allow-empty -m init
+  wt="$anchor/.worktrees/wtx"
+  git -C "$anchor" worktree add -q -b wtx-branch "$wt" >/dev/null
+  printf '%s\t%s' "$anchor" "$wt"
+}
+
+@test "edit-write-guard(sc-649): --self-test が緑（decide の境界・prefix・traversal・symlink・in-tree metadata を hermetic に pin）" {
+  run python3 "$(_ewguard)" --self-test
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SELF-TEST OK"* ]]
+}
+
+@test "edit-write-guard(sc-649): 実行可能である" {
+  [ -x "$(_ewguard)" ]
+}
+
+@test "edit-write-guard(sc-649): worker(SCRIBE_WORKER=1) の worktree 内 Write は allow（exit 0）" {
+  local p anchor wt; p="$(_mk_wt)"; anchor="${p%%$'\t'*}"; wt="${p#*$'\t'}"
+  run bash -c "printf '%s' '{\"tool_name\":\"Write\",\"cwd\":\"$wt\",\"tool_input\":{\"file_path\":\"$wt/foo.txt\"}}' | SCRIBE_WORKER=1 SCRIBE_WORKTREE='$wt' python3 '$(_ewguard)'"
+  [ "$status" -eq 0 ]
+  git -C "$anchor" worktree remove --force "$wt" 2>/dev/null || true; rm -rf "$anchor"
+}
+
+@test "edit-write-guard(sc-649): worker の worktree 外（anchor 直下）Write は deny（exit 2・SBX-ESC-1 経路）" {
+  local p anchor wt; p="$(_mk_wt)"; anchor="${p%%$'\t'*}"; wt="${p#*$'\t'}"
+  run bash -c "printf '%s' '{\"tool_name\":\"Write\",\"cwd\":\"$wt\",\"tool_input\":{\"file_path\":\"$anchor/RELEASE.md\"}}' | SCRIBE_WORKER=1 SCRIBE_WORKTREE='$wt' python3 '$(_ewguard)'"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"BLOCKED"* ]]
+  git -C "$anchor" worktree remove --force "$wt" 2>/dev/null || true; rm -rf "$anchor"
+}
+
+@test "edit-write-guard(sc-649): worker の worktree 外（リポ完全外 /tmp）Edit は deny（exit 2）" {
+  local p anchor wt; p="$(_mk_wt)"; anchor="${p%%$'\t'*}"; wt="${p#*$'\t'}"
+  run bash -c "printf '%s' '{\"tool_name\":\"Edit\",\"cwd\":\"$wt\",\"tool_input\":{\"file_path\":\"/tmp/ewguard-evil-$$.txt\"}}' | SCRIBE_WORKER=1 SCRIBE_WORKTREE='$wt' python3 '$(_ewguard)'"
+  [ "$status" -eq 2 ]
+  git -C "$anchor" worktree remove --force "$wt" 2>/dev/null || true; rm -rf "$anchor"
+}
+
+@test "edit-write-guard(sc-649): worker の NotebookEdit(notebook_path) worktree 外は deny（exit 2）" {
+  local p anchor wt; p="$(_mk_wt)"; anchor="${p%%$'\t'*}"; wt="${p#*$'\t'}"
+  run bash -c "printf '%s' '{\"tool_name\":\"NotebookEdit\",\"cwd\":\"$wt\",\"tool_input\":{\"notebook_path\":\"$anchor/x.ipynb\"}}' | SCRIBE_WORKER=1 SCRIBE_WORKTREE='$wt' python3 '$(_ewguard)'"
+  [ "$status" -eq 2 ]
+  git -C "$anchor" worktree remove --force "$wt" 2>/dev/null || true; rm -rf "$anchor"
+}
+
+@test "edit-write-guard(sc-649): worker の MultiEdit(file_path) worktree 外は deny（exit 2・matcher に MultiEdit を含む）" {
+  local p anchor wt; p="$(_mk_wt)"; anchor="${p%%$'\t'*}"; wt="${p#*$'\t'}"
+  run bash -c "printf '%s' '{\"tool_name\":\"MultiEdit\",\"cwd\":\"$wt\",\"tool_input\":{\"file_path\":\"$anchor/m.txt\"}}' | SCRIBE_WORKER=1 SCRIBE_WORKTREE='$wt' python3 '$(_ewguard)'"
+  [ "$status" -eq 2 ]
+  git -C "$anchor" worktree remove --force "$wt" 2>/dev/null || true; rm -rf "$anchor"
+}
+
+@test "edit-write-guard(sc-649): self-disable 回帰 — worktree 内に汚染 .beads/metadata.json があっても guard は依然発火する（活性化に台帳を読まない）" {
+  # gate round1 critical の回帰。旧設計は _is_scribe_guard_session が worktree ローカルの tracked
+  # metadata.json を読み、worker がそれを非 sc へ書換えて guard を自己無効化できた。新設計は活性化を
+  # env `SCRIBE_WORKER=1` のみに依存し filesystem content を読まないため、metadata を汚染しても発火し続ける。
+  local p anchor wt; p="$(_mk_wt)"; anchor="${p%%$'\t'*}"; wt="${p#*$'\t'}"
+  mkdir -p "$wt/.beads"; printf '{"dolt_database":"orch"}\n' > "$wt/.beads/metadata.json"   # worker が書換えた想定
+  run bash -c "printf '%s' '{\"tool_name\":\"Write\",\"cwd\":\"$wt\",\"tool_input\":{\"file_path\":\"$anchor/escape.txt\"}}' | SCRIBE_WORKER=1 SCRIBE_WORKTREE='$wt' python3 '$(_ewguard)'"
+  [ "$status" -eq 2 ]   # 汚染 metadata に関係なく worktree 外は依然 deny＝self-disable 不能
+  git -C "$anchor" worktree remove --force "$wt" 2>/dev/null || true; rm -rf "$anchor"
+}
+
+@test "edit-write-guard(sc-649): 境界 escalation 回帰 — worker が worktree の .git を rm しても SCRIBE_WORKTREE env が境界を保つ（anchor へ広がらない）" {
+  # gate round2 major の回帰。旧設計は境界を git toplevel(cwd) から導出＝worker が <worktree>/.git（単一
+  # ファイル gitfile）を非再帰 rm すると git が anchor へ walk-up し境界が anchor 全体へ広がった。新設計は
+  # 境界を spawn 注入の SCRIBE_WORKTREE env から取るため .git を消しても境界は worktree のまま。
+  local p anchor wt; p="$(_mk_wt)"; anchor="${p%%$'\t'*}"; wt="${p#*$'\t'}"
+  rm "$wt/.git"   # linked worktree の gitfile は単一ファイル＝非再帰 rm で消せる（rm-guard は再帰のみ block）
+  run bash -c "printf '%s' '{\"tool_name\":\"Write\",\"cwd\":\"$wt\",\"tool_input\":{\"file_path\":\"$anchor/escape.txt\"}}' | SCRIBE_WORKER=1 SCRIBE_WORKTREE='$wt' python3 '$(_ewguard)'"
+  [ "$status" -eq 2 ]   # SCRIBE_WORKTREE env が境界＝.git 破壊に関係なく anchor 外は deny
+  git -C "$anchor" worktree remove --force "$wt" 2>/dev/null || true; rm -rf "$anchor"
+}
+
+@test "edit-write-guard(sc-649): 境界は SCRIBE_WORKTREE env を最優先（内=allow・外=deny）" {
+  local p anchor wt; p="$(_mk_wt)"; anchor="${p%%$'\t'*}"; wt="${p#*$'\t'}"
+  run bash -c "printf '%s' '{\"tool_name\":\"Write\",\"cwd\":\"$wt\",\"tool_input\":{\"file_path\":\"$wt/in.txt\"}}' | SCRIBE_WORKER=1 SCRIBE_WORKTREE='$wt' python3 '$(_ewguard)'"
+  [ "$status" -eq 0 ]
+  run bash -c "printf '%s' '{\"tool_name\":\"Write\",\"cwd\":\"$wt\",\"tool_input\":{\"file_path\":\"$anchor/out.txt\"}}' | SCRIBE_WORKER=1 SCRIBE_WORKTREE='$wt' python3 '$(_ewguard)'"
+  [ "$status" -eq 2 ]
+  git -C "$anchor" worktree remove --force "$wt" 2>/dev/null || true; rm -rf "$anchor"
+}
+
+@test "edit-write-guard(sc-649): SCRIBE_WORKER=1 だが SCRIBE_WORKTREE 未設定 → fail-closed deny（git fallback へ落とさない・gate round3）" {
+  # round3: git_toplevel fallback を撤去し、worker 文脈で境界を確立できなければ deny（git 構造を信用しない）。
+  local p anchor wt; p="$(_mk_wt)"; anchor="${p%%$'\t'*}"; wt="${p#*$'\t'}"
+  run bash -c "printf '%s' '{\"tool_name\":\"Write\",\"cwd\":\"$wt\",\"tool_input\":{\"file_path\":\"$wt/in.txt\"}}' | env -u SCRIBE_WORKTREE SCRIBE_WORKER=1 python3 '$(_ewguard)'"
+  [ "$status" -eq 2 ]   # 境界未確立 → fail-closed（worktree 内書込みすら通さない＝安全側）
+  git -C "$anchor" worktree remove --force "$wt" 2>/dev/null || true; rm -rf "$anchor"
+}
+
+@test "edit-write-guard(sc-649): SCRIBE_WORKTREE が非存在ディレクトリ → fail-closed deny（境界破損を fail-open にしない）" {
+  local p anchor wt; p="$(_mk_wt)"; anchor="${p%%$'\t'*}"; wt="${p#*$'\t'}"
+  run bash -c "printf '%s' '{\"tool_name\":\"Write\",\"cwd\":\"$wt\",\"tool_input\":{\"file_path\":\"$wt/in.txt\"}}' | SCRIBE_WORKER=1 SCRIBE_WORKTREE=/nonexistent/broken-wt python3 '$(_ewguard)'"
+  [ "$status" -eq 2 ]
+  git -C "$anchor" worktree remove --force "$wt" 2>/dev/null || true; rm -rf "$anchor"
+}
+
+@test "spawn(sc-649): worker env-file は SCRIBE_WORKTREE を %q で source-safe に焼く（空白/メタ文字パスの語分割・source インジェクションを防ぐ・gate round3）" {
+  # scribe-spawn の生成方式（printf %q）と同型で空白入りパスの env-file を作り、cld-spawn 相当の source で
+  # 原値が復元されることを pin する（%s だと語分割で SCRIBE_WORKTREE が切り詰められる回帰を counterfactual で封じる）。
+  local ef wtpath got
+  ef="$(mktemp)"; wtpath='/home/a b/.worktrees/sc x'
+  printf 'export SCRIBE_WORKER=1\nexport SCRIBE_WORKTREE=%q\n' "$wtpath" > "$ef"
+  got="$(bash -c "source '$ef' 2>/dev/null; printf '%s' \"\$SCRIBE_WORKTREE\"")"
+  [ "$got" = "$wtpath" ]     # source 後に原値（空白込み）が復元される
+  rm -f "$ef"
+  # scribe-spawn 本体が %q（%s でない）で焼くことを source で pin（現ホストに空白が無くても回帰を守る）。
+  run grep -F "SCRIBE_WORKTREE=%q" "$SPAWN"
+  [ "$status" -eq 0 ]
+  run grep -F "SCRIBE_WORKTREE=%s" "$SPAWN"
+  [ "$status" -ne 0 ]        # 無引用 %s が残っていない
+}
+
+@test "spawn(sc-649): worker env-file はホスト既定 env（CLD_ENV_FILE/~/.cld-env）を chain-source する（--env-file 排他置換による認証/秘密喪失を防ぐ・gate round4）" {
+  # cld-spawn の env-file 解決は排他（--env-file が ~/.cld-env 既定 source を置換）。worker は隔離対象でない
+  # ため、生成 env-file が既定 env-file を先に source してから SCRIBE signal を足すこと（順序込み・両立）を pin する。
+  # (a) 生成器が既定 env を chain-source する行を持つ（実 spawn 経路・dry-run mirror でなく source で pin）。
+  run grep -F "source %q 2>/dev/null || true" "$SPAWN"
+  [ "$status" -eq 0 ]
+  run grep -F 'CLD_ENV_FILE:-$HOME/.cld-env' "$SPAWN"
+  [ "$status" -eq 0 ]
+  # (b) 実機: 既定 env（サンプル値）を先に source → SCRIBE signal を後に export すると両方が並立する
+  #     （chain-source が既定を潰さず、順序も正しい＝gate round4 の boot-path 回帰 counterfactual）。
+  local defenv ef got
+  defenv="$(mktemp)"; printf 'export SAMPLE_HOST_SECRET=xyz\n' > "$defenv"
+  ef="$(mktemp)"
+  { printf 'source %q 2>/dev/null || true\n' "$defenv"; printf 'export SCRIBE_WORKER=1\nexport SCRIBE_WORKTREE=%q\n' '/tmp/wt'; } > "$ef"
+  got="$(bash -c "source '$ef' 2>/dev/null; printf '%s|%s' \"\$SAMPLE_HOST_SECRET\" \"\$SCRIBE_WORKER\"")"
+  [ "$got" = "xyz|1" ]       # 既定 env の値と SCRIBE signal が両立（chain-source が既定を潰さない）
+  rm -f "$defenv" "$ef"
+  # (c) scribe-spawn が %q 前に先頭チルダを $HOME へ展開すること（cld-spawn:278 parity・literal ~ 設定での
+  #     既定 env 取りこぼしを防ぐ・gate round5）を source で pin。
+  run grep -F 'HOME}' "$SPAWN"
+  [ "$status" -eq 0 ]
+  run grep -E '_worker_def_env=.*/#.~/.HOME' "$SPAWN"
+  [ "$status" -eq 0 ]
+}
+
+@test "spawn(sc-649): chain-source は literal-tilde の CLD_ENV_FILE でも既定 env を source する（%q 前に ~ 展開・gate round5）" {
+  # 現状の生成ロジックと同型で literal ~ を展開してから焼き、source で原ファイルに解決されることを実機確認。
+  local d ef got def
+  d="$(mktemp -d)"; printf 'export TILDE_SECRET=ok\n' > "$d/.cld-env"
+  def='~/.cld-env'
+  def="${def/#\~/$d}"                 # scribe-spawn と同式で先頭 ~ を展開（テストでは $d を HOME 代用）
+  ef="$(mktemp)"
+  { printf 'source %q 2>/dev/null || true\n' "$def"; printf 'export SCRIBE_WORKER=1\n'; } > "$ef"
+  got="$(bash -c "source '$ef' 2>/dev/null; printf '%s' \"\$TILDE_SECRET\"")"
+  [ "$got" = "ok" ]                    # 展開後は literal ~ でも既定 env が source される（auth-loss 回避）
+  rm -rf "$d" "$ef"
+}
+
+@test "edit-write-guard(sc-649): 非 worker（SCRIBE_WORKER 未設定・admin/foreign）は発火せず worktree 外書込みも allow" {
+  local p anchor wt; p="$(_mk_wt)"; anchor="${p%%$'\t'*}"; wt="${p#*$'\t'}"
+  # SCRIBE_WORKER を明示的に空にして起動（admin/foreign セッションを模す）。worktree cwd + 外部パスでも非発火。
+  run bash -c "printf '%s' '{\"tool_name\":\"Write\",\"cwd\":\"$wt\",\"tool_input\":{\"file_path\":\"/tmp/ewg-nonworker-$$.txt\"}}' | env -u SCRIBE_WORKER python3 '$(_ewguard)'"
+  [ "$status" -eq 0 ]   # env signal 無し＝発火せず（admin の全リポ編集/foreign project を壊さない）
+  git -C "$anchor" worktree remove --force "$wt" 2>/dev/null || true; rm -rf "$anchor"
+}
+
+@test "edit-write-guard(sc-649): cwd 欠落 + 境界外の絶対パスは deny（境界は SCRIBE_WORKTREE ゆえ cwd 不要・fail-closed へ統一・gate round3）" {
+  # round3 finding4: SCRIBE_WORKTREE が権威になった今、cwd 欠落でも絶対パスは境界判定でき、境界外は deny。
+  local p anchor wt; p="$(_mk_wt)"; anchor="${p%%$'\t'*}"; wt="${p#*$'\t'}"
+  run bash -c "printf '%s' '{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$anchor/out.txt\"}}' | SCRIBE_WORKER=1 SCRIBE_WORKTREE='$wt' python3 '$(_ewguard)'"
+  [ "$status" -eq 2 ]   # cwd 欠落でも SCRIBE_WORKTREE 境界外の絶対パスは deny（fail-open にしない）
+  git -C "$anchor" worktree remove --force "$wt" 2>/dev/null || true; rm -rf "$anchor"
+}
+
+@test "edit-write-guard(sc-649): 壊れた JSON 入力は fail-open（exit 0・guard バグで worker を brick しない）" {
+  run bash -c "printf '%s' '{bad json' | SCRIBE_WORKER=1 SCRIBE_WORKTREE=/tmp python3 '$(_ewguard)'"
+  [ "$status" -eq 0 ]
+}
+
+@test "hooks(sc-649): PreToolUse に matcher='Edit|Write|NotebookEdit|MultiEdit' の block があり edit-write-guard.py を指す（|| true を付けない）" {
+  run python3 -c "import json; h=json.load(open('$HOOKS_JSON')); pre=h['hooks']['PreToolUse']; \
+m=[b for b in pre if b.get('matcher')=='Edit|Write|NotebookEdit|MultiEdit']; assert len(m)==1, 'matcher 欠落/不一致'; \
+cmd=m[0]['hooks'][0]['command']; assert 'edit-write-guard.py' in cmd, 'guard 未配線'; assert '|| true' not in cmd, 'guard に || true 禁止（exit2 を伝播）'; print('OK')"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"* ]]
+}
+
+@test "spawn(sc-649): worker 起動は SCRIBE_WORKER=1 + SCRIBE_WORKTREE の env-file を注入する（activation+境界 signal）" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SCRIBE_WORKER=1"* ]]      # activation signal
+  [[ "$output" == *"SCRIBE_WORKTREE="* ]]     # 境界 signal（worker-immutable な worktree 絶対パス）
+  [[ "$output" == *"--env-file"* ]]           # worker cld-spawn は env-file を持つ
+  [[ "$output" != *"SCRIBE_ROLE=consult"* ]]  # worker は consult env を持たない
+}
+
+@test "spawn(sc-649): 実 worker cld-spawn 起動行が --env-file \"\$WORKER_ENV_FILE\" を持つ（dry-run mirror でなく実行路を source で pin）" {
+  # minor round2: dry-run plan だけでなく実 invocation 行（cld-spawn 実行）が env-file を渡すことを source で確認。
+  run grep -E '\$CLD_SPAWN" --cd "\$WORKTREE".*--env-file "\$WORKER_ENV_FILE"' "$SPAWN"
+  [ "$status" -eq 0 ]
+  # env-file の mktemp が worktree add より前にあること（mktemp 失敗で orphan を作らない・gate round2 minor）。
+  run bash -c "grep -n 'WORKER_ENV_FILE=\"\$(mktemp' '$SPAWN' | cut -d: -f1"
+  local mktemp_ln="$output"
+  run bash -c "grep -n 'worktree add -b \"\$BRANCH\"' '$SPAWN' | cut -d: -f1"
+  local add_ln="$output"
+  [ "$mktemp_ln" -lt "$add_ln" ]
 }

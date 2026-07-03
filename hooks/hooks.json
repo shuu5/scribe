@@ -4,6 +4,7 @@
   "_comment_scope": "本セル(C1)は wire(hooks.json の形)だけを置き、hook の実 script は書かない(= C2 の領分)。PostToolUse diagnostics hook(scribe-design.md §11)は v0 堀 OFF のため未配線(v1+)。",
   "_comment_guard": "PreToolUse[Bash]=git-destructive-guard.py(sc-erd) + rm-destructive-guard.py(sc-nfs) + bd-write-guard.py(sc-wdr)。3者とも uns/orch から re-home/port し cmdtokens lib を共用。SessionStart と違い command に `|| true` を付けない(guard の exit2=block を必ず伝播させるため。consistency-fix で || true を足すと guard が無効化されるので禁止)。script 不在/非実行時のみ if/else で exit 0=fail-open。global(~/.claude)guard との二重発火は block 冪等で安全。rm-guard の DATA_ROOTS はマシン固有ゆえ既定空+SCRIBE_RM_GUARD_DATA_ROOTS env opt-in(構造的保護は host-agnostic)。git-guard の scribe-anchor 認識(.claude-plugin plugin.json name=='scribe' 署名)は本 plugin のみが持ち uns 非導入ホストでの自己防護を成す。bd-write-guard は orch bd-write-guard を scribe 台帳(dolt_database=sc・prefix sc-)向けに faithful port したもの: 自台帳(sc-)への bare bd write を bdw 経由へ差し戻し(kind c)、foreign 台帳(-C/--db/--global/非 sc- bead)への write を deny(kind a/b)する。plugin global enable で全セッション発火するため session self-scope(共有 lib scripts/hooks/lib/scribe_session.py の _is_scribe_guard_session=fail-closed)で dolt_database=='sc' session のみ効かせ、非 sc(orch/un…)session では exit0 no-op(fully-dynamic にはしない=D1)。banner の _is_scribe_session(fail-open)とは意図的に分岐(present-but-unreadable を guard は fail-closed=moat 維持・banner は fail-open=誤注入ゼロ)。",
   "_comment_guard_health": "SessionStart 2 本目=session-start-guard-health.py(sc-ovq)。scribe が consume する canonical plugin(cmdtokens / beads-bdw)の不在を SessionStart stdout の ⚠️ banner で loud 化する health-check。**banner hook ゆえ role-inject と同形の非ブロック fail-safe(`[ -x ]`+`|| true`)で wire する**(PreToolUse guard の `|| true` 禁止規約とは別物=guard は exit2=block を伝播させるが、本 hook は exit0 degrade で決して die しない)。self-scope は dolt_database=='sc' 精密判定(scripts/hooks/lib/scribe_session.py)で foreign(orchestrator の orch 等)へ誤注入しない。両 canonical 配備済ホストでは silent(無音)。",
+  "_comment_guard_editwrite": "PreToolUse[Edit|Write|NotebookEdit|MultiEdit]=edit-write-guard.py(sc-649)。security-audit SBX-ESC-1 で判明した『bwrap sandbox は Bash subprocess のみを封じ、built-in の Edit/Write/NotebookEdit/MultiEdit は permission 層＝bypassPermissions で素通し』の封じ込め穴を埋める。発火条件・境界とも **spawn 注入の worker-immutable env のみ**(scribe-spawn が worker CC へ全 worker 無条件・sandbox on/off 非連動で注入。worker は CC プロセス env を改変できず spoof 不可): 活性化=`SCRIBE_WORKER=1`・書込み境界=`SCRIBE_WORKTREE`(worktree 絶対パス・%q で source-safe)。書込み先が SCRIBE_WORKTREE 境界外なら exit2 で block する。**活性化も境界も filesystem/git 構造を一切読まない**(台帳 .beads/metadata.json は git-tracked で worktree にチェックアウト・anchor コピーも bwrap allowWrite 内=worker 書換可能／git toplevel も worker が .git を非再帰 rm で anchor へ walk-up させられる=いずれも worker-reachable ゆえ signal に使えない=self-disable/boundary-escalation バイパスを構造的に排除・gate round1-3 で改訂)。matcher は MultiEdit も**防御的に含める**(CC 2.1.199 で存否不確定・存在しなければ無害)。tool_input パスは file_path(Edit/Write/MultiEdit)/notebook_path(NotebookEdit)。fail-mode 三値=非 worker は発火せず(admin/foreign を brick しない)・worker 文脈で境界確立不能(SCRIBE_WORKTREE 未設定/非 dir)や発火後のパス境界外/解決不能は deny(fail-closed・git fallback へ落とさない)・guard クラッシュは fail-open(exit0+warn)。**guard ゆえ `|| true` を付けない**(exit2=block を伝播)。folio の PreToolUse[Edit|Write|NotebookEdit](spec 配下のみ)とは AND 合成で共存(CC は同 matcher 複数 hook を全実行し 1 つでも exit2 なら deny)。",
   "hooks": {
     "SessionStart": [
       {
@@ -38,6 +39,16 @@
           {
             "type": "command",
             "command": "SCRIPT=\"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/bd-write-guard.py\"; if [ -x \"$SCRIPT\" ]; then python3 \"$SCRIPT\"; else exit 0; fi",
+            "timeout": 10000
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SCRIPT=\"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/edit-write-guard.py\"; if [ -x \"$SCRIPT\" ]; then python3 \"$SCRIPT\"; else exit 0; fi",
             "timeout": 10000
           }
         ]

@@ -7,7 +7,10 @@
 #   - linked worktree の共有 .git     … sandbox 既定で writable(hooks/ と config は拒否のまま)
 #   - <ANCHOR>/.beads                … 明示(bd/bdw の台帳書込み = B/hybrid。worktree subtree 外ゆえ絶対パス必須)
 #   - bdw のロック dir(BDW_LOCK_DIR:-$HOME/.cache/bdw-locks) … 明示(bdw の flock 鍵 bd-write-<repo>.lock の置き場・bdw と同式・sc-xs2)
-# 上記以外への書込みは sandbox 外壁(層2)が拒否する。
+# 上記以外への **Bash subprocess の**書込みは sandbox 外壁(層2)が拒否する。ただし bwrap が封じるのは
+# Bash 経路のみ＝built-in の Edit/Write/NotebookEdit は permission 層(bypassPermissions で素通し)で動き
+# bwrap では縛れない。worker の Edit/Write は別レイヤの PreToolUse guard(scripts/hooks/edit-write-guard.py・
+# sc-649)が worktree 境界へ縛る(security-audit SBX-ESC-1)。
 #
 # キー名は CC 公式 docs で verified(code.claude.com/docs/en/sandboxing.md / settings.md):
 #   sandbox.enabled(bool) / sandbox.failIfUnavailable(bool・bwrap 不在で起動失敗=D6 fail-loud)
