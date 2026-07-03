@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dynamic Workflow 完全図解 — scribe での使われ方まで</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚙️</text></svg>">
+<script>document.documentElement.classList.add('js')</script>
+<style>
+/* ============ CONTROL-ROOM BLUEPRINT AESTHETIC ============ */
+:root{
+  --bg:#0a0d12; --bg2:#0d1119; --panel:#10151d; --panel2:#141b26;
+  --line:#1e2733; --line2:#2a3648;
+  --ink:#d8dfe9; --muted:#8b9bb0; --faint:#5b6b80;
+  --amber:#ffb454; --amber-dim:#a97a3a;
+  --cyan:#56d4bc; --red:#f2708a; --violet:#b79cf0; --blue:#7aa8f5;
+  --mono:ui-monospace,"SF Mono","Cascadia Code","JetBrains Mono",Consolas,"Liberation Mono",monospace;
+  --sans:"Hiragino Kaku Gothic ProN","Hiragino Sans","Noto Sans CJK JP","Yu Gothic Medium","Meiryo",sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);color:var(--ink);font-family:var(--sans);
+  font-size:15.5px;line-height:1.9;letter-spacing:.01em;
+  background-image:
+    radial-gradient(1100px 500px at 75% -100px, rgba(255,180,84,.06), transparent 60%),
+    radial-gradient(900px 600px at -10% 30%, rgba(86,212,188,.04), transparent 55%),
+    repeating-linear-gradient(0deg, transparent 0 47px, rgba(140,160,190,.045) 47px 48px),
+    repeating-linear-gradient(90deg, transparent 0 47px, rgba(140,160,190,.045) 47px 48px);
+}
+::selection{background:rgba(255,180,84,.3)}
+a{color:var(--cyan);text-decoration:none;border-bottom:1px dotted rgba(86,212,188,.5)}
+code,.m{font-family:var(--mono)}
+code{background:rgba(122,168,245,.10);border:1px solid rgba(122,168,245,.18);border-radius:4px;padding:.08em .4em;font-size:.86em;color:#b8cdf5;white-space:nowrap}
+strong{color:#fff}
+
+/* ---- layout ---- */
+.wrap{max-width:1060px;margin:0 auto;padding:0 22px 120px}
+section{margin-top:96px}
+html.js .rev{opacity:0;transform:translateY(18px);transition:opacity .7s ease,transform .7s ease}
+html.js .rev.in{opacity:1;transform:none}
+
+/* ---- left rail nav ---- */
+nav{position:fixed;left:0;top:0;bottom:0;width:190px;padding:28px 0 28px 20px;border-right:1px solid var(--line);background:rgba(10,13,18,.85);backdrop-filter:blur(6px);z-index:50;display:flex;flex-direction:column;gap:4px}
+nav .brand{font-family:var(--mono);font-size:11px;letter-spacing:.22em;color:var(--amber);margin-bottom:26px}
+nav .brand b{display:block;font-size:14px;color:var(--ink);letter-spacing:.08em;margin-top:4px}
+nav a{display:block;padding:7px 14px 7px 12px;border-left:2px solid transparent;border-bottom:none;color:var(--muted);font-size:12.5px;font-family:var(--mono);letter-spacing:.04em;transition:.2s}
+nav a .n{color:var(--faint);margin-right:8px;font-size:10.5px}
+nav a:hover{color:var(--ink)}
+nav a.on{color:var(--amber);border-left-color:var(--amber);background:linear-gradient(90deg,rgba(255,180,84,.08),transparent)}
+nav .foot{margin-top:auto;font-family:var(--mono);font-size:10px;color:var(--faint);line-height:1.7;padding-right:14px}
+main{margin-left:190px}
+@media(max-width:900px){
+  nav{position:sticky;width:auto;bottom:auto;flex-direction:row;align-items:center;gap:2px;padding:10px 14px;border-right:none;border-bottom:1px solid var(--line);overflow-x:auto}
+  nav .brand{margin:0 14px 0 0;white-space:nowrap}
+  nav .brand b{display:inline;margin-left:6px;font-size:12px}
+  nav a{white-space:nowrap;border-left:none;border-bottom:2px solid transparent;padding:5px 10px}
+  nav a.on{border-bottom-color:var(--amber);border-left-color:transparent}
+  nav .foot{display:none}
+  main{margin-left:0}
+}
+
+/* ---- hero ---- */
+header.hero{padding:110px 0 20px;position:relative}
+.kicker{font-family:var(--mono);color:var(--amber);font-size:12px;letter-spacing:.35em;margin-bottom:18px}
+h1{font-size:clamp(30px,4.6vw,52px);line-height:1.25;font-weight:800;letter-spacing:.01em}
+h1 .en{display:block;font-family:var(--mono);font-weight:600;font-size:.42em;color:var(--muted);letter-spacing:.18em;margin-top:14px}
+.lede{max-width:640px;color:var(--muted);margin-top:24px;font-size:15px}
+
+/* ---- chapter headers ---- */
+.ch{display:flex;align-items:baseline;gap:20px;border-bottom:1px solid var(--line2);padding-bottom:14px;margin-bottom:34px}
+.ch .num{font-family:var(--mono);font-size:56px;font-weight:700;color:transparent;-webkit-text-stroke:1px var(--amber-dim);line-height:1}
+.ch h2{font-size:clamp(20px,2.6vw,28px);font-weight:800}
+.ch .sub{font-family:var(--mono);font-size:11px;color:var(--faint);letter-spacing:.2em;margin-left:auto;text-align:right}
+h3{font-size:17.5px;font-weight:700;margin:52px 0 14px;color:#fff;display:flex;align-items:center;gap:10px}
+h3::before{content:"";width:22px;height:2px;background:var(--amber);flex:none}
+p.g{color:var(--muted);max-width:760px;margin-bottom:14px}
+p.g b,p.g strong{color:var(--ink)}
+
+/* ---- cards ---- */
+.cards{display:grid;gap:14px;margin:20px 0}
+.c3{grid-template-columns:repeat(3,1fr)} .c2{grid-template-columns:repeat(2,1fr)}
+@media(max-width:760px){.c3,.c2{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 18px 16px;position:relative;overflow:hidden}
+.card::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--amber)}
+.card.cy::before{background:var(--cyan)} .card.rd::before{background:var(--red)} .card.vl::before{background:var(--violet)} .card.bl::before{background:var(--blue)}
+.card h4{font-size:14.5px;margin-bottom:8px;color:#fff}
+.card h4 .m{color:var(--amber);font-size:.9em}
+.card p{font-size:13px;color:var(--muted);line-height:1.85}
+.card p b{color:var(--ink)}
+.tag{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.12em;padding:2px 8px;border-radius:99px;border:1px solid var(--line2);color:var(--faint);margin-bottom:10px}
+.tag.a{color:var(--amber);border-color:rgba(255,180,84,.4)} .tag.c{color:var(--cyan);border-color:rgba(86,212,188,.4)} .tag.r{color:var(--red);border-color:rgba(242,112,138,.4)}
+
+/* ---- terminal / code ---- */
+.term{background:#070a0f;border:1px solid var(--line2);border-radius:10px;margin:20px 0;overflow:hidden;box-shadow:0 14px 44px rgba(0,0,0,.45)}
+.term .bar{display:flex;align-items:center;gap:7px;padding:9px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+.term .bar i{width:10px;height:10px;border-radius:50%;background:var(--line2)}
+.term .bar i:nth-child(1){background:#e8637a}.term .bar i:nth-child(2){background:#e5b567}.term .bar i:nth-child(3){background:#65bf8d}
+.term .bar span{font-family:var(--mono);font-size:11px;color:var(--faint);margin-left:8px;letter-spacing:.06em}
+.term pre{padding:18px 20px;overflow-x:auto;font-family:var(--mono);font-size:12.6px;line-height:1.95;color:#c3ceda}
+.k{color:#c792ea}.s{color:#c3e88d}.f{color:#82aaff}.cm{color:#5b6b80;font-style:italic}.n{color:#f78c6c}.pin{display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;border-radius:50%;background:var(--amber);color:#0a0d12;font-size:10.5px;font-weight:700;font-style:normal;vertical-align:1px;margin-left:8px}
+.pins{display:grid;gap:8px;margin:14px 0 0}
+.pins div{display:flex;gap:12px;font-size:13px;color:var(--muted);align-items:baseline}
+.pins .pin{flex:none;vertical-align:0}
+.pins b{color:var(--ink)}
+
+/* ---- diagram primitives ---- */
+.dia{background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--line2);border-radius:12px;padding:26px 24px;margin:20px 0;overflow-x:auto}
+.dia .cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.22em;color:var(--faint);margin-bottom:20px}
+.dia .cap b{color:var(--amber);font-weight:600}
+.node{display:inline-block;background:var(--panel2);border:1px solid var(--line2);border-radius:8px;padding:9px 14px;font-size:13px;text-align:center;line-height:1.55}
+.node small{display:block;font-size:11px;color:var(--muted);font-weight:400}
+.node.hot{border-color:rgba(255,180,84,.55);box-shadow:0 0 18px rgba(255,180,84,.10)}
+.node.ok{border-color:rgba(86,212,188,.55)} .node.bad{border-color:rgba(242,112,138,.55)}
+.node.ghost{border-style:dashed;color:var(--muted)}
+.arrow{display:flex;align-items:center;justify-content:center;color:var(--faint);font-family:var(--mono);font-size:12px;padding:4px 0}
+.vflow{display:flex;flex-direction:column;align-items:center;gap:0}
+.vflow .arrow::before{content:"│";display:block}
+.hrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:center}
+.chip{font-family:var(--mono);font-size:11px;padding:3px 10px;border-radius:6px;border:1px solid var(--line2);color:var(--muted);background:rgba(0,0,0,.25)}
+.chip.a{color:var(--amber);border-color:rgba(255,180,84,.45)}
+.chip.c{color:var(--cyan);border-color:rgba(86,212,188,.45)}
+.chip.r{color:var(--red);border-color:rgba(242,112,138,.45)}
+.chip.v{color:var(--violet);border-color:rgba(183,156,240,.45)}
+
+/* ---- versus split ---- */
+.vs{display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--line2);border-radius:12px;overflow:hidden;margin:20px 0}
+@media(max-width:760px){.vs{grid-template-columns:1fr}}
+.vs>div{padding:22px 22px 20px;background:var(--panel)}
+.vs>div+div{border-left:1px solid var(--line2)}
+@media(max-width:760px){.vs>div+div{border-left:none;border-top:1px solid var(--line2)}}
+.vs h5{font-family:var(--mono);font-size:12px;letter-spacing:.14em;margin-bottom:14px}
+.vs .l h5{color:var(--blue)} .vs .r h5{color:var(--amber)}
+.vs ul{list-style:none;font-size:13px;color:var(--muted)}
+.vs li{padding:5px 0 5px 18px;position:relative}
+.vs li::before{content:"▸";position:absolute;left:0;color:var(--faint)}
+.vs li b{color:var(--ink)}
+
+/* ---- gantt ---- */
+.gantt{margin:18px 0 6px}
+.gantt .row{display:grid;grid-template-columns:56px 1fr;align-items:center;gap:12px;margin:9px 0}
+.gantt .lbl{font-family:var(--mono);font-size:11px;color:var(--muted);text-align:right}
+.gantt .track{position:relative;height:22px;background:rgba(0,0,0,.3);border-radius:5px;border:1px solid var(--line)}
+.gantt .b{position:absolute;top:2px;bottom:2px;border-radius:4px;font-family:var(--mono);font-size:9.5px;display:flex;align-items:center;justify-content:center;color:#0a0d12;font-weight:700}
+.gantt .s1{background:linear-gradient(180deg,#7aa8f5,#5d8be0)}
+.gantt .s2{background:linear-gradient(180deg,#ffb454,#e09638)}
+.gantt .idle{position:absolute;top:2px;bottom:2px;border-radius:4px;background:repeating-linear-gradient(45deg,rgba(242,112,138,.25) 0 4px,transparent 4px 8px);border:1px dashed rgba(242,112,138,.4)}
+.gantt .wall{position:absolute;top:-6px;bottom:-6px;width:0;border-left:2px dashed var(--red)}
+.glegend{display:flex;gap:18px;font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:10px;flex-wrap:wrap}
+.glegend i{display:inline-block;width:12px;height:8px;border-radius:2px;margin-right:6px;vertical-align:0}
+.glegend .i1{background:#7aa8f5}.glegend .i2{background:#ffb454}.glegend .i3{background:repeating-linear-gradient(45deg,rgba(242,112,138,.5) 0 3px,transparent 3px 6px)}
+
+/* ---- big loop diagram ---- */
+.loopwrap{display:grid;grid-template-columns:46px 1fr;gap:0;margin-top:8px}
+.looprail{position:relative}
+.looprail::before{content:"";position:absolute;top:170px;bottom:60px;left:18px;width:14px;border:2px solid var(--amber-dim);border-right:none;border-radius:10px 0 0 10px}
+.looprail::after{content:"▲";position:absolute;top:158px;left:12px;color:var(--amber-dim);font-size:11px}
+.looplbl{position:absolute;top:58%;left:-6px;transform:rotate(-90deg) translateX(50%);transform-origin:left center;font-family:var(--mono);font-size:9.5px;letter-spacing:.2em;color:var(--amber-dim);white-space:nowrap}
+.pline{display:flex;flex-direction:column;gap:0}
+.ph{display:grid;grid-template-columns:118px 1fr;gap:16px;padding:13px 0;border-bottom:1px dashed var(--line);align-items:start}
+.ph:last-child{border-bottom:none}
+.ph .pn{font-family:var(--mono);font-size:11.5px;color:var(--amber);letter-spacing:.1em;padding-top:3px}
+.ph .pn small{display:block;color:var(--faint);font-size:9.5px;letter-spacing:.04em;margin-top:2px}
+.ph .pd{font-size:13px;color:var(--muted);line-height:1.8}
+.ph .pd b{color:var(--ink)}
+.ph .pd .hrow{justify-content:flex-start;margin-top:8px}
+@media(max-width:700px){.ph{grid-template-columns:1fr;gap:4px}}
+
+/* ---- outcome chips row ---- */
+.outs{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px}
+@media(max-width:760px){.outs{grid-template-columns:1fr}}
+.out{border-radius:9px;padding:13px 15px;font-size:12.5px;line-height:1.75;border:1px solid}
+.out .t{font-family:var(--mono);font-size:12px;font-weight:700;display:block;margin-bottom:4px}
+.out.ok{border-color:rgba(86,212,188,.4);background:rgba(86,212,188,.06)} .out.ok .t{color:var(--cyan)}
+.out.mid{border-color:rgba(255,180,84,.4);background:rgba(255,180,84,.06)} .out.mid .t{color:var(--amber)}
+.out.ng{border-color:rgba(242,112,138,.4);background:rgba(242,112,138,.06)} .out.ng .t{color:var(--red)}
+.out p{color:var(--muted)}
+
+/* ---- table ---- */
+table{width:100%;border-collapse:collapse;margin:18px 0;font-size:13px}
+th,td{padding:10px 13px;border:1px solid var(--line);text-align:left;vertical-align:top}
+th{background:var(--panel2);font-family:var(--mono);font-size:11px;letter-spacing:.1em;color:var(--muted);font-weight:600}
+td{color:var(--muted)} td b{color:var(--ink)}
+td .chip{font-size:10px}
+@media(max-width:760px){table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}}
+
+/* ---- callout ---- */
+.co{border:1px solid rgba(255,180,84,.35);background:rgba(255,180,84,.05);border-radius:10px;padding:16px 18px;margin:20px 0;font-size:13.5px;color:var(--muted)}
+.co b{color:var(--amber)}
+.co.c{border-color:rgba(86,212,188,.35);background:rgba(86,212,188,.05)} .co.c b{color:var(--cyan)}
+.co.r{border-color:rgba(242,112,138,.35);background:rgba(242,112,138,.05)} .co.r b{color:var(--red)}
+
+/* ---- details (D1-D7) ---- */
+details{border:1px solid var(--line);border-radius:9px;background:var(--panel);margin:8px 0;overflow:hidden}
+summary{cursor:pointer;padding:13px 16px;font-size:13.5px;color:var(--ink);list-style:none;display:flex;gap:12px;align-items:baseline;transition:.2s}
+summary::-webkit-details-marker{display:none}
+summary:hover{background:var(--panel2)}
+summary .dn{font-family:var(--mono);color:var(--amber);font-size:12px;flex:none}
+summary .dd{color:var(--muted);font-size:12px;margin-left:auto;font-family:var(--mono)}
+details[open] summary{border-bottom:1px dashed var(--line)}
+details .body{padding:14px 16px 16px;font-size:13px;color:var(--muted);line-height:1.9}
+details .body b{color:var(--ink)}
+details .body .why{color:var(--amber);font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;display:block;margin:8px 0 2px}
+
+/* ---- two-layer diagram ---- */
+.layers{display:flex;flex-direction:column;gap:14px}
+.layer{border-radius:12px;padding:20px;border:1px solid}
+.layer.bone{border-color:rgba(122,168,245,.35);background:rgba(122,168,245,.05)}
+.layer.tact{border-color:rgba(255,180,84,.35);background:rgba(255,180,84,.05)}
+.layer h5{font-family:var(--mono);font-size:11.5px;letter-spacing:.2em;margin-bottom:14px}
+.layer.bone h5{color:var(--blue)} .layer.tact h5{color:var(--amber)}
+.workerbox{border:1px dashed var(--line2);border-radius:9px;padding:12px;text-align:center;background:rgba(0,0,0,.2);font-size:12px;color:var(--muted)}
+.workerbox b{color:var(--ink);display:block;font-size:12.5px}
+.burst{margin-top:8px;display:flex;gap:4px;justify-content:center}
+.burst i{width:8px;height:8px;border-radius:2px;background:var(--amber);opacity:.85;animation:blink 2.4s infinite}
+.burst i:nth-child(2){animation-delay:.3s}.burst i:nth-child(3){animation-delay:.6s}.burst i:nth-child(4){animation-delay:.9s}
+@keyframes blink{0%,100%{opacity:.85}50%{opacity:.25}}
+
+footer{margin-top:110px;border-top:1px solid var(--line);padding-top:26px;font-size:12px;color:var(--faint);font-family:var(--mono);line-height:2}
+footer b{color:var(--muted)}
+</style>
+</head>
+<body>
+
+<nav id="nav">
+  <div class="brand">FIELD MANUAL<b>Dynamic Workflow</b></div>
+  <a href="#tldr"><span class="n">00</span>TL;DR</a>
+  <a href="#basic"><span class="n">01</span>基本知識</a>
+  <a href="#adv"><span class="n">02</span>応用知識</a>
+  <a href="#scribe"><span class="n">03</span>scribe での仕組み</a>
+  <a href="#demo"><span class="n">04</span>この頁の作られ方</a>
+  <div class="foot">host: ipatho-server-2<br>src: 一次情報 verified<br>2026-07-03</div>
+</nav>
+
+<main><div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero rev">
+  <div class="kicker">CLAUDE CODE / WORKFLOW TOOL / SCRIBE</div>
+  <h1>Dynamic Workflow 完全図解
+    <span class="en">DETERMINISTIC MULTI-AGENT ORCHESTRATION — AND HOW SCRIBE USES IT</span>
+  </h1>
+  <p class="lede">「コードが指揮し、LLM の群れが働き、呼び出し元が値で監査する」— 基本のメカニズムから、scribe が2本の凍結骨格で回している実運用まで、一次情報（骨格コード・docs・scripts）に基づいて図解する。</p>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<section id="tldr" class="rev">
+  <div class="ch"><div class="num">00</div><h2>TL;DR — 3行でいうと</h2><div class="sub">SUMMARY</div></div>
+  <div class="cards c3">
+    <div class="card bl">
+      <div class="tag">WHAT</div>
+      <h4>コードが制御する多エージェント</h4>
+      <p>dynamic workflow = <b>JavaScript スクリプトで多数のサブエージェントを決定論的に指揮する仕組み</b>。ループや分岐は LLM の気分でなく <code>for</code>/<code>while</code> が決める。コードは繰り返しを忘れない。</p>
+    </div>
+    <div class="card">
+      <div class="tag a">WHY</div>
+      <h4>速度でなく網羅性・確信度を買う</h4>
+      <p>並列化の本質は時短ではない。<b>互いに盲目な独立エージェントの多視点</b>で「もっともらしいが間違い」を潰し、1コンテキストに収まらない量を制覇する。そのための定型パターン集がある。</p>
+    </div>
+    <div class="card cy">
+      <div class="tag c">SCRIBE</div>
+      <h4>背骨にせず、道具に限定</h4>
+      <p>scribe は dynamic workflow を<b>組織図（背骨）にしない</b>。worker はあくまで完全な対話セッションで、WF はタスク内の <b>bounded な戦術 fan-out 専用</b>。凍結骨格2本＋args 注入で再利用する。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 01 BASIC ================= -->
+<section id="basic" class="rev">
+  <div class="ch"><div class="num">01</div><h2>基本知識 — 何が「dynamic」なのか</h2><div class="sub">FUNDAMENTALS</div></div>
+
+  <h3>1.1 制御フローを誰が握るか — Agent tool との対比</h3>
+  <p class="g">Claude Code でサブエージェント（＝親とは別のコンテキストで動く子エージェント）を使う道は2つ。違いは<strong>「次に何をするか」を誰が決めるか</strong>に尽きる。</p>
+  <div class="vs">
+    <div class="l">
+      <h5>AGENT TOOL — LLM 駆動</h5>
+      <div class="vflow">
+        <span class="node">親 LLM<small>その都度、判断して spawn</small></span>
+        <span class="arrow"></span>
+        <span class="node ghost">subagent ×1</span>
+      </div>
+      <ul style="margin-top:16px">
+        <li>単発の調査・独立作業 1 個に向く</li>
+        <li>「10回繰り返して」は<b>途中で忘れうる</b></li>
+        <li>fan-out の形が実行のたびに揺れる</li>
+      </ul>
+    </div>
+    <div class="r">
+      <h5>WORKFLOW TOOL — コード駆動（dynamic workflow）</h5>
+      <div class="vflow">
+        <span class="node hot">script<small>for / while / if / schema 検証</small></span>
+        <span class="arrow"></span>
+        <span class="hrow">
+          <span class="node ghost">agent</span><span class="node ghost">agent</span><span class="node ghost">agent</span><span class="node ghost">…×N</span>
+        </span>
+      </div>
+      <ul style="margin-top:16px">
+        <li>ループ・条件分岐・大規模 fan-out に向く</li>
+        <li><b>決定論的</b>＝同じ入力なら同じ流れ。コードは忘れない</li>
+        <li>途中失敗からの <b>resume</b>（キャッシュ再開）が可能</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>1.2 スクリプトの解剖 — 5つの道具で全部読める</h3>
+  <div class="term">
+    <div class="bar"><i></i><i></i><i></i><span>find-bugs.workflow.js — 最小の骨格</span></div>
+    <pre><span class="k">export const</span> <span class="f">meta</span> = {                      <span class="cm">// 必ず先頭・純リテラル（変数や計算式は書けない）</span><i class="pin">1</i>
+  name: <span class="s">'find-bugs'</span>,
+  description: <span class="s">'バグを探して検証する'</span>,
+  phases: [{ title: <span class="s">'Find'</span> }, { title: <span class="s">'Verify'</span> }],
+}
+<span class="f">phase</span>(<span class="s">'Find'</span>)                                  <span class="cm">// 進捗表示のグループ開始</span><i class="pin">2</i>
+<span class="k">const</span> found = <span class="k">await</span> <span class="f">agent</span>(<span class="s">'この diff のバグを探せ'</span>, {
+  schema: BUGS_SCHEMA,                          <span class="cm">// 返り値の型を JSON Schema で強制</span><i class="pin">3</i>
+  model: <span class="s">'opus'</span>, label: <span class="s">'find:bugs'</span>,
+})
+<span class="f">log</span>(<span class="s">`${found.bugs.length} 件検出`</span>)             <span class="cm">// ユーザーに見える進捗 1 行</span><i class="pin">4</i>
+<span class="k">const</span> verdicts = <span class="k">await</span> <span class="f">parallel</span>(found.bugs.map(b =&gt; () =&gt;
+  <span class="f">agent</span>(<span class="s">`反証せよ: ${b.title}`</span>, { schema: VERDICT, phase: <span class="s">'Verify'</span> })))<i class="pin">5</i>
+<span class="k">return</span> { confirmed: verdicts.filter(Boolean).filter(v =&gt; !v.refuted) }</pre>
+  </div>
+  <div class="pins">
+    <div><span class="pin">1</span><span><b><code>meta</code></b> — 名前・説明・フェーズ一覧。純リテラル制約（run ごとに変えられない）。これが後述の「run 識別問題」の伏線になる。</span></div>
+    <div><span class="pin">2</span><span><b><code>phase()</code></b> / <b><code>log()</code></b> — 進捗の可視化。phase タイトルは meta と完全一致でグループ化される。</span></div>
+    <div><span class="pin">3</span><span><b><code>agent(prompt, opts)</code></b> — サブエージェント1体。<b><code>schema</code></b>（＝返り値の型定義）を渡すと<b>検証済みオブジェクトが返る</b>（型不一致は自動リトライ）。「子の返事を親がパースする」壊れやすさが消える、実務上いちばん重要な機能。</span></div>
+    <div><span class="pin">4</span><span><b><code>args</code></b>（この例には無いが）— 呼び出し時に外から渡す入力。<b>骨格の再利用の鍵</b>（§2.4）。</span></div>
+    <div><span class="pin">5</span><span><b><code>parallel()</code></b> / <b><code>pipeline()</code></b> — 並列実行の2形態。使い分けが次項。</span></div>
+  </div>
+
+  <h3>1.3 pipeline vs barrier — 待ち合わせの規律</h3>
+  <p class="g"><code>parallel()</code> は<strong>全員終わるまで待つ</strong>（この待ち合わせ点を <strong>barrier</strong> と呼ぶ）。<code>pipeline()</code> は barrier を張らず、<strong>各アイテムが自分のペースで次の段へ進む</strong>。多段処理の既定は pipeline。</p>
+  <div class="dia">
+    <div class="cap"><b>BARRIER 型</b>（parallel を2回）— 速い子が最遅の子を待たされる</div>
+    <div class="gantt">
+      <div class="row"><div class="lbl">item A</div><div class="track"><span class="b s1" style="left:0;width:42.8%">stage1</span><span class="idle" style="left:43.5%;width:27%"></span><span class="b s2" style="left:71.4%;width:28.6%">stage2</span></div></div>
+      <div class="row"><div class="lbl">item B</div><div class="track"><span class="b s1" style="left:0;width:71.4%">stage1（最遅）</span><span class="b s2" style="left:71.4%;width:28.6%">stage2</span></div></div>
+      <div class="row"><div class="lbl">item C</div><div class="track"><span class="b s1" style="left:0;width:28.6%">stage1</span><span class="idle" style="left:29.3%;width:41.4%"></span><span class="b s2" style="left:71.4%;width:28.6%">stage2</span><span class="wall" style="left:71.4%"></span></div></div>
+    </div>
+    <div class="cap" style="margin:26px 0 20px"><b>PIPELINE 型</b>（既定）— 各自、終わり次第すぐ次の段へ。A は 5、C は 4 の時点で完了</div>
+    <div class="gantt">
+      <div class="row"><div class="lbl">item A</div><div class="track"><span class="b s1" style="left:0;width:42.8%">stage1</span><span class="b s2" style="left:42.8%;width:28.6%">stage2</span></div></div>
+      <div class="row"><div class="lbl">item B</div><div class="track"><span class="b s1" style="left:0;width:71.4%">stage1</span><span class="b s2" style="left:71.4%;width:28.6%">stage2</span></div></div>
+      <div class="row"><div class="lbl">item C</div><div class="track"><span class="b s1" style="left:0;width:28.6%">stage1</span><span class="b s2" style="left:28.6%;width:28.6%">stage2</span></div></div>
+    </div>
+    <div class="glegend"><span><i class="i1"></i>stage1（例: review）</span><span><i class="i2"></i>stage2（例: verify）</span><span><i class="i3"></i>barrier 待ちの無駄</span></div>
+  </div>
+  <div class="co">barrier が正当化されるのは<b>全結果を一度に必要とするときだけ</b> — 重複排除・0件なら後段スキップ・相互参照。「概念的に段が分かれているから」は理由にならない（それは pipeline が表現するもの）。</div>
+
+  <h3>1.4 実行環境の重要な制約</h3>
+  <div class="cards c3">
+    <div class="card bl"><h4><span class="m">同時実行 cap</span></h4><p>同時に走るのは <b>min(16, CPUコア−2)</b> 体まで。100体渡しても超過分は待ち行列に入って全部完走する。生涯上限は1000体（暴走防止の天井）。</p></div>
+    <div class="card vl"><h4><span class="m">Date.now() 禁止</span></h4><p><code>Date.now()</code> / <code>Math.random()</code> は使えない。理由は <b>resume</b>: 中断後に同じスクリプトで再起動すると<b>変更のない agent() はキャッシュから即返る</b>。実行のたびに値が変わる関数は再現を壊す。</p></div>
+    <div class="card cy"><h4><span class="m">バックグラウンド実行</span></h4><p>ワークフローは裏で走り、完了すると親に通知が届く。親はその間、別の作業を続けられる（このページの元ネタ収集もそうやって走った）。</p></div>
+  </div>
+</section>
+
+<!-- ================= 02 ADVANCED ================= -->
+<section id="adv" class="rev">
+  <div class="ch"><div class="num">02</div><h2>応用知識 — 何を買うために fan-out するか</h2><div class="sub">QUALITY PATTERNS</div></div>
+
+  <h3>2.1 発想の転換</h3>
+  <p class="g">fan-out（＝並列展開）の価値は時短だけではない。<strong>買っているのは次の3つ</strong>。</p>
+  <div class="cards c3">
+    <div class="card"><h4>網羅性</h4><p>1つのコンテキストに入りきらない量を、分割して<b>全部</b>読む・全部触る。</p></div>
+    <div class="card cy"><h4>確信度</h4><p><b>互いの結果を知らない独立エージェント</b>に別角度から検証させ、1体の「もっともらしいが間違い」を潰す。</p></div>
+    <div class="card vl"><h4>スケール</h4><p>移行・監査・全数スイープ — 1コンテキストでは持ちきれない作業量に挑む。</p></div>
+  </div>
+
+  <h3>2.2 品質パターン・カタログ（7つの語彙）</h3>
+  <p class="g">出典: scribe <code>docs/methodology.md</code> §2。各パターンは「どの軸に効くか」のタグ付き。</p>
+  <div class="cards c2">
+    <div class="card rd">
+      <div class="tag r">不確実性に効く</div>
+      <h4>adversarial verify（敵対的検証）</h4>
+      <p>finding（指摘）1件ごとに独立した懐疑役を立て「<b>反証せよ。迷ったら却下</b>」と命じ、多数決で殺す。誤検出（plausible-but-wrong）を本線に通さない。</p>
+      <div class="hrow" style="justify-content:flex-start;margin-top:10px"><span class="chip">finding</span><span style="color:var(--faint)">→</span><span class="chip r">skeptic×3</span><span style="color:var(--faint)">→</span><span class="chip c">生存/棄却</span></div>
+    </div>
+    <div class="card rd">
+      <div class="tag r">不確実性に効く</div>
+      <h4>perspective-diverse verify（多視点検証）</h4>
+      <p>検証役 N 体を同一の複製でなく<b>別レンズ</b>（正しさ／セキュリティ／再現性／性能）にする。冗長より多様のほうが広い壊れ方を拾う。</p>
+      <div class="hrow" style="justify-content:flex-start;margin-top:10px"><span class="chip a">correctness</span><span class="chip c">security</span><span class="chip v">repro</span><span class="chip">perf</span></div>
+    </div>
+    <div class="card">
+      <div class="tag a">規模（広い解空間）に効く</div>
+      <h4>judge panel（審査員団）</h4>
+      <p>設計案を別角度（MVP優先／リスク優先／ユーザー優先）で N 本<b>独立生成</b>→並列採点→勝者に次点の長所を移植。一発生成の反復より広い解空間を当てる。</p>
+    </div>
+    <div class="card rd">
+      <div class="tag r">不確実性（未知サイズの発見）に効く</div>
+      <h4>loop-until-dry（枯れるまで回す）</h4>
+      <p>バグ等<b>個数が読めない発見</b>は「K 回連続で新規ゼロ」まで finder を回す。<code>count &lt; N</code> 型は尻尾を取りこぼす。重複排除は「確定リスト」でなく「<b>見たことある集合（seen）</b>」に対して行う — でないと却下済みが毎回再来して永遠に収束しない。</p>
+    </div>
+    <div class="card">
+      <div class="tag a">規模（探索の広さ）に効く</div>
+      <h4>multi-modal sweep（多角スイープ）</h4>
+      <p>1つの検索角度で拾えないものを、<b>互いに盲目な複数角度</b>（内容別・実体別・時系列別…）で並列に掃く。</p>
+    </div>
+    <div class="card cy">
+      <div class="tag c">リスク（見落とし）に効く</div>
+      <h4>completeness critic（完全性批評家）</h4>
+      <p>最終段に「<b>何が欠けているか</b> — 走らせていない角度・未検証の主張・未読のソース」だけを問う批評役を置く。出たものが次ラウンドの仕事になる。</p>
+    </div>
+    <div class="card cy" style="grid-column:1/-1">
+      <div class="tag c">リスク（誠実性）に効く</div>
+      <h4>no silent caps（黙った切り捨て禁止）</h4>
+      <p>top-N・リトライなし・サンプリングで網羅を切ったら、必ず <code>log()</code> で<b>何を落としたか</b>を明示する。黙った切り捨ては「全部見た」と誤読される。</p>
+    </div>
+  </div>
+
+  <h3>2.3 強度キャリブレーション — 全部入り≠最善</h3>
+  <p class="g">fan-out の本数・検証の票数・ループ回数は<strong>すべて実トークンとレート枠を消費する</strong>。強度は3軸で見積もり、効く軸にだけ盛る（methodology.md §1）。</p>
+  <div class="dia">
+    <div class="cap"><b>3軸</b> → 上げるべきレバー</div>
+    <div class="vflow" style="gap:10px">
+      <div class="hrow" style="width:100%;justify-content:space-between;flex-wrap:nowrap"><span class="node" style="flex:1">規模<small>触る面積・読む量</small></span><span class="arrow" style="padding:0 14px">──▶</span><span class="node hot" style="flex:1">fan-out の幅<small>finder 数 / item 数 / 角度の数</small></span></div>
+      <div class="hrow" style="width:100%;justify-content:space-between;flex-wrap:nowrap"><span class="node" style="flex:1">不確実性<small>解の未知さ・誤検出の出やすさ</small></span><span class="arrow" style="padding:0 14px">──▶</span><span class="node hot" style="flex:1">検証の深さ<small>1票 → 3〜5票 反証多数決 / loop 回数</small></span></div>
+      <div class="hrow" style="width:100%;justify-content:space-between;flex-wrap:nowrap"><span class="node" style="flex:1">リスク<small>不可逆性・外部公開・波及範囲</small></span><span class="arrow" style="padding:0 14px">──▶</span><span class="node hot" style="flex:1">gate の厳しさ<small>read-only 監査 / 人間確認の閾値</small></span></div>
+    </div>
+  </div>
+  <div class="co r"><b>コスト実測（verified）:</b> 2026-06-10 のパイロットでは gate review 2回で 5時間レート枠を <b>53%→80%</b> まで消費（fable 投入起因の特殊コスト。これが後述「WF から fable 全廃」の根拠になった数値）。強度選び＝レート予算の配分そのもの。「ユーザーが要求した強度」が上限で、opt-in なしに勝手に盛らない。</div>
+
+  <h3>2.4 骨格の凍結と再利用 — args という差し込み口</h3>
+  <p class="g">よくできたスクリプトは<strong>資産</strong>。汎用の骨格を <code>~/.claude/workflows/*.workflow.js</code> に凍結し、案件ごとの固有物は <code>args</code> で注入する。<strong>同じ骨格を二度書かない</strong>。</p>
+  <div class="dia">
+    <div class="cap"><b>骨格 × args</b> — 不変ロジックと固有データの分離</div>
+    <div class="hrow" style="gap:20px">
+      <span class="node hot">凍結骨格<small>フェーズ順序・ループ・安全装置<br>= git 管理・全 project 共有</small></span>
+      <span style="font-family:var(--mono);color:var(--faint)">◀── args ──</span>
+      <span class="node">固有データ<small>worktree / テストコマンド /<br>観点 / 対象パス</small></span>
+    </div>
+  </div>
+  <div class="cards c2">
+    <div class="card"><h4><span class="m">運用則①: まず ls</span></h4><p>新規に組む前に <code>ls ~/.claude/workflows/</code>。カタログは<b>コンテキストに自動注入されない</b>ため、これを踏まないと既存骨格に気づかず再発明する。</p></div>
+    <div class="card"><h4><span class="m">運用則②: 起動直後に log で run 識別</span></h4><p><code>meta.name</code> は純リテラル制約で run ごとに変えられない → 同名 WF を並走させると進捗ビューで区別不能。<b>最初の1行で <code>log('[タスク名] …')</code></b> を出すのが唯一の識別手段。</p></div>
+  </div>
+</section>
+
+<!-- ================= 03 SCRIBE ================= -->
+<section id="scribe" class="rev">
+  <div class="ch"><div class="num">03</div><h2>scribe での仕組み — 背骨にせず、道具にする</h2><div class="sub">SCRIBE INTERNALS</div></div>
+
+  <h3>3.1 大前提: 2層モデル（最重要の設計判断）</h3>
+  <p class="g">scribe は dynamic workflow を<strong>オーケストレーションの背骨にしない</strong>（scribe-design.md §12・§18.0）。理由: workflow の子エージェントは<strong>親のターンと共に死に、フラットで、途中入力ができない</strong>。持続・並列・相互通信する worker 艦隊の土台にならない。</p>
+  <div class="layers">
+    <div class="layer bone">
+      <h5>背骨層 — 確定済み・設計余地なし（組織図）</h5>
+      <div class="hrow" style="gap:14px;align-items:stretch">
+        <span class="node" style="border-color:rgba(122,168,245,.5)">admin<small>anchor セッション<br>graph 所有・gate・唯一の dolt push</small></span>
+        <span class="arrow">── spawn ──▶</span>
+        <div class="workerbox"><b>worker ×N</b>完全な対話 CC セッション<br>1 issue = 1 worktree = 1 window<br><b style="color:var(--blue)">worker 自身が実装する</b>
+          <div class="burst" title="タスク内の戦術 fan-out"><i></i><i></i><i></i><i></i></div>
+          <div style="font-size:10px;color:var(--amber);font-family:var(--mono);margin-top:4px">↑ ここ（タスク内）でだけ WF を使う</div>
+        </div>
+        <span class="node" style="border-color:rgba(122,168,245,.5)">beads (bd)<small>タスク台帳・依存 DAG<br>= 調整の SSOT</small></span>
+      </div>
+      <p style="font-size:12px;color:var(--muted);margin-top:12px">オーケストレーションの SSOT = folio spec + admin プロトコル + hook ゲート + beads。<b style="color:var(--ink)">workflow スクリプトではない。</b></p>
+    </div>
+    <div class="layer tact">
+      <h5>戦術層 — 設計余地あり・D1-D7 で確定（電動工具）</h5>
+      <p style="font-size:13px;color:var(--muted)">worker や admin が<b style="color:var(--ink)">タスク内の bounded な fan-out</b>（品質レビュー・調査スイープ・pre-bake 分析）に限って dynamic workflow を使う。凍結骨格は2本だけ:</p>
+      <div class="hrow" style="justify-content:flex-start;margin-top:12px;gap:12px">
+        <span class="node hot">cell-quality.workflow.js<small>実装セルの品質保証（958行）→ §3.2</small></span>
+        <span class="node hot">needs-user-prebake.workflow.js<small>人間判断の下ごしらえ（312行）→ §3.4</small></span>
+      </div>
+    </div>
+  </div>
+
+  <h3>3.2 凍結骨格①: cell-quality — 実装セルの品質保証ループ</h3>
+  <p class="g">「1 issue = 1 実装セル」の品質を担保する戦術層の主役。§2 のパターンがほぼ全部入り。<strong>WF 自身は合否を確定せず、構造化 JSON を返すだけ</strong>（薄 gate 設計・後述）。</p>
+  <div class="dia">
+    <div class="cap"><b>CELL-QUALITY PIPELINE</b> — loop-until-dry で収束するまで回る</div>
+    <div class="loopwrap">
+      <div class="looprail"><span class="looplbl">LOOP-UNTIL-DRY</span></div>
+      <div class="pline">
+        <div class="ph"><div class="pn">CLASSIFY<small>opus</small></div><div class="pd">タスク種別を判定（testable / executable / docs / config / monitoring / notes）。種別ごとに<b>検証戦略</b>が変わる（テスト系は TDD red→green、実行系は dry-run・実機実証…）。軽量種別（monitoring/notes）はループ1周のみ。</div></div>
+        <div class="ph"><div class="pn">[PLAN]<br>[IMPLEMENT]<small>任意・opus</small></div><div class="pd">受入基準の精緻化と worktree での実装。<b>どちらも既定 off</b> — worker は自分で実装するから、通常は品質ループだけを借りる。</div></div>
+        <div class="ph"><div class="pn">REVIEW<small>perspective-diverse</small></div><div class="pd">観点別の専任レビュアーを<b>並列</b>起動。既定4観点（＝D3 の「監査の床」）:
+          <div class="hrow"><span class="chip a">correctness</span><span class="chip r">robustness-security</span><span class="chip v">integration-ops</span><span class="chip c">completeness-critic</span></div>
+        </div></div>
+        <div class="ph"><div class="pn">VERIFY<small>adversarial refute</small></div><div class="pd">指摘1件ごとに<b>独立の検証者</b>。プロンプトで反証バイアス:「<b>立証責任は指摘側。少しでも不確かなら refuted=true</b>」。生き残った critical/major だけ（confirmed blocking）がループを駆動し、minor/nit は記録のみ。<br><span style="font-size:11.5px;color:var(--faint)">※ 観点間は pipeline（correctness の review が終わり次第その verify が走る）、観点内の複数指摘は parallel — §1.3 の規律の実例。</span></div></div>
+        <div class="ph"><div class="pn">FIX<small>gated autoFix</small></div><div class="pd">自動修正は三条件下でのみコミット: <b>confirmed の指摘のみ</b> ＋ <b>selfTestCmd（自己テスト）指定済み</b> ＋ <b>テスト PASS</b>。fail-closed（＝失敗・不備のときは安全側＝停止に倒す）で、テスト失敗なら即 escalate。<b>silent ship（黙って出荷）を構造的に禁止</b>。</div></div>
+      </div>
+    </div>
+    <div class="outs">
+      <div class="out ok"><span class="t">CONVERGED（収束）</span><p>critical/major が <b style="color:var(--ink)">2ラウンド連続ゼロ</b>（zeroStreak≥2）で初めて収束。レビューは非決定的なので1回のクリーンを信用しない。</p></div>
+      <div class="out mid"><span class="t">OPEN（続行）</span><p>blocking が残り autoFix 不可なら、呼び出し元が修正して再起動する番。</p></div>
+      <div class="out ng"><span class="t">ESCALATE（人間へ）</span><p>ループ上限到達・self-test 失敗・機構故障（review/snapshot の失敗はクリーン扱いしない）→ 人間判断に差し戻し。</p></div>
+    </div>
+  </div>
+
+  <p class="g" style="margin-top:28px">骨格本体には<strong>ラッパーから上書きできない不変条件</strong>が多重防御としてハードコードされている（D4「安全の核は内」）:</p>
+  <div class="cards c2">
+    <div class="card rd"><h4><span class="m">demoteFable</span> — fable の機械的降格</h4><p>review/verify のモデルが fable に解決されたら<b>問答無用で opus へ降格</b>。fable は実コスト 2×Opus 超 → dynamic WF への投入は全廃（2026-06-10 改訂）というルールをコードで強制。<code>FABLE_MAX_CONCURRENCY=2</code> は降格漏れ時の最終防壁。</p></div>
+    <div class="card"><h4><span class="m">makeLimiter / opusLimiter</span> — セマフォ</h4><p>セマフォ（＝同時実行数を絞る待ち行列）。<code>args.maxConcurrency</code> で opus 並列度を案件ごとに絞れる（D2: レート予算は案件ごとに違うから args 化）。</p></div>
+    <div class="card cy"><h4><span class="m">receivedArgs</span> エコー</h4><p>「どんな args が届いたか（キー一覧＋型）」を<b>全 return 経路で返す</b>。args がシリアライズ事故で全既定値実行に落ちると<b>偽クリーン</b>になる — 呼び出し元が机上でなく値で監査できるようにする。</p></div>
+    <div class="card cy"><h4>defensive parse / fail-fast</h4><p>args の JSON 解釈失敗・必須 args 欠落時は<b>エージェントを1体も起動せず</b> escalate で即 return。静かな暴走を根治。autoFix も既定 off（共有 fail-safe）。</p></div>
+  </div>
+
+  <h3>3.3 呼び出しの2系統 — 同じ骨格・非対称な責務</h3>
+  <p class="g">同じ cell-quality 骨格が、<strong>立場の違う2者から異なる固定値で</strong>呼ばれる。args を組み立てるのは薄いシェルラッパー。</p>
+  <table>
+    <tr><th style="width:24%"></th><th>① worker 自己点検</th><th>② admin gate（一次監査）</th></tr>
+    <tr><td><b>ラッパー</b></td><td><code>scribe-selftest-args.sh</code></td><td><code>scribe-gate-args.sh</code></td></tr>
+    <tr><td><b>autoFix</b></td><td><span class="chip a">true 固定</span>（selfTestCmd 必須）</td><td><span class="chip c">false 固定</span>（完全 read-only）</td></tr>
+    <tr><td><b>doPlan / doImplement</b></td><td>false 固定</td><td>false 固定</td></tr>
+    <tr><td><b>dimensions（観点）</b></td><td>必須4観点＋<b>追加・focus 調整可</b></td><td><b>必須4観点で固定</b></td></tr>
+    <tr><td><b>並列 cap</b></td><td>既定 4</td><td>指定せず harness 既定</td></tr>
+    <tr><td><b>位置づけ</b></td><td>実装後の自浄（protocol §2）</td><td>merge 前の関門（protocol §5）</td></tr>
+  </table>
+  <div class="co"><b>なぜ非対称か（D3 の why）:</b> 監査の床は admin が固定する（観点が worker 任せで揺れてはいけない）。検出力の上積みは、タスクを一番知る worker が focus を寄せ・レンズを足して調整する。<b>床は固定・上積みは現場</b>。なお3スクリプトとも <code>--model</code> に fable を渡すと拒否する。</div>
+  <div class="dia">
+    <div class="cap"><b>薄 GATE 設計</b> — WF は verdict を返すだけ。合否を確定するのは呼び出し元</div>
+    <div class="hrow" style="gap:16px">
+      <span class="node hot">cell-quality WF<small>findings + verdicts + history<br>+ receivedArgs を構造化 JSON で返す</small></span>
+      <span class="arrow">──▶</span>
+      <span class="node ok">admin が直読・一次監査<small>refuted 判定すら鵜呑みにせず逆監査<br>merge と不可逆操作の人間確認のみ担う<br><b style="color:var(--cyan)">再レビューはしない</b></small></span>
+    </div>
+  </div>
+
+  <h3>3.4 凍結骨格②: needs-user-prebake — 人間判断の下ごしらえ</h3>
+  <p class="g">人間の判断が要るタスク（needs-user）について、admin が議論の材料を先に焼いておく（pre-bake）。<strong>生成と対話を別主体に分離</strong>したことが設計の核。</p>
+  <div class="dia">
+    <div class="cap"><b>PREBAKE → GRILL</b> — 生成（WF）と対話（grill-consult）の主体分離</div>
+    <div class="vflow" style="gap:2px">
+      <div class="hrow"><span class="node">admin<small>相互独立な決定軸（facet）≥2 を切り出す<br>※ 1 facet ならインラインで足り fan-out 不要</small></span></div>
+      <span class="arrow"></span>
+      <div class="hrow" style="gap:8px">
+        <span class="node" style="border-color:rgba(183,156,240,.5)">facet agent<small>read-only</small></span>
+        <span class="node" style="border-color:rgba(183,156,240,.5)">facet agent<small>read-only</small></span>
+        <span class="node" style="border-color:rgba(183,156,240,.5)">facet agent<small>read-only</small></span>
+      </div>
+      <div style="font-size:11.5px;color:var(--muted);text-align:center;max-width:560px;margin:6px 0">各自「現状調査（事実と推測を明示区別）→ 決定木 → 選択肢＋トレードオフ → 起票候補」を構造化 brief で返す。read-only は<b style="color:var(--ink)">プロンプト任せにせず <code>agentType:'Explore'</code>（書込ツールを持たない型）で構造強制</b>、<code>model:'opus'</code> で弱モデル退化を上書き。</div>
+      <span class="arrow"></span>
+      <div class="hrow"><span class="node hot">synthesize（opus ×1）<small>全 facet を単一 brief に統合。<b>裁定はしない</b><br>冒頭に「これは WF の提案であって決定ではない」ヘッダを schema で強制</small></span></div>
+      <span class="arrow"></span>
+      <div class="hrow"><span class="node">admin が brief をファイル化<small><code>scribe-spawn --consult --context &lt;brief&gt; &lt;grill-issue&gt;</code></small></span></div>
+      <span class="arrow"></span>
+      <div class="hrow"><span class="node ok">grill-consult ⇄ ユーザー<small>対話 grill で決定を確定 → bd notes へ handoff</small></span></div>
+    </div>
+  </div>
+  <div class="co r"><b>F2 の構造解消:</b> かつて「相談役が自分の作った pre-bake をユーザー入力と誤認する」事故（F2）があった。生成＝WF／対話＝grill-consult と<b>主体を分けたことで、自己誤帰属する主体そのものが消えた</b>。仕組みで直す、の好例。</div>
+
+  <h3>3.5 配線 — 配布ではなく直接参照</h3>
+  <div class="dia">
+    <div class="cap"><b>WIRING</b> — symlink（＝別パスから同じ実体を指す参照）による単一実体</div>
+    <div class="hrow" style="gap:16px">
+      <span class="node">~/.claude/workflows/<small>グローバル参照点</small></span>
+      <span class="arrow">── symlink ──▶</span>
+      <span class="node hot">scribe リポ workflows/<small>単一実体・git 履歴管理</small></span>
+    </div>
+    <p style="font-size:12.5px;color:var(--muted);text-align:center;margin-top:14px">配布・同期スクリプトは存在しない — リポで骨格を編集すれば即グローバル反映。<br>コピーによるドリフト（＝複製が古びてズレる現象）が構造的に起きない（verified）。</p>
+  </div>
+
+  <h3>3.6 D1–D7 — 戦術層の設計判断（決定と why）</h3>
+  <p class="g">2026-06-15 の grill で確定（scribe-design.md §18）。クリックで why を展開。</p>
+  <details><summary><span class="dn">D1</span>戦術層の背骨 = ハイブリッド<span class="dd">骨格 + args</span></summary><div class="body"><b>決定:</b> 不変骨格（cell-quality.workflow.js）＋ worker が args を供給。<span class="why">WHY</span>骨格を毎回書き下ろすと収束硬化や read-only 不変条件が自由記述に溶けて再現性を失う。全部を骨格に焼くと固有物のたび分岐が増える。<b>不変な品質構造は骨格・固有物は args</b> が再現性と柔軟性を両取りする。</div></details>
+  <details><summary><span class="dn">D2</span>opus 並列 cap = args 化<span class="dd">maxConcurrency</span></summary><div class="body"><b>決定:</b> <code>A.maxConcurrency</code> で opus 経路の同時実行を絞れるようにする。<span class="why">WHY</span>レート予算は案件ごとに違うから、ハードコードでなく args。既存の <code>makeLimiter</code> セマフォに opus 経路を通すだけ＝新規機構ゼロ。</div></details>
+  <details><summary><span class="dn">D3</span>dimensions 権限 = 枠分業<span class="dd">床は admin / 上積みは worker</span></summary><div class="body"><b>決定:</b> admin gate は必須4観点固定、worker 自己点検は 4必須＋focus 調整＋追加観点可。<span class="why">WHY</span>gate は一次監査の最低保証ゆえ観点が揺れてはいけない。worker はタスクを一番知る主体ゆえ調整できるほうが検出力が上がる。完全固定も完全自由も両端却下。</div></details>
+  <details><summary><span class="dn">D4</span>固定/可変の境界 = 両方<span class="dd">安全の核は内・固有合成は外</span></summary><div class="body"><b>決定:</b> 絶対不変（read-only 強制・収束硬化・demoteFable）は WF 本体にハードコード、固有合成は外部ラッパー（gate-args 型）。<span class="why">WHY</span>一次監査の安全条件は<b>ラッパーから上書きされては困る</b>ので骨格内に固定（fail-safe を外部化しない）。固有合成を外に出せば骨格を触らずに済む。改竄耐性と再利用性の分離。</div></details>
+  <details><summary><span class="dn">D5</span>汎用/固有の写像<span class="dd">ロジックは汎用・固有はデータだけ</span></summary><div class="body"><b>決定:</b> 骨格＋汎用ラッパー＝scribe（全 project 共有）、固有「データ」（selfTestCmd・追加観点・probe）＝project 側。<span class="why">WHY</span>固有データをロジックへ混ぜると project ごとに WF が fork して保守が割れる。データを外から注げば汎用ロジック1本で全 project を回せる。</div></details>
+  <details><summary><span class="dn">D6</span>per-project WF ファイル = 不要<span class="dd">YAGNI</span></summary><div class="body"><b>決定:</b> 汎用1本＋args/ラッパーで吸収。骨格の形（phase 順序・ループ構造）自体が違う要件が現れたら、その時に作る留保。<span class="why">WHY</span>per-project ファイルは骨格の重複＝ドリフト源。まだ現れていないものは作らない。</div></details>
+  <details><summary><span class="dn">D7</span>compaction 対応 = 参照保持<span class="dd">carrier を増やさない</span></summary><div class="body"><b>決定:</b> run 固有の WF 呼び出し（scriptPath + args）は Working Memory に参照として残すだけ。骨格は git、恒久設定は CLAUDE.md という既存 carrier に乗せる。<span class="why">WHY</span>run 固有の呼び出しは「その run 限りの一時状態」なので Working Memory が正しい置き場。新しい保存先を作ると責務境界が壊れる。</div></details>
+</section>
+
+<!-- ================= 04 DEMO ================= -->
+<section id="demo" class="rev">
+  <div class="ch"><div class="num">04</div><h2>この頁の作られ方 — それ自体が実演</h2><div class="sub">SELF-DEMO</div></div>
+  <p class="g">この解説の scribe パートは、まさに §2 でいう「understand 型」dynamic workflow で収集した。<strong>5体の並列リーダー</strong>が一次情報を構造化 schema で読解して返し、親（メインセッション）が統合している。</p>
+  <div class="dia">
+    <div class="cap"><b>understand-scribe-dynamic-wf</b> — 実際に走った run（2026-07-03）</div>
+    <div class="hrow" style="gap:10px">
+      <span class="node ok">骨格 cell-quality<small>opus / 51k tok</small></span>
+      <span class="node ok">骨格 prebake<small>opus / 31k tok</small></span>
+      <span class="node ok">protocol.md<small>sonnet / 63k tok</small></span>
+      <span class="node bad">scribe-design.md<small>opus / <b style="color:var(--red)">失敗</b>（構造化出力の再試行上限）</small></span>
+      <span class="node ok">scripts 配線<small>sonnet / 93k tok</small></span>
+    </div>
+    <p style="font-size:12.5px;color:var(--muted);text-align:center;margin-top:16px">モデル割当はモデル階層ルール通り（読み掃き＝sonnet／分析＝opus、fable は WF に入れない）。<br>1体の失敗は <code>parallel()</code> の失敗正規化（null 化）で他の4体に波及せず、欠けた §12・§18 は親が直接読んで補完 —<br>「<b style="color:var(--ink)">失敗した子が全体を壊さない</b>」「<b style="color:var(--ink)">欠落を黙殺せず報告する（no silent caps）</b>」がそのまま働いた。</p>
+  </div>
+  <footer>
+    <b>一次出典（すべて読解済み・verified）:</b><br>
+    ~/.claude/workflows/cell-quality.workflow.js（958行・凍結骨格） / needs-user-prebake.workflow.js（312行）<br>
+    scribe: docs/methodology.md（方法論 SSOT） / docs/protocol.md §2・§5・§7 / docs/scribe-design.md §12・§18<br>
+    scripts/scribe-gate-args.sh / scribe-selftest-args.sh / scribe-spawn.sh / bdw ・ Workflow tool 仕様（機械的フックの SSOT）<br><br>
+    generated 2026-07-03 · served via tailnet · ipatho-server-2
+  </footer>
+</section>
+
+</div></main>
+
+<script>
+// reveal on scroll
+const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}}),{threshold:.06});
+document.querySelectorAll('.rev').forEach(el=>io.observe(el));
+// nav active state
+const links=[...document.querySelectorAll('nav a')];
+const secs=links.map(a=>document.querySelector(a.getAttribute('href')));
+const spy=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){const i=secs.indexOf(e.target);if(i>=0){links.forEach(l=>l.classList.remove('on'));links[i].classList.add('on')}}})},{rootMargin:'-30% 0px -60% 0px'});
+secs.forEach(s=>s&&spy.observe(s));
+</script>
+</body>
+</html>
