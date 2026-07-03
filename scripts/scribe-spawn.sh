@@ -519,7 +519,7 @@ if [[ "$SANDBOX_ON" == "1" ]]; then
     else
       scribe_die "sandbox deps 欠如で worker を sandbox 化できません（default-on・sc-u53）: ${_preflight_reason}
   対処のいずれか:
-    (1) deps を入れる（bubblewrap / socat / userns 緩和。手順は scripts/sandbox-spike/README.md）。
+    (1) deps を入れる（bubblewrap / socat / userns 緩和。手順は $SCRIPT_DIR/sandbox-spike/README.md）。
     (2) この host で非 sandbox 実行を意図するなら SCRIBE_SANDBOX=0 を明示する（1 回限りの opt-out）。
     (3) この host で恒久的に『deps 欠如時は警告付き非 sandbox』にするなら SCRIBE_SANDBOX_FALLBACK=1 を置く。"
     fi
