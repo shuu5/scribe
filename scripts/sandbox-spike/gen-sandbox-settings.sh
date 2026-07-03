@@ -5,7 +5,9 @@
 # scribe worker(cwd=worktree) の Bash subprocess を OS レベルで封じ、書込みを次へ限定する:
 #   - cwd(worktree) + 配下           … sandbox 既定で writable(列挙不要)
 #   - linked worktree の共有 .git     … sandbox 既定で writable(hooks/ と config は拒否のまま)
-#   - <ANCHOR>/.beads                … 明示(bd/bdw の台帳書込み = B/hybrid。worktree subtree 外ゆえ絶対パス必須)
+#   - <ANCHOR>/.beads の runtime サブパスのみ … 明示(bd/bdw の台帳書込み = B/hybrid。worktree subtree 外ゆえ絶対パス
+#       必須)。**丸ごとでなく** governance denylist(PRIME.md/metadata.json/config.yaml/README.md/.gitignore)を除いた
+#       present 直下エントリ(embeddeddolt/ 等 dolt runtime)だけを grant し tracked 統治ファイルを read-only に守る(OG-1・sc-nd6。下記本体参照)
 #   - bdw のロック dir(BDW_LOCK_DIR:-$HOME/.cache/bdw-locks) … 明示(bdw の flock 鍵 bd-write-<repo>.lock の置き場・bdw と同式・sc-xs2)
 # 上記以外への **Bash subprocess の**書込みは sandbox 外壁(層2)が拒否する。ただし bwrap が封じるのは
 # Bash 経路のみ＝built-in の Edit/Write/NotebookEdit は permission 層(bypassPermissions で素通し)で動き
@@ -64,16 +66,46 @@ uid="$(id -u)"
 lock_dir="$("$_GEN_DIR/../bdw" lock-dir)"
 beads_dir="$anchor/.beads"
 
-jq -n \
-  --arg beads "$beads_dir" \
-  --arg lockdir "$lock_dir" \
-  '{
+# --- OG-1(sc-nd6): .beads を丸ごとでなく runtime サブパスだけ grant（tracked 統治ファイルを read-only に守る）---
+# 旧: allowWrite=[<anchor>/.beads, <lock_dir>] は .beads 直下の **tracked 統治ファイル**（PRIME.md=policy SSOT /
+#   metadata.json=台帳 identity / config.yaml / README.md / .gitignore）まで worker の Bash に書込み可能にして
+#   いた（B/hybrid 境界が OS 層で無強制・bd write に不要な規約まで改竄可能・security-audit OG-1 high）。
+# 新: governance denylist を除いた .beads 直下エントリ（= dolt/bd の runtime データ）だけを grant する。統治
+#   ファイルは read-only になり worker の Bash から改変も削除もできない（削除は親 dir write が要るが .beads dir
+#   自体は grant しないため）。runtime write-set は実測で確定（mtime 差分・doobidoo）: bd create/close は
+#   embeddeddolt/**（dolt DB）+ interactions.jsonl + last-touched（+ issues.jsonl / export-state.json）のみを
+#   書き、governance には触れない（governance を a-w 化しても create/close は exit0=検証済）。dir（embeddeddolt/
+#   backup/）は再帰 grant ゆえ dolt 内部のファイル増減に強い。present な直下のみ列挙＝全 grant は実在パス
+#   （bwrap は bind 前に path 存在を要求しうるため bind-safe）。established anchor（spawn の常態）では runtime
+#   エントリは既在。session 中の新規 top-level エントリ生成は稀で、起きれば fail-loud（worker が気付く）。
+# 残存（OG-1 の到達限界）: embeddeddolt を dir grant する以上 worker は dolt DB を raw 書換でき、他 issue 改竄は
+#   OS 層では防げない（tool 層の bd-write-guard=PreToolUse + bdw-write-outside-sandbox 案が別レイヤ・脅威モデル
+#   の正直な文書化は sc-451）。lock_dir のファイル単位 grant（OG-4）は cross-plugin 依存ゆえ別 issue。
+_beads_governance=( PRIME.md metadata.json config.yaml README.md .gitignore )
+_beads_grants=()
+shopt -s nullglob dotglob
+for _e in "$beads_dir"/*; do
+  _n="${_e##*/}"
+  _skip=0
+  for _g in "${_beads_governance[@]}"; do [[ "$_n" == "$_g" ]] && { _skip=1; break; }; done
+  [[ "$_skip" -eq 0 ]] && _beads_grants+=( "$_e" )
+done
+shopt -u nullglob dotglob
+# fail-closed: grant 可能な runtime エントリが皆無（.beads が空/不在/統治ファイルのみ）＝worker の bd write が
+# 全滅する異常 anchor。黙って空 allowWrite を出さず止める（established anchor では必ず embeddeddolt 等が在る）。
+if [[ "${#_beads_grants[@]}" -eq 0 ]]; then
+  echo "gen-sandbox: .beads に grant 可能な runtime エントリがありません（anchor 異常? 空 .beads?）: $beads_dir" >&2
+  exit 2
+fi
+
+# allowWrite = [<.beads runtime サブパス...>, <lock_dir>]。--args で positional 配列化（空白/メタ文字パス安全・verified）。
+jq -n --args '{
     sandbox: {
       enabled: true,
       failIfUnavailable: true,
       allowUnsandboxedCommands: false,
       filesystem: {
-        allowWrite: [ $beads, $lockdir ]
+        allowWrite: $ARGS.positional
       }
     }
-  }'
+  }' "${_beads_grants[@]}" "$lock_dir"

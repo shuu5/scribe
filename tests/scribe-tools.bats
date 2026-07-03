@@ -174,11 +174,48 @@ _mk_main_and_linked() {
 }
 
 # ---------- spawn: sandbox opt-in（SCRIBE_SANDBOX=1・sc-1gu）----------
-@test "spawn(sandbox): gen-sandbox-settings.sh は failIfUnavailable + .beads先頭 allowWrite の valid JSON を出す" {
+# realistic .beads fixture（sc-nd6）: tracked 統治ファイル + dolt/bd runtime を両方置く。gen は governance を
+# 除いた present 直下エントリだけを grant するため、両種を置いて「runtime は grant・統治は除外」を検証できる。
+# 旧 gen は .beads の存在を見ず path 文字列を無条件 grant していたが、新 gen は実在 runtime を列挙するため
+# gen を叩くテストは realistic .beads を要する（＝より正しいテスト化）。
+_mk_beads() {
+  local d="$1/.beads"
+  mkdir -p "$d/embeddeddolt/x/.dolt/noms" "$d/backup"
+  : > "$d/PRIME.md"; : > "$d/metadata.json"; : > "$d/config.yaml"; : > "$d/README.md"; : > "$d/.gitignore"
+  : > "$d/issues.jsonl"; : > "$d/interactions.jsonl"; : > "$d/last-touched"; : > "$d/.local_version"
+}
+
+@test "spawn(sandbox): gen-sandbox-settings.sh は failIfUnavailable + .beads runtime サブパス allowWrite の valid JSON を出す（sc-nd6: 統治ファイルを除外）" {
+  _mk_beads "$SCRIBE_TEST_CWD"
   run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$SCRIBE_TEST_CWD"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.sandbox.enabled==true and .sandbox.failIfUnavailable==true and .sandbox.allowUnsandboxedCommands==false' >/dev/null
-  echo "$output" | jq -e '(.sandbox.filesystem.allowWrite|length)==2 and (.sandbox.filesystem.allowWrite[0]|endswith("/.beads"))' >/dev/null
+  # sc-nd6: allowWrite は .beads を丸ごとでなく runtime サブパス + lock_dir。embeddeddolt は grant・wholesale .beads は非 grant。
+  local b="$SCRIBE_TEST_CWD/.beads"
+  echo "$output" | jq -e --arg b "$b" '.sandbox.filesystem.allowWrite | (index($b+"/embeddeddolt")!=null) and (index($b)==null)' >/dev/null
+}
+
+@test "gen-sandbox(sc-nd6・OG-1): tracked 統治ファイル(PRIME.md/metadata.json/config.yaml/README.md/.gitignore)は allowWrite に入らない＝worker Bash から read-only" {
+  _mk_beads "$SCRIBE_TEST_CWD"
+  run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$SCRIBE_TEST_CWD" "$SCRIBE_TEST_CWD"
+  [ "$status" -eq 0 ]
+  local b="$SCRIBE_TEST_CWD/.beads"
+  # 統治ファイル5種がどれも allowWrite に無い（差集合=5＝全除外）＝OG-1 の核心 assertion。
+  echo "$output" | jq -e --arg b "$b" '([$b+"/PRIME.md",$b+"/metadata.json",$b+"/config.yaml",$b+"/README.md",$b+"/.gitignore"] - .sandbox.filesystem.allowWrite | length)==5' >/dev/null
+  # runtime(embeddeddolt)は grant＝worker の bd write は機能する（過剰狭化でない）。
+  echo "$output" | jq -e --arg b "$b" '.sandbox.filesystem.allowWrite | index($b+"/embeddeddolt")!=null' >/dev/null
+  # wholesale .beads を grant しない（旧 over-grant の回帰ガード）。
+  echo "$output" | jq -e --arg b "$b" '.sandbox.filesystem.allowWrite | index($b)==null' >/dev/null
+}
+
+@test "gen-sandbox(sc-nd6): 空/統治のみの .beads は fail-closed（exit 2・空 allowWrite を黙って出さない）" {
+  local A; A="$(cd "$(mktemp -d)" && pwd -P)"
+  git -C "$A" -c init.defaultBranch=main init -q; git -C "$A" config user.email t@e; git -C "$A" config user.name t; git -C "$A" commit -q --allow-empty -m init
+  mkdir -p "$A/.beads"; : > "$A/.beads/PRIME.md"; : > "$A/.beads/metadata.json"   # 統治のみ・runtime 無し
+  run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$A" "$A"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"grant 可能な runtime エントリがありません"* ]]
+  rm -rf "$A"
 }
 
 @test "spawn(sandbox/sc-lkg): cross-repo で gen は明示 anchor(第2引数)の .beads を grant する（逆算は repo 側を誤 grant＝negative control）" {
@@ -189,20 +226,22 @@ _mk_main_and_linked() {
   git -C "$repoX" -c init.defaultBranch=main init -q
   git -C "$repoX" config user.email t@e; git -C "$repoX" config user.name t
   git -C "$repoX" commit -q --allow-empty -m init
+  _mk_beads "$repoX"                                # 逆算で誤 grant される側にも realistic .beads（sc-nd6）
   anchorY="$(cd "$(mktemp -d)" && pwd -P)"          # 真の bd graph 所在（repo X とは別リポ）
-  mkdir -p "$anchorY/.beads"
+  _mk_beads "$anchorY"
   wt="$repoX/.worktrees/cell"
   git -C "$repoX" worktree add -q -b cell-branch "$wt" >/dev/null
 
-  # (a) negative control: anchor 未指定＝逆算 → repo X の .beads を誤 grant（sc-lkg バグの再現＝修正の counterfactual）
+  # (a) negative control: anchor 未指定＝逆算 → repo X の .beads runtime を誤 grant（sc-lkg バグ再現＝修正の counterfactual）
   run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$wt"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e --arg x "$repoX/.beads" '.sandbox.filesystem.allowWrite[0]==$x' >/dev/null
+  echo "$output" | jq -e --arg x "$repoX/.beads" '.sandbox.filesystem.allowWrite | index($x+"/embeddeddolt")!=null' >/dev/null
 
-  # (b) fix: 真の anchor Y を第2引数で明示 → Y の .beads を grant（worker の bdw が真 graph へ書ける）
+  # (b) fix: 真の anchor Y を第2引数で明示 → Y の .beads runtime を grant・X 側は一切 grant しない（sc-nd6 で shape 更新）
   run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$wt" "$anchorY"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e --arg y "$anchorY/.beads" '.sandbox.filesystem.allowWrite[0]==$y' >/dev/null
+  echo "$output" | jq -e --arg y "$anchorY/.beads" '.sandbox.filesystem.allowWrite | index($y+"/embeddeddolt")!=null' >/dev/null
+  echo "$output" | jq -e --arg x "$repoX/.beads" '.sandbox.filesystem.allowWrite | (map(startswith($x+"/")) | any | not)' >/dev/null
 
   rm -rf "$repoX" "$anchorY"
 }
@@ -999,15 +1038,16 @@ _make_noop_cld_spawn() {
   repo="$SCRIBE_TEST_CWD"   # setup() の temp git repo（init コミット済み）
   noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
   wt="$repo/.worktrees/spawn/un-4nm-101010"
+  _mk_beads "$repo"   # sc-nd6: gen が runtime サブパスを列挙するため anchor に realistic .beads が要る
   # sc-u53: default-on の dep-preflight を passing stub(noop=exit0)で stub し host 非依存にする
   #（materialization 経路の検証が host の bwrap/socat/userns 有無に依存しないように）。
   run env SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_PREFLIGHT="$noop" BDW_LOCK_DIR="$BATS_TEST_TMPDIR/rt" SCRIBE_HHMMSS=101010 \
       "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
   rm -f "$noop"
   [ "$status" -eq 0 ]
-  # 物理生成された settings.local.json は valid JSON で sandbox contract（failIfUnavailable + .beads 先頭）を持つ。
+  # 物理生成された settings.local.json は valid JSON で sandbox contract（failIfUnavailable + .beads runtime サブパス・sc-nd6）を持つ。
   [ -f "$wt/.claude/settings.local.json" ]
-  run jq -e '.sandbox.enabled == true and .sandbox.failIfUnavailable == true and (.sandbox.filesystem.allowWrite[0] | endswith("/.beads"))' "$wt/.claude/settings.local.json"
+  run jq -e --arg b "$repo/.beads" '.sandbox.enabled == true and .sandbox.failIfUnavailable == true and (.sandbox.filesystem.allowWrite | index($b+"/embeddeddolt")!=null) and (.sandbox.filesystem.allowWrite | index($b)==null)' "$wt/.claude/settings.local.json"
   [ "$status" -eq 0 ]
   # atomic mv 後に temp ファイル(.settings.XXXXXX)が残っていない（mv→cp 退化を捕捉）。
   run bash -c "ls \"$wt/.claude/\".settings.* 2>/dev/null | wc -l | tr -d ' '"
@@ -1017,7 +1057,8 @@ _make_noop_cld_spawn() {
   [ "$status" -eq 0 ]
   # sc-xs2: runtime grant は専用 lock dir(= BDW_LOCK_DIR をそのまま・subdir 付与なし)へ最小化されている。
   # 既定なら $HOME/.cache/bdw-locks。ここでは BDW_LOCK_DIR=$BATS_TEST_TMPDIR/rt を直に grant する。
-  run jq -e --arg ld "$BATS_TEST_TMPDIR/rt" '.sandbox.filesystem.allowWrite[1] == $ld' "$wt/.claude/settings.local.json"
+  # sc-nd6: allowWrite は複数 .beads runtime + lock_dir になり lock_dir の index が固定でないため index() で検査。
+  run jq -e --arg ld "$BATS_TEST_TMPDIR/rt" '.sandbox.filesystem.allowWrite | index($ld) != null' "$wt/.claude/settings.local.json"
   [ "$status" -eq 0 ]
   # sc-da0: bwrap の bind-before-exist 対策で spawn が lock dir を事前生成する（grant 済 path が実在）。
   [ -d "$BATS_TEST_TMPDIR/rt" ]
@@ -1035,6 +1076,7 @@ _make_noop_cld_spawn() {
   git -C "$anchorY" -c init.defaultBranch=main init -q
   git -C "$anchorY" config user.email t@e; git -C "$anchorY" config user.name t
   git -C "$anchorY" commit -q --allow-empty -m init
+  _mk_beads "$anchorY"   # sc-nd6: gen が runtime サブパスを列挙するため真 anchor に realistic .beads が要る
   noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
   wt="$repoX/.worktrees/spawn/un-4nm-101010"
   # 実 gen を走らせる（gen は stub しない）。preflight/cld-spawn のみ noop・bdw は present stub で host 非依存。
@@ -1044,10 +1086,10 @@ _make_noop_cld_spawn() {
   rm -f "$noop"
   [ "$status" -eq 0 ]
   [ -f "$wt/.claude/settings.local.json" ]
-  # 核心 assert: 真の anchorY/.beads を grant（repoX/.beads を誤 grant しない＝forwarding が効いている）。
-  run jq -e --arg y "$anchorY/.beads" '.sandbox.filesystem.allowWrite[0] == $y' "$wt/.claude/settings.local.json"
+  # 核心 assert: 真の anchorY/.beads runtime を grant（repoX/.beads を一切 grant しない＝forwarding が効いている・sc-nd6 で shape 更新）。
+  run jq -e --arg y "$anchorY/.beads" '.sandbox.filesystem.allowWrite | index($y+"/embeddeddolt")!=null' "$wt/.claude/settings.local.json"
   [ "$status" -eq 0 ]
-  run jq -e --arg x "$repoX/.beads" '.sandbox.filesystem.allowWrite[0] != $x' "$wt/.claude/settings.local.json"
+  run jq -e --arg x "$repoX/.beads" '.sandbox.filesystem.allowWrite | (map(startswith($x+"/")) | any | not)' "$wt/.claude/settings.local.json"
   [ "$status" -eq 0 ]
   git -C "$repoX" worktree remove --force "$wt" 2>/dev/null || true
   rm -rf "$anchorY"
