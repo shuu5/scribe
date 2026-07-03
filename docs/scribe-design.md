@@ -190,6 +190,7 @@ A↔B 差分（ここだけ）:
 
 - **再確認粒度 = 正規内容ハッシュ基準**: 規範内容（REQ 本文・受入条件）が変わった時のみ降格、cosmetic/非規範編集は確定維持。
 - **脅威モデル**: A = 自分の agent のうっかり過信（solo の現実的脅威）/ B = 意図的偽装（hardware-touch 署名のみが壁）。方針 = 最終的に B 対応・まず A 運用・B の設計も今やる。
+- **worker OS sandbox の境界（sc-451・正直な明示）**: worker の bwrap sandbox は **Bash write 境界**であって完全隔離ではない（read は host 全体・network egress は非封鎖・built-in Edit/Write は tool 層 guard〔sc-649〕が別レイヤで縛る）。**admin/consult は非 sandbox のまま worker 生成物を ingest する非対称**があり、これは上記脅威モデルで言えば A（うっかり）運用の信頼前提＝B（意図的偽装・敵対 worker）への壁ではない。gate funnel の ground-truth verify（protocol §5）が現行の運用補償で、B 対応は provenance 署名 lane（本節上部）の領分。守る/守らないの全体像 SSOT = `scripts/sandbox-spike/README.md`「脅威モデル」節。
 
 ---
 

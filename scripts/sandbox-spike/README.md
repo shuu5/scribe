@@ -7,6 +7,44 @@
 scribe worker を **OS レベル sandbox**(Claude Code 組込み bubblewrap)で封じ込められるか、
 かつ正当な cross-dir 作業(anchor の bd 台帳書込み)を壊さないかを、使い捨て worktree で実証する spike。
 
+## 脅威モデル — sandbox が守るもの / 守らないもの（sc-451・正直な境界）
+
+**本節が scribe sandbox の脅威モデル SSOT**（`docs/protocol.md` §1 / `docs/scribe-design.md` §6 はここへの
+ポインタ）。security-audit（TB-1 high / TB-2 medium）で確定した正直な境界: scribe docs が worker を sandbox に
+「封じる」と言うとき、その正確な意味は **worker の Bash subprocess の write を許可 path へ限定する**こと
+（だけ）である。**完全隔離ではない**。
+
+### 守るもの（実装済みの各レイヤ）
+
+| 境界 | レイヤ | 実装 |
+|---|---|---|
+| Bash subprocess の write → worktree + 許可 path のみ | OS 外壁（bwrap・層2） | `gen-sandbox-settings.sh`（allowWrite は `.beads` runtime サブパス + 専用 lock_dir へ最小化・OG-1/sc-nd6） |
+| built-in `Edit`/`Write`/`NotebookEdit`/`MultiEdit` → worktree 境界 | tool 層（PreToolUse hook） | `edit-write-guard.py`（SBX-ESC-1/sc-649。bwrap は Bash しか縛れないための別レイヤ） |
+| 縮退の可視化・fail-loud | spawn 経路 | dep-preflight（sc-u53）+ opt-out loud warn / dry-run 可視化 / 生成 settings 強制キーの実行時アテステーション（FO-1/2/4・sc-7oj） |
+
+### 守らないもの（非対象・到達限界の明示）
+
+- **read は host 全体**（TB-1 high）: CC sandbox は write 封じ込めのみで、host filesystem を広く read 可能な
+  まま走らせる。`bypassPermissions` worker は host の秘密（`~/.ssh`・`~/.cld-env`・認証 token 等）を**読める**。
+- **network egress は非封鎖**（TB-1）: egress は CC sandbox の proxy 構成任せで scribe は追加封鎖しない。
+  読めた秘密は**持ち出せる**。⇒ read+egress が非対象である以上、**敵対的 prompt（injection）を掴んだ worker
+  による秘密の読出し・持出しは sandbox では防げない**。防御は worker に与える入力（issue 本文・参照させる
+  ファイル）の信頼に依存する。
+- **admin/consult の ingest 非対称**（TB-2 medium）: admin/consult は**非 sandbox + `bypassPermissions`** の
+  まま worker 生成物（bd notes・commit・diff・self-report）を取り込む＝**最も封じ込めの弱い principal が最も
+  敵対的になりうる入力を処理する**。現状は信頼前提の運用（脅威モデル A=うっかり対応・`docs/scribe-design.md`
+  §6。B=意図的偽装への壁は provenance 署名 lane・v1+）。gate funnel（protocol §5）の「worker の報告を信じず
+  ground truth を verify する」規律が、この非対称に対する現行の運用上の補償である。
+- **dolt DB の raw 書換**（OG-1 到達限界・sc-nd6）: `embeddeddolt/` を dir で grant する以上、worker は dolt DB
+  を raw 書換でき**他 issue の改竄は OS 層では防げない**（tool 層の bd-write-guard が別レイヤの補償）。
+- **lock_dir は共有 dir grant**（OG-4・sc-mcx open）: `$HOME/.cache/bdw-locks` を dir で grant するため、他リポの
+  flock 鍵にも書ける（DoS 級。鍵ファイルは中身を読まれないため改竄影響は限定）。ファイル単位への狭化は
+  canonical bdw の repo_id 導出に依存する cross-plugin 変更＝sc-mcx。
+- **CC が settings を honor すること自体**（FO-2 残存・sc-7oj）: spawn 時の実行時アテステーションは「我々が
+  置いたファイルの強制キー」までしか検証できない。CC 本体の version/precedence drift による fail-open は
+  spawn 時に検証不能＝opt-in e2e lane（`SCRIBE_SANDBOX_E2E=1`・sc-7n1・下記「sandbox 内の実操作 e2e」節の
+  block-side control）が実 CC で外壁の実効を検証する唯一の手段。
+
 ## 前提(ホスト)
 
 CC 組込み sandbox は次の3つを要求する(spike で実測):

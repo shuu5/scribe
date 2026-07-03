@@ -479,6 +479,27 @@ _mk_beads() {
   [[ "$output" == *"本番"* ]]
 }
 
+# ---------- 脅威モデルの正直な文書化（sc-451: TB-1 read+egress 非対象 / TB-2 admin ingest 非対称）----------
+@test "sandbox(sc-451): 脅威モデル SSOT（sandbox README）が『守る/守らない』を正直に持ち、protocol/design がポインタで整合する" {
+  # security-audit TB-1/TB-2: docs が『封じる』と言うとき read/egress が非対象である旨・admin ingest 非対称が
+  # 不明確だった。SSOT（sandbox README「脅威モデル」節）の存在と核心文言、protocol.md / scribe-design.md の
+  # ポインタ整合を pin する。mutation（節削除・over-claim への巻き戻し・ポインタ喪失）で RED 化する。
+  local readme="$SCRIPTS/sandbox-spike/README.md" proto="$REPO_ROOT/docs/protocol.md" design="$REPO_ROOT/docs/scribe-design.md"
+  # SSOT: 節見出し + TB-1（read host 全体・egress 非封鎖）+ TB-2（ingest 非対称）+ 完全隔離でない旨。
+  grep -q "^## 脅威モデル" "$readme"
+  grep -q "read は host 全体" "$readme"
+  grep -q "network egress は非封鎖" "$readme"
+  grep -q "ingest 非対称" "$readme"
+  grep -q "完全隔離ではない" "$readme"
+  # protocol.md: 正直な境界 bullet + SSOT ポインタ（本文の重複でなく要約 + 参照）。
+  grep -q "完全隔離ではない" "$proto"
+  grep -q "read は host 全体" "$proto"
+  grep -q 'sandbox-spike/README.md.*脅威モデル' "$proto"
+  # scribe-design.md: §6 脅威モデル（A/B）へ sandbox 境界が接続され SSOT を指す。
+  grep -q "Bash write 境界" "$design"
+  grep -q 'sandbox-spike/README.md.*脅威モデル' "$design"
+}
+
 # ---------- spawn: consult モード ----------
 @test "spawn: consult モードで SCRIBE_ROLE=consult が env-file に焼き込まれる" {
   run "$SPAWN" --dry-run --consult un-consult
