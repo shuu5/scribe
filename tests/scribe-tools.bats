@@ -536,6 +536,63 @@ _mk_main_and_linked() {
   [[ "$output" == *"--model claude-fable-5"* ]]
 }
 
+# ---------- spawn: consult 既定 model = fable（sc-9q6・利用不可時 opus fallback） ----------
+@test "spawn: consult 既定 model は fable（--model 未指定・dry-run は preflight しない・sc-9q6）" {
+  run "$SPAWN" --dry-run --consult un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--model claude-fable-5"* ]]
+  # dry-run は API を叩かず、本起動時 preflight の予告行だけ出す（副作用ゼロ維持）。
+  [[ "$output" == *"preflight"* ]]
+}
+
+@test "spawn: consult --model 明示は fable 既定より優先される（sc-9q6）" {
+  run "$SPAWN" --dry-run --consult --model opus un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--model opus"* ]]
+  [[ "$output" != *"--model claude-fable-5"* ]]
+  # 明示時は preflight 予告も出ない（既定解決の経路に入らない）。
+  [[ "$output" != *"preflight"* ]]
+}
+
+@test "spawn: consult 実起動で fable preflight 失敗 → opus へ loud fallback（SCRIBE_FABLE_PREFLIGHT=0 注入・sc-9q6）" {
+  noop="$BATS_TEST_TMPDIR/noop-cld-spawn"
+  printf '#!/bin/bash\necho "cld-spawn-args: $*"\n' > "$noop"; chmod +x "$noop"
+  run env SCRIBE_CLD_SPAWN="$noop" SCRIBE_FABLE_PREFLIGHT=0 "$SPAWN" --consult un-consult
+  [ "$status" -eq 0 ]
+  # spawn 行と結果行の両方が opus（fallback 済み）になり、WARN が loud に出る（silent 降格禁止）。
+  [[ "$output" == *"--model opus"* ]]
+  [[ "$output" == *"model=opus"* ]]
+  [[ "$output" == *"WARN"* ]]
+  [[ "$output" != *"claude-fable-5"* ]]
+}
+
+@test "spawn: consult 実起動で fable preflight 成功 → fable のまま起動（SCRIBE_FABLE_PREFLIGHT=1 注入・sc-9q6）" {
+  noop="$BATS_TEST_TMPDIR/noop-cld-spawn"
+  printf '#!/bin/bash\necho "cld-spawn-args: $*"\n' > "$noop"; chmod +x "$noop"
+  run env SCRIBE_CLD_SPAWN="$noop" SCRIBE_FABLE_PREFLIGHT=1 "$SPAWN" --consult un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--model claude-fable-5"* ]]
+  [[ "$output" == *"model=claude-fable-5"* ]]
+  [[ "$output" != *"WARN"* ]]
+}
+
+@test "spawn: consult --model 明示時は preflight を実行しない（SCRIBE_FABLE_PREFLIGHT=0 でも fallback しない・sc-9q6）" {
+  # 明示 --model claude-fable-5 はユーザーの確定指定＝preflight 対象外（fallback で上書きしない）。
+  noop="$BATS_TEST_TMPDIR/noop-cld-spawn"
+  printf '#!/bin/bash\necho "cld-spawn-args: $*"\n' > "$noop"; chmod +x "$noop"
+  run env SCRIBE_CLD_SPAWN="$noop" SCRIBE_FABLE_PREFLIGHT=0 "$SPAWN" --consult --model claude-fable-5 un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--model claude-fable-5"* ]]
+  [[ "$output" != *"WARN"* ]]
+}
+
+@test "spawn: worker の既定 model は opus のまま（consult の fable 既定が worker へ漏れない・sc-9q6）" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--model opus"* ]]
+  [[ "$output" != *"claude-fable-5"* ]]
+}
+
 @test "spawn: prompt テンプレに cell-quality WF / receivedArgs / bdw / 禁止が含まれる" {
   run "$SPAWN" --dry-run un-4nm
   [ "$status" -eq 0 ]
