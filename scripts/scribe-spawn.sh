@@ -400,8 +400,13 @@ WORKTREE="$REPO/.worktrees/$BRANCH"             # <repo>/.worktrees/spawn/<id>-H
 # build_prompt（--also-tmp / scribe-add 規律）・emit_plan・実 materialization が全てこの 1 変数を読む（DRY＝
 # 4 箇所のインライン判定が drift しない）。dep-preflight（下記・実 spawn 経路）が deps 欠如時に SANDBOX_ON を
 # 0 へ降格しうる（fallback）ため、build_prompt はその降格後の値を見る（呼出は materialization より後）。
+# SANDBOX_OPTOUT（sc-7oj/FO-1）は「明示 opt-out で off になった」ことだけを記録する別変数（fallback 降格と区別）。
+# 明示 opt-out は env 継承で sticky 化し無警告で fleet 全体を非 sandbox 化しうる（silent degrade の本命）ため、
+# emit_plan（dry-run 可視化・FO-4）と実経路（stderr loud warn・FO-1）の両方でこのフラグを見て縮退を surface する。
+# fallback 降格（deps 欠如＋FALLBACK=1）は別途その場で警告済みゆえ二重警告しないよう opt-out だけを立てる。
 SANDBOX_ON=1
-[[ "${SCRIBE_SANDBOX:-}" == "0" ]] && SANDBOX_ON=0
+SANDBOX_OPTOUT=0
+[[ "${SCRIBE_SANDBOX:-}" == "0" ]] && { SANDBOX_ON=0; SANDBOX_OPTOUT=1; }
 
 # --- 3. task prompt 生成（protocol.md §2）---
 build_prompt() {
@@ -467,6 +472,11 @@ emit_plan() {
   echo "[plan] scribe-spawn: issue=$ID（実在検証 OK）"
   echo "[plan] git -C $REPO worktree add -b $BRANCH $WORKTREE $BASE"
   [[ "$SANDBOX_ON" == "1" ]] && echo "[plan] sandbox: $WORKTREE/.claude/settings.local.json を生成（SCRIBE_SANDBOX 既定 on・opt-out は SCRIBE_SANDBOX=0。bwrap 外壁。CLD_PATH/launcher は不変＝spawn 行 byte 同一）。実 spawn 時に dep-preflight（deps 欠如→SCRIBE_SANDBOX_FALLBACK=1 で警告付き非 sandbox / 無ければ fail-loud・sc-u53）"
+  # FO-4(sc-7oj): 縮退経路（明示 opt-out）を dry-run でも可視化する。旧 emit_plan は opt-out 時に sandbox 行を
+  # 一切出さず「無防備で走る」ことが --dry-run 監査で不可視だった（監査ギャップ）。opt-out は env 継承で sticky
+  # 化する点まで明示する。sandbox 設定は生成しない旨は書くが literal 'settings.local.json' は出さない（opt-out で
+  # sandbox 節を出さない不変条件を pin する既存テストを壊さないため・そちらは別行で on 経路のみ照合している）。
+  [[ "$SANDBOX_OPTOUT" == "1" ]] && echo "[plan] sandbox: OPT-OUT（SCRIBE_SANDBOX=0）→ この worker は OS sandbox の**外**で走ります（sandbox 設定を生成せず旧 byte 経路・Bash subprocess の書込みが worktree 外へ到達しうる）。⚠ SCRIBE_SANDBOX=0 は env 継承で sticky 化し、意図せず以降の全 spawn を無防備化しうる（1 回限りの opt-out でなければ環境から unset すること）。"
   echo "[plan] scribe_capture_origin $REPO $WORKTREE   # canonical origin を per-worktree marker へ捕捉（un-1n1・gate §5 verify 用）"
   echo "[plan] worker env-file（/tmp・全 worker 無条件・worktree add より前に mktemp・spawn 後 rm。edit-write-guard の activation+境界 signal・sc-649）:"
   echo "         WORKER_ENV_FILE=\$(mktemp /tmp/scribe-worker-XXXXXX.env)"
@@ -489,6 +499,16 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 # ===== 実行（real）=====
+
+# --- FO-1(sc-7oj): 明示 opt-out を loud に警告する（silent fleet degrade の本命）---
+# SCRIBE_SANDBOX=0 は env 継承で sticky 化しうる（1 回の opt-out を export したまま同一 shell から spawn を
+# 繰り返すと、以降の全 worker が無警告で非 sandbox 化される）。旧コードはこの経路を一切警告せず、settings も
+# 生成しないため実 spawn でも --dry-run でも「無防備で走る」ことが不可視だった（security-audit FO-1 high→medium）。
+# ここで stderr に loud warn を出し、意図しない sticky opt-out を運用者が即座に気付けるようにする。fallback 降格
+# （deps 欠如＋FALLBACK=1）は下の dep-preflight ブロックが別途警告するため、ここは明示 opt-out だけを対象にする。
+if [[ "$SANDBOX_OPTOUT" == "1" ]]; then
+  echo "scribe: ⚠ sandbox OPT-OUT: SCRIBE_SANDBOX=0 が設定されています → この worker（issue $ID）は OS sandbox の**外**で走ります（Bash subprocess の書込みが worktree 外へ到達しうる）。1 回限りの opt-out でなければ環境から SCRIBE_SANDBOX を unset してください（env 継承で sticky 化し、以降の全 spawn が無警告で無防備になります）。" >&2
+fi
 
 # --- canonical bdw 無条件 preflight（sc-ovq・sandbox-off zombie worker 防止）---
 # bdw（scripts/bdw shim→canonical beads-bdw plugin）は **sandbox の有無に依らず worker が必ず使う**一般依存
@@ -603,6 +623,23 @@ if [[ "$SANDBOX_ON" == "1" ]]; then
       echo "         $SCRIPT_DIR/scribe-cleanup.sh --repo \"$REPO\" --worktree \"$WORKTREE\" --branch \"$BRANCH\" --window \"$WINDOW\" $ID"
     } >&2
     exit 1
+  fi
+  # --- FO-2(sc-7oj): 生成した settings が実際に sandbox を強制するキーを持つか実行時アテステーション ---
+  # gen が（SCRIBE_SANDBOX_GEN stub 差替え / 手編集 drift で）valid JSON だが強制キーを欠く settings を吐いても、
+  # materialize して worker を「sandbox 済み」と信じたまま起動すれば silent fail-open になる（安全性が CC の
+  # settings honor 任せである以上、少なくとも我々が置いたファイルの enforcing 不変条件は launch 前に自分で確かめる）。
+  # enabled=true / failIfUnavailable=true / allowUnsandboxedCommands=false を assert し、破れたら fail-loud で
+  # 停止する（黙って非 sandbox worker を起動しない）。CC 本体が settings を honor するか自体（version/precedence
+  # drift）はここでは検証不能＝実 e2e verify(sc-7n1) と脅威モデルの正直な文書化(sc-451)の領分。jq はこの経路へ
+  # 到達する時点で必ず在る（gen が jq 依存で先に die）が、防御的に存在を確認してから使う。
+  if command -v jq >/dev/null 2>&1; then
+    if ! jq -e '.sandbox.enabled == true and .sandbox.failIfUnavailable == true and .sandbox.allowUnsandboxedCommands == false' \
+         "$WORKTREE/.claude/settings.local.json" >/dev/null 2>&1; then
+      scribe_die "sandbox 実行時アテステーション失敗: 生成した settings.local.json が sandbox 強制キー（enabled=true / failIfUnavailable=true / allowUnsandboxedCommands=false）を満たしません（gen 破損 / stub drift?）。黙って非 sandbox worker を起動しないため停止します。
+  worktree が orphan として残っています（自動削除はしません＝force 禁止・確認必須ポリシー）: $WORKTREE
+  掃除するには: $SCRIPT_DIR/scribe-cleanup.sh --repo \"$REPO\" --worktree \"$WORKTREE\" --branch \"$BRANCH\" --window \"$WINDOW\" $ID
+  settings: $WORKTREE/.claude/settings.local.json"
+    fi
   fi
   # 生成した settings.local.json を ephemeral に保つ（worker の stage に巻き込まない・sc-1gu）。info/exclude は
   # 共有 common-dir へ冪等追記する（scribe-lib の単一実装＝本番と test で drift しない）。CC sandbox が cwd の
