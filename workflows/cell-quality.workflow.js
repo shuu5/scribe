@@ -9,6 +9,7 @@ export const meta = {
   phases: [
     { title: 'Classify', detail: 'task-type を判定し verify 戦略を選ぶ(testable/executable/docs/config/monitoring/notes)', model: 'opus' },
     { title: 'Plan', detail: '[任意] goal から受入基準を導出/精緻化', model: 'opus' },
+    { title: 'Self-test', detail: 'selfTestCmd を worktree で実行し baseline(実装前)/final(終了時)の生ログ+pass/fail を返り値へ載せる(mechanical run=sonnet・selfTestCmd 未定義なら graceful skip)', model: 'sonnet' },
     { title: 'Implement', detail: '[任意] worktree で実装', model: 'opus' },
     { title: 'Review', detail: 'perspective-diverse な並列 Opus review(correctness/robustness-security/integration-ops/completeness-critic)', model: 'opus' },
     { title: 'Verify', detail: '各 finding を独立 Opus が adversarial に refute-verify(過剰提案を排除)', model: 'opus' },
@@ -63,6 +64,17 @@ export const meta = {
 //      Implement に「commit するな」と指示すると Fix の amend と矛盾する。よって「commit したかに依らず」セル
 //      全差分を捕捉する合成が一貫する(指示遵守に依存しない恒久修正)。escalateReason には「snapshot 空=
 //      commit 済の可能性」ヒントを含め、既知 artifact かどうかを呼出元が見分けられるようにする。
+// (10) selfTestCmd 常時実行へ昇格(sc-jx8): 従来 selfTestCmd は autoFix 経路(Fix agent 内)の fail-closed
+//      ゲートでのみ走り、WF 自体は独立実行しなかった。これを baseline(実装前=regression 起点)+ final(終了時)
+//      の 2 点で【常時】実行し、両者の生ログ + 実行有無 + pass/fail 判定を返り値 JSON(selfTestBaseline/
+//      selfTestFinal)へ載せる=gate/orchestrator が actor 報告に依存せず self-test 状態を直読できる。WF 本体は
+//      Bash 非所持ゆえ各々 cheap agent(worktree で cd し selfTestCmd を 1 回実行・生ログを返す read-only Explore
+//      + model:sonnet=mechanical run)に委譲する。設計上の不変条件(回帰なし=受入 B4):
+//        - baseline/final は【情報ログ専用】= converged/escalate 判定を一切駆動しない(既存の Fix agent 内
+//          fail-closed self-test ゲートとは別物・温存)。escalate/収束は従来ロジックのまま。
+//        - 発火条件は selfTestCmd の有無のみ。未定義 bead(admin read-only gate=scribe-gate-args.sh は
+//          selfTestCmd を渡さない)では graceful skip(fail-open・skip を JSON へ明示)=read-only gate 経路が不変。
+//        - snapshot 合成・autoFix fail-closed ゲート・escalate 判定は一切触らない(独立追加)。
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── (8) defensive args parse(un-2yy): string で届いたら JSON.parse、object はそのまま ──────────
@@ -106,6 +118,9 @@ if (typeof args === 'string') {
       history: [],
       diff: '',
       machineryFailedLastRound: false,
+      // (10) sc-jx8: 起動前中断=self-test は一切走っていない。返り値 shape の一貫性のため skip を明示。
+      selfTestBaseline: { ran: false, skipped: true, skipReason: 'WF 起動前に中断(args parse 失敗)', passed: null, exitCode: null, rawLog: '' },
+      selfTestFinal: { ran: false, skipped: true, skipReason: 'WF 起動前に中断(args parse 失敗)', passed: null, exitCode: null, rawLog: '' },
       receivedArgs: { type: __rawArgsType, parseFailed: true, keys: [] },
       gate: `ESCALATE: ${reason}`,
     }
@@ -408,6 +423,20 @@ const FIX_SCHEMA = {
   },
 }
 
+// (10) selfTestCmd 常時実行(sc-jx8): baseline/final の cheap runner agent が返す構造化結果。
+// WF 本体は Bash 非所持ゆえ worktree で selfTestCmd を 1 回実行し、実行有無/pass-fail/生ログを返す。
+const SELFTEST_RUN_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['ran', 'passed', 'rawLog'],
+  properties: {
+    ran: { type: 'boolean', description: 'selfTestCmd を実際に実行できたか(true=実行した)' },
+    passed: { type: 'boolean', description: '終了コード 0 なら true(exit != 0 は false)' },
+    exitCode: { type: 'integer', description: '終了コード(取得できた場合)' },
+    rawLog: { type: 'string', description: 'stdout+stderr を合わせた生ログ(長大時は末尾優先で切り詰め可)' },
+  },
+}
+
 // ── prompt builders(固有物を文脈として注入) ─────────────────────────────────
 function ctxBlock() {
   return [
@@ -553,6 +582,51 @@ ${roundDiff || '(worktree の現状を確認して修正)'}
 JSON で {applied, selfTestRan, selfTestPassed, amended, summary, newDiff?} を返せ。`
 }
 
+// (10) selfTestCmd 常時実行(sc-jx8): baseline/final を worktree で 1 回実行する cheap runner の prompt。
+// read-only(編集・commit 禁止)= self-test を「観測」するだけ。Fix agent 内の fail-closed ゲート(修正→amend)とは別物。
+function selfTestRunPrompt(when) {
+  return `worktree ${worktree} で self-test コマンドを **1 回だけ実行**し、その生ログと結果を返せ(${when} 計測)。
+これは観測専用: **編集・commit・stage は一切するな**(read-only)。コマンドを改変・回避・分割せず、そのまま実行する。
+
+実行するコマンド:
+\`\`\`bash
+cd "${worktree}" && ${selfTestCmd}
+\`\`\`
+
+- 終了コードを記録する(exit 0 = pass=true / それ以外 = false)。
+- stdout と stderr を合わせた**生ログ**を rawLog に入れる(長すぎる場合は末尾を優先して切り詰めてよい)。
+- コマンドが起動できない/見つからない等で実行不能なら ran=false・passed=false・理由を rawLog に入れる。
+JSON で {ran, passed, exitCode, rawLog} を返せ。`
+}
+
+// selfTestCmd を worktree で 1 回実行し {ran, skipped, passed, exitCode, rawLog} に正規化する。
+// selfTestCmd 未定義なら graceful skip(fail-open=WF は止めず skip を明示)。agent 失敗/skip も観測可能な値へ正規化。
+// 【重要・回帰なし(B4)】返り値は情報ログ専用で converged/escalate を一切駆動しない。
+async function runSelfTest(when) {
+  if (!selfTestCmd) {
+    return { ran: false, skipped: true, skipReason: 'selfTestCmd 未指定(graceful skip=fail-open)', passed: null, exitCode: null, rawLog: '' }
+  }
+  const r = await agent(selfTestRunPrompt(when), {
+    label: `selftest:${when}`,
+    phase: 'Self-test',
+    model: 'sonnet', // mechanical run(substantive reasoning でない)。read-only Explore tools + sonnet
+    agentType: 'Explore', // read-only(Bash あり/Edit・Write なし)= self-test を実行するが編集はできない
+    schema: SELFTEST_RUN_SCHEMA,
+  }).catch(() => null)
+  if (!r) {
+    // agent 失敗/skip(schema 枯渇/terminal death)。fail-open で WF は続行するが、実行不能を JSON に明示する
+    // (gate/orchestrator が「self-test 状態が取れなかった」を actor 報告に頼らず読めるように)。
+    return { ran: false, skipped: false, error: true, skipReason: `self-test runner agent 失敗/skip(${when})`, passed: null, exitCode: null, rawLog: '' }
+  }
+  return {
+    ran: r.ran !== false,
+    skipped: false,
+    passed: r.passed === true,
+    exitCode: Number.isInteger(r.exitCode) ? r.exitCode : null,
+    rawLog: typeof r.rawLog === 'string' ? r.rawLog : '',
+  }
+}
+
 // severity 判定
 const isBlocking = (f) => f && (f.severity === 'critical' || f.severity === 'major')
 const isMinor = (f) => f && (f.severity === 'minor' || f.severity === 'nit')
@@ -599,6 +673,9 @@ if (isWorkerCell) {
       history: [],
       diff: '',
       machineryFailedLastRound: false,
+      // (10) sc-jx8: 必須 args 欠落で agent 未起動=self-test は走っていない。返り値 shape 一貫性のため skip を明示。
+      selfTestBaseline: { ran: false, skipped: true, skipReason: 'args fail-fast(必須 args 欠落)で agent 未起動', passed: null, exitCode: null, rawLog: '' },
+      selfTestFinal: { ran: false, skipped: true, skipReason: 'args fail-fast(必須 args 欠落)で agent 未起動', passed: null, exitCode: null, rawLog: '' },
       receivedArgs, // 何が届いたか(キー一覧 + 受信型)を呼出元監査用に明示
       gate: `ESCALATE: ${reason} 呼出元/人間が args を補って再 invoke すること。`,
     }
@@ -637,6 +714,16 @@ if (doPlan) {
     refinedAcceptance = p.acceptance
     log('受入基準を精緻化した')
   }
+}
+
+// ── (10) self-test baseline(sc-jx8): 実装前に selfTestCmd を実行し「開始時点の green/red」を記録 ──────
+// regression 起点。selfTestCmd 未定義なら graceful skip(fail-open)。情報ログ専用=converged/escalate を駆動しない
+// (既存の Fix agent 内 fail-closed ゲートとは別物・温存)。返り値 selfTestBaseline へ載せる。
+const selfTestBaseline = await runSelfTest('baseline')
+if (selfTestBaseline.skipped) {
+  log('self-test baseline: skip(selfTestCmd 未指定=fail-open)')
+} else {
+  log(`self-test baseline: ran=${selfTestBaseline.ran} passed=${selfTestBaseline.passed}${selfTestBaseline.error ? ' (runner agent 失敗)' : ''}`)
 }
 
 // ── 2. Implement(任意): worktree で実装 ───────────────────────────────────────
@@ -913,6 +1000,16 @@ if (canAutoFix && !LIGHT_TYPES.has(taskType)) {
   }
 }
 
+// ── (10) self-test final(sc-jx8): 終了時に selfTestCmd を再実行し「最終 green/red」を記録 ──────
+// autoFix loop 完了後(amend 反映後)の状態。baseline との差分で loop が self-test 状態を変えたかを gate が読める。
+// 情報ログ専用=converged/escalate を駆動しない(B4)。escalate/converged は上の判定で確定済み(不変)。
+const selfTestFinal = await runSelfTest('final')
+if (selfTestFinal.skipped) {
+  log('self-test final: skip(selfTestCmd 未指定=fail-open)')
+} else {
+  log(`self-test final: ran=${selfTestFinal.ran} passed=${selfTestFinal.passed}${selfTestFinal.error ? ' (runner agent 失敗)' : ''}`)
+}
+
 // ── 返り値: 呼出元(worker/admin)が一次監査する。verdict を鵜呑みにしない ──────────
 const result = {
   taskTitle,
@@ -938,6 +1035,10 @@ const result = {
   history,
   diff: lastDiff,
   machineryFailedLastRound: !!(lastH.reviewFailed || lastH.snapshotFailed), // F3/F4: review/snapshot silent 失敗の有無
+  // (10) sc-jx8: selfTestCmd 常時実行の baseline(実装前)/final(終了時)。各 {ran, skipped, passed, exitCode, rawLog}。
+  // gate/orchestrator が actor 報告に依存せず self-test 状態を直読する。情報ログ専用(escalate/converged を駆動しない)。
+  selfTestBaseline,
+  selfTestFinal,
   receivedArgs, // un-2yy: 何が届いたか(キー一覧 + 受信型 + 生の受信型)を呼出元監査用に明示
 }
 
