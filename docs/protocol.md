@@ -232,6 +232,10 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 
 - **対象**: needs-user タスク = worker 着手不可の理由が人間判断に依存する状態（概念定義 = `scribe-design.md` §1）。needs-user は駐車ラベル、本節の WF pre-bake + grill-consult が解決機構（別物）。
 - **発火条件**: 人間判断を要する **相互独立な決定軸（facet）が複数（≥2）**あるとき、admin が pre-bake WF で各 facet を並列 read-only 分析する。1 facet なら admin インラインで足り、WF fan-out 不要（そのまま grill-consult を立てるか admin が直接 grill するかは admin 判断）。
+- **入口（2系統・sc-bs0 2026-07-03 grill 確定）**: 本フローの入口は2つ。**入口A（graph 駆動・従来）** = needs-user ラベルのタスクを admin が graph 処理するとき（上記発火条件で判定）。**入口B（ユーザー駆動）** = ユーザーが consult 起動を依頼したとき（`/scribe:consult`）。入口Bでは AI が spawn **前**に議題を **2段判定**する:
+  1. **目的判定**: その相談は「**決定を確定し記録したい**」形か、「**思考の壁打ち・第2視点**」か。壁打ちなら**黙って素 consult の従来フローへ**（毎回選択肢を提示しない＝確認疲れで本当に必要なときの推奨が流し読みされるのを防ぐ）。
+  2. **facet 数判定（決定側のみ）**: 上記発火条件と同じ（facet ≥2 → pre-bake WF / 1 facet → WF 不要・admin インライン下ごしらえ or 直接 grill-consult）。
+  判定が「決定を確定・記録したい」形のときだけ、AI は「**pre-bake 推奨ですが実行しますか？ それとも plain consult をすぐ起動しますか？**」と**ユーザーに裁定を求める**（推奨提示時は grill-issue が 1 件起票されること・WF のコストを一行で開示する）。**ユーザーが「pre-bake なしで」等を明示済みなら判定・質問を挟まず素 consult を即起動**する。pre-bake 選択時は本フロー（下記 1.〜6.）にそのまま乗せる — grill-issue をその場で起票する（`--context` は grill-issue 必須＝決定 handoff 先の bd notes を定める技術制約であり、この issue は「決定の記録先」そのもの。起票は admin 専有＝§3）。skill 側の手順は `skills/consult/SKILL.md` step 0（本節が規約 SSOT・skill は本文を転記しない）。決定経緯 = bd sc-bs0 notes（旧 regime sc-osn→sc-in9→sc-cuw では入口Bのルーティングが未検討で、pre-bake WF がユーザー駆動経路で構造的にバイパスされていた gap の解消）。
 - **facet の単位**: 通常は 1 needs-user issue = 1 grill-issue。1 issue 内に相互独立な複数決定があれば、各決定を 1 facet 扱いして pre-bake WF の `facets[]` に並べる（例: sandbox spike の「bwrap install 是非」と「書込み許可注入の設計」）。**濫用防止**: 相互独立でない・人間判断を要さない些末な選択肢は facet に分割しない。
 - **フロー**:
   1. **pre-bake（admin が WF を回す・read-only）**: admin が `Workflow({name:'needs-user-prebake', args:{taskRef, taskTitle, anchor, facets:[{key,question,context}]}})` を起動する。各 facet を **並列 read-only agent** が分析（現状調査〔read-only〕→ 決定木 → 選択肢 + トレードオフ → admin 起票候補）し、opus が **単一の構造化 brief へ統合して WF 返り値（`briefMarkdown`/`facets`/`receivedArgs`）で admin に返す**。WF は **grill しない・graph を触らない・doobidoo 保存もしない**（データを admin に返すだけ）。admin は返り値を一次監査する（薄 gate＝worker 報告と同型）。
