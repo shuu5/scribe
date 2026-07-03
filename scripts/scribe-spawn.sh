@@ -18,11 +18,11 @@
 #   よって consult モードでは:
 #     - **worktree を作らない / worker prompt を出さない / --bd-id を渡さない**（role 契約遵守）。
 #       `--cd` は anchor（cwd）を指す＝worktree ではない（consult は anchor 同居）。
-#     - anchor（cwd）で `cld-spawn --model opus --env-file <SCRIBE_ROLE=consult> "<consult テンプレ本文>"`。
+#     - anchor（cwd）で `cld-spawn --model <fable 既定・不可時 opus> --env-file <SCRIBE_ROLE=consult> "<consult テンプレ本文>"`。
 #       consult テンプレは read-only 規律・記憶系のみ write・サマリ保存義務のみ（bdw/selftest/cell-quality を含まない）。
 #     - SCRIBE_ROLE=consult を --env-file で注入（C2 の role 判定が最優先で読む side）。env-file は
 #       **anchor working tree の外**（/tmp）に作り spawn 後に rm する＝anchor リポを汚さない（read-only 起動器の自浄）。
-#     - model は基本 opus・ユーザー指定時のみ fable 可（role-context-spec §2.3 の唯一の fable 例外。worker は fable 厳禁）。
+#     - model は既定 fable・利用不可時のみ opus へ loud fallback（sc-9q6・role-context-spec §2.3。--model 明示が優先・worker は fable 厳禁）。
 #   bd id は consult では **任意の議題参照**（read-only な `bd show` のみ・worktree/branch には焼かない）。
 #
 # 既知バグ防御（un-ivb・別セル）: 現行 cld-spawn は未知オプションを PROMPT に落とす。
@@ -40,8 +40,8 @@
 #                   §7 needs-user regime: grill-issue id 必須。grill-consult は brief を出発点にユーザーと対話 grill し、
 #                   決定を own grill-issue の bd notes へ書く（bdw 経由 --claim/--append-notes のみ・read-only 限定緩和）。
 #                   （pre-bake 自体は admin が回す dynamic Workflow = workflows/needs-user-prebake.workflow.js へ移管。）
-#   --model MODEL   cld-spawn のモデル（既定: opus）。worker は fable 厳禁＝コスト爆発。
-#                   consult は基本 opus・ユーザー指定時のみ fable 可（role-context-spec §2.3 の例外）
+#   --model MODEL   cld-spawn のモデル（既定: worker=opus / consult=fable）。worker は fable 厳禁＝コスト爆発。
+#                   consult は既定 fable・利用不可時のみ opus へ loud fallback（sc-9q6・role-context-spec §2.3）
 #   --dry-run       実行するはずのコマンド列を arg-echo するだけ（実 spawn しない）
 #   -h | --help
 set -euo pipefail
@@ -85,8 +85,8 @@ Options:
   --consult       consult role セッションを anchor で起動（worktree/worker prompt なし）
   --context FILE  consult 専用。admin 集約 brief（FILE）を grill 材料として焼き込み grill-consult モードへ（§7・grill-issue id 必須）。
                   grill-consult は brief を grill し決定を own grill-issue の bd notes へ書く（bdw 経由・read-only 限定緩和）
-  --model MODEL   cld-spawn のモデル（既定: opus）。worker は fable 厳禁＝コスト爆発。
-                  consult は基本 opus・ユーザー指定時のみ fable 可（role-context-spec §2.3 の例外）
+  --model MODEL   cld-spawn のモデル（既定: worker=opus / consult=fable）。worker は fable 厳禁＝コスト爆発。
+                  consult は既定 fable・利用不可時のみ opus へ loud fallback（sc-9q6・role-context-spec §2.3）
   --dry-run       実行するはずのコマンド列を arg-echo するだけ（実 spawn しない）
   -h | --help
 EOF
@@ -97,7 +97,8 @@ REPO="$(pwd)"
 BASE="HEAD"
 ANCHOR="$(pwd)"
 CONSULT=0
-MODEL="opus"
+MODEL="opus"       # worker 既定。consult は --model 未指定なら fable 既定へ解決する（sc-9q6・consult 分岐冒頭）
+MODEL_EXPLICIT=0   # --model 明示の有無（明示は consult の fable 既定より常に優先）
 DRY_RUN=0
 BD_ID=""
 # --context: admin 集約 brief をファイルから consult prompt へ焼き込み grill-consult モードへ切替える
@@ -117,7 +118,7 @@ while [[ $# -gt 0 ]]; do
     --anchor)  scribe_need_val "${2:-}" --anchor; ANCHOR="$2"; ANCHOR_EXPLICIT=1; shift 2 ;;
     --consult) CONSULT=1; shift ;;
     --context) scribe_need_val "${2:-}" --context; CONTEXT_FILE="$2"; shift 2 ;;
-    --model)   scribe_need_val "${2:-}" --model; MODEL="$2"; shift 2 ;;
+    --model)   scribe_need_val "${2:-}" --model; MODEL="$2"; MODEL_EXPLICIT=1; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage 0 ;;
     --) shift; break ;;
@@ -161,19 +162,44 @@ fi
 
 # fable の許否は role で非対称（道具は規約を変えない）:
 #   - worker: fable 厳禁（protocol.md §1: worker は opus 必須＝コスト爆発防止）。worker 分岐内で die する。
-#   - consult: fable は **許容**（role-context-spec §2.3: 基本 opus・ユーザー指定時のみ fable。
-#     consult は admin と同じ main-loop 系統ゆえ fable 起動が許される唯一の例外）。
+#   - consult: fable は **既定**（sc-9q6: 既定 fable・利用不可時のみ opus へ loud fallback・--model 明示は常に優先。
+#     consult は admin と同じ main-loop 系統ゆえ fable 起動が許される唯一の役割＝role-context-spec §2.3）。
 # ＝この一括 die をここに置くと consult の例外パスを塞いで規約を変えてしまうため、
 #   worker 分岐の入口へ移動する（下記）。
 
 # ===========================================================================
 # consult モード（--consult）: role-context-spec §2.3 / design §14 の契約どおりに分岐。
 #   worktree 作成・worker prompt 生成・--bd-id を **一切しない**（consult に spawn worktree は禁止）。
-#   anchor で `cld-spawn --cd <anchor> --model opus --env-file <SCRIBE_ROLE=consult> "<consult テンプレ>"` を出す
+#   anchor で `cld-spawn --cd <anchor> --model <fable 既定・不可時 opus> --env-file <SCRIBE_ROLE=consult> "<consult テンプレ>"` を出す
 #   （--cd は anchor=cwd を指す＝worktree ではない）。
 #   bd id は consult では任意の議題参照（read-only な実在検証のみ・worktree/branch には焼かない）。
 # ===========================================================================
 if [[ "$CONSULT" -eq 1 ]]; then
+  # --- consult 既定 model = fable（sc-9q6・2026-07-03 ユーザー確定）---
+  # --model 明示は常に優先（MODEL_EXPLICIT）。未指定なら fable を既定にし、fable が利用できない
+  # （API/アクセス障害）ときだけ opus へ **loud** fallback する（silent 降格しない）。
+  # preflight は実起動時のみ（dry-run は API を叩かない＝dry-run の副作用ゼロを維持）。
+  # SCRIBE_FABLE_PREFLIGHT=1/0 で可否を強制注入できる（テスト・緊急時の seam。未設定=実測）。
+  CONSULT_FABLE_MODEL="claude-fable-5"
+  fable_available() {
+    case "${SCRIBE_FABLE_PREFLIGHT:-}" in
+      1) return 0 ;;
+      0) return 1 ;;
+    esac
+    # 実測（sc-9q6・2026-07-03）: fable は最小 -p 呼び出しでも応答に 60s+ かかる（重 reasoning 系の固有コスト）
+    # 一方、利用不可（モデル不存在・アクセス不能・limit 到達）は ~5s で fast fail する（rc=1 等）。
+    # ゆえに判定は「fast fail だけが不可」: timeout(rc=124) は **受理された＝利用可** とみなす
+    # （完了を待つ判定だと正常 fable が常に偽不可＝恒常 opus 降格になる）。timeout 15s は fast fail(~5s) の
+    # 3 倍マージン。--strict-mcp-config + 空 mcp-config で MCP ロードを抑止し preflight を軽く保つ。
+    local rc=0
+    timeout 15 "${SCRIBE_CLAUDE_BIN:-claude}" --model "$CONSULT_FABLE_MODEL" -p "ok" \
+      --strict-mcp-config --mcp-config '{"mcpServers":{}}' >/dev/null 2>&1 || rc=$?
+    [[ "$rc" -eq 0 || "$rc" -eq 124 ]]
+  }
+  if [[ "$MODEL_EXPLICIT" -eq 0 ]]; then
+    MODEL="$CONSULT_FABLE_MODEL"
+  fi
+
   TOPIC=""
   if [[ -n "$BD_ID" ]]; then
     TOPIC="$(scribe_normalize_bd_id "$BD_ID")" \
@@ -301,6 +327,9 @@ PROMPT
     echo "[plan] env-file（anchor 外＝anchor リポを汚さない・spawn 後 rm）:"
     echo "         ENV_FILE=\$(mktemp /tmp/scribe-consult-XXXXXX.env)"
     echo "         printf '%s\\n' '$ENV_LINE' > \"\$ENV_FILE\""
+    if [[ "$MODEL_EXPLICIT" -eq 0 ]]; then
+      echo "[plan] model: 既定 fable（$CONSULT_FABLE_MODEL・sc-9q6）。本起動時に preflight し、利用不可なら opus へ loud fallback（dry-run は API を叩かない）"
+    fi
     echo "[plan] $CLD_SPAWN --cd $ANCHOR --model $MODEL --window-name $CONSULT_WINDOW --force-new --env-file \"\$ENV_FILE\" \"<consult テンプレ本文>\""
     echo "[plan] rm -f \"\$ENV_FILE\"   # source 済みなので spawn 後に消す（anchor に残さない）"
     echo "[plan] (consult は worktree を作らない / --bd-id を渡さない / worker prompt を出さない＝role 契約)"
@@ -311,6 +340,11 @@ PROMPT
   fi
 
   # ===== consult 実行（real）=====
+  # fable preflight（sc-9q6）: fable 既定で解決されたときだけ実測し、利用不可なら opus へ loud fallback。
+  if [[ "$MODEL_EXPLICIT" -eq 0 ]] && ! fable_available; then
+    echo "[scribe-spawn] WARN: fable preflight 失敗 → consult を opus で起動します（既定 fable の fallback 経路・sc-9q6）" >&2
+    MODEL="opus"
+  fi
   ENV_FILE="$(mktemp /tmp/scribe-consult-XXXXXX.env)" || scribe_die "env-file の作成に失敗しました（mktemp）"
   trap 'rm -f "$ENV_FILE"' EXIT   # 異常終了でも /tmp に残さない
   printf '%s\n' "$ENV_LINE" > "$ENV_FILE"
