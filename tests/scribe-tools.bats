@@ -32,7 +32,7 @@ setup() {
   # BEADS_BDW="$BDW_PRESENT_STUB" でこれを使う＝host 非依存維持）。bdw 不在を注入するテストは BEADS_BDW を
   # 明示上書きする（_need_canonical_bdw で実 canonical を要するテストには使わない＝そちらは skip 規律のまま）。
   BDW_PRESENT_STUB="$BATS_TEST_TMPDIR/bdw-present-stub"
-  printf '#!/usr/bin/env bash\n[ "$1" = lock-dir ] && { echo "%s/locks"; exit 0; }\nexit 0\n' "$BATS_TEST_TMPDIR" > "$BDW_PRESENT_STUB"
+  printf '#!/usr/bin/env bash\n[ "$1" = lock-dir ] && { echo "%s/locks"; exit 0; }\n[ "$1" = lock-file ] && { echo "%s/locks/bd-write-stub.lock"; exit 0; }\nexit 0\n' "$BATS_TEST_TMPDIR" "$BATS_TEST_TMPDIR" > "$BDW_PRESENT_STUB"
   chmod +x "$BDW_PRESENT_STUB"
   # grill-consult は grill-me SKILL.md を verbatim 注入する（sc-swc・mechanism b）。テストは hermetic に
   # するためホストの実 skill でなく fixture stub を読ませる（注入の機構＝sentinel が焼かれるかを検証）。
@@ -190,7 +190,7 @@ _mk_beads() {
   run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$SCRIBE_TEST_CWD"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.sandbox.enabled==true and .sandbox.failIfUnavailable==true and .sandbox.allowUnsandboxedCommands==false' >/dev/null
-  # sc-nd6: allowWrite は .beads を丸ごとでなく runtime サブパス + lock_dir。embeddeddolt は grant・wholesale .beads は非 grant。
+  # sc-nd6/sc-mcx: allowWrite は .beads を丸ごとでなく runtime サブパス + lock **鍵 file**。embeddeddolt は grant・wholesale .beads は非 grant。
   local b="$SCRIBE_TEST_CWD/.beads"
   echo "$output" | jq -e --arg b "$b" '.sandbox.filesystem.allowWrite | (index($b+"/embeddeddolt")!=null) and (index($b)==null)' >/dev/null
 }
@@ -1129,13 +1129,18 @@ _make_noop_cld_spawn() {
   # worktree の git exclude 追記で worker の git add -A が settings.local.json を巻き込まない（ephemeral 維持・load-bearing）。
   run git -C "$wt" check-ignore -q .claude/settings.local.json
   [ "$status" -eq 0 ]
-  # sc-xs2: runtime grant は専用 lock dir(= BDW_LOCK_DIR をそのまま・subdir 付与なし)へ最小化されている。
-  # 既定なら $HOME/.cache/bdw-locks。ここでは BDW_LOCK_DIR=$BATS_TEST_TMPDIR/rt を直に grant する。
-  # sc-nd6: allowWrite は複数 .beads runtime + lock_dir になり lock_dir の index が固定でないため index() で検査。
-  run jq -e --arg ld "$BATS_TEST_TMPDIR/rt" '.sandbox.filesystem.allowWrite | index($ld) != null' "$wt/.claude/settings.local.json"
+  # sc-mcx(OG-4): runtime grant は lock **dir** 丸ごとでなく自リポの flock 鍵 `<lock_dir>/bd-write-<repo_id>.lock`
+  # (file 単位)へ狭化されている。BDW_LOCK_DIR=$BATS_TEST_TMPDIR/rt を base に repo_id は不定ゆえ前方一致 + .lock 末尾で検査。
+  run jq -e --arg ld "$BATS_TEST_TMPDIR/rt" '.sandbox.filesystem.allowWrite | map(startswith($ld+"/bd-write-") and endswith(".lock")) | any' "$wt/.claude/settings.local.json"
   [ "$status" -eq 0 ]
-  # sc-da0: bwrap の bind-before-exist 対策で spawn が lock dir を事前生成する（grant 済 path が実在）。
-  [ -d "$BATS_TEST_TMPDIR/rt" ]
+  # lock **dir** 自体は allowWrite に入らない（同 dir 内の他リポ鍵に触れない＝OG-4 の核心・wholesale grant 回帰ガード）。
+  run jq -e --arg ld "$BATS_TEST_TMPDIR/rt" '.sandbox.filesystem.allowWrite | index($ld) == null' "$wt/.claude/settings.local.json"
+  [ "$status" -eq 0 ]
+  # sc-da0/sc-mcx: bwrap の bind-before-exist 対策で spawn が lock **鍵 file** を pre-create(touch)する（grant 済 path が実在）。
+  run bash -c "ls '$BATS_TEST_TMPDIR/rt'/bd-write-*.lock"
+  [ "$status" -eq 0 ]
+  # dir 化でなく通常ファイルとして先在する（flock の `exec 9>file` が Is-a-directory で壊れない回帰ガード）。
+  _lf="$(ls "$BATS_TEST_TMPDIR/rt"/bd-write-*.lock | head -1)"; [ -f "$_lf" ]
   git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
 }
 
@@ -1165,6 +1170,52 @@ _make_noop_cld_spawn() {
   [ "$status" -eq 0 ]
   run jq -e --arg x "$repoX/.beads" '.sandbox.filesystem.allowWrite | (map(startswith($x+"/")) | any | not)' "$wt/.claude/settings.local.json"
   [ "$status" -eq 0 ]
+  git -C "$repoX" worktree remove --force "$wt" 2>/dev/null || true
+  rm -rf "$anchorY"
+}
+
+@test "spawn(sandbox/sc-mcx・OG-4): cross-repo 実 bdw で lock 鍵 file が anchor の repo_id で {gen grant / spawn pre-create / worker 経路} 3者 byte 一致（spawn 側 cd \$ANCHOR 落とし回帰を捕捉）" {
+  # 受入(OG-4)の中核 modality =『repo_id を subshell `cd anchor` で consume し cross-repo(X≠Y)で worker の bd write と
+  # byte 一致』。これを genuine な X≠Y(2 実リポ + 実 canonical bdw)で動的に叩く。上の sc-lkg 実経路テストは
+  # BDW_PRESENT_STUB(定数 `bd-write-stub.lock`・cwd/BDW_LOCK_DIR 無視)ゆえ repo_id 導出を再現できず lock 鍵に何も
+  # assert しない。ここは **実 canonical bdw**(shim→canonical)を使い repo_id を genuine に導出させる(present stub
+  # 不使用ゆえ _need_canonical_bdw で plugin 不在 host は skip=host 非依存維持)。
+  _need_canonical_bdw
+  local repoX anchorY wt noop ld gen_lf worker_lf repoX_lf
+  repoX="$SCRIBE_TEST_CWD"                          # worktree を作るリポ（= --repo X）
+  anchorY="$(cd "$(mktemp -d)" && pwd -P)"          # 真の bd graph（= --anchor Y・X とは別 git common-dir ゆえ repo_id が異なる）
+  git -C "$anchorY" -c init.defaultBranch=main init -q
+  git -C "$anchorY" config user.email t@e; git -C "$anchorY" config user.name t
+  git -C "$anchorY" commit -q --allow-empty -m init
+  _mk_beads "$anchorY"   # sc-nd6: gen が runtime サブパスを列挙するため真 anchor に realistic .beads が要る
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  wt="$repoX/.worktrees/spawn/un-4nm-101010"
+  ld="$BATS_TEST_TMPDIR/rt"
+  # 実 gen + 実 bdw を scribe-spawn 経由で走らせる（BEADS_BDW を **設定しない**＝shim→canonical・repo_id を実導出。
+  # preflight/cld-spawn のみ noop）。
+  run env SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_PREFLIGHT="$noop" \
+      BDW_LOCK_DIR="$ld" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repoX" --anchor "$anchorY" un-4nm
+  rm -f "$noop"
+  [ "$status" -eq 0 ]
+  [ -f "$wt/.claude/settings.local.json" ]
+  # (i) gen が grant した lock 鍵 = BDW_LOCK_DIR(ld)配下・.lock 末尾の唯一の要素。
+  gen_lf="$(jq -r '.sandbox.filesystem.allowWrite[] | select(endswith(".lock"))' "$wt/.claude/settings.local.json")"
+  [ -n "$gen_lf" ]
+  [[ "$gen_lf" == "$ld/bd-write-"*.lock ]]
+  # (iii) worker 経路（`cd anchorY && bdw lock-file`・実 shim→canonical）の鍵と byte 一致＝gen が anchor(Y)の repo_id で grant。
+  worker_lf="$( (cd "$anchorY" && BDW_LOCK_DIR="$ld" "$BDW" lock-file) )"
+  [ "$gen_lf" = "$worker_lf" ]
+  # X≠Y の genuine 対照: repoX の cwd で導く repo_id 鍵は gen 鍵と異なる（同一なら cross-repo が vacuous＝テスト無効）。
+  repoX_lf="$( (cd "$repoX" && BDW_LOCK_DIR="$ld" "$BDW" lock-file) )"
+  [ "$gen_lf" != "$repoX_lf" ]
+  # (ii) scribe-spawn が pre-create した実ファイルが gen 鍵(=worker 鍵)で、**通常ファイル**として先在し dir 化していない。
+  #      spawn が line 663 の `cd "$ANCHOR"` を落とすと cwd(=repoX)の repo_id 鍵(repoX_lf)を pre-create+除外し、gen が
+  #      grant した anchorY 鍵(gen_lf)は除外されず汎用 mkdir ループで **dir 化**する→ [ -f gen_lf ] が落ちて回帰を捕捉。
+  [ -f "$gen_lf" ]
+  [ ! -d "$gen_lf" ]
+  # 誤鍵(repoX 側)は pre-create されていない（cd \$ANCHOR 落とし回帰の直接検出＝spawn が正しく anchor cwd で導いた証跡）。
+  [ ! -e "$repoX_lf" ]
   git -C "$repoX" worktree remove --force "$wt" 2>/dev/null || true
   rm -rf "$anchorY"
 }
@@ -2539,7 +2590,7 @@ _run_guard_env() {  # <guard-basename> <cmd> <json_cwd> <envassign|""> <proc_cwd
   [[ "$stderr" == *"$_PREAMBLE_FAILOPEN_MSG"* ]]
 }
 
-@test "bdw cutover(sc-vae): bdw=logic-free shim / gen+e2e は bdw lock-dir を consume / scribe-lib に lock_dir 関数なし" {
+@test "bdw cutover(sc-vae/sc-mcx): bdw=logic-free shim / gen+e2e は bdw lock-file を consume / scribe-lib に lock_dir 関数なし" {
   # cutover の構造不変条件（旧 'lock_dir formula を scribe_bdw_lock_dir に集約' を置換）。lock_dir の SSOT は
   # canonical bdw（beads-bdw plugin）へ一本化され、scribe 側は shim→canonical を consume するだけ＝3 copy
   # drift（uns/scriptorium/scribe）を撲滅した。判定は bare token でなく「直列化ロジックの実体」で行う
@@ -2552,10 +2603,10 @@ _run_guard_env() {  # <guard-basename> <cmd> <json_cwd> <envassign|""> <proc_cwd
   run grep -q 'exec 9>' "$BDW";                [ "$status" -ne 0 ]
   run grep -qE '^[[:space:]]*source ' "$BDW";  [ "$status" -ne 0 ]
   run grep -q 'scribe_bdw_lock_dir' "$BDW";    [ "$status" -ne 0 ]
-  # (b) gen-sandbox / verify-sandbox-e2e は `bdw lock-dir`（shim→canonical）を consume し、旧ローカル関数を呼ばない。
-  grep -qE '/bdw" lock-dir' "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh"
+  # (b) gen-sandbox / verify-sandbox-e2e は `bdw lock-file`（shim→canonical・OG-4 で lock-dir から狭化）を consume し、旧ローカル関数を呼ばない。
+  grep -qE '/bdw" lock-file' "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh"
   run grep -q 'scribe_bdw_lock_dir' "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh"; [ "$status" -ne 0 ]
-  grep -qE '/bdw" lock-dir' "$E2E"
+  grep -qE '/bdw" lock-file' "$E2E"
   run grep -q 'scribe_bdw_lock_dir' "$E2E"; [ "$status" -ne 0 ]
   # (c) scribe-lib.sh は lock_dir 解決関数を定義しない（dead code 削除＝単一SSOT化の本旨）。
   run grep -q 'scribe_bdw_lock_dir' "$LIB"; [ "$status" -ne 0 ]

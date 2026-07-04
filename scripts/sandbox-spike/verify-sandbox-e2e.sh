@@ -103,9 +103,16 @@ mkdir -p "$WT/.claude"
 # 下の WORKER_CMD が scribe-add(型で弾く stage ラッパ・sc-yqa B)を実走して扱う＝それが効くこと、かつ CC が
 # null-mount を増やしても scribe-add は型ベースゆえ壊れないことを実 sandbox で実証する(sc-yqa 4b の robust 版)。
 scribe_sandbox_write_exclude "$WT"
-# bwrap の bind-before-exist 対策: grant 済 lock dir を worker 起動前に実在させる(本番 scribe-spawn と同じ)。
-# lock_dir は canonical bdw に問い合わせる(sc-vae cutover: SSOT 一本化・gen-sandbox の allowWrite と同 contract)。
-mkdir -p "$("$HERE/../bdw" lock-dir)" 2>/dev/null || true
+# bwrap の bind-before-exist 対策: grant 済 lock 鍵 file を worker 起動前に実在させる(本番 scribe-spawn と同じ)。
+# lock file は canonical bdw に問い合わせる(OG-4・sc-mcx: lock dir 丸ごとから **file 単位** grant へ狭化・
+# gen-sandbox の allowWrite と同 contract)。file 単位 grant では parent(lock dir)を grant しないため、mkdir -p で
+# 親を作り file を **touch** で先在させる(mkdir -p では file を dir 化し flock が壊れる)。repo_id は cwd 依存
+# (BDW_REPO_DIR override は効かない・verified)ゆえ subshell `(cd "$ANCHOR" && bdw lock-file)` で gen/worker と同一
+# invocation にし byte 一致の鍵を得る。
+_e2e_lock_file="$( (cd "$ANCHOR" && "$HERE/../bdw" lock-file) 2>/dev/null || true)"
+if [[ -n "$_e2e_lock_file" ]]; then
+  mkdir -p "$(dirname "$_e2e_lock_file")" 2>/dev/null && touch "$_e2e_lock_file" 2>/dev/null || true
+fi
 echo "--- settings.local.json ---"; cat "$WT/.claude/settings.local.json"
 
 # 3) sandboxed worker(実 CC)に 1 コマンドを走らせる。allow-side(git commit/bd close)と block-side
@@ -122,7 +129,7 @@ COMMIT_MSG="sc7n1-e2e-commit-$$"
 # これで『scribe-add が必須(git add -A は実 sandbox の char-device で rc=128 死)』と『退行=loud fail(検出網が捕捉)』を
 # counterfactual で実証する。git reset で index を戻してから scribe-add(positive)へ進むので positive path は汚さない。
 MARKER="sc7n1-e2e-marker.txt"
-# block-side control: cwd($WT)の外かつ allowWrite([<anchor>/.beads, lock_dir])外の anchor 直下。
+# block-side control: cwd($WT)の外かつ allowWrite([<anchor>/.beads runtime, lock 鍵 file])外の anchor 直下。
 # sandbox 外壁が効いていれば書込みは拒否され OUTSIDE は出来ない(spike の b1=anchor-root と同型)。$TMP 配下ゆえ無害。
 OUTSIDE="$ANCHOR/sc7n1-OUTSIDE-marker.txt"
 # block-side の positive 信号は **stdout token でなく実ファイル(INBOUND)** にする(allow-side の commit/close と同型の
