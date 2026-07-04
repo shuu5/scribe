@@ -619,7 +619,7 @@ if [[ "$SANDBOX_ON" == "1" ]]; then
     rm -f "$_sb_tmp"
     {
       echo "scribe: error: sandbox settings.local.json の生成に失敗（gen-sandbox-settings.sh・sandbox 既定 on・opt-out=SCRIBE_SANDBOX=0）。"
-      echo "scribe: 真因の候補: jq 不在 / canonical bdw（beads-bdw plugin）未配備で 'scripts/bdw lock-dir' 失敗（sc-vae cutover で gen の spawn-time 依存）。通常は preflight が両者を worktree add 前に検出する。"
+      echo "scribe: 真因の候補: jq 不在 / canonical bdw（beads-bdw plugin）未配備で 'scripts/bdw lock-file' 失敗（sc-vae/sc-mcx cutover で gen の spawn-time 依存＝OG-4 で lock-dir から lock-file consume へ）。通常は preflight が両者を worktree add 前に検出する。"
       echo "scribe: worktree が orphan として残っています（自動削除はしません＝force 禁止・確認必須ポリシー）: $WORKTREE"
       echo "scribe: 掃除するには（force 系を使わない確認プロンプト付き cleanup）:"
       echo "         $SCRIPT_DIR/scribe-cleanup.sh --repo \"$REPO\" --worktree \"$WORKTREE\" --branch \"$BRANCH\" --window \"$WINDOW\" $ID"

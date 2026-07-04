@@ -1129,7 +1129,7 @@ _make_noop_cld_spawn() {
 # settings.local.json が worker commit に漏れても検出できない（README が ephemeral 維持を不変条件と明記）。
 # facet3(上記) と同じく cld-spawn を no-op stub に差し替えて実 spawn を駆動し、生成物を assert する。
 @test "spawn(sandbox/sc-s68): SCRIBE_SANDBOX=1 実経路で settings.local.json を atomic 生成・temp 残無・worker 巻添え防止" {
-  _need_canonical_bdw  # sc-vae: 実 gen が bdw lock-dir(shim→canonical)を呼ぶゆえ plugin 不在 host は skip(SHOULD a・host 非依存維持)
+  _need_canonical_bdw  # sc-vae/sc-mcx: 実 gen が bdw lock-file(shim→canonical・OG-4)を呼ぶゆえ plugin 不在 host は skip(SHOULD a・host 非依存維持)
   local repo wt noop
   repo="$SCRIBE_TEST_CWD"   # setup() の temp git repo（init コミット済み）
   noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
