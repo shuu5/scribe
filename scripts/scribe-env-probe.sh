@@ -7,12 +7,16 @@
 # 本 probe は worker が done を申告する前に env 劣化を検出して fail-closed させる（sandbox は無関与＝
 # 真因は CC infra ゆえ worker では直せない→検出して停止するのが唯一効く防御）。
 #
-# 検出する2つの劣化:
+# 検出する3つの劣化:
 #   (1) cross-call filesystem 非永続: `plant` で sentinel を書き、**別の Bash 呼出し**での `verify` が
 #       読み戻せるか。呼出し間で消えていたら劣化（folio の /tmp ファイル消失と同型）。
 #       重要: shell 変数は Bash 呼出し間で消えるため、token は plant の stdout を **LLM が文脈で控えて**
 #       verify に文字列で渡す（呼出し間で生きる唯一の確実な channel）。
 #   (2) commit 非永続/未実装: done 主張なのに <base>..HEAD が 0 commit なら劣化（folio で 0 commit を実測）。
+#   (3) .git 書込劣化（read-only 化）: verify の度に .git の commit 実書込面（per-worktree の GIT_DIR＝index/HEAD 面
+#       + 共有 GIT_COMMON_DIR＝objects/refs 面）へ touch/rm ラウンドトリップし、書込不能を検出する（sc-owj・folio-229
+#       偽陰性）。既存 commit がある状態で .git が read-only mount 化すると (1)(2) は共に PASS するが commit を新規
+#       produce できない——「検証は全部走るのに成果を commit できない」空回りになる。この面は (1)(2) の検出圏外だった。
 #
 # fail-closed: 劣化検出時は `ENV_DEGRADED: <理由>` を stdout+stderr に出して非0 で抜ける。worker は
 # done を申告せず `STATUS: blocked — env degraded …` を bdw で書いて停止する（scribe-spawn worker prompt）。
@@ -31,7 +35,7 @@
 # Usage:
 #   scribe-env-probe.sh plant  --worktree W
 #   scribe-env-probe.sh verify --token T --worktree W [--base B] [--also-tmp]
-# 終了コード: 0=ENV_OK / 1=usage・die（scribe_die・fail-loud） / 3=cross-call 非永続 / 4=0 commit。
+# 終了コード: 0=ENV_OK / 1=usage・die（scribe_die・fail-loud） / 3=cross-call 非永続 / 4=0 commit / 5=.git 書込劣化（sc-owj）。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -43,7 +47,7 @@ usage() {
 Usage:
   scribe-env-probe.sh plant  --worktree W
   scribe-env-probe.sh verify --token T --worktree W [--base B] [--also-tmp]
-ENV_DEGRADED:<理由> + 非0 = 環境劣化（Bash 非永続 / 0 commit）。worker は done を申告せず
+ENV_DEGRADED:<理由> + 非0 = 環境劣化（Bash 非永続 / 0 commit / .git 書込不能）。worker は done を申告せず
 `STATUS: blocked — env degraded …` を bdw で書いて停止する。
 EOF
   exit "${1:-0}"
@@ -103,7 +107,7 @@ fi
 # ---- verify: 別 Bash 呼出しから sentinel を読み戻して永続を判定 ----
 [[ -n "$TOKEN" ]] || scribe_die "--token（必須・plant が出力した token を文脈から渡す）がありません。"
 
-# degraded(3,4)/die 経路では sentinel を残さない——残ると worker の git add に巻き込まれ・admin の
+# degraded(3,4,5)/die 経路では sentinel を残さない——残ると worker の git add に巻き込まれ・admin の
 # 引取り worktree を汚す（review#4/#7）。ENV_OK 経路は末尾で trap を解除して sentinel を温存する
 # （verify 再入可能化・sc-0d2。ignored な sentinel は git add にも `git worktree remove` にも掛からない＝
 # 検証済み。/tmp 面は既定 sandbox では plant が書けず（read-only・--also-tmp も落ちる＝sc-3lj）残置は
@@ -111,6 +115,31 @@ fi
 trap 'rm -f "$SENT_FILE" "$SENT_TMP" 2>/dev/null || true' EXIT
 
 degraded() { printf 'ENV_DEGRADED: %s\n' "$1"; printf 'ENV_DEGRADED: %s\n' "$1" >&2; exit "${2:-3}"; }
+
+# .git 書込可否 probe（sc-owj・folio-229 偽陰性）: commit の実書込面へ touch/rm ラウンドトリップして
+# 「今 .git へ新規 write できるか」を試す。既存 commit がある状態で .git が read-only mount 化しても
+# sentinel 永続(3)・0-commit(4) は共に PASS するため検出圏外だった面をここで塞ぐ。commit は per-worktree の
+# GIT_DIR（index/HEAD）と共有 GIT_COMMON_DIR（objects/refs）の**両面**へ書くため両方を probe する（linked
+# worktree では別 filesystem になりうる）。probe file は .git 内部ゆえ commit 混入せず・毎回 touch→rm の
+# transient で sentinel 温存 semantics(sc-0d2) と無干渉。非 git worktree（テスト seam 等）は git-path が
+# 解決不能 → no-op で skip（probe 対象が無い＝この面の劣化は起こりえない。実 worker は常に git worktree）。
+git_write_probe() {
+  local gd cd p probe
+  gd="$(scribe_git -C "$WORKTREE" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
+  cd="$(scribe_git -C "$WORKTREE" rev-parse --git-common-dir 2>/dev/null)" || cd="$gd"
+  # --git-common-dir は相対（"." 等）を返しうる → worktree 起点で絶対化してから比較・probe する。
+  case "$cd" in /*) : ;; *) cd="$WORKTREE/$cd" ;; esac
+  # 非 worktree リポ（git-dir == common-dir）は同一パスゆえ 1 面だけ probe すれば足りる。
+  if [[ "$cd" == "$gd" ]]; then set -- "$gd"; else set -- "$gd" "$cd"; fi
+  for p in "$@"; do
+    [[ -d "$p" ]] || continue
+    probe="$p/.scribe-wprobe.$$"
+    ( : > "$probe" ) 2>/dev/null \
+      || degraded ".git 書込劣化（$p へ新規 write 不能＝read-only mount 等で commit を produce できない・既存 commit があっても done を申告できない・folio-229）" 5
+    rm -f "$probe" 2>/dev/null || true
+  done
+  return 0
+}
 
 check_sentinel() { # <label> <path>
   local label="$1" path="$2" got
@@ -130,6 +159,11 @@ if [[ -n "$BASE" ]]; then
   [[ "$count" =~ ^[0-9]+$ ]] || scribe_die "commit-count が数値でありません（内部異常）: '$count'"
   [[ "$count" -gt 0 ]] || degraded "base..HEAD が 0 commit（worker の実装が永続していない/未コミット＝done を申告できない）: base=$BASE worktree=$WORKTREE" 4
 fi
+
+# .git 書込可否（sc-owj）: 上の sentinel/0-commit を通過しても .git が read-only 化していれば commit を
+# 新規 produce できない（folio-229 偽陰性）。ENV_OK を出す前に必ず probe する（--base の有無に依らず・
+# 「今 write できるか」は commit 段の前提）。degraded 検出時は exit 5＝trap が sentinel を掃除する。
+git_write_probe
 
 # 健全 → ENV_OK。trap を解除して sentinel を温存する（verify 再入可能・sc-0d2）。plant の info/exclude
 # 登録が失敗していた場合の第二防御として、ENV_OK の度に冪等再登録する（best-effort・非 git worktree は no-op）。

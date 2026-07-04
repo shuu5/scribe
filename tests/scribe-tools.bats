@@ -3202,6 +3202,72 @@ _mk_probe_env() {
   rm -rf "$wt"
 }
 
+# ---------- .git 書込劣化 probe（sc-owj・folio-229 偽陰性）----------
+# folio-229 実測: worker worktree の .git が read-only mount 化し commit 不能だった間、verify は ENV_OK を
+# 返し続けた（sentinel 永続(3)・0-commit(4) は .git 書込可否を probe しないため既存 commit 状態の書込劣化は
+# 検出圏外）。verify に .git commit 実書込面（per-worktree GIT_DIR + 共有 GIT_COMMON_DIR）への touch/rm
+# ラウンドトリップを足し ENV_DEGRADED exit 5 で fail-closed に倒す。
+@test "env-probe(verify・sc-owj): per-worktree GIT_DIR が read-only → ENV_DEGRADED exit 5（既存 commit 状態でも捕捉）" {
+  read -r main linked < <(_mk_main_and_linked)
+  git -C "$linked" commit -q --allow-empty -m work   # 既存 commit あり（0-commit 検査は PASS する状態）
+  tmp="$(mktemp -u)"
+  env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=T "$PROBE" plant --worktree "$linked" >/dev/null
+  local gd; gd="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$linked" rev-parse --absolute-git-dir)"
+  chmod a-w "$gd"                                     # per-worktree の index/HEAD 面を書込不能化
+  run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token T --worktree "$linked"
+  chmod u+w "$gd"                                     # cleanup が worktree remove できるよう先に回復
+  [ "$status" -eq 5 ]
+  [[ "$output" == *"ENV_DEGRADED"* ]]
+  [[ "$output" == *".git 書込劣化"* ]]
+  [ ! -f "$linked/.scribe-envprobe" ]                # exit 5 も trap が sentinel を掃除する（温存は ENV_OK のみ）
+  [ ! -f "$tmp" ]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main" "$tmp"
+}
+
+@test "env-probe(verify・sc-owj): 共有 GIT_COMMON_DIR が read-only → ENV_DEGRADED exit 5（objects/refs 面）" {
+  read -r main linked < <(_mk_main_and_linked)
+  git -C "$linked" commit -q --allow-empty -m work
+  tmp="$(mktemp -u)"
+  env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=T "$PROBE" plant --worktree "$linked" >/dev/null
+  local cd; cd="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$linked" rev-parse --git-common-dir)"
+  chmod a-w "$cd"                                     # 共有 objects/refs 面を書込不能化
+  run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token T --worktree "$linked"
+  chmod u+w "$cd"
+  [ "$status" -eq 5 ]
+  [[ "$output" == *".git 書込劣化"* ]]
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main" "$tmp"
+}
+
+# 健全な .git では probe が透過し ENV_OK を保つ + probe file の残骸を残さない（touch→rm ラウンドトリップの完結）。
+@test "env-probe(verify・sc-owj): 健全 .git は probe を透過し ENV_OK・probe file 残骸なし" {
+  read -r main linked < <(_mk_main_and_linked)
+  git -C "$linked" commit -q --allow-empty -m work
+  tmp="$(mktemp -u)"
+  env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=T "$PROBE" plant --worktree "$linked" >/dev/null
+  run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token T --worktree "$linked"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ENV_OK"* ]]
+  local gd cd; gd="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$linked" rev-parse --absolute-git-dir)"
+  cd="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$linked" rev-parse --git-common-dir)"
+  run bash -c 'find "$1" "$2" -name ".scribe-wprobe.*" 2>/dev/null' _ "$gd" "$cd"
+  [ -z "$output" ]                                    # probe file は毎回 rm される（残骸ゼロ）
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  rm -rf "$main" "$tmp"
+}
+
+# 非 git worktree（テスト seam・実 worker は常に git worktree）では git-path 解決不能 → probe を no-op skip し
+# ENV_OK を保つ（この面の劣化は起こりえない＝probe 対象が無い）。既存 _mk_probe_env 系の ENV_OK が退行しない保証。
+@test "env-probe(verify・sc-owj): 非 git worktree は .git 書込 probe を skip し ENV_OK（非退行）" {
+  pe="$(_mk_probe_env)"; wt="${pe%%$'\t'*}"; tmp="${pe#*$'\t'}"
+  env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=T "$PROBE" plant --worktree "$wt" >/dev/null
+  run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token T --worktree "$wt"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ENV_OK"* ]]
+  rm -rf "$wt" "$tmp"
+}
+
 # review#4 回帰: env-probe sentinel が .gitignore で ignore され worker の git add に巻き込まれない。
 @test "gitignore: .scribe-envprobe を ignore する（worker の git add 巻き込み防止）" {
   run git -C "$REPO_ROOT" check-ignore .scribe-envprobe
