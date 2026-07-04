@@ -17,6 +17,11 @@
 # fail-closed: 劣化検出時は `ENV_DEGRADED: <理由>` を stdout+stderr に出して非0 で抜ける。worker は
 # done を申告せず `STATUS: blocked — env degraded …` を bdw で書いて停止する（scribe-spawn worker prompt）。
 #
+# verify は再入可能（sc-0d2）: ENV_OK は sentinel を温存し、同じ token で何度でも verify できる。
+# worker prompt は self-report を cell-quality 呼出しと gate-pending 付与の 2 時点で踏むため、単回使用
+# （ENV_OK でも trap が sentinel を消費する旧設計）だと 2 回目の verify が偽 ENV_DEGRADED になる
+# （folio-c5r.5 実測・doobidoo 79d41450）。sentinel 掃除は degraded/die 経路のみ（下の trap 注記）。
+#
 # sentinel パス（テスト seam = env 上書き可）:
 #   SCRIBE_ENVPROBE_FILE  既定 <worktree>/.scribe-envprobe   （worktree FS の cross-call 永続を試す＝必須面。plant は
 #                         この basename を worktree の共有 info/exclude へ冪等登録し verify 前の commit 混入を防ぐ＝sc-zin）
@@ -84,7 +89,8 @@ if [[ "$MODE" == plant ]]; then
   # scribe-add / 素の `git add -A` が untracked sentinel を stage し commit へ混入させる(uns un-smnk 実事故
   # be8c199→amend 除外)。撒く主体(plant)が撒く前に info/exclude へ冪等登録して混入経路を構造的に塞ぐ。既定名は
   # .scribe-envprobe（SENT_FILE の basename＝sc-sau で anchor .gitignore にも登録済の名と一致）。best-effort＝
-  # 登録不能でも plant 本務(sentinel 書込み)は殺さず、verify の trap 掃除で二重防御（/tmp sentinel は worktree 外で対象外）。
+  # 登録不能でも plant 本務(sentinel 書込み)は殺さず、verify が ENV_OK 経路で冪等再登録・degraded/die 経路で
+  # trap 掃除して二重防御（/tmp sentinel は worktree 外で対象外・sc-0d2 で ENV_OK 掃除→温存に変更）。
   scribe_write_exclude "$WORKTREE" "$(basename "$SENT_FILE")" || true
   # worktree 面は必須（書込み自体が失敗したら即 fail-loud＝env がもう壊れている）。
   printf '%s\n' "$tok" > "$SENT_FILE" || scribe_die "sentinel 書込み失敗(worktree 面): $SENT_FILE"
@@ -97,8 +103,11 @@ fi
 # ---- verify: 別 Bash 呼出しから sentinel を読み戻して永続を判定 ----
 [[ -n "$TOKEN" ]] || scribe_die "--token（必須・plant が出力した token を文脈から渡す）がありません。"
 
-# どの exit（ENV_OK / degraded 3,4 / die）でも sentinel を残さない。degraded 経路で worktree に残ると
-# worker の git add に巻き込まれ・admin の引取り worktree を汚す（review#4/#7）。trap で全 exit を掃除。
+# degraded(3,4)/die 経路では sentinel を残さない——残ると worker の git add に巻き込まれ・admin の
+# 引取り worktree を汚す（review#4/#7）。ENV_OK 経路は末尾で trap を解除して sentinel を温存する
+# （verify 再入可能化・sc-0d2。ignored な sentinel は git add にも `git worktree remove` にも掛からない＝
+# 検証済み。/tmp 面は既定 sandbox では plant が書けず（read-only・--also-tmp も落ちる＝sc-3lj）残置は
+# 非 sandbox 経路のみ。worktree パスは spawn ごと一意ゆえ次 plant の上書きは期待できず OS の /tmp 掃除に委ねる）。
 trap 'rm -f "$SENT_FILE" "$SENT_TMP" 2>/dev/null || true' EXIT
 
 degraded() { printf 'ENV_DEGRADED: %s\n' "$1"; printf 'ENV_DEGRADED: %s\n' "$1" >&2; exit "${2:-3}"; }
@@ -122,6 +131,9 @@ if [[ -n "$BASE" ]]; then
   [[ "$count" -gt 0 ]] || degraded "base..HEAD が 0 commit（worker の実装が永続していない/未コミット＝done を申告できない）: base=$BASE worktree=$WORKTREE" 4
 fi
 
-# 健全 → ENV_OK（sentinel 掃除は上の trap EXIT が全 exit 共通で行う）。
+# 健全 → ENV_OK。trap を解除して sentinel を温存する（verify 再入可能・sc-0d2）。plant の info/exclude
+# 登録が失敗していた場合の第二防御として、ENV_OK の度に冪等再登録する（best-effort・非 git worktree は no-op）。
+scribe_write_exclude "$WORKTREE" "$(basename "$SENT_FILE")" || true
+trap - EXIT
 printf 'ENV_OK\n'
 exit 0

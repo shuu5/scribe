@@ -2973,14 +2973,45 @@ _mk_probe_env() {
   rm -rf "$r"
 }
 
-@test "env-probe(verify): 健全（sentinel 残存・token 一致）→ ENV_OK exit 0 + sentinel 掃除" {
+@test "env-probe(verify): 健全（sentinel 残存・token 一致）→ ENV_OK exit 0 + sentinel 温存（再入可能・sc-0d2）" {
   pe="$(_mk_probe_env)"; wt="${pe%%$'\t'*}"; tmp="${pe#*$'\t'}"
   env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=TOK123 "$PROBE" plant --worktree "$wt" >/dev/null
   run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token TOK123 --worktree "$wt" --also-tmp
   [ "$status" -eq 0 ]
   [[ "$output" == *"ENV_OK"* ]]
-  [ ! -f "$wt/.scribe-envprobe" ]   # 健全時は sentinel を掃除する
+  [ "$(cat "$wt/.scribe-envprobe")" = "TOK123" ]   # ENV_OK は sentinel を温存する（旧: 掃除→sc-0d2 で反転）
   rm -rf "$wt" "$tmp"
+}
+
+# sc-0d2 回帰: worker prompt は self-report を 2 時点（cell-quality 呼出し・gate-pending 付与）で踏むため
+# verify が 2 回呼ばれうる。旧・単回使用（ENV_OK でも trap が sentinel を消費）では 2 回目が偽 ENV_DEGRADED
+# になった（folio-c5r.5 実測・doobidoo 79d41450）。
+@test "env-probe(verify・sc-0d2): 連続 2 回の verify がどちらも ENV_OK（double-verify 偽陽性の回帰）" {
+  pe="$(_mk_probe_env)"; wt="${pe%%$'\t'*}"; tmp="${pe#*$'\t'}"
+  env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=TOK123 "$PROBE" plant --worktree "$wt" >/dev/null
+  run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token TOK123 --worktree "$wt" --also-tmp
+  [ "$status" -eq 0 ]
+  run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token TOK123 --worktree "$wt" --also-tmp
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ENV_OK"* ]]
+  rm -rf "$wt" "$tmp"
+}
+
+@test "env-probe(verify・sc-0d2): ENV_OK 時に info/exclude を冪等再登録する（plant 登録失敗時の第二防御）" {
+  r="$(cd "$(mktemp -d)" && pwd -P)"; git -C "$r" -c init.defaultBranch=main init -q
+  tmp="$(mktemp -u)"
+  env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=TOK "$PROBE" plant --worktree "$r" >/dev/null
+  : > "$r/.git/info/exclude"   # plant の登録が失われた状況を模す
+  run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token TOK --worktree "$r"
+  [ "$status" -eq 0 ]
+  [ "$(grep -cxF '.scribe-envprobe' "$r/.git/info/exclude")" -eq 1 ]
+  # 再登録も冪等（もう一度 verify しても重複登録しない）
+  env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token TOK --worktree "$r" >/dev/null
+  [ "$(grep -cxF '.scribe-envprobe' "$r/.git/info/exclude")" -eq 1 ]
+  # 温存された sentinel は exclude 済で git add / status に掛からない（温存判断の安全不変条件・sc-0d2）
+  [ -f "$r/.scribe-envprobe" ]
+  [ -z "$(git -C "$r" status --porcelain --untracked-files=all)" ]
+  rm -rf "$r" "$tmp"
 }
 
 @test "env-probe(verify): worktree sentinel 消失（cross-call 非永続）→ ENV_DEGRADED exit 3" {
@@ -3029,6 +3060,8 @@ _mk_probe_env() {
   run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token T --worktree "$linked" --base "$base"
   [ "$status" -eq 4 ]
   [[ "$output" == *"0 commit"* ]]
+  [ ! -f "$linked/.scribe-envprobe" ]   # degraded(exit 4) でも trap が sentinel を掃除する（sc-0d2: 温存は ENV_OK のみ）
+  [ ! -f "$tmp" ]
   git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
   rm -rf "$main" "$tmp"
 }
