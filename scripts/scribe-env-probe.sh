@@ -13,10 +13,11 @@
 #       重要: shell 変数は Bash 呼出し間で消えるため、token は plant の stdout を **LLM が文脈で控えて**
 #       verify に文字列で渡す（呼出し間で生きる唯一の確実な channel）。
 #   (2) commit 非永続/未実装: done 主張なのに <base>..HEAD が 0 commit なら劣化（folio で 0 commit を実測）。
-#   (3) .git 書込劣化（read-only 化）: verify の度に .git の commit 実書込面（per-worktree の GIT_DIR＝index/HEAD 面
-#       + 共有 GIT_COMMON_DIR＝objects/refs 面）へ touch/rm ラウンドトリップし、書込不能を検出する（sc-owj・folio-229
-#       偽陰性）。既存 commit がある状態で .git が read-only mount 化すると (1)(2) は共に PASS するが commit を新規
-#       produce できない——「検証は全部走るのに成果を commit できない」空回りになる。この面は (1)(2) の検出圏外だった。
+#   (3) .git 書込劣化（read-only 化）: verify の度に commit の**実書込先ディレクトリ**（per-worktree の GIT_DIR＝
+#       index/HEAD 面 + 共有 GIT_COMMON_DIR/objects＝loose object 面）へ touch/rm ラウンドトリップし、書込不能を
+#       検出する（sc-owj・folio-229 偽陰性）。既存 commit がある状態で .git が read-only mount 化すると (1)(2) は共に
+#       PASS するが commit を新規 produce できない——「検証は全部走るのに成果を commit できない」空回りになる。この面は
+#       (1)(2) の検出圏外だった。ルートでなく実書込 subdir を狙うため objects のみ RO の部分劣化も捕捉する。
 #
 # fail-closed: 劣化検出時は `ENV_DEGRADED: <理由>` を stdout+stderr に出して非0 で抜ける。worker は
 # done を申告せず `STATUS: blocked — env degraded …` を bdw で書いて停止する（scribe-spawn worker prompt）。
@@ -116,22 +117,30 @@ trap 'rm -f "$SENT_FILE" "$SENT_TMP" 2>/dev/null || true' EXIT
 
 degraded() { printf 'ENV_DEGRADED: %s\n' "$1"; printf 'ENV_DEGRADED: %s\n' "$1" >&2; exit "${2:-3}"; }
 
-# .git 書込可否 probe（sc-owj・folio-229 偽陰性）: commit の実書込面へ touch/rm ラウンドトリップして
-# 「今 .git へ新規 write できるか」を試す。既存 commit がある状態で .git が read-only mount 化しても
-# sentinel 永続(3)・0-commit(4) は共に PASS するため検出圏外だった面をここで塞ぐ。commit は per-worktree の
-# GIT_DIR（index/HEAD）と共有 GIT_COMMON_DIR（objects/refs）の**両面**へ書くため両方を probe する（linked
-# worktree では別 filesystem になりうる）。probe file は .git 内部ゆえ commit 混入せず・毎回 touch→rm の
-# transient で sentinel 温存 semantics(sc-0d2) と無干渉。非 git worktree（テスト seam 等）は git-path が
-# 解決不能 → no-op で skip（probe 対象が無い＝この面の劣化は起こりえない。実 worker は常に git worktree）。
+# .git 書込可否 probe（sc-owj・folio-229 偽陰性）: commit の**実書込先ディレクトリ**へ touch/rm ラウンド
+# トリップして「今 commit の write ができるか」を試す。既存 commit がある状態で .git が read-only mount 化
+# しても sentinel 永続(3)・0-commit(4) は共に PASS するため検出圏外だった面をここで塞ぐ。commit が実際に
+# write する面を probe する（.git ルート直下だけ writable で subtree が RO の部分劣化＝objects の read-only
+# 共有 bind-mount 等も捕捉するため、ルートでなく実書込 subdir を狙う・gate 指摘 sc-owj）:
+#   - GIT_DIR 直下（index / HEAD の per-worktree 面。両者は git-dir 直下ゆえルート probe が同 dir を試す）
+#   - GIT_COMMON_DIR/objects（commit が loose object を書く共有面。無ければ common-dir 直下へフォールバック）
+# probe file は .git 内部ゆえ commit 混入せず・毎回 touch→rm の transient で sentinel 温存 semantics(sc-0d2)
+# と無干渉。非 git worktree（テスト seam 等）は git-path が解決不能 → no-op で skip（probe 対象が無い＝この
+# 面の劣化は起こりえない。実 worker は常に git worktree）。
 git_write_probe() {
   local gd cd p probe
+  local -a targets
   gd="$(scribe_git -C "$WORKTREE" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
   cd="$(scribe_git -C "$WORKTREE" rev-parse --git-common-dir 2>/dev/null)" || cd="$gd"
-  # --git-common-dir は相対（"." 等）を返しうる → worktree 起点で絶対化してから比較・probe する。
+  # --git-common-dir は相対（"." 等）を返しうる → worktree 起点で絶対化してから probe する。
   case "$cd" in /*) : ;; *) cd="$WORKTREE/$cd" ;; esac
-  # 非 worktree リポ（git-dir == common-dir）は同一パスゆえ 1 面だけ probe すれば足りる。
-  if [[ "$cd" == "$gd" ]]; then set -- "$gd"; else set -- "$gd" "$cd"; fi
-  for p in "$@"; do
+  targets=( "$gd" )                                    # index / HEAD 面（GIT_DIR 直下）
+  if [[ -d "$cd/objects" ]]; then                      # loose object の実書込先（共有面）
+    targets+=( "$cd/objects" )
+  else
+    targets+=( "$cd" )                                 # 想定外だが objects 不在なら common-dir 直下へフォールバック
+  fi
+  for p in "${targets[@]}"; do
     [[ -d "$p" ]] || continue
     probe="$p/.scribe-wprobe.$$"
     ( : > "$probe" ) 2>/dev/null \

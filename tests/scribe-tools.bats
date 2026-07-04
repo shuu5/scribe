@@ -3225,17 +3225,20 @@ _mk_probe_env() {
   rm -rf "$main" "$tmp"
 }
 
-@test "env-probe(verify・sc-owj): 共有 GIT_COMMON_DIR が read-only → ENV_DEGRADED exit 5（objects/refs 面）" {
+@test "env-probe(verify・sc-owj): 共有 GIT_COMMON_DIR/objects が read-only → ENV_DEGRADED exit 5（loose object 実書込面・部分 RO も捕捉）" {
   read -r main linked < <(_mk_main_and_linked)
   git -C "$linked" commit -q --allow-empty -m work
   tmp="$(mktemp -u)"
   env SCRIBE_ENVPROBE_TMP="$tmp" SCRIBE_ENVPROBE_TOKEN=T "$PROBE" plant --worktree "$linked" >/dev/null
   local cd; cd="$(env -u GIT_DIR -u GIT_WORK_TREE git -C "$linked" rev-parse --git-common-dir)"
-  chmod a-w "$cd"                                     # 共有 objects/refs 面を書込不能化
+  # commit の loose object 実書込先 objects/ のみを RO 化（.git ルートは writable のまま＝部分 RO）。
+  # ルート probe では取りこぼす部分劣化を、実書込 subdir probe が捕捉することを pin する。
+  chmod a-w "$cd/objects"
   run env SCRIBE_ENVPROBE_TMP="$tmp" "$PROBE" verify --token T --worktree "$linked"
-  chmod u+w "$cd"
+  chmod u+w "$cd/objects"
   [ "$status" -eq 5 ]
   [[ "$output" == *".git 書込劣化"* ]]
+  [[ "$output" == *"objects"* ]]                     # 実書込先（objects 面）を probe した証跡
   git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
   rm -rf "$main" "$tmp"
 }
