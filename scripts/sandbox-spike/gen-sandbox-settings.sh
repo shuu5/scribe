@@ -8,7 +8,7 @@
 #   - <ANCHOR>/.beads の runtime サブパスのみ … 明示(bd/bdw の台帳書込み = B/hybrid。worktree subtree 外ゆえ絶対パス
 #       必須)。**丸ごとでなく** governance denylist(PRIME.md/metadata.json/config.yaml/README.md/.gitignore)を除いた
 #       present 直下エントリ(embeddeddolt/ 等 dolt runtime)だけを grant し tracked 統治ファイルを read-only に守る(OG-1・sc-nd6。下記本体参照)
-#   - bdw のロック dir(BDW_LOCK_DIR:-$HOME/.cache/bdw-locks) … 明示(bdw の flock 鍵 bd-write-<repo>.lock の置き場・bdw と同式・sc-xs2)
+#   - bdw の flock 鍵 file(${lock_dir}/bd-write-<repo_id>.lock) … 明示(自リポ鍵 **file 単位**・OG-4/sc-mcx で lock dir 丸ごと grant から狭化＝同 dir 内の他リポ鍵に触れない)
 # 上記以外への **Bash subprocess の**書込みは sandbox 外壁(層2)が拒否する。ただし bwrap が封じるのは
 # Bash 経路のみ＝built-in の Edit/Write/NotebookEdit は permission 層(bypassPermissions で素通し)で動き
 # bwrap では縛れない。worker の Edit/Write は別レイヤの PreToolUse guard(scripts/hooks/edit-write-guard.py・
@@ -56,14 +56,20 @@ else
 fi
 
 uid="$(id -u)"
-# bdw(scripts/bdw)が flock 鍵を置く dir を**そのまま** consume する(sc-vae cutover: lock_dir の SSOT は
-# canonical bdw に一本化＝`bdw lock-dir` が解決済み dir を stdout に出す contract。旧 scribe-lib.sh の
-# ローカル lock_dir 解決関数の手書き複製は drift 源ゆえ廃止し、bdw 自身に問い合わせて構造的に byte 一致させる)。
+# bdw(scripts/bdw)が flock 鍵を置く **file** を consume する(OG-4・sc-mcx: lock **dir** 丸ごとでなく自リポの
+# flock 鍵 file 単位へ狭める＝sandboxed worker が同 dir 内の他リポ鍵に一切触れない)。lock_file の SSOT は
+# canonical bdw に一本化＝`bdw lock-file` が `${lock_dir}/bd-write-${repo_id}.lock`(repo_id=git common-dir の
+# sha256 先頭16)を stdout に出す contract(Leg-A・orch-7ti 着地済)。repo_id 導出を手書き複製すると drift(bdw が
+# 導出を変えると worker の bd write が fail-closed で壊れる)ゆえ再実装せず bdw に問い合わせ構造的に byte 一致させる。
 # `$_GEN_DIR/../bdw` = scripts/bdw shim→canonical へ exec。set -euo pipefail 下ゆえ失敗時は自動 fail-closed。
-# grant は専用 lock dir(既定 $HOME/.cache/bdw-locks・sc-xs2 で orch/uns bdw と収束)のみ＝parent(`$HOME/.cache`
-# 等)を丸ごと grant せず、sandboxed worker が触れる範囲を最小化する。bwrap が bind 前に path 存在を要求しうる
-# ため、scribe-spawn.sh が worker 起動前にこの dir を mkdir する。
-lock_dir="$("$_GEN_DIR/../bdw" lock-dir)"
+# repo_id は bdw が **プロセス cwd** の git common-dir(sha256 先頭16)から導く(canonical は BDW_REPO_DIR override を
+# 持つが repo_id 解決には効かない＝cwd 依存・verified)。cross-repo cell(--repo X --anchor Y・X≠Y)では真の bd graph
+# は anchor(Y)で worker も `cd Y && bdw` して書くため、gen 側も **anchor(Y)を cwd に** して repo_id を出す必要がある
+# (gen の cwd は anchor と限らない)。よって subshell `(cd "$anchor" && bdw lock-file)` で worker の bd write と同一
+# invocation にし、byte 一致の repo_id 鍵を grant する(worktree と anchor が common-dir 共有な同一リポ cell では
+# どちらでも同値ゆえ安全側)。bwrap が bind 前に path 存在を要求しうるため、scribe-spawn.sh が worker 起動前にこの
+# file を pre-create(touch)する(parent lock dir も mkdir・汎用 mkdir では file を dir 化するため専用 touch)。
+lock_file="$(cd "$anchor" && "$_GEN_DIR/../bdw" lock-file)"
 beads_dir="$anchor/.beads"
 
 # --- OG-1(sc-nd6): .beads を丸ごとでなく runtime サブパスだけ grant（tracked 統治ファイルを read-only に守る）---
@@ -80,7 +86,8 @@ beads_dir="$anchor/.beads"
 #   エントリは既在。session 中の新規 top-level エントリ生成は稀で、起きれば fail-loud（worker が気付く）。
 # 残存（OG-1 の到達限界）: embeddeddolt を dir grant する以上 worker は dolt DB を raw 書換でき、他 issue 改竄は
 #   OS 層では防げない（tool 層の bd-write-guard=PreToolUse + bdw-write-outside-sandbox 案が別レイヤ・脅威モデル
-#   の正直な文書化は sc-451）。lock_dir のファイル単位 grant（OG-4）は cross-plugin 依存ゆえ別 issue。
+#   の正直な文書化は sc-451）。lock 鍵の **file 単位** grant（OG-4・sc-mcx）は下記 lock_file で実装済（lock dir
+#   丸ごとを grant しないため同 dir 内の他リポ鍵 file には触れない＝残存 DoS を消す defense-in-depth）。
 _beads_governance=( PRIME.md metadata.json config.yaml README.md .gitignore )
 _beads_grants=()
 shopt -s nullglob dotglob
@@ -98,7 +105,7 @@ if [[ "${#_beads_grants[@]}" -eq 0 ]]; then
   exit 2
 fi
 
-# allowWrite = [<.beads runtime サブパス...>, <lock_dir>]。--args で positional 配列化（空白/メタ文字パス安全・verified）。
+# allowWrite = [<.beads runtime サブパス...>, <lock_file>]。--args で positional 配列化（空白/メタ文字パス安全・verified）。
 jq -n --args '{
     sandbox: {
       enabled: true,
@@ -108,4 +115,4 @@ jq -n --args '{
         allowWrite: $ARGS.positional
       }
     }
-  }' "${_beads_grants[@]}" "$lock_dir"
+  }' "${_beads_grants[@]}" "$lock_file"

@@ -619,7 +619,7 @@ if [[ "$SANDBOX_ON" == "1" ]]; then
     rm -f "$_sb_tmp"
     {
       echo "scribe: error: sandbox settings.local.json の生成に失敗（gen-sandbox-settings.sh・sandbox 既定 on・opt-out=SCRIBE_SANDBOX=0）。"
-      echo "scribe: 真因の候補: jq 不在 / canonical bdw（beads-bdw plugin）未配備で 'scripts/bdw lock-dir' 失敗（sc-vae cutover で gen の spawn-time 依存）。通常は preflight が両者を worktree add 前に検出する。"
+      echo "scribe: 真因の候補: jq 不在 / canonical bdw（beads-bdw plugin）未配備で 'scripts/bdw lock-file' 失敗（sc-vae/sc-mcx cutover で gen の spawn-time 依存＝OG-4 で lock-dir から lock-file consume へ）。通常は preflight が両者を worktree add 前に検出する。"
       echo "scribe: worktree が orphan として残っています（自動削除はしません＝force 禁止・確認必須ポリシー）: $WORKTREE"
       echo "scribe: 掃除するには（force 系を使わない確認プロンプト付き cleanup）:"
       echo "         $SCRIPT_DIR/scribe-cleanup.sh --repo \"$REPO\" --worktree \"$WORKTREE\" --branch \"$BRANCH\" --window \"$WINDOW\" $ID"
@@ -648,13 +648,27 @@ if [[ "$SANDBOX_ON" == "1" ]]; then
   # 既知 dotfile/.claude 設定を /dev/null device 化する件（sc-yqa）は info/exclude でなく scribe-add（型で弾く
   # stage ラッパ）が担う＝CC のリスト churn に無関係・共有 exclude の広い漏れを避ける（E→B 切替・sc-yqa grill）。
   scribe_sandbox_write_exclude "$WORKTREE"
-  # bwrap が allowWrite path を bind 前に存在要求しうる（deduced・sc-da0）。gen が grant した書込み
-  # 許可 path（専用 lock dir = 既定 $HOME/.cache/bdw-locks・sc-xs2 で orch/uns bdw と収束）を worker
-  # 起動前に事前生成する。formula を再実装せず生成済み settings の allowWrite から読む＝gen と drift
-  # しない（.beads は既存ゆえ no-op）。
+  # bwrap が allowWrite path を bind 前に存在要求しうる（deduced・sc-da0）。gen が grant した書込み許可 path を
+  # worker 起動前に事前生成する。allowWrite は 2 種を含み、pre-create の作法が異なる:
+  #  (1) bdw の flock 鍵 = **file**（OG-4・sc-mcx で lock dir 丸ごとから file 単位へ狭化）。canonical bdw の
+  #      `exec 9>"$lock_file"`(O_TRUNC)は不在 file には parent dir write を要すが、file 単位 grant では親 dir を
+  #      grant しないため、ここで parent(lock dir)を mkdir し file を **touch** で先在させる（`mkdir -p` では file
+  #      を dir 化してしまい flock が Is-a-directory で壊れる＝専用 touch が要る）。repo_id 導出は複製せず gen と
+  #      同一の `bdw lock-file` を consume する（subshell `(cd "$ANCHOR" && bdw lock-file)` で worker の bd write
+  #      と同一 invocation にする＝repo_id は cwd 依存で BDW_REPO_DIR override は効かない・verified。cross-repo cell
+  #      でも worker が使う鍵と byte 一致・gen と drift しない）。
+  #  (2) .beads runtime サブパス = established anchor では既存 dir/file。汎用 `mkdir -p` ループで存在保証する
+  #      （既存 dir は no-op・既存 file は "File exists" warn になるが bind には既存で十分）。lock file は (1) で
+  #      touch 済みゆえ **除外**する（汎用ループが触れて dir 化する事故を構造的に排除＝(1) の touch が失敗しても安全）。
+  _sb_lock_file="$(cd "$ANCHOR" && "$SCRIPT_DIR/bdw" lock-file 2>/dev/null)" || _sb_lock_file=""
+  if [[ -n "$_sb_lock_file" ]]; then
+    if ! { mkdir -p "$(dirname "$_sb_lock_file")" 2>/dev/null && touch "$_sb_lock_file" 2>/dev/null; }; then
+      echo "scribe: warn: sandbox lock 鍵 file の pre-create（parent mkdir + touch）に失敗（worker 起動が failIfUnavailable で止まりうる）: $_sb_lock_file" >&2
+    fi
+  fi
   if command -v jq >/dev/null 2>&1; then
     while IFS= read -r _sb_aw; do
-      if [[ -n "$_sb_aw" ]]; then
+      if [[ -n "$_sb_aw" && "$_sb_aw" != "$_sb_lock_file" ]]; then
         mkdir -p "$_sb_aw" || echo "scribe: warn: sandbox allowWrite path の mkdir に失敗（worker 起動が failIfUnavailable で止まりうる）: $_sb_aw" >&2
       fi
     done < <(jq -r '.sandbox.filesystem.allowWrite[]?' "$WORKTREE/.claude/settings.local.json" 2>/dev/null || true)
