@@ -483,16 +483,20 @@ _mk_beads() {
   [[ "$output" == *"--also-tmp"* ]]
 }
 
-# ---------- zombie fallback の pane 可視 sentinel（sc-c7c・folio-nufl）----------
+# ---------- zombie fallback の pane 可視 sentinel（sc-c7c・folio-nufl・dogfood 済）----------
 # 全ツール死（Bash/Read が空応答＝bdw で STATUS: blocked を書けない zombie 変種・protocol §6 第 3 変種）では
 # admin 検知網 3 信号（gate-pending / STATUS notes / 窓消失）が全て沈黙する。folio-nufl 実測で turn の
 # text 出力だけは pane に残った → worker prompt に「blocked を書けない時は行頭定型 SCRIBE-ENV-DEGRADED: を
 # 出力して停止」を焼き、admin が capture-pane + regex で機械的に拾えるようにする（Layer1 の pane fallback）。
-@test "spawn(sc-c7c): worker prompt に zombie fallback（SCRIBE-ENV-DEGRADED: <実ID> 行頭定型 + 検知 regex 契約）が焼かれる" {
+# dogfood（sc-adr drill・lock 鍵 chmod 000 で bd write 封鎖）で確定: CC TUI は assistant text を先頭スペース
+# インデントで描画するため実 sentinel は '  SCRIBE-ENV-DEGRADED: …' となり厳格 ^ は偽陰性 → 検知 regex は
+# 行頭空白許容形 ^[[:space:]]*SCRIBE-ENV-DEGRADED: が正（prompt にこの正しい契約が焼かれることを pin）。
+@test "spawn(sc-c7c): worker prompt に zombie fallback（SCRIBE-ENV-DEGRADED: <実ID> 行頭定型 + dogfood 確定検知 regex 契約）が焼かれる" {
   run "$SPAWN" --dry-run un-4nm
   [ "$status" -eq 0 ]
-  [[ "$output" == *'SCRIBE-ENV-DEGRADED: un-4nm'* ]]   # 定型に実 issue-id が展開される（$ID のまま残らない）
-  [[ "$output" == *'^SCRIBE-ENV-DEGRADED:'* ]]         # admin 側検知 regex が同じ prompt に契約として明記される
+  [[ "$output" == *'SCRIBE-ENV-DEGRADED: un-4nm'* ]]                 # 定型に実 issue-id が展開される（$ID のまま残らない）
+  [[ "$output" == *'^[[:space:]]*SCRIBE-ENV-DEGRADED:'* ]]          # dogfood 確定の空白許容検知 regex が契約として明記される
+  [[ "$output" == *'tail -n'* ]]                                     # prompt echo 除外の tail 窓検知が契約に含まれる
 }
 
 @test "spawn(sc-c7c): 停止許可の規律行が pane sentinel 停止を第 2 例外として明記する（旧「ENV_DEGRADED 検出時のみ」へ巻き戻すと RED）" {
@@ -839,6 +843,21 @@ _make_noop_cld_spawn() {
   # 停止条件(load-bearing)も docs 側で pin する（spawn 側 assert と対称・docs だけ停止規範が drift しても捕捉）。
   grep -q '停止してよいのは' "$REPO_ROOT/docs/protocol.md"
   grep -q 'ENV_DEGRADED' "$REPO_ROOT/docs/protocol.md"
+}
+
+# sc-c7c: dogfood 通過後の §6 昇格を pin する。zombie 変種の pane sentinel（定型・確定検知 regex・
+# tail 窓検知コマンド）が protocol §6 の regulatory SSOT に成文化され、§2 停止規律が 2 例外化された
+# ことを docs 側で pin（成文化の規律＝dogfood 済みのみ protocol に載る。昇格を巻き戻すと RED）。
+@test "docs(sc-c7c): protocol §6 に zombie pane sentinel が成文化され §2 停止規律が 2 例外化されている" {
+  local proto="$REPO_ROOT/docs/protocol.md"
+  # §6: sentinel 定型 + dogfood 確定の空白許容検知 regex + prompt echo 除外の tail 窓検知。
+  grep -q 'SCRIBE-ENV-DEGRADED' "$proto"
+  grep -q '\^\[\[:space:\]\]\*SCRIBE-ENV-DEGRADED:' "$proto"   # 厳格 ^ でなく空白許容形（偽陰性回避・dogfood verified）
+  grep -q 'capture-pane' "$proto"
+  # sentinel は主網の代替でなく追加信号である旨（fail-closed 主網 = idle-at-prompt × 0-commit）。
+  grep -q '追加信号であって主網の代替ではない' "$proto"
+  # §2: 停止許可が「のみ」1 条件から pane sentinel を含む 2 例外へ更新された（巻き戻し検出）。
+  grep -q '停止してよいのは 2 例外のみ' "$proto"
 }
 
 # 上の positive テストは cell-quality/receivedArgs/bdw のみ assert し、build_prompt が焼く
