@@ -541,6 +541,10 @@ _mk_beads() {
   [[ "$output" == *'monitor: C=$(tmux capture-pane -p -t "'* ]]
   [[ "$output" == *"tail -n 12"* ]]
   [[ "$output" == *"grep -E '^[[:space:]]*SCRIBE-ENV-DEGRADED:'"* ]]
+  # dry-run テストと対称に 4 契約すべてを実 emit 側でも pin する（builder 共有の不変条件を回帰から守る・
+  # gate wf_d8e3e17f 指摘の採用修正: 片側だけの assert では builder 分岐退行を実経路側で見逃す）。
+  [[ "$output" == *'busy regex'* ]]
+  [[ "$output" == *'cross-read'* ]]
   # 後片付け（テスト自身は force 可・本番ポリシーとは別物）。
   git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
 }
