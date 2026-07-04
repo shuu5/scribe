@@ -461,6 +461,25 @@ _mk_beads() {
   [[ "$output" == *"--also-tmp"* ]]
 }
 
+# ---------- zombie fallback の pane 可視 sentinel（sc-c7c・folio-nufl）----------
+# 全ツール死（Bash/Read が空応答＝bdw で STATUS: blocked を書けない zombie 変種・protocol §6 第 3 変種）では
+# admin 検知網 3 信号（gate-pending / STATUS notes / 窓消失）が全て沈黙する。folio-nufl 実測で turn の
+# text 出力だけは pane に残った → worker prompt に「blocked を書けない時は行頭定型 SCRIBE-ENV-DEGRADED: を
+# 出力して停止」を焼き、admin が capture-pane + regex で機械的に拾えるようにする（Layer1 の pane fallback）。
+@test "spawn(sc-c7c): worker prompt に zombie fallback（SCRIBE-ENV-DEGRADED: <実ID> 行頭定型 + 検知 regex 契約）が焼かれる" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'SCRIBE-ENV-DEGRADED: un-4nm'* ]]   # 定型に実 issue-id が展開される（$ID のまま残らない）
+  [[ "$output" == *'^SCRIBE-ENV-DEGRADED:'* ]]         # admin 側検知 regex が同じ prompt に契約として明記される
+}
+
+@test "spawn(sc-c7c): 停止許可の規律行が pane sentinel 停止を第 2 例外として明記する（旧「ENV_DEGRADED 検出時のみ」へ巻き戻すと RED）" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'pane sentinel 停止'* ]]
+  [[ "$output" != *'ENV_DEGRADED 検出時のみ'* ]]
+}
+
 # ---------- sandbox-spike 'spike' 文言の本番ヘルパー手当て（sc-2m0 facet3・案C軽量）----------
 # 実害: 'spike' 語が **本番ヘルパー** gen-sandbox-settings.sh（scribe-spawn.sh の SCRIBE_SANDBOX=1
 # opt-in が起動）を experimental と誤認させる可読性問題。ディレクトリ scripts/sandbox-spike/ は
@@ -775,15 +794,16 @@ _make_noop_cld_spawn() {
 
 # sc-46h: worker は autonomous に動く＝確認待ちで停止しない。sc-498 litmus で worker1 が「どうしますか?」と
 # 確認待ち idle 化し fleet を詰まらせた穴を prompt 規律で塞ぐ。停止は ENV_DEGRADED 時のみ・監視ノイズで止まらない。
-@test "spawn(sc-46h): worker prompt に autonomous 規律(確認待ち停止禁止・停止は ENV_DEGRADED のみ)が焼ける" {
+@test "spawn(sc-46h): worker prompt に autonomous 規律(確認待ち停止禁止・停止は ENV_DEGRADED と pane sentinel の 2 例外のみ)が焼ける" {
   run "$SPAWN" --dry-run un-4nm
   [ "$status" -eq 0 ]
   [[ "$output" == *"autonomous 規律"* ]]
   [[ "$output" == *"確認・許可・指示を待って停止してはならない"* ]]
-  # 停止条件は ENV_DEGRADED のみ（autonomy が env 健全性 gate の停止と矛盾しないことの pin）。独立 2 文で
+  # 停止条件は ENV_DEGRADED 検出＋pane sentinel（sc-c7c で「のみ」→2 例外へ拡張。autonomy が env 健全性
+  # gate / zombie fallback の停止と矛盾しないことの pin）。独立文で
   # 各 [[ ]] を errexit に効かせる（`&&` 連結は errexit 免除で fail-open になりうる＝sc-3lj gate の教訓）。
   [[ "$output" == *"停止してよいのは"* ]]
-  [[ "$output" == *"ENV_DEGRADED 検出時のみ"* ]]
+  [[ "$output" == *"ENV_DEGRADED 検出時"* ]]
   # 実体確認の bd は anchor cd 付き（worktree から bare bd show は bd graph を解決しない・sc-46h gate blocking）。
   # $ANCHOR は heredoc で展開されるため、修正で入れた安定 prose で pin する。
   [[ "$output" == *"bd graph は anchor 所在ゆえ worktree から bare"* ]]

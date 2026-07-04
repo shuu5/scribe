@@ -434,7 +434,7 @@ build_prompt() {
 ## autonomous 規律（最重要・protocol.md §2・sc-46h）
 - この worker は**自律実行する**。**人間の確認・許可・指示を待って停止してはならない**（admin は監視するが対話しない。admin の \`capture-pane\` / \`bd show\` は read-only であなたを中断しない）。
 - 出力に「中断された」「割り込み」等のノイズが見えても作業を止めるな。shell 変数は Bash 呼出し間で消える・出力フィルタがノイズを混ぜることがある——**疑わしければ同じコマンドを再実行し、git/bd の実体（\`git -C "$WORKTREE" log\` / \`cd "$ANCHOR" && bd show $ID\`＝bd graph は anchor 所在ゆえ worktree から bare \`bd show\` は解決しない）で事実を確認**してから進む（推測や前回出力の記憶で判断しない）。
-- **停止してよいのは下記 env 健全性 gate の ENV_DEGRADED 検出時のみ**（その時だけ STATUS: blocked を書いて止まる）。それ以外は契約完遂（実装→self-test→cell-quality→commit→DONE 報告）まで自律的に進めること。
+- **停止してよいのは下記 env 健全性 gate の ENV_DEGRADED 検出時（その時だけ STATUS: blocked を書いて止まる）と、その STATUS: blocked 自体を書けない時の pane sentinel 停止（下記 zombie fallback・sc-c7c）のみ**。それ以外は契約完遂（実装→self-test→cell-quality→commit→DONE 報告）まで自律的に進めること。
 
 ## 契約（SSOT）
 - 契約 = bd issue の description: \`cd "$ANCHOR" && bd show $ID\`（着手前に必ず読む。bd graph 所在 = anchor $ANCHOR・worktree からは解決しない）。
@@ -452,6 +452,7 @@ build_prompt() {
   - **self-report の直前**に**別 Bash 呼出し**で \`"$SCRIPT_DIR/scribe-env-probe.sh" verify --token <控えた token> --worktree "$WORKTREE" --base $_probe_base$_also_tmp_flag\` を実行する。
   - **verify は再入可能**（ENV_OK は sentinel を温存する・sc-0d2）: 途中で env を確かめたいとき（例: cell-quality 呼出し前）は **\`--base\` を外して**同じ token で随時 verify してよい。実装完了前に \`--base\` 付きで呼ぶと 0 commit 検査が偽 \`ENV_DEGRADED\`（exit 4）を出すため、\`--base\` 付きの verify は最終（gate-pending 直前）のみ。
   - \`ENV_DEGRADED\`（呼出し間で sentinel 消失／base..HEAD が 0 commit）なら **done を申告せず** \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $ID --append-notes "STATUS: blocked — env degraded（CC infra の Bash 非永続・要admin）: <ENV_DEGRADED の理由>"\` を書いて停止する（回避策を打たない＝worker では直せない・admin が reliable env で引き取る）。
+  - **zombie fallback（STATUS: blocked を書けない時・sc-c7c）**: 上記 blocked の bdw 書込が繰り返し失敗する、またはツール実行が全て空応答になる（Bash/Read を再実行しても結果が返らない＝ツール実行層の全死・folio-nufl 実測）なら、回避策を打たず**応答テキストの単独行**として行頭から \`SCRIBE-ENV-DEGRADED: $ID <一行理由>\` を出力して停止する（ツールが全死しても turn の text 出力は pane に残る＝最後の信号。admin が regex \`^SCRIBE-ENV-DEGRADED:\` で pane から拾って引き取る。出力後は再試行ループに入らず入力待ちのまま止まる）。
 - bd write は必ず \`bdw\` 経由で直列化: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" <subcmd>\`（自 issue の進捗のみ）。$_sandbox_add_note
 - **完了は gate-pending ラベル + DONE 報告（自己 close しない・§4 反転）**: 実装 + self-test pass + PR/commit + 上記 env-probe verify が揃ったら、\`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $ID --add-label gate-pending\` で自 issue に **gate-pending ラベル**を付与し、PR 番号 / commit / WF 返り値を添えて DONE を報告する。**自分で \`bd close\` しない**——close は admin が gate+merge を済ませた後に行う（worker の自己 close は admin の gate 待ち検知をすり抜ける＝orch-ol0 反転）。
 
