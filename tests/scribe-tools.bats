@@ -246,6 +246,28 @@ _mk_beads() {
   rm -rf "$repoX" "$anchorY"
 }
 
+@test "gen-sandbox(sc-mcx/cross-repo): lock-file grant は worktree(X)でなく anchor(Y)の repo_id 鍵（実 bdw・stub でない・OG-4 誤 grant 回帰）" {
+  # sc-mcx cell-quality blocking: 既存 cross-repo テスト(sc-lkg)は BDW_PRESENT_STUB(定数 lock 名)で repo_id 導出を
+  # 再現せず lock file を assert しない。ここは **実 canonical bdw** で 2 実リポ(X≠Y)を構成し、gen の lock-file grant
+  # が anchor(Y)の repo_id 鍵であって worktree(X)の鍵でないことを動的に pin する（repo_id は cwd 依存＝gen の subshell
+  # `cd "$anchor"` 落とし回帰を捕捉。worker は `cd Y && bdw` で書くため Y 鍵でなければ flock がずれ bd write が壊れる）。
+  _need_canonical_bdw
+  local X Y XLD gen_lf key_x key_y
+  X="$(cd "$(mktemp -d)" && pwd -P)"; Y="$(cd "$(mktemp -d)" && pwd -P)"
+  git -C "$X" -c init.defaultBranch=main init -q; git -C "$Y" -c init.defaultBranch=main init -q
+  _mk_beads "$Y"                                    # anchor(Y)側に realistic .beads（gen が grant する側）
+  XLD="$BATS_TEST_TMPDIR/xrlocks"; mkdir -p "$XLD"
+  run env BDW_LOCK_DIR="$XLD" "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$X" "$Y"
+  [ "$status" -eq 0 ]
+  gen_lf="$(echo "$output" | jq -r '.sandbox.filesystem.allowWrite[] | select(endswith(".lock"))')"
+  key_y="$( (cd "$Y" && BDW_LOCK_DIR="$XLD" "$SCRIPTS/bdw" lock-file) )"   # worker/spawn 経路（cd "$ANCHOR"=Y）
+  key_x="$( (cd "$X" && BDW_LOCK_DIR="$XLD" "$SCRIPTS/bdw" lock-file) )"   # worktree 側リポ(X)の鍵
+  [ -n "$key_y" ] && [ "$key_y" != "$key_x" ]      # 非 vacuity: 2 リポの repo_id 鍵が異なる
+  [ "$gen_lf" = "$key_y" ]                          # gen は anchor(Y)の鍵を grant
+  [ "$gen_lf" != "$key_x" ]                         # worktree(X)の鍵を誤 grant しない
+  rm -rf "$X" "$Y"
+}
+
 @test "spawn(sandbox/sc-lkg): gen は存在しない --anchor(第2引数)を fail-loud で弾く（誤ったパスを黙って grant しない）" {
   run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$SCRIBE_TEST_CWD" "/nonexistent/anchor/path"
   [ "$status" -eq 2 ]
