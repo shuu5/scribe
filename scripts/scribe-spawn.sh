@@ -467,8 +467,25 @@ PROMPT
 # --- monitor 起動コマンド（protocol.md §1/§6・window ID @N 参照）---
 # WINDOW(wt-<id>) → window_id(@N) を解決してから -t に渡す（dotted id の window.pane 区切り衝突回避）。
 # 監視は capture-pane + busy 判定 regex（protocol.md §6）で手動観測する（v0 = 背景 supervisor なし）。
+# sc-w5e（sc-c7c 昇格の運用側配線）: tail 窓は 3→12 行。CC TUI は入力 prompt box + statusline で pane
+# 最下部を最大 ~10 行占有するため、worker 停止時の zombie sentinel 行は 3 行窓の外へ押し出される
+#（sc-c7c dogfood 実測。busy spinner 行も同様に 3 行窓の外だった）。12 は同 dogfood の admin 監視が
+# idle 判定に使った実測値で、これ以上広げると scrollback 残渣が誤検知源になる（同 dogfood で広窓が
+# 過去表示の残渣から SESSION-LIMIT を偽検知した実害）。
+# 1 回の capture を C に取り、目視（echo）と sentinel 機械検知（grep・§6 補助信号）を 1 行に併記する。
+# 検知 regex は sc-c7c dogfood 確定形（行頭空白許容・protocol §6 と同一契約）。sentinel は
+# self-authenticating ではない（§6・token が worker の正当 content に現れるケースを regex では弁別不能）
+# ため、検知時の文言は即 salvage でなく 0-commit × 持続 idle の cross-read へ誘導する。
+# grep 形は fleet-monitor 拡張（sc-3pq）が将来 consume する前提で protocol §6 と揃える。
+# 両 emit 箇所（emit_plan の MONITOR_CMD / spawn 末尾の monitor: 行）は本 builder を共有し、片方だけの
+# 契約ドリフトを構造的に防ぐ。
+MONITOR_TAIL=12
+MONITOR_SENTINEL_RE='^[[:space:]]*SCRIBE-ENV-DEGRADED:'
+monitor_cmd_for() {  # $1 = tmux -t ターゲット（dry-run は literal $WID のまま emit＝MONITOR_RESOLVE 後に admin shell が展開）
+  printf '%s' "C=\$(tmux capture-pane -p -t \"$1\" | tail -n $MONITOR_TAIL); echo \"\$C\"; grep -E '$MONITOR_SENTINEL_RE' <<<\"\$C\" && echo '>>> zombie sentinel 検知（補助信号・protocol §6: 即 salvage せず 0-commit × 持続 idle を cross-read）'   # busy regex: '… \\(|esc to interrupt|agents [0-9/ ]*(done|running)|tokens'"
+}
 MONITOR_RESOLVE="WID=\$(tmux list-windows -F '#{window_id} #{window_name}' | awk -v n='$WINDOW' '\$2==n{print \$1; exit}')   # → @N"
-MONITOR_CMD="tmux capture-pane -p -t \"\$WID\" | tail -n 3   # busy regex: '… \\(|esc to interrupt|agents [0-9/ ]*(done|running)|tokens'"
+MONITOR_CMD="$(monitor_cmd_for '$WID')"
 
 emit_plan() {
   echo "[plan] scribe-spawn: issue=$ID（実在検証 OK）"
@@ -706,4 +723,6 @@ fi
 # 空 WID へ degrade させる（|| true）。空なら下の ${WID:-$WINDOW} が window 名へフォールバック。
 WID="$(scribe_window_id "$WINDOW")"
 echo "spawned: issue=$ID window=$WINDOW window_id=${WID:-?} worktree=$WORKTREE"
-echo "monitor: tmux capture-pane -p -t \"${WID:-$WINDOW}\" | tail -n 3"
+# sc-w5e: dry-run 側 MONITOR_CMD と同一 builder（monitor_cmd_for）で emit する（sentinel 配線 + 12 行窓の
+# 契約を 2 箇所で個別に持たない）。こちらは WID 解決済みゆえ実値（@N or 名前フォールバック）を埋め込む。
+echo "monitor: $(monitor_cmd_for "${WID:-$WINDOW}")"

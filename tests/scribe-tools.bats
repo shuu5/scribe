@@ -506,6 +506,49 @@ _mk_beads() {
   [[ "$output" != *'ENV_DEGRADED 検出時のみ'* ]]
 }
 
+# ---------- monitor 一行への sentinel 配線 + tail 窓拡大（sc-w5e・sc-c7c 昇格の運用側配線）----------
+# sc-c7c で確定した検知契約（行頭空白許容 regex + tail 窓）は worker prompt / protocol §6 に成文化済みだが、
+# admin が実際にコピーする spawn emit の monitor 一行は busy 判定 + tail -n 3 のみで未配線だった（gap 1）。
+# また CC TUI の入力 prompt box + statusline が pane 最下部を最大 ~10 行占有するため、3 行窓では worker
+# 停止時の sentinel 行が窓外へ押し出され取りこぼす（gap 2・sc-c7c dogfood 実測）。emit 一行に sentinel
+# grep が併記され、tail 窓が入力 box を跨ぐ 12 行（dogfood 実測値）である契約を pin する。
+# sentinel は self-authenticating でない（§6）ため、検知文言が即 salvage でなく cross-read へ誘導する点も pin。
+@test "spawn(sc-w5e): dry-run の monitor 一行に sentinel grep が配線され tail 窓が入力 box 跨ぎ（12 行）" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'tail -n 12'* ]]                                          # 窓拡大（3 行では sentinel が押し出される）
+  [[ "$output" != *'| tail -n 3'* ]]                                          # 旧 3 行窓の残存は回帰
+  [[ "$output" == *"grep -E '^[[:space:]]*SCRIBE-ENV-DEGRADED:'"* ]]          # dogfood 確定 regex がそのまま monitor に配線される
+  [[ "$output" == *'busy regex'* ]]                                            # 既存の busy 判定併記が残る（置換でなく併記）
+  [[ "$output" == *'cross-read'* ]]                                            # 検知時は即 salvage でなく §6 cross-read へ誘導
+}
+
+# 実(非 dry-run)経路の spawn 末尾 "monitor:" 行も同一 builder（monitor_cmd_for）を通ることを pin する。
+# dry-run 側だけ配線して実 emit が旧 tail -n 3 のまま残る片側ドリフト（本 issue の gap そのもの）を捕捉する。
+# facet3/sc-s68 と同じく cld-spawn を no-op stub に差し替えて実 spawn を駆動する（実 tmux/claude なし）。
+@test "spawn(sc-w5e): 実経路の spawn 末尾 monitor: 行にも sentinel 配線＝dry-run と同一 builder を通る" {
+  local repo wt noop
+  repo="$SCRIBE_TEST_CWD"   # setup() の temp git repo（init コミット済み）
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  wt="$repo/.worktrees/spawn/un-4nm-101010"
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"spawned: issue=un-4nm"* ]]
+  # monitor: 行が builder 産の形（capture を C に取り echo + sentinel grep 併記）で emit される。
+  # -t ターゲットは tmux 有無で @N / 名前フォールバックに揺れるため pin しない。
+  [[ "$output" == *'monitor: C=$(tmux capture-pane -p -t "'* ]]
+  [[ "$output" == *"tail -n 12"* ]]
+  [[ "$output" == *"grep -E '^[[:space:]]*SCRIBE-ENV-DEGRADED:'"* ]]
+  # dry-run テストと対称に 4 契約すべてを実 emit 側でも pin する（builder 共有の不変条件を回帰から守る・
+  # gate wf_d8e3e17f 指摘の採用修正: 片側だけの assert では builder 分岐退行を実経路側で見逃す）。
+  [[ "$output" == *'busy regex'* ]]
+  [[ "$output" == *'cross-read'* ]]
+  # 後片付け（テスト自身は force 可・本番ポリシーとは別物）。
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+}
+
 # ---------- sandbox-spike 'spike' 文言の本番ヘルパー手当て（sc-2m0 facet3・案C軽量）----------
 # 実害: 'spike' 語が **本番ヘルパー** gen-sandbox-settings.sh（scribe-spawn.sh の SCRIBE_SANDBOX=1
 # opt-in が起動）を experimental と誤認させる可読性問題。ディレクトリ scripts/sandbox-spike/ は
