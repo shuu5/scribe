@@ -1,9 +1,9 @@
 export const meta = {
   name: 'needs-user-prebake',
   description:
-    'needs-user タスクの pre-bake WF（admin が回す）: 並列 read-only facet 分析 → 各 facet が「現状調査(read-only・事実/推測を区別)→決定木→選択肢+トレードオフ→admin 起票候補」を構造化 brief で返す → opus が単一の構造化 brief へ統合し admin に返す。grill は含まない(対話 grill は grill-consult が別途行う=protocol §7)。F2 構造解消: WF は admin にデータを返すだけで自己 pre-bake を grill しない。固有物(taskRef/taskTitle/anchor/facets/model)は args で差し込む(骨格は再利用)。',
+    'needs-user タスクの pre-bake WF（admin が回す）: 並列 read-only facet 分析 → 各 facet が「現状調査(read-only・事実/推測を区別)→決定木→選択肢+トレードオフ→admin 起票候補」を構造化 brief で返す → opus が単一の構造化 brief へ統合し admin に返す。grill は含まない(対話 grill は grill-consult が別途行う=protocol §7)。F2 構造解消: WF は admin にデータを返すだけで自己 pre-bake を grill しない。固有物(taskRef/taskTitle/anchor/facets/model/roAgentType)は args で差し込む(骨格は再利用)。',
   whenToUse:
-    'admin が needs-user タスク(人間判断依存)の grill 準備として pre-bake brief を作りたいとき。相互独立な複数の決定軸(facet)を並列 read-only 分析する。返り値の brief を admin が file へ書き grill-consult へ `scribe-spawn --consult --context <brief> <grill-issue>` で渡す(protocol §7)。1 facet なら admin インラインで足り fan-out 不要。',
+    'admin が needs-user タスク(人間判断依存)の grill 準備として pre-bake brief を作りたいとき。相互独立な複数の決定軸(facet)を並列 read-only 分析する。返り値の brief を admin が file へ書き grill-consult へ `scribe-spawn --consult --context <brief> <grill-issue>` で渡す(protocol §7)。1 facet なら admin インラインで足り fan-out 不要。roAgentType は read-only 段の agentType 上書き escape hatch(既定 scribe:explore・"none" で agentType 無し強制)。',
   // phases は phase() 呼び出し / opts.phase と同名で対応させる(タイトル完全一致でグループ化)。
   // 全 substantive agent は model:'opus'(args.model 既定)。facet 分析は read-only だが「決定木構築・
   // 選択肢起草」= 設計分析(thinking)ゆえ opus(CLAUDE.md model 階層: opus=思考・統合・分析の主力)。
@@ -53,6 +53,8 @@ if (typeof args === 'string') {
       facets: [],
       briefMarkdown: '',
       receivedArgs: { type: __rawArgsType, parseFailed: true, keys: [] },
+      // (sc-7bv/sc-xyw) roAgent helper 定義前の早期中断=read-only agent 未起動=fallback 未評価 → literal false で一貫させる。
+      roFallbackActive: false,
     }
   }
 } else {
@@ -152,6 +154,7 @@ if (facets.length === 0) {
     facets: [],
     briefMarkdown: '',
     receivedArgs,
+    roFallbackActive, // (sc-xyw) read-only agentType fallback の最終状態(facets 空 fail-fast=agent 未起動ゆえ RO_FORCE_NONE 以外は false)
   }
 }
 
@@ -276,6 +279,7 @@ if (okBriefs.length === 0) {
     facets: [],
     briefMarkdown: '',
     receivedArgs,
+    roFallbackActive, // (sc-xyw) read-only agentType fallback の最終状態(全 facet 失敗経路でも facet agent は起動済ゆえ実発火を反映)
   }
 }
 
@@ -342,6 +346,7 @@ if (!synth || typeof synth.briefMarkdown !== 'string' || !synth.briefMarkdown.tr
     facets: okBriefs,
     briefMarkdown: '',
     receivedArgs,
+    roFallbackActive, // (sc-xyw) read-only agentType fallback の最終状態(synthesize 失敗経路でも facet agent は起動済ゆえ実発火を反映)
   }
 }
 
@@ -358,4 +363,5 @@ return {
   briefMarkdown: synth.briefMarkdown, // admin が file へ書き grill-consult へ --context で渡す材料
   crossFacetNotes: Array.isArray(synth.crossFacetNotes) ? synth.crossFacetNotes : [],
   receivedArgs,
+  roFallbackActive, // (sc-7bv/sc-xyw) read-only agentType fallback が最終的に発火したか(true=agentType 解決不能で降格した run)。receivedArgs.roAgentType は解決した型だけで発火有無は読めないため別途載せる。
 }
