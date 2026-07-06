@@ -5,7 +5,7 @@ export const meta = {
   whenToUse:
     'worker worktree で substantive な per-issue 実装の品質を担保したいとき。固有物(taskTitle/worktree/goal/acceptance/diff/selfTestCmd/dimensions/model/maxRounds/autoFix/doPlan/doImplement/taskType/target/context/probe)は args で渡す。autoFix は既定 off(共有 fail-safe)、worker cell 文脈は autoFix:true を渡す。',
   // phases は phase() 呼び出し / opts.phase と同名で対応させる(タイトル完全一致でグループ化)。
-  // substantive な全 agent は model:'opus'(args.model 既定)= Explore 等の弱モデル退化を根治。
+  // substantive な全 agent は model:'opus'(args.model 既定)= read-only agent(scribe:explore)の frontmatter 弱モデル退化を根治。
   phases: [
     { title: 'Classify', detail: 'task-type を判定し verify 戦略を選ぶ(testable/executable/docs/config/monitoring/notes)', model: 'opus' },
     { title: 'Plan', detail: '[任意] goal から受入基準を導出/精緻化', model: 'opus' },
@@ -23,9 +23,12 @@ export const meta = {
 // 確定 spec: bd un-bs0(grill 2026-06-09)。受入: bd un-dja(最小スコープ)。
 //
 // 設計の核(必ず維持すること):
-//  (1) 全 review/verify/fix/plan/classify/snapshot agent に model:'opus' を明示。
-//      agentType:'Explore' は読み取り専用だが既定で弱モデルへ退化する → opts.model が
-//      agentType 既定を上書きし両立(read-only tools + Opus reasoning)。これが最重要。
+//  (1) 全 review/verify/fix/plan/classify/snapshot agent に model:'opus' を明示。read-only 段は roAgent 経由で
+//      agentType 'scribe:explore'(agents/explore.md=書込ツール非所持)を注入し read-only を構造強制する。
+//      旧 builtin 'Explore' は registry から削除された(harness breaking change=sc-7bv)ため、roAgent が解決
+//      不能(scribe plugin 未ロード session / registry drift)を検知したら agentType 省略へ後退し read-only
+//      規律を prompt で代替する(fallback)。custom agent の frontmatter model(sonnet)は opts.model が上書きする
+//      ため read-only tools + Opus reasoning が両立する。これが最重要。
 //  (2) 各ラウンド頭の snapshot が worktree diff を inline 供給 → 「この diff のみ対象」で
 //      スコープ固定 = reviewer の anchor ドリフト根治。
 //  (3) autoFix は confirmed のみ適用 + self-test fail-closed(失敗=即停止+escalate)+ amend。
@@ -68,8 +71,8 @@ export const meta = {
 //      ゲートでのみ走り、WF 自体は独立実行しなかった。これを baseline(実装前=regression 起点)+ final(終了時)
 //      の 2 点で【常時】実行し、両者の生ログ + 実行有無 + pass/fail 判定を返り値 JSON(selfTestBaseline/
 //      selfTestFinal)へ載せる=gate/orchestrator が actor 報告に依存せず self-test 状態を直読できる。WF 本体は
-//      Bash 非所持ゆえ各々 cheap agent(worktree で cd し selfTestCmd を 1 回実行・生ログを返す read-only Explore
-//      + model:sonnet=mechanical run)に委譲する。設計上の不変条件(回帰なし=受入 B4):
+//      Bash 非所持ゆえ各々 cheap agent(worktree で cd し selfTestCmd を 1 回実行・生ログを返す read-only=roAgent
+//      経由で scribe:explore + model:sonnet=mechanical run)に委譲する。設計上の不変条件(回帰なし=受入 B4):
 //        - baseline/final は【情報ログ専用】= converged/escalate 判定を一切駆動しない(既存の Fix agent 内
 //          fail-closed self-test ゲートとは別物・温存)。escalate/収束は従来ロジックのまま。
 //        - 発火条件は selfTestCmd の有無のみ。未定義 bead(admin read-only gate=scribe-gate-args.sh は
@@ -129,12 +132,61 @@ if (typeof args === 'string') {
   A = args && typeof args === 'object' && !Array.isArray(args) ? args : {}
 }
 
+// ── (sc-7bv) read-only agent 起動 helper: builtin 'Explore' 消失(harness breaking change)への恒久 fix ──
+// 旧 read-only 段(classify/plan/snapshot/review/verify/self-test 実行)は builtin の read-only agent 型 'Explore'(書込
+// ツールを持たない型)を agentType に指定して read-only を構造強制していたが、Claude Code registry から 'Explore' が削除され spawn
+// 前に即 throw する(fleet 全滅)。代わりに scribe plugin の read-only custom agent(agentType 'scribe:explore'
+// =agents/explore.md)を指す。registry から解決不能な session(scribe plugin 未ロード / merge 前の worker
+// session / 将来の registry drift)では agentType 省略へ後退して read-only 規律を prompt で代替する(fallback)。
+// args.roAgentType で RO agent type を差し替え可能・'none' で agentType 無しを強制する(運用 escape hatch)。
+// roAgent が管理する agentType は各呼出サイトでは指定しない(roAgent へ一元化)。
+const _rawRoAgentType = typeof A.roAgentType === 'string' ? A.roAgentType.trim() : ''
+const RO_AGENT_TYPE = _rawRoAgentType || 'scribe:explore'
+const RO_FORCE_NONE = RO_AGENT_TYPE === 'none' // 'none' = 最初から agentType を付けない強制
+let roFallbackActive = RO_FORCE_NONE // not found を一度検知したら以降降格(flag・並行 race は同じ降格へ収束=無害)
+
+// fallback 時、agentType の構造強制(書込ツール非所持)を prompt の read-only 規律で代替する(前置文)。
+const RO_DISCIPLINE =
+  '\n\n## 厳守（read-only・agentType 構造強制の代替）\n' +
+  'あなたは read-only の観測・分析役。ファイル編集(Write/Edit)・git write(commit/push/add)・bd write・deploy・' +
+  '別 agent の spawn を一切しない。Bash は読取り・検証実行(self-test 実行 / git read / bd show 等)に限り、コード・' +
+  '状態を変えない。返り値(構造化データ)だけを返す(呼出元が一次監査する)。'
+
+// registry から agentType が解決できなかった throw かを判定(probe verified のエラー形状:
+// "agent({agentType}): agent type 'X' not found. Available agents: ...")。not found 以外は透過する。
+const isAgentTypeNotFound = (e) => {
+  const m = e && e.message ? String(e.message) : String(e == null ? '' : e)
+  return /agent type\b[\s\S]*\bnot found/i.test(m) || /not found\. Available agents:/i.test(m)
+}
+
+// roAgent(prompt, opts): read-only 段の agent() 代替。RO_AGENT_TYPE を注入し、not found なら agentType 省略へ後退。
+// - 降格済/強制 none: agentType 無し + read-only 規律 prompt 前置。
+// - not found 検知: [RO-FALLBACK] を loud に log し降格 flag を立て、以降の read-only 段も agentType 無しへ。
+// - not found 以外の throw: そのまま透過(呼出元の既存 .catch 意味論=不変条件(5)を変えない)。
+// 返り値は agent() と同一の Promise(.then/.catch 互換)。runAgent(limiter 経由)も内部でこれを呼ぶ。
+async function roAgent(prompt, opts) {
+  const base = { ...(opts || {}) }
+  delete base.agentType // agentType の管理は roAgent に一元化(呼出サイトは指定しない)
+  if (roFallbackActive) return agent(prompt + RO_DISCIPLINE, base)
+  try {
+    return await agent(prompt, { ...base, agentType: RO_AGENT_TYPE })
+  } catch (e) {
+    if (isAgentTypeNotFound(e)) {
+      roFallbackActive = true
+      log(`[RO-FALLBACK] read-only agentType '${RO_AGENT_TYPE}' が registry で解決不能(${e && e.message ? String(e.message).slice(0, 120) : 'not found'})。agentType 省略へ後退し read-only 規律を prompt で代替する。以降の read-only 段も降格(scribe plugin 未ロード session / registry drift の可能性=merge 後の fresh session で解消)。`)
+      return agent(prompt + RO_DISCIPLINE, base)
+    }
+    throw e // not found 以外は透過(既存 .catch 意味論を保つ)
+  }
+}
+
 // receivedArgs 要約: キー一覧 + 各キーの受信型 + 生の受信型(parse 前)。呼出元監査用に返り値へ載せる。
 const receivedArgs = {
   type: __rawArgsType, // 'string'(parse 済)/'object'/'undefined'/'null'/'array' 等(parse 前の生型)
   parseFailed: false,
   keys: Object.keys(A),
   keyTypes: Object.fromEntries(Object.keys(A).map((k) => [k, Array.isArray(A[k]) ? 'array' : typeof A[k]])),
+  roAgentType: RO_AGENT_TYPE, // (sc-7bv) 解決した read-only agentType(既定 'scribe:explore' / override / 'none')
 }
 
 // ── args(固有物)。骨格は不変、ここだけ差し替える ───────────────────────────
@@ -288,12 +340,15 @@ const opusLimiter = maxConcurrency > 0 ? makeLimiter(maxConcurrency) : null
 // un-1kb 後は reviewModel/verifyModel が demoteFable で opus へ畳まれるため通常は fable 分岐に入らない(素通し)が、
 // 降格漏れの最終防壁として cap 分岐を残す(defense-in-depth)。返り値は agent() と同一の Promise(.then/.catch 互換)。
 // (D2) fable 指定は fableLimiter(≤2・defense-in-depth)経由。非 fable(=通常 opus)は opusLimiter があれば
-// それ経由(≤ maxConcurrency)、無ければ素通し(従来=harness 任せ)。runAgent は review/verify でのみ呼ばれる
-// (逐次段は agent() 直呼び)ため、opusLimiter の cap は opus 経路にのみ効き他フェーズの逐次性に干渉しない。
+// それ経由(≤ maxConcurrency)、無ければ素通し(従来=harness 任せ)。runAgent は review/verify(read-only 段)でのみ
+// 呼ばれる(逐次段は agent()/roAgent() 直呼び)ため、opusLimiter の cap は opus 経路にのみ効き他フェーズの逐次性に
+// 干渉しない。read-only 段ゆえ内部は roAgent 経由で RO agentType('scribe:explore')注入 + not found fallback を
+// 通す(sc-7bv)。roAgent の fallback(2 回目の agent 呼出)は同一 thunk 内で完結し limiter スロットを 1 個保持した
+// ままなのでデッドロックしない(スロット保持中に別スロット取得を待つ入れ子が無い)。
 function runAgent(prompt, opts) {
-  if (isFable(opts.model)) return fableLimiter(() => agent(prompt, opts))
-  if (opusLimiter) return opusLimiter(() => agent(prompt, opts))
-  return agent(prompt, opts)
+  if (isFable(opts.model)) return fableLimiter(() => roAgent(prompt, opts))
+  if (opusLimiter) return opusLimiter(() => roAgent(prompt, opts))
+  return roAgent(prompt, opts)
 }
 
 // dimensions は文字列配列でもオブジェクト配列でも受ける。既定 = perspective-diverse 4 観点。
@@ -606,11 +661,12 @@ async function runSelfTest(when) {
   if (!selfTestCmd) {
     return { ran: false, skipped: true, skipReason: 'selfTestCmd 未指定(graceful skip=fail-open)', passed: null, exitCode: null, rawLog: '' }
   }
-  const r = await agent(selfTestRunPrompt(when), {
+  const r = await roAgent(selfTestRunPrompt(when), {
     label: `selftest:${when}`,
     phase: 'Self-test',
-    model: 'sonnet', // mechanical run(substantive reasoning でない)。read-only Explore tools + sonnet
-    agentType: 'Explore', // read-only(Bash あり/Edit・Write なし)= self-test を実行するが編集はできない
+    // mechanical run(substantive reasoning でない)。read-only(roAgent=scribe:explore: Bash あり/Edit・Write
+    // なし=self-test を実行するが編集はできない)tools + sonnet。roAgent が RO agentType を注入 + not found fallback。
+    model: 'sonnet',
     schema: SELFTEST_RUN_SCHEMA,
   }).catch(() => null)
   if (!r) {
@@ -686,11 +742,10 @@ if (isWorkerCell) {
 phase('Classify')
 let verifyStrategy = ''
 if (!taskType) {
-  const c = await agent(classifyPrompt(), {
+  const c = await roAgent(classifyPrompt(), {
     label: 'classify',
     phase: 'Classify',
-    model: stageModel,
-    agentType: 'Explore',
+    model: stageModel, // roAgent が RO agentType('scribe:explore')注入 + not found fallback(read-only 段)
     schema: CLASSIFY_SCHEMA,
   })
   taskType = (c && c.taskType) || 'executable'
@@ -703,11 +758,10 @@ verifyStrategy = VERIFY_STRATEGY[taskType] || VERIFY_STRATEGY.executable
 // ── 1. Plan(任意): 受入基準の導出/精緻化 ─────────────────────────────────────
 if (doPlan) {
   phase('Plan')
-  const p = await agent(planPrompt(), {
+  const p = await roAgent(planPrompt(), {
     label: 'plan',
     phase: 'Plan',
-    model: stageModel,
-    agentType: 'Explore',
+    model: stageModel, // roAgent が RO agentType('scribe:explore')注入 + not found fallback(read-only 段)
     schema: PLAN_SCHEMA,
   })
   if (p && p.acceptance) {
@@ -732,7 +786,7 @@ if (doImplement) {
   const impl = await agent(implementPrompt(refinedAcceptance), {
     label: 'implement',
     phase: 'Implement',
-    model: stageModel, // 編集するので agentType:'Explore' は付けない(全ツール)
+    model: stageModel, // 編集するので roAgent(read-only agentType)を使わず agent() 直呼び(全ツール)
   })
   log(`implement: ${impl ? String(impl).slice(0, 120) : '(no output)'}`)
 }
@@ -779,11 +833,10 @@ while (round < effectiveCap) {
   // ミス/真の空)なら snapshot 失敗としてマークし、後段の収束判定で clean 扱いから除外する(silent ship 防止)。
   let snapshotFailed = false
   if (!roundDiff || canAutoFix) {
-    const snap = await agent(snapshotPrompt(), {
+    const snap = await roAgent(snapshotPrompt(), {
       label: `snapshot r${round}`,
       phase: 'Review',
-      model: stageModel,
-      agentType: 'Explore',
+      model: stageModel, // roAgent が RO agentType('scribe:explore')注入 + not found fallback(read-only 段)
     })
     // snapshot agent には「生 diff のみ・空なら EMPTY_DIFF の一語」を指示しているが、LLM は説明文を前置しがち
     // (例: "Both (a) and (b) are empty.\n\nEMPTY_DIFF")。exact-match(snap.trim()!=='EMPTY_DIFF')だと説明文付きの
@@ -810,7 +863,7 @@ while (round < effectiveCap) {
 
   // un-2yy: single モードでレビュー対象が確定的に不在(snapshot=EMPTY_DIFF かつ静的 diff 未供給)なら、
   // review/verify を一切起動せず即 escalate へ短絡する。理由: 対象なしで 4 観点 review を回すのは無駄(最小コスト)
-  // かつ roundDiff='' の「diff 未供給」フォールバックは reviewer(Explore)を worktree/anchor へ彷徨わせ off-target
+  // かつ roundDiff='' の「diff 未供給」フォールバックは reviewer(read-only agent)を worktree/anchor へ彷徨わせ off-target
   // findings を生む(設計核(2)の scope 固定=anchor ドリフト防止に反する)。machinery 失敗の history を 1 件残して
   // loop を抜け、後段の single 収束判定が converged を否定し escalate を立てる。loop モード(canAutoFix)は
   // 新鮮 diff 依存で再試行に賭けるため短絡しない(従来通り次ラウンドへ)。
@@ -841,8 +894,7 @@ while (round < effectiveCap) {
       runAgent(reviewPrompt(d, round, roundDiff), {
         label: `review:${d.key} r${round}`,
         phase: 'Review',
-        model: reviewModel, // 既定=MODEL(opus)。fable 指定時のみ runAgent が ≤2 cap を適用
-        agentType: 'Explore',
+        model: reviewModel, // 既定=MODEL(opus)。fable 指定時のみ runAgent が ≤2 cap を適用。runAgent 内 roAgent が RO agentType 注入 + fallback
         schema: FINDINGS_SCHEMA,
       }).catch(() => ({ findings: [], __reviewFailed: true })),
     (review, d) => {
@@ -854,8 +906,7 @@ while (round < effectiveCap) {
           runAgent(verifyPrompt(f, d.key, roundDiff), {
             label: `verify:${d.key}:${shortTitle(f)} r${round}`,
             phase: 'Verify',
-            model: verifyModel, // 既定=MODEL(opus)。fable 指定時のみ runAgent が ≤2 cap を適用
-            agentType: 'Explore',
+            model: verifyModel, // 既定=MODEL(opus)。fable 指定時のみ runAgent が ≤2 cap を適用。runAgent 内 roAgent が RO agentType 注入 + fallback
             schema: VERDICT_SCHEMA,
           })
             .then((v) => ({ ...f, dimension: d.key, verdict: v }))
@@ -940,7 +991,7 @@ while (round < effectiveCap) {
   const fix = await agent(fixPrompt(blocking, roundDiff), {
     label: `autofix r${round}`,
     phase: 'Fix',
-    model: stageModel, // 編集するので Explore は付けない
+    model: stageModel, // 編集するので roAgent(read-only agentType)を使わず agent() 直呼び(全ツール)
     schema: FIX_SCHEMA,
   })
   if (!fix) {

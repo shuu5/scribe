@@ -531,7 +531,7 @@ footer b{color:var(--muted)}
         <span class="node" style="border-color:rgba(183,156,240,.5)">facet agent<small>read-only</small></span>
         <span class="node" style="border-color:rgba(183,156,240,.5)">facet agent<small>read-only</small></span>
       </div>
-      <div style="font-size:11.5px;color:var(--muted);text-align:center;max-width:560px;margin:6px 0">各自「現状調査（事実と推測を明示区別）→ 決定木 → 選択肢＋トレードオフ → 起票候補」を構造化 brief で返す。read-only は<b style="color:var(--ink)">プロンプト任せにせず <code>agentType:'Explore'</code>（書込ツールを持たない型）で構造強制</b>、<code>model:'opus'</code> で弱モデル退化を上書き。</div>
+      <div style="font-size:11.5px;color:var(--muted);text-align:center;max-width:560px;margin:6px 0">各自「現状調査（事実と推測を明示区別）→ 決定木 → 選択肢＋トレードオフ → 起票候補」を構造化 brief で返す。read-only は<b style="color:var(--ink)">プロンプト任せにせず <code>agentType:'scribe:explore'</code>（scribe plugin の read-only custom agent＝書込ツールを持たない型）で構造強制</b>、<code>model:'opus'</code> で custom agent の frontmatter モデルを上書き。旧 builtin <code>'Explore'</code> は registry から削除された（harness breaking change・sc-7bv）ため、<code>roAgent</code> helper が agentType 解決不能を検知したら agentType 省略へ後退し read-only 規律を prompt で代替する（fallback）。</div>
       <span class="arrow"></span>
       <div class="hrow"><span class="node hot">synthesize（opus ×1）<small>全 facet を単一 brief に統合。<b>裁定はしない</b><br>冒頭に「これは WF の提案であって決定ではない」ヘッダを schema で強制</small></span></div>
       <span class="arrow"></span>
