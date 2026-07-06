@@ -95,6 +95,7 @@ async function runWorkflow() {
   const calls = [] // agent 呼び出しの label を順に記録(ordering/回数の assert 用)
   const logs = []
   const agentTypeCalls = [] // (sc-xyw) agentType が付いた呼出しの記録({label, agentType})=降格の後続伝播を検証する
+  const promptCalls = [] // (sc-xyw errata) 各呼出しの prompt に RO_DISCIPLINE 前置が付いたかを記録({label, hasDiscipline})=降格後の read-only 規律代替(中核安全機構)を behavioral に検証する
   const RO_NOTFOUND = envBool('CQ_RO_NOTFOUND', false) // (sc-xyw) true=agentType 付き呼出しを probe 形状 not found で reject し roAgent fallback を発火させる
 
   const agentStub = (prompt, opts) => {
@@ -102,6 +103,9 @@ async function runWorkflow() {
     const agentType = opts && opts.agentType
     calls.push(label)
     if (agentType) agentTypeCalls.push({ label, agentType })
+    // (sc-xyw errata) roAgent fallback は降格後 `prompt + RO_DISCIPLINE` を渡し agentType 構造強制を prompt 規律で代替する。
+    // この前置マーカー(agentType 構造強制の代替)が付いた呼出しを記録し、消失(=完全 fail-open 退行)を behavioral に検出する。
+    promptCalls.push({ label, hasDiscipline: /agentType 構造強制の代替/.test(String(prompt == null ? '' : prompt)) })
     // (sc-xyw) fallback シナリオ: agentType 付き呼出しは probe verified の "not found" 形状で reject する。
     // roAgent は isAgentTypeNotFound を検知 → [RO-FALLBACK] を log → 降格 flag を立て → agentType 無しで再呼出しする
     // (=再呼出しは agentType 無しゆえここを通らず resolve)。降格が後続へ伝播していれば以降の read-only 段も最初から
@@ -149,7 +153,7 @@ async function runWorkflow() {
   const run = new AsyncFunction(...INJECTED, body)
   const result = await run(...INJECTED.map((k) => stubs[k]))
 
-  return { result, calls, logs, agentTypeCalls }
+  return { result, calls, logs, agentTypeCalls, promptCalls }
 }
 
 // ── 出力: `K <key> <value>` 行(bats が grep で assert)+ 生 JSON ─────────────────
@@ -158,7 +162,7 @@ function firstIndex(calls, prefix) {
   return -1
 }
 
-function printResult(result, calls, logs, agentTypeCalls) {
+function printResult(result, calls, logs, agentTypeCalls, promptCalls) {
   const K = (k, v) => console.log(`K ${k} ${v}`)
   const b = result.selfTestBaseline || {}
   const f = result.selfTestFinal || {}
@@ -202,6 +206,11 @@ function printResult(result, calls, logs, agentTypeCalls) {
   const roFbLogCount = (logs || []).filter((l) => String(l).includes('[RO-FALLBACK]')).length
   K('roFallbackLogCount', roFbLogCount)
   K('agentTypeCallCount', (agentTypeCalls || []).length)
+  // (sc-xyw errata) roDisciplineCallCount: prompt に RO_DISCIPLINE 前置マーカーが付いた呼出しの総数。
+  // fallback シナリオで >0(降格後の read-only 段が read-only 規律を prompt で代替)・正常時で 0(前置しない)。
+  // この前置が消えても従来の log/agentType 系 assert は全 green ゆえ、silent fail-open 退行を捕える専用軸。
+  const roDisciplineCallCount = (promptCalls || []).filter((p) => p && p.hasDiscipline).length
+  K('roDisciplineCallCount', roDisciplineCallCount)
   const rvCalls = calls.filter((c) => c.startsWith('review:') || c.startsWith('verify:')).length
   K('reviewVerifyCalls', rvCalls)
   console.log(`ESCALATE_REASON ${String(result.escalateReason || '')}`)
@@ -214,8 +223,8 @@ if (mode === 'emit-wrapped') {
   process.stdout.write(emitWrapped())
 } else if (mode === 'run') {
   runWorkflow()
-    .then(({ result, calls, logs, agentTypeCalls }) => {
-      printResult(result, calls, logs, agentTypeCalls)
+    .then(({ result, calls, logs, agentTypeCalls, promptCalls }) => {
+      printResult(result, calls, logs, agentTypeCalls, promptCalls)
     })
     .catch((e) => {
       console.error(`DRIVER_ERROR: ${e && e.stack ? e.stack : e}`)

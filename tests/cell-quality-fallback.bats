@@ -115,3 +115,42 @@ setup() {
   grep -A2 'whenToUse:' "$WF" | grep -q 'roAgentType'
   grep -A2 'whenToUse:' "$PREBAKE" | grep -q 'roAgentType'
 }
+
+# ── (sc-xyw errata) 中核安全機構の behavioral 固定: 降格後の read-only 段呼出しに RO_DISCIPLINE 前置が付く ──────
+# confirmed-minor(sc-7bv gate wf_05bc3204-cc8): agentType の構造強制(書込ツール非所持)を fallback 降格後は prompt の
+# read-only 規律(RO_DISCIPLINE 前置=`prompt + RO_DISCIPLINE`)が代替する。この前置が消えても既存の log/agentType/converged
+# 系 assert は全て green のまま=fallback が完全 fail-open へ silent 退行しうる(前任 gate の confirmed minor)。
+# driver は各呼出しの prompt に前置マーカー(/agentType 構造強制の代替/)が付いたかを K roDisciplineCallCount へ露出するので、
+# fallback シナリオで >0・正常時(agentType 解決可)で 0 を対照実験で固定し、この silent 退行を behavioral に捕捉する。
+@test "sc-xyw errata: fallback 降格後の read-only 段呼出しに RO_DISCIPLINE 前置が付く(対照: 正常時は付かない)" {
+  # fallback シナリオ: 降格後の read-only 段(classify/plan/snapshot/selftest/review/verify)は prompt に RO_DISCIPLINE を前置される。
+  run env CQ_ARGS="$ARGS_WORKER" CQ_RO_NOTFOUND=true node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"K escalate false"* ]]
+  disc_fb="$(echo "$output" | awk '/^K roDisciplineCallCount / {print $3}')"
+  [ -n "$disc_fb" ]
+  # 降格後に read-only 規律が prompt で代替されている証拠(前置が消えれば 0 に落ちてここで fail)。
+  [ "$disc_fb" -gt 0 ]
+  # 対照: 正常時(agentType 解決可)は降格せず RO_DISCIPLINE 前置は一度も付かない(=前置は fallback 経路固有)。
+  run env CQ_ARGS="$ARGS_WORKER" node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"K roDisciplineCallCount 0"* ]]
+}
+
+# ── (sc-xyw errata) 構造 pin(両骨格・source-level): RO_DISCIPLINE 定義と降格経路での前置(prompt + RO_DISCIPLINE) ──
+# 上の behavioral test は cell-quality driver(逐次経路)でしか回らない。prebake の read-only 段(facet 分析)は parallel()
+# 起動ゆえ driver の逐次再現が構造上届かない=behavioral 検証不能。よって prebake は source-level grep で fallback の
+# 中核安全機構(RO_DISCIPLINE 前置)を pin し、cell-quality と対称に守る。
+# 注意: [RO-FALLBACK] log=1 の invariant は「逐次先頭の read-only 段が最初に fallback を確定する」cell-quality 固有の性質で、
+# facet を parallel 起動する prebake へは流用しない(並行 race で複数 facet が確定前に not found を踏み log>1 になりうる=無害だが 1 に pin できない)。
+@test "sc-xyw errata 構造 pin: 両骨格が RO_DISCIPLINE を定義し降格経路で prompt へ前置する(prebake は behavioral 不達ゆえ pin で固定)" {
+  for f in "$WF" "$PREBAKE"; do
+    [ -f "$f" ]
+    # RO_DISCIPLINE 前置文の定義。
+    grep -qF 'const RO_DISCIPLINE' "$f"
+    # 降格経路で prompt に前置する呼出し(中核安全機構)=2 箇所(降格済 short-circuit + not found 検知直後)。
+    grep -qF 'prompt + RO_DISCIPLINE' "$f"
+    # 前置マーカー(driver の behavioral 検出 /agentType 構造強制の代替/ と同一の目印=消えれば behavioral と pin が同時に落ちる)。
+    grep -qF 'agentType 構造強制の代替' "$f"
+  done
+}
