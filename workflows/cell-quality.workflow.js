@@ -3,7 +3,7 @@ export const meta = {
   description:
     '1 issue = 1 実装セルの品質WF: task-type routing → [Plan] → [Implement] → perspective-diverse な Opus review → 各 finding を独立 Opus が adversarial refute-verify → gated autoFix(confirmed のみ+self-test fail-closed+amend) → loop-until-dry 収束。返り値を呼出元(worker/admin)が一次監査する薄 gate 設計。固有物は args で差し込む(骨格は再利用)。',
   whenToUse:
-    'worker worktree で substantive な per-issue 実装の品質を担保したいとき。固有物(taskTitle/worktree/goal/acceptance/diff/selfTestCmd/dimensions/model/maxRounds/autoFix/doPlan/doImplement/taskType/target/context/probe)は args で渡す。autoFix は既定 off(共有 fail-safe)、worker cell 文脈は autoFix:true を渡す。',
+    'worker worktree で substantive な per-issue 実装の品質を担保したいとき。固有物(taskTitle/worktree/goal/acceptance/diff/selfTestCmd/dimensions/model/maxRounds/autoFix/doPlan/doImplement/taskType/target/context/probe/roAgentType)は args で渡す。autoFix は既定 off(共有 fail-safe)、worker cell 文脈は autoFix:true を渡す。roAgentType は read-only 段の agentType 上書き escape hatch(既定 scribe:explore・"none" で agentType 無し強制)。',
   // phases は phase() 呼び出し / opts.phase と同名で対応させる(タイトル完全一致でグループ化)。
   // substantive な全 agent は model:'opus'(args.model 既定)= read-only agent(scribe:explore)の frontmatter 弱モデル退化を根治。
   phases: [
@@ -125,6 +125,9 @@ if (typeof args === 'string') {
       selfTestBaseline: { ran: false, skipped: true, skipReason: 'WF 起動前に中断(args parse 失敗)', passed: null, exitCode: null, rawLog: '' },
       selfTestFinal: { ran: false, skipped: true, skipReason: 'WF 起動前に中断(args parse 失敗)', passed: null, exitCode: null, rawLog: '' },
       receivedArgs: { type: __rawArgsType, parseFailed: true, keys: [] },
+      // (sc-7bv/sc-xyw) read-only agentType fallback の最終状態。ここは roAgent helper 定義前の早期中断=
+      // read-only agent を一度も起動していない=fallback は評価すらされていない → literal false で一貫させる。
+      roFallbackActive: false,
       gate: `ESCALATE: ${reason}`,
     }
   }
@@ -733,6 +736,7 @@ if (isWorkerCell) {
       selfTestBaseline: { ran: false, skipped: true, skipReason: 'args fail-fast(必須 args 欠落)で agent 未起動', passed: null, exitCode: null, rawLog: '' },
       selfTestFinal: { ran: false, skipped: true, skipReason: 'args fail-fast(必須 args 欠落)で agent 未起動', passed: null, exitCode: null, rawLog: '' },
       receivedArgs, // 何が届いたか(キー一覧 + 受信型)を呼出元監査用に明示
+      roFallbackActive, // (sc-xyw) read-only agentType fallback の最終状態(fail-fast=agent 未起動ゆえ RO_FORCE_NONE 以外は false)
       gate: `ESCALATE: ${reason} 呼出元/人間が args を補って再 invoke すること。`,
     }
   }
@@ -1091,6 +1095,7 @@ const result = {
   selfTestBaseline,
   selfTestFinal,
   receivedArgs, // un-2yy: 何が届いたか(キー一覧 + 受信型 + 生の受信型)を呼出元監査用に明示
+  roFallbackActive, // (sc-7bv/sc-xyw) read-only agentType fallback が最終的に発火したか(true=agentType 解決不能で降格した run)。receivedArgs.roAgentType は「解決した型」だけで発火有無は読めないため別途載せる。
 }
 
 // admin 薄 gate の指針(再 review はしない)。unverified(verdict 取得失敗/throw)や machinery 失敗が
