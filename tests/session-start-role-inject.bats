@@ -98,6 +98,22 @@ inject() {
     [[ "$output" == *"role=worker"* ]]
 }
 
+# ---- ultracode 打鍵リマインダ(sc-icb): admin にだけ出る ----
+@test "ultracode リマインダ: admin 注入に /effort ultracode の打鍵案内が含まれる" {
+    run --separate-stderr inject admin "$REPO" "$ANCHOR_JSON"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/effort ultracode"* ]]
+}
+
+@test "ultracode リマインダ: worker/consult 注入には出ない" {
+    run --separate-stderr inject worker "$REPO" "$ANCHOR_JSON"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"/effort ultracode"* ]]
+    run --separate-stderr inject consult "$REPO" "$ANCHOR_JSON"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"/effort ultracode"* ]]
+}
+
 @test "優先順: env(consult) > cwd(.worktrees) — worktree cwd でも consult が勝つ" {
     run --separate-stderr inject consult "$REPO" "$WT_JSON"
     [ "$status" -eq 0 ]
