@@ -31,6 +31,23 @@ ultracode（multi-agent fan-out で網羅性・確信度・スケールを買う
 
 > 一次出典: Workflow tool 方法論（"Scale to what the user asked for"・quality patterns）/ doobidoo `c06ab15b`（un-8q5 pilot milestone・rate 53→80%）・`6d11f667`（un-8q5 GOTCHA）/ doobidoo `e5d79cc9`（2026-06-15 grill: 強度キャリブレーション = 規模×不確実性×リスク）。
 
+### 1.1 effort ルーティング（worker/WF agent の推論強度・sc-dc9）
+
+強度キャリブレーションの**もう一つの制御軸が effort**（推論に費やす思考量）。fan-out の幅・票数とは独立に、**1 エージェントあたりの推論深度**を選ぶ。既定は **high**。settings.json の `"effortLevel":"xhigh"` を全 worker/WF agent へ無差別波及させない（xhigh の超長単一ターンは confabulation＝幻影ツール結果を誘発した実害がある・doobidoo `1e98254c`。gate funnel は diff 欠陥の二次防御で、diff が生成されない幻影は捕捉外ゆえ effort=high 化の一次便益は「幻覚の予防」）。
+
+| タスク種別 | effort | 指定方法 |
+|---|---|---|
+| docs 追補 / 軽微修正 | **medium** | admin が `scribe-spawn --effort medium`（or `SCRIBE_WORKER_EFFORT=medium`） |
+| 標準実装 cell | **high（既定）** | 無指定でよい（既定 high） |
+| probe / 調査 | **high** | 無指定でよい（既定 high） |
+| 大規模設計 / 高不確実 / 高リスク | **xhigh** | admin が `scribe-spawn --effort xhigh` を**明示**（opt-in なしで盛らない原則と整合） |
+
+- **worker（spawn）**: `scribe-spawn.sh --effort <LEVEL>`（既定 high・env `SCRIBE_WORKER_EFFORT` で既定上書き・allowlist `low|medium|high|xhigh|max`）。CC 正規名 `CLAUDE_CODE_EFFORT_LEVEL` を worker env-file へ後勝ち注入する（`CLAUDE_EFFORT` は CC **非正規名で silent no-op** ゆえ使わない）。cld-spawn への `--effort` flag passthrough は feature-detect（`--help` に実在時のみ・un-ivb 防御）。
+- **WF agent（cell-quality）**: 全 `agent()` 呼出しが `opts.effort` を既定 high で pin する（settings.json 依存を断つ）。`args.effort` で上書き可（admin/worker が xhigh 等を渡せる）。allowlist 外は既定 high へ fail-safe。
+- **admin session は不変**（settings.json の xhigh のまま）: この統制は worker/WF agent への波及のみを止める。opt-in なしで xhigh を盛らない（コスト事故＋幻覚リスク）。
+
+> 一次出典: doobidoo `1e98254c`（xhigh worker の confabulation 3/3 再現）/ bd `sc-dc9`（effort 統制の機構訂正: 真因 = machine-global settings.json の xhigh を admin/worker 双方が読む・process env の `CLAUDE_EFFORT` は CC 非正規名）/ CC 正規 precedence: `--effort` フラグ > `CLAUDE_CODE_EFFORT_LEVEL` env > `settings.effortLevel` > model 既定。
+
 ---
 
 ## 2. quality patterns（カタログ）

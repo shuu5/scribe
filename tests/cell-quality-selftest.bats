@@ -176,3 +176,47 @@ setup() {
   # graceful skip(fail-open): selfTestCmd 無しなら skip(agent を起動しない)。
   grep -q 'skipped: true' "$WF"
 }
+
+# ── effort 統制(sc-dc9): 全 agent() に opts.effort が pin される ──────────────────────
+@test "sc-dc9: 既定(args.effort 未指定)で全 agent 呼出しが effort=high で pin される" {
+  run env CQ_ARGS="$ARGS_WORKER" node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  # 全 agent 呼出しに effort が届き(undefined 無し)、distinct 値は 'high' のみ=全箇所 pin かつ既定 high。
+  [[ "$output" == *"K effortAllPinned true"* ]]
+  [[ "$output" == *"K effortDistinct high"* ]]
+  # 返り値サマリにも解決 effort が載る(呼出元監査用)。
+  [[ "$output" == *"K resultEffort high"* ]]
+}
+
+@test "sc-dc9: args.effort=xhigh で全 agent が xhigh に pin される(settings.json 非依存で args 上書きが効く)" {
+  run env CQ_ARGS='{"taskTitle":"cell","worktree":"/tmp/wt","goal":"do x","selfTestCmd":"bats tests/x.bats","autoFix":true,"taskType":"testable","effort":"xhigh"}' \
+    node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"K effortAllPinned true"* ]]
+  [[ "$output" == *"K effortDistinct xhigh"* ]]
+  [[ "$output" == *"K resultEffort xhigh"* ]]
+}
+
+@test "sc-dc9: allowlist 外の args.effort は既定 high へ fail-safe(WF は止めず警告 log・spawn の fail-loud と二重化)" {
+  run env CQ_ARGS='{"taskTitle":"cell","worktree":"/tmp/wt","goal":"do x","selfTestCmd":"bats tests/x.bats","autoFix":true,"taskType":"testable","effort":"bogus"}' \
+    node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"K effortDistinct high"* ]]
+  [[ "$output" == *"K resultEffort high"* ]]
+  # fail-safe を warn log で可視化する(silent に既定へ倒さない)=behavioral に発火を確認。
+  [[ "$output" == *"K effortFailSafeWarned true"* ]]
+}
+
+# ── WF 本体の静的 pin 検査: 全 agent()/roAgent()/runAgent() opts に effort が明示されている ──
+@test "sc-dc9: WF 本体の agent 呼出し全箇所に effort: EFFORT が明示 pin されている(静的)" {
+  [ -f "$WF" ]
+  # EFFORT 解決(allowlist + fail-safe high)が存在する。
+  grep -q "const EFFORT = EFFORT_ALLOWED.has" "$WF"
+  grep -q "EFFORT_ALLOWED = new Set(\['low', 'medium', 'high', 'xhigh', 'max'\])" "$WF"
+  # agent 呼出し 8 箇所 + result 2 箇所 = effort: EFFORT が 10 回以上。
+  local n
+  n="$(grep -c 'effort: EFFORT' "$WF")"
+  [ "$n" -ge 10 ]
+  # CLAUDE_EFFORT(非正規名)を WF が使わない(念のため・WF は env を書かないが方針として)。
+  ! grep -q 'CLAUDE_EFFORT\b' "$WF"
+}

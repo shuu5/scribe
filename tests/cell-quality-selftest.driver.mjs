@@ -95,6 +95,7 @@ async function runWorkflow() {
   const calls = [] // agent 呼び出しの label を順に記録(ordering/回数の assert 用)
   const logs = []
   const agentTypeCalls = [] // (sc-xyw) agentType が付いた呼出しの記録({label, agentType})=降格の後続伝播を検証する
+  const effortCalls = [] // (sc-dc9) 各 agent 呼出しの opts.effort を記録({label, effort})=全 agent に effort が pin されたか検証する
   const promptCalls = [] // (sc-xyw errata) 各呼出しの prompt に RO_DISCIPLINE 前置が付いたかを記録({label, hasDiscipline})=降格後の read-only 規律代替(中核安全機構)を behavioral に検証する
   const RO_NOTFOUND = envBool('CQ_RO_NOTFOUND', false) // (sc-xyw) true=agentType 付き呼出しを probe 形状 not found で reject し roAgent fallback を発火させる
 
@@ -103,6 +104,7 @@ async function runWorkflow() {
     const agentType = opts && opts.agentType
     calls.push(label)
     if (agentType) agentTypeCalls.push({ label, agentType })
+    effortCalls.push({ label, effort: opts && opts.effort }) // (sc-dc9) opts.effort を記録(roAgent/runAgent は opts を透過ゆえ届く)
     // (sc-xyw errata) roAgent fallback は降格後 `prompt + RO_DISCIPLINE` を渡し agentType 構造強制を prompt 規律で代替する。
     // この前置マーカー(agentType 構造強制の代替)が付いた呼出しを記録し、消失(=完全 fail-open 退行)を behavioral に検出する。
     promptCalls.push({ label, hasDiscipline: /agentType 構造強制の代替/.test(String(prompt == null ? '' : prompt)) })
@@ -153,7 +155,7 @@ async function runWorkflow() {
   const run = new AsyncFunction(...INJECTED, body)
   const result = await run(...INJECTED.map((k) => stubs[k]))
 
-  return { result, calls, logs, agentTypeCalls, promptCalls }
+  return { result, calls, logs, agentTypeCalls, promptCalls, effortCalls }
 }
 
 // ── 出力: `K <key> <value>` 行(bats が grep で assert)+ 生 JSON ─────────────────
@@ -162,7 +164,7 @@ function firstIndex(calls, prefix) {
   return -1
 }
 
-function printResult(result, calls, logs, agentTypeCalls, promptCalls) {
+function printResult(result, calls, logs, agentTypeCalls, promptCalls, effortCalls) {
   const K = (k, v) => console.log(`K ${k} ${v}`)
   const b = result.selfTestBaseline || {}
   const f = result.selfTestFinal || {}
@@ -213,6 +215,18 @@ function printResult(result, calls, logs, agentTypeCalls, promptCalls) {
   K('roDisciplineCallCount', roDisciplineCallCount)
   const rvCalls = calls.filter((c) => c.startsWith('review:') || c.startsWith('verify:')).length
   K('reviewVerifyCalls', rvCalls)
+  // (sc-dc9) effort pin の behavioral 検証: 全 agent 呼出しに opts.effort が届いたか + その distinct 値。
+  // effortAgentCalls: effort を記録した呼出し総数(= 全 agent 呼出し)。
+  // effortAllPinned: すべての agent 呼出しで effort が defined(undefined が 1 つも無い=全箇所 pin の証拠)。
+  // effortDistinct: 実際に届いた effort の distinct 値(既定なら 'high' のみ・args.effort 指定ならその値)。
+  const ec = effortCalls || []
+  K('effortAgentCalls', ec.length)
+  K('effortAllPinned', ec.length > 0 && ec.every((e) => e && e.effort !== undefined))
+  K('effortDistinct', Array.from(new Set(ec.map((e) => String(e && e.effort)))).sort().join(','))
+  K('resultEffort', result.effort)
+  // (sc-dc9) allowlist 外 args.effort → 既定 high へ fail-safe した際、warn log が実際に発火したか(behavioral)。
+  // logs は既定では stdout に dump しないため、この behavioral K 行で fail-safe の可視化(silent に倒さない)を検証する。
+  K('effortFailSafeWarned', (logs || []).some((l) => String(l).includes('許可外')))
   console.log(`ESCALATE_REASON ${String(result.escalateReason || '')}`)
   console.log(`RESULT ${JSON.stringify(result)}`)
 }
@@ -223,8 +237,8 @@ if (mode === 'emit-wrapped') {
   process.stdout.write(emitWrapped())
 } else if (mode === 'run') {
   runWorkflow()
-    .then(({ result, calls, logs, agentTypeCalls, promptCalls }) => {
-      printResult(result, calls, logs, agentTypeCalls, promptCalls)
+    .then(({ result, calls, logs, agentTypeCalls, promptCalls, effortCalls }) => {
+      printResult(result, calls, logs, agentTypeCalls, promptCalls, effortCalls)
     })
     .catch((e) => {
       console.error(`DRIVER_ERROR: ${e && e.stack ? e.stack : e}`)

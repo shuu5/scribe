@@ -111,6 +111,7 @@ if (typeof args === 'string') {
       autoFix: false, // 起動前に中断=自動修正は一切走っていない
       reviewModel: 'opus',
       verifyModel: 'opus',
+      effort: 'high', // (sc-dc9) EFFORT 定義前の早期中断=既定 high をリテラルで(return shape 一貫性)
       fableCapped: false,
       maxConcurrency: 0, // (D2) args 不明=cap 計算前。0=無 cap
       opusCapped: false,
@@ -241,6 +242,19 @@ if (_rawScribeAdd && !scribeAddPath) {
   log(`警告: scribeAddPath が path 安全文字を外れ無効化(${_rawScribeAdd.slice(0, 60)})。autoFix/implement が走る run では stage が scribe-add 固定でなく旧経路へ後退する(sandbox では git add -A の rc=128 死 risk・fail-open=autoFix は続行)。install path を ASCII-clean にするか args を見直すこと。`)
 }
 const MODEL = A.model || 'opus' // substantive 既定 = opus(cheap→opus 格上げ)
+// ── effort 統制(sc-dc9): 全 agent() 呼出しに opts.effort を明示 pin する。既定 high。──────────────
+// 目的: machine-global settings.json の "effortLevel":"xhigh" が dynamic WF の全 agent へ無差別波及するのを
+// 断つ(worker の xhigh 幻覚事例の根治=doobidoo 1e98254c)。既定 high・args.effort で上書き可(admin/worker が
+// 大規模設計等で xhigh を渡せる)。allowlist(low|medium|high|xhigh|max) 外は既定 high へ **fail-safe**(warn log)
+// = 予防を優先し、壊れた args でも WF を止めず安全側(high)へ倒す(scribe-spawn.sh の allowlist は spawn 時に
+// fail-loud で弾くが、WF 直叩き経路の防御として fail-safe を二重化する)。opts.effort は Workflow tool が受理する
+// (admin 実証済み)。roAgent/runAgent は opts を透過するため(base={...opts}, delete は agentType のみ)効く。
+const EFFORT_ALLOWED = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+const _rawEffort = typeof A.effort === 'string' ? A.effort.trim() : ''
+const EFFORT = EFFORT_ALLOWED.has(_rawEffort) ? _rawEffort : 'high'
+if (_rawEffort && !EFFORT_ALLOWED.has(_rawEffort)) {
+  log(`警告: effort='${_rawEffort}' は許可外(low|medium|high|xhigh|max)。既定 high へ fail-safe(sc-dc9)。`)
+}
 const maxRounds = Number.isInteger(A.maxRounds) && A.maxRounds > 0 ? A.maxRounds : 3 // hard cap
 // ── (D2) opus 並列 cap(un-3yc): review fan-out / verify parallel(= opus 経路)の同時実行を args で絞る。
 // 未指定(0)=無 cap=従来どおり harness の min(16,cores-2)が実効上限(後方互換=安全既定。設計核(6)の「既定
@@ -670,6 +684,7 @@ async function runSelfTest(when) {
     // mechanical run(substantive reasoning でない)。read-only(roAgent=scribe:explore: Bash あり/Edit・Write
     // なし=self-test を実行するが編集はできない)tools + sonnet。roAgent が RO agentType を注入 + not found fallback。
     model: 'sonnet',
+    effort: EFFORT, // (sc-dc9) settings.json xhigh 波及を断ち既定 high で pin(全 agent 一律)
     schema: SELFTEST_RUN_SCHEMA,
   }).catch(() => null)
   if (!r) {
@@ -722,6 +737,7 @@ if (isWorkerCell) {
       autoFix: false, // 起動前に中断=自動修正は一切走っていない
       reviewModel,
       verifyModel,
+      effort: EFFORT, // (sc-dc9) 解決した実効 effort(監査用・return shape 一貫性)
       fableCapped: isFable(reviewModel) || isFable(verifyModel),
       maxConcurrency, // (D2) opus 経路 cap(監査用)。0=無 cap
       opusCapped: maxConcurrency > 0,
@@ -750,6 +766,7 @@ if (!taskType) {
     label: 'classify',
     phase: 'Classify',
     model: stageModel, // roAgent が RO agentType('scribe:explore')注入 + not found fallback(read-only 段)
+    effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
     schema: CLASSIFY_SCHEMA,
   })
   taskType = (c && c.taskType) || 'executable'
@@ -766,6 +783,7 @@ if (doPlan) {
     label: 'plan',
     phase: 'Plan',
     model: stageModel, // roAgent が RO agentType('scribe:explore')注入 + not found fallback(read-only 段)
+    effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
     schema: PLAN_SCHEMA,
   })
   if (p && p.acceptance) {
@@ -791,6 +809,7 @@ if (doImplement) {
     label: 'implement',
     phase: 'Implement',
     model: stageModel, // 編集するので roAgent(read-only agentType)を使わず agent() 直呼び(全ツール)
+    effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
   })
   log(`implement: ${impl ? String(impl).slice(0, 120) : '(no output)'}`)
 }
@@ -841,6 +860,7 @@ while (round < effectiveCap) {
       label: `snapshot r${round}`,
       phase: 'Review',
       model: stageModel, // roAgent が RO agentType('scribe:explore')注入 + not found fallback(read-only 段)
+      effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
     })
     // snapshot agent には「生 diff のみ・空なら EMPTY_DIFF の一語」を指示しているが、LLM は説明文を前置しがち
     // (例: "Both (a) and (b) are empty.\n\nEMPTY_DIFF")。exact-match(snap.trim()!=='EMPTY_DIFF')だと説明文付きの
@@ -899,6 +919,7 @@ while (round < effectiveCap) {
         label: `review:${d.key} r${round}`,
         phase: 'Review',
         model: reviewModel, // 既定=MODEL(opus)。fable 指定時のみ runAgent が ≤2 cap を適用。runAgent 内 roAgent が RO agentType 注入 + fallback
+        effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
         schema: FINDINGS_SCHEMA,
       }).catch(() => ({ findings: [], __reviewFailed: true })),
     (review, d) => {
@@ -911,6 +932,7 @@ while (round < effectiveCap) {
             label: `verify:${d.key}:${shortTitle(f)} r${round}`,
             phase: 'Verify',
             model: verifyModel, // 既定=MODEL(opus)。fable 指定時のみ runAgent が ≤2 cap を適用。runAgent 内 roAgent が RO agentType 注入 + fallback
+            effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
             schema: VERDICT_SCHEMA,
           })
             .then((v) => ({ ...f, dimension: d.key, verdict: v }))
@@ -996,6 +1018,7 @@ while (round < effectiveCap) {
     label: `autofix r${round}`,
     phase: 'Fix',
     model: stageModel, // 編集するので roAgent(read-only agentType)を使わず agent() 直呼び(全ツール)
+    effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
     schema: FIX_SCHEMA,
   })
   if (!fix) {
@@ -1079,6 +1102,7 @@ const result = {
   autoFix: canAutoFix,
   reviewModel, // per-stage model(既定=MODEL)。監査用に明示
   verifyModel,
+  effort: EFFORT, // (sc-dc9) 全 agent に pin した実効 effort(既定 high・settings.json 非依存)。呼出元監査用
   fableCapped: isFable(reviewModel) || isFable(verifyModel), // fable ≤2 cap が効いた経路か
   maxConcurrency, // (D2) opus 経路 cap(0=無 cap=harness 任せ)。監査用
   opusCapped: maxConcurrency > 0, // (D2) opus limiter が effective だった経路か
