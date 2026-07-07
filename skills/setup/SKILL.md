@@ -23,7 +23,7 @@ SessionStart 注入が opt-in で発火する状態**にする。各次元を独
 > 注入と二重・矛盾するため、本 skill は PRIME を role 中立版へ同期する。
 
 ## 正しい構成（収束ゴール）
-1. `bd` が **v1.0.4**（v1.0.5+ は #4259 で禁止）
+1. `bd` が **導入済み**（バージョンは pin しない・upgrade 前検証は人間ポリシー＝PRIME §バージョン管理。reconciler は特定バージョンを強制/ダウングレードしない）
 2. `.beads/` が存在（embedded Dolt）
 3. `bd config` の `backup.git-push = false`
 4. Dolt remote `origin = git+https://...`（マルチPC同期）
@@ -41,7 +41,7 @@ SessionStart 注入が opt-in で発火する状態**にする。各次元を独
 git root で以下を実行し、各次元の状態を把握する:
 ```bash
 root=$(git rev-parse --show-toplevel) && cd "$root"
-bd --version 2>/dev/null                                   # → 1.0.4 か
+bd --version 2>/dev/null                                   # → 導入済みか（バージョンは pin しない）
 test -d .beads && echo "BEADS:yes" || echo "BEADS:no"
 bd config get backup.git-push 2>/dev/null                  # → false か
 bd dolt remote list 2>/dev/null | grep -q '://' && echo "REMOTE:yes" || echo "REMOTE:no"
@@ -69,8 +69,8 @@ grep -q 'issues.jsonl' .gitignore 2>/dev/null && echo "GITIGNORE:yes" || echo "G
 
 ## Step 1〜: 各次元を収束（必要な次元だけ実行）
 
-### bd v1.0.4（#1）
-未導入/別バージョンなら案内: `npm install -g @beads/bd@1.0.4`。v1.0.5+ を見つけたら**ダウングレード**を促す（#4259）。
+### bd 導入（#1）
+未導入なら案内: `npm install -g @beads/bd`。**バージョンは pin しない**（旧ポリシーの v1.0.4 ピンは撤廃）。**特定バージョンの強制・ダウングレードは促さない**。upgrade する場合は upgrade 先の migration がマルチPC同期を壊さないか検証してから上げる＝人間判断（reconciler は代行しない）。参考: v1.0.5+ の migration 0043 が過去に #4259 で同期破壊。remote-backed DB の schema 移行は単一指定移行者のみ（PRIME §バージョン管理）。
 
 ### .beads（#2）— 無いときだけ init
 ```bash

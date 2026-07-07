@@ -15,8 +15,10 @@
 
 > **役割を帯びた規約の SSOT は scribe plugin の role 別 SessionStart 注入**（admin / worker / consult）。「誰が `bd create` / `bd dep` / `bd dolt push` / close するか・残作業のフォローアップ起票の可否・終了プロトコルの全手順・close→gate の順序」は role ごとに scribe が配る（規約本文は scribe plugin の `docs/protocol.md`）。本 PRIME は role 中立な bd 基礎のみを持ち、役割を帯びた指示を全セッションへ一律注入しない（案 A 責務分割＝worker への過剰注入が `bd create` 逸脱の構造原因。scribe `docs/role-context-spec.md` §0）。scribe plugin を導入していないプロジェクトでは、本節は「単独 worker は素の bd で運用」と読み替えてよい。
 
-## ⚙️ バージョン固定・保守（重要）
-- **bd は v1.0.4 にピン**。`bd upgrade` や `npm install -g @beads/bd`(latest) を実行しないこと。v1.0.5+ は migration 0043 がマルチマシン同期を破壊する（upstream #4259）。
+## ⚙️ バージョン管理・保守（重要）
+- **bd はピン解除**。ただし `bd upgrade` / `npm install -g @beads/bd` を実行する**前に**、アップグレード先バージョンに問題（特に migration によるマルチマシン同期破壊）が無いかを検証してから上げる。npm global bd は **OS ユーザー単位で共有**されるため、任意アカウントの upgrade が全アカウントへ波及する点に注意。
+- **remote-backed bd DB の schema 移行は単一指定移行者のみ**が `BD_ALLOW_REMOTE_MIGRATE=1 bd migrate` → `bd dolt push` で行う（他 clone は `bd bootstrap` 再取得で未 push を喪失しうるため、先に `bd export` で backup を取る）。
+- 参考: v1.0.5+ の migration 0043 が過去にマルチマシン同期を破壊した（upstream #4259）。現行は移行検証を経て運用する（旧・v1.0.4 ピンは撤廃）。
 - このプロジェクトの beads は `bd init --skip-agents --skip-hooks` で導入済（bd に CLAUDE.md/AGENTS.md を汚染させない）。本 PRIME.md がポリシー SSOT で、bd は再生成しない。
 
 ## Core Rules
