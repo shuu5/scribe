@@ -749,6 +749,96 @@ _mk_beads() {
   [[ "$output" == *"--model claude-fable-5"* ]]
 }
 
+# ---------- spawn: effort 統制（sc-dc9） ----------
+@test "spawn(sc-dc9): 既定 effort=high が env-file(CLAUDE_CODE_EFFORT_LEVEL)と plan に注入される" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CLAUDE_CODE_EFFORT_LEVEL"* ]]
+  [[ "$output" == *"effort: high"* ]]
+}
+
+@test "spawn(sc-dc9): --effort medium が env-file と plan へ伝播する" {
+  run "$SPAWN" --dry-run --effort medium un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"effort: medium"* ]]
+  [[ "$output" == *"CLAUDE_CODE_EFFORT_LEVEL=medium"* ]]
+}
+
+@test "spawn(sc-dc9): SCRIBE_WORKER_EFFORT env が既定を上書きする" {
+  run env SCRIBE_WORKER_EFFORT=xhigh "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"effort: xhigh"* ]]
+}
+
+@test "spawn(sc-dc9): allowlist 外の effort は fail-loud（low|medium|high|xhigh|max 以外）" {
+  run "$SPAWN" --dry-run --effort bogus un-4nm
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"[plan]"* ]]
+  [[ "$output" == *"low|medium|high|xhigh|max"* ]]
+}
+
+@test "spawn(sc-dc9): max も allowlist で受理される（xhigh の上位・NOTES テストの型）" {
+  run "$SPAWN" --dry-run --effort max un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"effort: max"* ]]
+}
+
+@test "spawn(sc-dc9): CLAUDE_EFFORT（非正規名）は書かない＝出力に現れない（silent no-op 反例）" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  # 非正規名 CLAUDE_EFFORT= を書くと CC が読まず silent no-op（受入条件の反例）。正規名 CLAUDE_CODE_EFFORT_LEVEL のみ使う。
+  [[ "$output" != *"CLAUDE_EFFORT="* ]]
+  [[ "$output" == *"CLAUDE_CODE_EFFORT_LEVEL"* ]]
+}
+
+@test "spawn(sc-dc9): 起動直後の実効 effort 自己 log 指示が worker prompt に焼かれる（受入条件）" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"起動直後の実効 effort 自己申告"* ]]
+  [[ "$output" == *'CLAUDE_CODE_EFFORT_LEVEL:-<unset>'* ]]
+}
+
+@test "spawn(sc-dc9): cld-spawn --help に --effort が実在するときだけ spawn 行へ --effort（feature-detect・un-ivb 防御）" {
+  detect="$BATS_TEST_TMPDIR/cld-effort-detect"
+  printf '#!/usr/bin/env bash\n[ "$1" = --help ] && { echo "Usage: cld-spawn [--model M] [--effort L]"; exit 0; }\nexit 0\n' > "$detect"
+  chmod +x "$detect"
+  run env SCRIBE_CLD_SPAWN="$detect" "$SPAWN" --dry-run --effort low un-4nm
+  [ "$status" -eq 0 ]
+  # 検出時: spawn 行は --model opus --effort low --disallowed-tools の順（cld-spawn の末尾可変長 tools より前）。
+  [[ "$output" == *"--model opus --effort low --disallowed-tools"* ]]
+  [[ "$output" == *"--effort 検出"* ]]
+}
+
+@test "spawn(sc-dc9): cld-spawn --help に --effort が無ければ spawn 行へ付けない（無条件 passthrough 禁止・un-ivb）＝env-file 経路は常に敷く" {
+  nodetect="$BATS_TEST_TMPDIR/cld-effort-nodetect"
+  printf '#!/usr/bin/env bash\n[ "$1" = --help ] && { echo "Usage: cld-spawn [--model M]"; exit 0; }\nexit 0\n' > "$nodetect"
+  chmod +x "$nodetect"
+  run env SCRIBE_CLD_SPAWN="$nodetect" "$SPAWN" --dry-run --effort high un-4nm
+  [ "$status" -eq 0 ]
+  # 未検出: spawn 行に "--effort high" が付かない（un-ivb: 未知オプションは PROMPT へ落ちる）。
+  [[ "$output" != *"--effort high"* ]]
+  [[ "$output" == *"--effort 未検出"* ]]
+  # env-file 経路（CLAUDE_CODE_EFFORT_LEVEL）は flag 有無に関わらず常に敷く。
+  [[ "$output" == *"CLAUDE_CODE_EFFORT_LEVEL=high"* ]]
+}
+
+@test "spawn(sc-dc9): 実 spawn 経路の effort 配線を source で pin（dry-run mirror でなく実 invocation 行・sc-649 同型・drift 防止）" {
+  # 上の dry-run テスト群は emit_plan(別関数)の echo 文字列を検査する。実際に worker env-file へ書く printf と実 spawn
+  # argv は dry-run の echo とは別リテラルゆえ drift risk が残る(emit_plan だけ直して実行路を直し忘れる等)。当環境は
+  # linked worktree ゆえ実 spawn 行は un-ag7 anchor guard / worktree add / tmux 依存で hermetic 駆動できない。そこで
+  # sc-649(:688)と同型に実 invocation 行を静的 grep して両者の drift を回帰から守る(cell-quality gate wf_751bb5e6 の
+  # completeness-critic finding 対応)。
+  # (a) 実 WORKER_ENV_FILE 生成が CC **正規名** CLAUDE_CODE_EFFORT_LEVEL を %q で後勝ち注入する（emit_plan echo と別リテラル）。
+  run grep -F -- "printf 'export CLAUDE_CODE_EFFORT_LEVEL=%q" "$SPAWN"
+  [ "$status" -eq 0 ]
+  # (b) 実 cld-spawn 起動行が --model "$MODEL" と --disallowed-tools の間で CLD_EFFORT_ARG を配列展開する（feature-detect の実 argv）。
+  run bash -c 'grep -F -- "--model \"\$MODEL\" \"\${CLD_EFFORT_ARG[@]}\" --disallowed-tools" "$1"' _ "$SPAWN"
+  [ "$status" -eq 0 ]
+  # (c) 非正規名 CLAUDE_EFFORT=（silent no-op 反例）を script のどこでも使わない（実行路の printf も含め source で pin）。
+  run grep -F -- "CLAUDE_EFFORT=" "$SPAWN"
+  [ "$status" -ne 0 ]
+}
+
 # ---------- spawn: consult 既定 model = fable（sc-9q6・利用不可時 opus fallback） ----------
 @test "spawn: consult 既定 model は fable（--model 未指定・dry-run は preflight しない・sc-9q6）" {
   run "$SPAWN" --dry-run --consult un-consult
