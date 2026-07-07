@@ -26,6 +26,9 @@ setup() {
   export BD_STUB_OK_IDS="un-4nm un-consult un-3sh.3.5"
   # cld-spawn は dry-run では実行されない。echo を決定論化するため固定値を入れる。
   export SCRIBE_CLD_SPAWN="cld-spawn"
+  # sc-rvq: config-dir 追随テストを hermetic にする。ホスト/CI 側の CLAUDE_CONFIG_DIR / override 系が漏れると
+  # 既定経路テスト（unset 注入）や real-path preflight が汚染されるため、各テスト前に必ず落とす。
+  unset CLAUDE_CONFIG_DIR SCRIBE_WORKER_CONFIG_DIR SCRIBE_ACCOUNTS_BASE 2>/dev/null || true
   # sc-ovq: spawn は real-exec 冒頭で **無条件に**（ON/OFF 両経路で）canonical bdw 到達性を検査する
   # （zombie worker 防止）。bdw 非依存の spawn テスト（preflight/fallback/orphan/gen 失敗枝）が host の
   # plugin 配備に左右されないよう、`lock-dir` で exit0 する present スタブを 1 つ用意する（テストは
@@ -837,6 +840,198 @@ _mk_beads() {
   # (c) 非正規名 CLAUDE_EFFORT=（silent no-op 反例）を script のどこでも使わない（実行路の printf も含め source で pin）。
   run grep -F -- "CLAUDE_EFFORT=" "$SPAWN"
   [ "$status" -ne 0 ]
+}
+
+# ---------- spawn: CLAUDE_CONFIG_DIR 追随（マルチアカウント・sc-rvq） ----------
+# 有効な config dir（credentials + onboarding 完了 + scribe/beads-bdw/cmdtokens plugin 実在）を作る helper。
+# $1=base dir（無ければ mktemp）。stdout に config dir の絶対パスを返す。省略フラグで欠落系を注入する:
+#   CFG_NO_CREDS=1 → .credentials.json を作らない / CFG_ONBOARDING=false → onboarding 未完 / CFG_NO_PLUGIN=<name> → 当該 plugin を落とす
+_mk_valid_cfgdir() {
+  local d; d="$(cd "$(mktemp -d)" && pwd -P)"
+  [[ "${CFG_NO_CREDS:-}" == "1" ]] || printf '{}' > "$d/.credentials.json"
+  printf '{"hasCompletedOnboarding":%s}' "${CFG_ONBOARDING:-true}" > "$d/.claude.json"
+  local p
+  for p in scribe beads-bdw cmdtokens; do
+    [[ "${CFG_NO_PLUGIN:-}" == "$p" ]] && continue
+    mkdir -p "$d/plugins/$p"
+  done
+  printf '%s\n' "$d"
+}
+
+@test "spawn(sc-rvq/AC1): 既定(CLAUDE_CONFIG_DIR 未設定)→ env-file に unset CLAUDE_CONFIG_DIR のみ・export しない" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"unset CLAUDE_CONFIG_DIR"* ]]           # 既定は unset 行を注入
+  [[ "$output" != *"export CLAUDE_CONFIG_DIR="* ]]         # export はしない（挙動不変）
+  [[ "$output" == *"源=unset"* ]]
+}
+
+@test "spawn(sc-rvq/AC2): admin CLAUDE_CONFIG_DIR set → env-file に export CLAUDE_CONFIG_DIR=<dir> を mirror" {
+  run env CLAUDE_CONFIG_DIR=/some/admin/dir "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"export CLAUDE_CONFIG_DIR=/some/admin/dir"* ]]
+  [[ "$output" == *"源=mirror"* ]]
+  [[ "$output" != *"unset CLAUDE_CONFIG_DIR"* ]]
+}
+
+@test "spawn(sc-rvq): --account <label> → <accounts-base>/<label> を注入（admin mirror より優先）" {
+  run env SCRIBE_ACCOUNTS_BASE=/acct/base CLAUDE_CONFIG_DIR=/admin/dir "$SPAWN" --dry-run --account alice un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"export CLAUDE_CONFIG_DIR=/acct/base/alice"* ]]   # 規約導出
+  [[ "$output" == *"源=account"* ]]
+  [[ "$output" != *"/admin/dir"* ]]                                  # mirror より優先
+}
+
+@test "spawn(sc-rvq): SCRIBE_WORKER_CONFIG_DIR は admin mirror より優先・--account より下位（優先順位）" {
+  # env override は mirror に勝つ
+  run env CLAUDE_CONFIG_DIR=/admin/dir SCRIBE_WORKER_CONFIG_DIR=/override/dir "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"export CLAUDE_CONFIG_DIR=/override/dir"* ]]
+  [[ "$output" == *"源=env"* ]]
+  # --account は env override にも勝つ（最優先）
+  run env SCRIBE_ACCOUNTS_BASE=/acct/base SCRIBE_WORKER_CONFIG_DIR=/override/dir "$SPAWN" --dry-run --account bob un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"export CLAUDE_CONFIG_DIR=/acct/base/bob"* ]]
+  [[ "$output" != *"/override/dir"* ]]
+}
+
+@test "spawn(sc-rvq): --account の不正ラベル(path traversal/不正文字)は fail-loud（[plan]を出さない）" {
+  run "$SPAWN" --dry-run --account "../evil" un-4nm
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"[plan]"* ]]
+  run "$SPAWN" --dry-run --account ".." un-4nm
+  [ "$status" -ne 0 ]
+  run "$SPAWN" --dry-run --account "a/b" un-4nm
+  [ "$status" -ne 0 ]
+}
+
+@test "spawn(sc-rvq/AC3): config dir set だが .credentials.json 欠落 → preflight fail-loud（worktree を作らない）" {
+  local repo cfg noop
+  repo="$SCRIBE_TEST_CWD"
+  cfg="$(CFG_NO_CREDS=1 _mk_valid_cfgdir)"
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=0 SCRIBE_WORKER_CONFIG_DIR="$cfg" SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop"; rm -rf "$cfg"
+  [ "$status" -ne 0 ]                                     # fail-loud（黙って ~/.claude へ fallback しない）
+  [[ "$output" == *"credentials.json"* ]]
+  [ ! -d "$repo/.worktrees/spawn/un-4nm-101010" ]         # worktree add より前に die＝orphan を作らない
+}
+
+@test "spawn(sc-rvq/AC3): config dir の onboarding 未完了 → preflight fail-loud" {
+  local repo cfg noop
+  repo="$SCRIBE_TEST_CWD"
+  cfg="$(CFG_ONBOARDING=false _mk_valid_cfgdir)"
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=0 SCRIBE_WORKER_CONFIG_DIR="$cfg" SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop"; rm -rf "$cfg"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"hasCompletedOnboarding"* || "$output" == *"オンボーディング"* ]]
+  [ ! -d "$repo/.worktrees/spawn/un-4nm-101010" ]
+}
+
+@test "spawn(sc-rvq): onboarding preflight の grep フォールバック正規表現が true/false を弁別（jq 不在枝・regex pin）" {
+  # preflight_config_dir (b) は jq 不在時に grep フォールバックへ落ちる（非 sandbox worker で jq 保証が無い経路・
+  # completeness-critic minor）。jq を PATH から隠して全 spawn 経路を通すのは重い（script は git/readlink 等を要する）
+  # ため、grep 枝の核心＝正規表現の弁別能を直接 pin する。まず script が当該パターンを実際に持つことを確認し
+  # （drift 時に本テストを更新させる）、そのパターンで true/false を正しく弁別することを assert する。
+  local pat='"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true'
+  run grep -F -- "$pat" "$SPAWN"
+  [ "$status" -eq 0 ]                                                  # script の grep フォールバックが使う実パターン
+  run grep -Eq "$pat" <(printf '{"hasCompletedOnboarding":true}')
+  [ "$status" -eq 0 ]                                                  # 完了=match（die しない方向）
+  run grep -Eq "$pat" <(printf '{ "hasCompletedOnboarding" : true }')
+  [ "$status" -eq 0 ]                                                  # スペース入り正準形も match
+  run grep -Eq "$pat" <(printf '{"hasCompletedOnboarding":false}')
+  [ "$status" -ne 0 ]                                                  # 未完了=no-match（die 方向・fail-closed）
+  run grep -Eq "$pat" <(printf '{"hasCompletedOnboarding":false,"x":true}')
+  [ "$status" -ne 0 ]                                                  # key の直後が false なら後続 true に釣られない
+}
+
+@test "spawn(sc-rvq/AC3): config dir で scribe plugin 欠落 → preflight fail-loud（hooks 黙殺を防ぐ）" {
+  local repo cfg noop
+  repo="$SCRIBE_TEST_CWD"
+  cfg="$(CFG_NO_PLUGIN=scribe _mk_valid_cfgdir)"
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=0 SCRIBE_WORKER_CONFIG_DIR="$cfg" SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop"; rm -rf "$cfg"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"plugin"* ]]
+  [[ "$output" == *"scribe"* ]]
+  [ ! -d "$repo/.worktrees/spawn/un-4nm-101010" ]
+}
+
+@test "spawn(sc-rvq): 存在しない config dir → preflight fail-loud（黙って ~/.claude へ fallback しない）" {
+  local repo noop
+  repo="$SCRIBE_TEST_CWD"
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=0 SCRIBE_WORKER_CONFIG_DIR="/nonexistent-cfg-xyz" SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"config dir が存在しません"* || "$output" == *"存在しません"* ]]
+  [ ! -d "$repo/.worktrees/spawn/un-4nm-101010" ]
+}
+
+@test "spawn(sc-rvq): 完全な config dir → preflight 通過し real spawn 成功（noop stub・非 sandbox）" {
+  # real-path 完遂テストは WORKER_ENV_FILE を /tmp へ mktemp する（scribe-spawn 設計）。CC worker sandbox 下では
+  # /tmp が read-only で mktemp が die するため（既存 25/33/40 と同じ env 制約）、/tmp 書込不可なら skip する
+  # （正常 env=gate では緑・worker sandbox 自己点検では false-RED にしない）。
+  local _t="/tmp/.scribe-rvq-wtest.$$"
+  : > "$_t" 2>/dev/null || skip "/tmp が read-only（worker sandbox）— real-path spawn の mktemp が非実行可"
+  rm -f "$_t"
+  local repo cfg noop wt
+  repo="$SCRIBE_TEST_CWD"
+  cfg="$(_mk_valid_cfgdir)"
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  wt="$repo/.worktrees/spawn/un-4nm-101010"
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=0 SCRIBE_WORKER_CONFIG_DIR="$cfg" SCRIBE_CLD_SPAWN="$noop" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop"; rm -rf "$cfg"
+  [ "$status" -eq 0 ]                                     # preflight 通過＝real spawn 成功
+  [[ "$output" == *"spawned: issue=un-4nm"* ]]
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+}
+
+@test "spawn(sc-rvq/item2): consult dry-run にも config-dir 追随行が出る（admin mirror）" {
+  run env CLAUDE_CONFIG_DIR=/consult/dir "$SPAWN" --dry-run --consult un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"export CLAUDE_CONFIG_DIR=/consult/dir"* ]]
+  [[ "$output" == *"config-dir 追随"* ]]
+}
+
+@test "spawn(sc-rvq/item2): 既定 consult は unset CLAUDE_CONFIG_DIR を注入（chain-source 無しの落下を明示化）" {
+  run "$SPAWN" --dry-run --consult un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"unset CLAUDE_CONFIG_DIR"* ]]
+  [[ "$output" != *"export CLAUDE_CONFIG_DIR="* ]]
+}
+
+@test "spawn(sc-rvq/item2): consult 実起動でも config dir 欠落は preflight fail-loud" {
+  local cfg noop
+  cfg="$(CFG_NO_CREDS=1 _mk_valid_cfgdir)"
+  noop="$BATS_TEST_TMPDIR/noop-cld-spawn"
+  printf '#!/bin/bash\necho "cld-spawn-args: $*"\n' > "$noop"; chmod +x "$noop"
+  run env SCRIBE_CLD_SPAWN="$noop" SCRIBE_FABLE_PREFLIGHT=1 SCRIBE_WORKER_CONFIG_DIR="$cfg" "$SPAWN" --consult un-consult
+  rm -rf "$cfg"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"credentials.json"* ]]
+}
+
+@test "spawn(sc-rvq): 実 spawn 経路の config-dir 配線を source で pin（emit_plan mirror でなく実行路・drift 防止）" {
+  # dry-run テストは emit_plan の echo を見る。実 WORKER_ENV_FILE 生成の emit_config_dir_envline 呼出と
+  # worktree add 前 preflight は別リテラルゆえ drift risk が残る（sc-649/sc-dc9 同型の静的 pin）。
+  # (a) 実 env-file 生成ブロックが emit_config_dir_envline を呼ぶ（effort printf の数行後・コメント挟む）。
+  run bash -c 'grep -A3 "printf .export CLAUDE_CODE_EFFORT_LEVEL=%q" "$1" | grep -q "emit_config_dir_envline"' _ "$SPAWN"
+  [ "$status" -eq 0 ]
+  # (b) real-exec が worktree add より前に preflight_config_dir を呼ぶ（欠落 config dir で orphan を作らない）。
+  run grep -nE '^preflight_config_dir$' "$SPAWN"
+  [ "$status" -eq 0 ]
+  # (c) unset 経路の fail-closed 文字列（chain-source 混入防御）が実装に在る。
+  run grep -F -- "unset CLAUDE_CONFIG_DIR" "$SPAWN"
+  [ "$status" -eq 0 ]
 }
 
 # ---------- spawn: consult 既定 model = fable（sc-9q6・利用不可時 opus fallback） ----------
