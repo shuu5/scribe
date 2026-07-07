@@ -76,6 +76,60 @@ setup() {
   [[ "$output" != *"schema 健全性"* ]]
 }
 
+# ── [D] full-workflow: 実 finding→confirmed→fix summary=placeholder → degFix → escalate + schemaHealth.degenerate ──
+# 発端事例(fix summary="test" の最終値化)の end-to-end 回帰ガード(admin gate errata・sc-j32)。[B] は review 段で
+# degenerate→escalate に達し **fix 段へ届かない**ため degFindings 配線のみ担保し、degFix の呼出サイト配線
+# (schemaAgent(agent,…,degFix))は未カバーだった。ここは実 finding を confirmed 化して fix 段へ到達させ、autofix
+# stub の summary を placeholder('test')へ差し替え(CQ_FIX_SUMMARY)て degFix を駆動する。fix 呼出サイトから第4引数
+# degFix を落とす回帰が起きると、placeholder summary が truthy のまま fix 採用され escalate せず degenerate も
+# 記録されない=本テストが RED になり回帰を捕える。
+@test "sc-j32 [D]: 実 finding→confirmed→fix summary=placeholder は degFix で escalate し schemaHealth.degenerate に autofix label が載る" {
+  run env CQ_ARGS="$ARGS_WORKER" CQ_REVIEW_FINDINGS="$FINDING_REAL" CQ_VERIFY_REFUTED=false CQ_FIX_SUMMARY=test node "$CQ_DRIVER" run
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # fix stub の summary=placeholder → degFix → schemaAgent が null → if(!fix) で escalate(fail-closed)。
+  [[ "$output" == *"K escalate true"* ]]
+  [[ "$output" == *"K gatePrefix ESCALATE"* ]]
+  # 返り値 schemaHealth.degenerate に autofix 系 label が載る(fix 段の degenerate 配線が生きている証跡)。
+  [[ "$output" == *'"degenerate":["autofix r1"]'* ]]
+  [[ "$output" == *'"nullDeaths":[]'* ]]
+  # gate に schemaNote が付き silent ship を防ぐ。
+  [[ "$output" == *"schema 健全性"* ]]
+  [[ "$output" == *"degenerate=1"* ]]
+}
+
+# ── [D対照] fix summary が非 placeholder のとき degFix は不発火(fix 段の誤検知回帰ガード) ──────────────────
+# [D] と対称。実 finding→confirmed→fix 段到達まで同じだが、fix summary を非 placeholder にすると degFix は
+# 発火せず fix が採用される=degFix が正当な fix summary を試し打ちと誤断定しないことを固定する(false-positive ガード)。
+# stub は毎ラウンド同一の実 finding を返すため hard cap まで回り最終的に escalate(未収束)するが、ここでは degFix の
+# 非発火(schemaHealth 空・schemaNote 無し)のみを assert する。
+@test "sc-j32 [D対照]: fix summary が非 placeholder のとき degFix は不発火(schemaHealth 空・誤検知しない)" {
+  run env CQ_ARGS="$ARGS_WORKER" CQ_REVIEW_FINDINGS="$FINDING_REAL" CQ_VERIFY_REFUTED=false CQ_FIX_SUMMARY="applied real boundary fix" node "$CQ_DRIVER" run
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # degFix 不発火 → degenerate 記録なし・schemaNote 無し(fix 段の false-positive を作らない)。
+  [[ "$output" == *'"degenerate":[]'* ]]
+  [[ "$output" == *'"nullDeaths":[]'* ]]
+  [[ "$output" != *"schema 健全性"* ]]
+}
+
+# ── 構造 pin: 全 schema 呼出サイトが degenerate 述語(第4引数)を配線している ────────────────────────────
+# [B]/[D] は full-workflow で degFindings(review 段)/degFix(fix 段)の配線を behavioral に固定するが、
+# verify/classify/plan の呼出サイトは full-workflow の逐次経路で individual に到達させにくい(review/fix が先に
+# escalate/収束を決めうる)。残る配線は呼出サイトの第4引数を grep で pin する=degX を落とす回帰を fail-closed で
+# 捕える軽量 backstop(正当なリファクタで呼出形が変わればここも更新する前提=配線の「存在」を明示固定する)。
+@test "sc-j32 構造 pin: 全 schema 呼出サイトが degenerate 述語(第4引数 degX)を配線している" {
+  # cell-quality: 5 呼出サイト(classify/plan/review/verify/fix)。
+  grep -q ', degClassify)' "$WF"
+  grep -q ', degPlan)' "$WF"
+  grep -q ', degFindings)' "$WF"
+  grep -q ', degVerdict)' "$WF"
+  grep -q ', degFix)' "$WF"
+  # prebake: facet は `, degFacet)`、synthesize は複数行呼出しゆえ独立行 `degSynth,`。
+  grep -q ', degFacet)' "$PREBAKE"
+  grep -q 'degSynth,' "$PREBAKE"
+}
+
 # ── 構造 pin(両骨格): schemaAgent 導入・schemaHealth 返り値搭載・isPlaceholderStr の長さ撤去 ──────────────
 @test "sc-j32 構造 pin: 両骨格が schemaAgent/schemaHealth を持ち isPlaceholderStr が長さヒューリスティックを使わない" {
   for f in "$WF" "$PREBAKE"; do
