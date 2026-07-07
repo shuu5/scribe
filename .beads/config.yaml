@@ -44,6 +44,18 @@
 #   git-push: false    # Disable git push (export locally only)
 #   git-repo: ""       # Separate git repo for backups (default: project repo)
 
+# Auto-export to JSONL after each mutation.
+# Disabled (2026-07-07, sc-tq3): under the sandboxed worker profile the
+# post-mutation auto-export creates a temp file (.~issues.jsonl.<rand>) directly
+# inside .beads/, which the sandbox denies with EROFS. The failed export leaves
+# the issues.jsonl mirror stale and emits a warning on every bd write. On the
+# non-sandboxed admin side the same export hits git-add and warns because
+# .beads/issues.jsonl is gitignored. The Dolt store is the SSOT, so the
+# per-machine JSONL mirror is non-essential; disabling auto-export removes the
+# friction on both lanes without data loss. Run `bd export` manually when a
+# fresh mirror is wanted.
+export.auto: false
+
 # Integration settings (access with 'bd config get/set')
 # Non-secret keys (stored in the database):
 # - jira.url, jira.project
