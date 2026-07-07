@@ -55,14 +55,16 @@ GPGSIGN_FALSE = re.compile(r"commit\.gpgsign\s*=\s*false", re.I)
 # 表示修飾子であって read verb ではない: git は `--show-scope <key> <value>` を書込みとして実行する
 # （実機 git 2.43・exit0）ため read 免除に含めると `--show-scope core.hooksPath /dev/null` が素通しになる。
 CONFIG_READ_OPS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l"}
-# 明示 write verb（値代入なしでも core.hooksPath を書換/削除する形）。--unset/--unset-all は
-# core.hooksPath を消して既定 .git/hooks へ戻す＝配布フックを外す無効化ベクタ（値代入のみ block だと
-# --unset 系が fail-open だった）。--remove-section/--rename-section は含めない: section 名（`core`）を
-# 引数にとり key 名 core.hooksPath を含まないため本ガード（先頭で core.hooksPath 文字列を要求）では
-# 現実形 `git config --remove-section core` を捕捉できず素通り。実効しない誤主張なので撤回する
-# （sc-yuf self-review: 旧 self-test は git が受理しない `--remove-section core.hooksPath` を渡して
-# 無関係な値代入分岐に落ち block していた＝false-green。section 単位封じは本 issue のスコープ外）。
-CONFIG_WRITE_OPS = {"--add", "--replace-all", "--unset", "--unset-all"}
+# 明示 write verb（値代入なしでも core.hooksPath を書換/削除する形）の *bare 名*（`--` 抜き）。
+# long_opt_abbrev で **接頭辞照合**する（sc-yuf errata round2）: git parse-options は非曖昧な接頭辞省略を
+# 受理し `git config --unset-a core.hooksPath` を --unset-all として実削除する（実機 git 2.43・rc0＝配布
+# フック無効化）。完全一致だと省略形が漏れ、値を取らない --unset 系は positional>=2 にも掛からず ALLOW へ
+# 落ちる回帰だった。曖昧省略（--unse 等）を block しても git 自身が rc129 拒否する形ゆえ実害なし（over-block
+# 安全側）。read verb（get/list 等）はこれら write 名の接頭辞にならないので正当 read は落ちない。
+# --remove-section/--rename-section は含めない: section 名（`core`）を引数にとり key 名 core.hooksPath を
+# 含まないため本ガード（先頭で core.hooksPath 文字列を要求）では現実形 `git config --remove-section core` を
+# 捕捉できず素通り。実効しない誤主張なのでスコープ外（section 単位封じは admin 別 issue 追跡）。
+CONFIG_WRITE_OPS = ("add", "replace-all", "unset", "unset-all")
 # 値をとる config オプション（positional 抽出時にオプション値を name/value と誤認しないため）。
 CONFIG_VAL_OPTS = {"--file", "-f", "--blob", "--type", "-t", "--default"}
 # checkout/switch で必ず現ブランチ(main)を離脱するフラグ（新ブランチ作成/detach/tracking）。短フラグ
@@ -213,7 +215,9 @@ def _config_hookspath_write(sub_args):
     if not any("core.hooksPath" in a for a in sub_args):
         return False
     # (2) 明示 write-op は位置に関わらず block（read-op 短絡より先に評価＝末尾 read-op で素通しさせない）。
-    if any(a.split("=", 1)[0] in CONFIG_WRITE_OPS for a in sub_args):
+    #     完全一致でなく long_opt_abbrev で接頭辞照合する（git の非曖昧接頭辞省略 `--unset-a`=--unset-all を
+    #     捕捉。sc-yuf errata round2 の fail-open 修正。曖昧省略の over-block は git 自身が拒否ゆえ無害）。
+    if any(any(long_opt_abbrev(a, w) for w in CONFIG_WRITE_OPS) for a in sub_args):
         return True
     # positional（非フラグ語）を *元インデックス付き* で抽出（val-opt とその値は飛ばす）。加えて最初に
     # 現れた真の read verb のインデックスを控える（key より前に先頭するか＝git の read mode 確定を判定するため）。
@@ -510,6 +514,13 @@ def run_self_test():
         # 正当 read の allow 維持（read verb が key より前に先頭＝git 読取り mode）。
         ("git config --show-scope --get core.hooksPath", tmp, A, "errata: --show-scope --get は read allow 維持"),
         ("git config --get core.hooksPath /dev/null", tmp, A, "errata: 先頭--get は git exit1(非書込)＝allow 維持"),
+        # sc-yuf admin errata round2: 長オプション接頭辞省略の fail-open 固定（実機 git 2.43 で実削除実証）。
+        # git は非曖昧接頭辞省略を受理し core.hooksPath を実削除/実書込する → 接頭辞照合で block。
+        ("git config --unset-a core.hooksPath", tmp, B, "errata2: --unset-a (=--unset-all abbrev) block"),
+        ("git config --unset-al core.hooksPath", tmp, B, "errata2: --unset-al abbrev block"),
+        ("git config --global --unset-al core.hooksPath", tmp, B, "errata2: --global --unset-al abbrev block"),
+        ("git config --replace-al core.hooksPath /dev/null", tmp, B, "errata2: --replace-al (=--replace-all abbrev) block"),
+        ("git config --ad core.hooksPath /dev/null", tmp, B, "errata2: --ad (=--add abbrev) block"),
         # --- anchor branch-switch guard ---
         (f"git -C {anchor} switch feature", tmp, B, "anchor: switch feature"),
         (f"git -C {anchor} checkout -b feature", tmp, B, "anchor: checkout -b new"),
