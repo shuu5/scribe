@@ -822,6 +822,23 @@ _mk_beads() {
   [[ "$output" == *"CLAUDE_CODE_EFFORT_LEVEL=high"* ]]
 }
 
+@test "spawn(sc-dc9): 実 spawn 経路の effort 配線を source で pin（dry-run mirror でなく実 invocation 行・sc-649 同型・drift 防止）" {
+  # 上の dry-run テスト群は emit_plan(別関数)の echo 文字列を検査する。実際に worker env-file へ書く printf と実 spawn
+  # argv は dry-run の echo とは別リテラルゆえ drift risk が残る(emit_plan だけ直して実行路を直し忘れる等)。当環境は
+  # linked worktree ゆえ実 spawn 行は un-ag7 anchor guard / worktree add / tmux 依存で hermetic 駆動できない。そこで
+  # sc-649(:688)と同型に実 invocation 行を静的 grep して両者の drift を回帰から守る(cell-quality gate wf_751bb5e6 の
+  # completeness-critic finding 対応)。
+  # (a) 実 WORKER_ENV_FILE 生成が CC **正規名** CLAUDE_CODE_EFFORT_LEVEL を %q で後勝ち注入する（emit_plan echo と別リテラル）。
+  run grep -F -- "printf 'export CLAUDE_CODE_EFFORT_LEVEL=%q" "$SPAWN"
+  [ "$status" -eq 0 ]
+  # (b) 実 cld-spawn 起動行が --model "$MODEL" と --disallowed-tools の間で CLD_EFFORT_ARG を配列展開する（feature-detect の実 argv）。
+  run bash -c 'grep -F -- "--model \"\$MODEL\" \"\${CLD_EFFORT_ARG[@]}\" --disallowed-tools" "$1"' _ "$SPAWN"
+  [ "$status" -eq 0 ]
+  # (c) 非正規名 CLAUDE_EFFORT=（silent no-op 反例）を script のどこでも使わない（実行路の printf も含め source で pin）。
+  run grep -F -- "CLAUDE_EFFORT=" "$SPAWN"
+  [ "$status" -ne 0 ]
+}
+
 # ---------- spawn: consult 既定 model = fable（sc-9q6・利用不可時 opus fallback） ----------
 @test "spawn: consult 既定 model は fable（--model 未指定・dry-run は preflight しない・sc-9q6）" {
   run "$SPAWN" --dry-run --consult un-consult
