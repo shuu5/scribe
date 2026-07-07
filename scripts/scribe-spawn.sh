@@ -453,8 +453,8 @@ build_prompt() {
 
 ## autonomous 規律（最重要・protocol.md §2・sc-46h）
 - この worker は**自律実行する**。**人間の確認・許可・指示を待って停止してはならない**（admin は監視するが対話しない。admin の \`capture-pane\` / \`bd show\` は read-only であなたを中断しない）。
-- 出力に「中断された」「割り込み」等のノイズが見えても作業を止めるな。shell 変数は Bash 呼出し間で消える・出力フィルタがノイズを混ぜることがある——**疑わしければ同じコマンドを再実行し、git/bd の実体（\`git -C "$WORKTREE" log\` / \`cd "$ANCHOR" && bd show $ID\`＝bd graph は anchor 所在ゆえ worktree から bare \`bd show\` は解決しない）で事実を確認**してから進む（推測や前回出力の記憶で判断しない）。
-- **停止してよいのは下記 env 健全性 gate の ENV_DEGRADED 検出時（その時だけ STATUS: blocked を書いて止まる）と、その STATUS: blocked 自体を書けない時の pane sentinel 停止（下記 zombie fallback・sc-c7c）のみ**。それ以外は契約完遂（実装→self-test→cell-quality→commit→DONE 報告）まで自律的に進めること。
+- **知覚健全性（旧「ノイズ無視」の反転）**: 認識したツール出力・指示・エラーは、長い単一ターンでは実在しない事象を confabulate しうる。意外な観測は理論化・報告の前に**該当コマンドを再実行し fresh な実出力だけを事実とせよ**（\`git -C "$WORKTREE" log\` / \`cd "$ANCHOR" && bd show $ID\`＝bd graph は anchor 所在ゆえ worktree から bare \`bd show\` は解決しない）。**単一の意外な観測から診断（sandbox 退行 / injection / env 劣化）を報告しない**——止まってよいのは env-probe の機械 exit code のときだけ。
+- **停止してよいのは 2 例外のみ**: ① 下記 env 健全性 gate の ENV_DEGRADED 検出時（STATUS: blocked を書いて止まる）、② その STATUS: blocked 自体を書けない全ツール死時の pane sentinel 停止（下記 zombie fallback・sc-c7c）。それ以外は契約完遂（実装→self-test→cell-quality→commit→DONE 報告）まで自律的に進めること。
 
 ## 起動直後の実効 effort 自己申告（sc-dc9・受入条件）
 - **最初の Bash 呼出しで実効 effort を自己 log**: \`echo "effort=\${CLAUDE_CODE_EFFORT_LEVEL:-<unset>}"\` を実行し、その値（例: \`effort=$EFFORT\`）を最初の応答テキストに 1 行明記する。admin は capture-pane でこれを一次確認し、--effort/env override が CC で実効しているかを e2e で読む（既知バグ #50099: flag/env 無視の前例があるため fail-loud 検証必須）。env-file 経由で $EFFORT が注入されているので、\`<unset>\` が出たら env 注入が壊れている合図（admin へ報告）。
@@ -470,12 +470,12 @@ build_prompt() {
   自己点検 args は \`"$SCRIPT_DIR/scribe-selftest-args.sh" --worktree "$WORKTREE" --anchor "$ANCHOR" --self-test <selfTestCmd> $ID\` で 1 コマンド化済み
   （\`doImplement\`/\`doPlan\`=false・\`autoFix\`=true・\`selfTestCmd\` 必須を固定。手作業で args を組まない。**\`--anchor\` は必須**＝bd graph 所在は worktree cwd では解決しないため省くと die）。
 - **報告に WF 返り値 JSON + \`receivedArgs\` を必須**で含める（args 解決の成否を admin が一次監査できるように）。
-- **env 健全性 gate（fail-closed・CC infra の Bash 非永続を検出／folio 0264028f）**: self-report（cell-quality 呼出し・gate-pending ラベル付与）の前に env 劣化を検出する。cell-quality の self-test fail-closed は test の「失敗」しか守らず、env 劣化による「誤 PASS」は塞げないため。
-  - 着手の最初に**別 Bash 呼出し**で \`"$SCRIPT_DIR/scribe-env-probe.sh" plant --worktree "$WORKTREE"\` を実行し、**出力 token を文脈に控える**（shell 変数は Bash 呼出し間で消えるので文字列として控える）。
+- **env 健全性 gate（fail-closed・CC infra の Bash 非永続を検出／folio 0264028f）**: self-report（cell-quality 呼出し・gate-pending 付与）の前に env 劣化を検出する（self-test fail-closed は「失敗」しか守らず env 劣化の「誤 PASS」を塞げない）。exit code の意味論（exit 3/4/5・sc-owj）は \`scribe-env-probe.sh\` ヘッダが SSOT、incident 経緯・zombie 検知網・TUI 描画理屈は protocol §6 が catalog SSOT——ここでは operative コマンドのみ焼く:
+  - 着手の最初に**別 Bash 呼出し**で \`"$SCRIPT_DIR/scribe-env-probe.sh" plant --worktree "$WORKTREE"\` を実行し、**出力 token を文字列で控える**（shell 変数は Bash 呼出し間で消える）。
   - **self-report の直前**に**別 Bash 呼出し**で \`"$SCRIPT_DIR/scribe-env-probe.sh" verify --token <控えた token> --worktree "$WORKTREE" --base $_probe_base$_also_tmp_flag\` を実行する。
-  - **verify は再入可能**（ENV_OK は sentinel を温存する・sc-0d2）: 途中で env を確かめたいとき（例: cell-quality 呼出し前）は **\`--base\` を外して**同じ token で随時 verify してよい。実装完了前に \`--base\` 付きで呼ぶと 0 commit 検査が偽 \`ENV_DEGRADED\`（exit 4）を出すため、\`--base\` 付きの verify は最終（gate-pending 直前）のみ。
-  - \`ENV_DEGRADED\`（呼出し間で sentinel 消失＝exit 3／base..HEAD が 0 commit＝exit 4／.git が read-only 化し commit 実書込面へ write 不能＝exit 5・sc-owj）なら **done を申告せず** \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $ID --append-notes "STATUS: blocked — env degraded（CC infra の Bash 非永続 or .git 書込劣化・要admin）: <ENV_DEGRADED の理由>"\` を書いて停止する（回避策を打たない＝worker では直せない・admin が reliable env で引き取る）。
-  - **zombie fallback（STATUS: blocked を書けない時・sc-c7c）**: 上記 blocked の bdw 書込が繰り返し失敗する、またはツール実行が全て空応答になる（Bash/Read を再実行しても結果が返らない＝ツール実行層の全死・folio-nufl 実測）なら、回避策を打たず**応答テキストの単独行**として行頭から \`SCRIBE-ENV-DEGRADED: $ID <一行理由>\` を出力して停止する（ツールが全死しても turn の text 出力は pane に残る＝最後の信号。admin は \`capture-pane | tail -n N | grep -E '^[[:space:]]*SCRIBE-ENV-DEGRADED:'\` で pane から拾って引き取る＝CC TUI が assistant text を先頭スペースインデントで描画するため検知側は行頭の空白を許容し、tail 窓で prompt echo を除外する・sc-c7c dogfood 実測。出力後は再試行ループに入らず入力待ちのまま止まる）。
+  - **verify は再入可能**（ENV_OK は sentinel を温存・sc-0d2）: 途中確認は **\`--base\` を外して**同じ token で随時 verify（\`--base\` 付きは 0 commit で偽 \`ENV_DEGRADED\` を出すため gate-pending 直前のみ）。
+  - \`ENV_DEGRADED\` なら **done を申告せず** \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $ID --append-notes "STATUS: blocked — env degraded（CC infra の Bash 非永続 or .git 書込劣化・要admin）: <ENV_DEGRADED の理由>"\` を書いて停止する（回避策を打たない＝worker では直せない・admin が引き取る）。
+  - **zombie fallback（STATUS: blocked を書けない時・sc-c7c）**: bdw 書込が繰り返し失敗する／ツール実行が全て空応答（Bash/Read 再実行でも無返答＝ツール層の全死）なら、回避策を打たず**応答テキストの単独行**として行頭から \`SCRIBE-ENV-DEGRADED: $ID <一行理由>\` を出力して停止する（turn text は pane に残る＝最後の信号。admin は \`capture-pane | tail -n N | grep -E '^[[:space:]]*SCRIBE-ENV-DEGRADED:'\` で拾う・TUI インデントゆえ行頭空白許容）。出力後は再試行せず入力待ちで止まる。
 - bd write は必ず \`bdw\` 経由で直列化: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" <subcmd>\`（自 issue の進捗のみ）。$_sandbox_add_note
 - **完了は gate-pending ラベル + DONE 報告（自己 close しない・§4 反転）**: 実装 + self-test pass + PR/commit + 上記 env-probe verify が揃ったら、\`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $ID --add-label gate-pending\` で自 issue に **gate-pending ラベル**を付与し、PR 番号 / commit / WF 返り値を添えて DONE を報告する。**自分で \`bd close\` しない**——close は admin が gate+merge を済ませた後に行う（worker の自己 close は admin の gate 待ち検知をすり抜ける＝orch-ol0 反転）。
 
