@@ -90,6 +90,10 @@ async function runWorkflow() {
   const REVIEW_FINDINGS = JSON.parse(process.env.CQ_REVIEW_FINDINGS || '[]')
   const VERIFY_REFUTED = envBool('CQ_VERIFY_REFUTED', true) // 既定=refute(clean)。confirmed にするには false
   const FIX_SELFTEST_PASSED = envBool('CQ_FIX_SELFTEST_PASSED', true)
+  // (sc-j32 errata) autofix stub の summary を差し替える knob。既定 'stub autofix'(非 placeholder)。
+  // placeholder('test' 等)を注入すると degFix が発火し、fix 段の degenerate 配線(schemaAgent(agent,…,degFix))を
+  // end-to-end で駆動できる=発端事例(fix summary="test" の最終値化)の回帰ガードに使う。
+  const FIX_SUMMARY = envStr('CQ_FIX_SUMMARY', 'stub autofix')
   const SNAPSHOT = envStr('CQ_SNAPSHOT', 'diff --git a/x b/x\n@@ -1 +1 @@\n-old\n+new\n')
 
   const calls = [] // agent 呼び出しの label を順に記録(ordering/回数の assert 用)
@@ -133,7 +137,7 @@ async function runWorkflow() {
     if (label.startsWith('review:')) return Promise.resolve({ findings: REVIEW_FINDINGS })
     if (label.startsWith('verify:')) return Promise.resolve({ refuted: VERIFY_REFUTED, confidence: 'high', reasoning: 'stub' })
     if (label.startsWith('autofix')) {
-      return Promise.resolve({ applied: ['stub fix'], selfTestRan: true, selfTestPassed: FIX_SELFTEST_PASSED, amended: FIX_SELFTEST_PASSED, summary: 'stub autofix', newDiff: SNAPSHOT })
+      return Promise.resolve({ applied: ['stub fix'], selfTestRan: true, selfTestPassed: FIX_SELFTEST_PASSED, amended: FIX_SELFTEST_PASSED, summary: FIX_SUMMARY, newDiff: SNAPSHOT })
     }
     return Promise.resolve(null)
   }
