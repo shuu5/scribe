@@ -492,13 +492,12 @@ case "${MODEL,,}" in
 esac
 
 # --- effort allowlist 検証（sc-dc9・worker 分岐でのみ・flag/env/既定 の全由来を検証）---
-# EFFORT は --effort フラグ・SCRIBE_WORKER_EFFORT env・既定 high のいずれか。CC が受理する effort は
-# low|medium|high|xhigh|max（--effort フラグ / CLAUDE_CODE_EFFORT_LEVEL env の正規語彙）。それ以外は CC 側の
-# silent 無視や誤挙動を招くため上流で fail-loud する（consult 分岐は既に exit 済＝ここは worker 経路のみ）。
-case "$EFFORT" in
-  low|medium|high|xhigh|max) ;;
-  *) scribe_die "--effort/SCRIBE_WORKER_EFFORT が不正: '$EFFORT'（許可: low|medium|high|xhigh|max）" ;;
-esac
+# EFFORT は --effort フラグ・SCRIBE_WORKER_EFFORT env・既定 high のいずれか。CC が受理する effort 語彙
+# （low|medium|high|xhigh|max）は scribe-lib の単一 SSOT SCRIBE_EFFORT_ALLOWLIST（sc-ax4）へ集約済み。
+# それ以外は CC 側の silent 無視や誤挙動を招くため上流で fail-loud する（consult 分岐は既に exit 済＝
+# ここは worker 経路のみ）。許可語彙メッセージも SSOT 由来（scribe_effort_allowlist_join）にして drift を断つ。
+scribe_effort_is_valid "$EFFORT" \
+  || scribe_die "--effort/SCRIBE_WORKER_EFFORT が不正: '$EFFORT'（許可: $(scribe_effort_allowlist_join '|')）"
 
 # --- AC2: 既定 repo が linked（副）worktree のとき fail-loud（un-ag7）---
 # `--repo` 未指定（= cwd 既定）で cwd が副 worktree のとき、`git worktree add` が

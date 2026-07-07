@@ -319,6 +319,9 @@ const MODEL = A.model || 'opus' // substantive 既定 = opus(cheap→opus 格上
 // = 予防を優先し、壊れた args でも WF を止めず安全側(high)へ倒す(scribe-spawn.sh の allowlist は spawn 時に
 // fail-loud で弾くが、WF 直叩き経路の防御として fail-safe を二重化する)。opts.effort は Workflow tool が受理する
 // (admin 実証済み)。roAgent/runAgent は opts を透過するため(base={...opts}, delete は agentType のみ)効く。
+// SSOT-MIRROR(sc-ax4): この集合は bash 側 SSOT `SCRIBE_EFFORT_ALLOWLIST`(scripts/lib/scribe-lib.sh)の
+// mirror。WF sandbox は実行時に lib を source 不可(filesystem 非公開)ゆえ literal で複製する。両者の
+// drift は tests/effort-allowlist-ssot.bats が fail-loud で検知する(CC 新 tier 追加時の同時更新漏れ検知)。
 const EFFORT_ALLOWED = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 const _rawEffort = typeof A.effort === 'string' ? A.effort.trim() : ''
 const EFFORT = EFFORT_ALLOWED.has(_rawEffort) ? _rawEffort : 'high'

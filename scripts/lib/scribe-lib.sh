@@ -28,6 +28,37 @@ scribe_need_val() {
   [[ -n "${1:-}" && "$1" != -* ]] || scribe_die "$2 に値を指定してください（値の欠落・次フラグの誤消費を防止）"
 }
 
+# === effort allowlist SSOT（sc-ax4）================================================
+# CC が受理する worker 実効 effort 語彙の **単一 SSOT**。従来 scribe-spawn.sh（fail-loud gate）と
+# scribe-selftest-args.sh（焼き込み gate）が同じ `low|medium|high|xhigh|max` を literal 重複させて
+# いたのをここへ集約する（sc-7ac→sc-ax4 申し送り）。workflows/cell-quality.workflow.js は WF sandbox
+# 内で実行時に本 lib を source できない（filesystem 非公開）ため、同集合を JS literal で **mirror** し、
+# tests/effort-allowlist-ssot.bats が本 SSOT との drift を fail-loud で検知する導線を張る。
+# 将来 CC が新 tier を足したら **ここ 1 箇所** を直せば bash 2 consumer は自動追随し、JS mirror の
+# 更新漏れは上記 bats が検知する（「同時更新漏れを検知できない」保守性穴を塞ぐ本 issue の核）。
+SCRIBE_EFFORT_ALLOWLIST=(low medium high xhigh max)
+
+# scribe_effort_is_valid <value> — <value> が allowlist の **完全一致** メンバなら exit 0、否なら非0。
+#   完全一致のみ（大文字・前後空白・部分一致・空文字は不可＝CC 正規語彙の厳密判定）。呼出側は用途で分岐:
+#     spawn         = 不一致で fail-loud（scribe_die）＝不正 effort で worker を起こさない。
+#     selftest-args = 一致時のみ args.effort へ焼く（不一致・未設定は焼かず WF fail-safe〔既定 high〕へ委譲）。
+scribe_effort_is_valid() {
+  local v="${1-}" allowed
+  for allowed in "${SCRIBE_EFFORT_ALLOWLIST[@]}"; do
+    [[ "$v" == "$allowed" ]] && return 0
+  done
+  return 1
+}
+
+# scribe_effort_allowlist_join <sep> — allowlist を <sep> で連結して echo（fail-loud message / help 生成用）。
+#   例: scribe_effort_allowlist_join '|' → low|medium|high|xhigh|max。message も SSOT 由来にして drift を断つ。
+scribe_effort_allowlist_join() {
+  # IFS 代入は別 local 行に分ける（`local a=X b=$a` は同一宣言内で $a が未確定になる bash gotcha 回避）。
+  local sep="${1:?separator required}"
+  local IFS="$sep"
+  printf '%s' "${SCRIBE_EFFORT_ALLOWLIST[*]}"
+}
+
 # scribe_normalize_bd_id <raw> — bd id を正規化・検証する（protocol.md §1 / session-name.sh producer 準拠）。
 #   - 許容: 英数始まり + 英数 '.' '-'（dotted 階層 id un-3sh.3.5 を通す）。先頭 '#' は剥がす。
 #   - 拒否: path traversal（'..' を含む・'/' を含む）= path/window 名へ埋め込むため構造的に防御。
