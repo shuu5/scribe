@@ -126,6 +126,8 @@ if (typeof args === 'string') {
       selfTestBaseline: { ran: false, skipped: true, skipReason: 'WF 起動前に中断(args parse 失敗)', passed: null, exitCode: null, rawLog: '' },
       selfTestFinal: { ran: false, skipped: true, skipReason: 'WF 起動前に中断(args parse 失敗)', passed: null, exitCode: null, rawLog: '' },
       receivedArgs: { type: __rawArgsType, parseFailed: true, keys: [] },
+      // (sc-j32) schema-guard block 定義前の早期中断=schema agent 未起動=集計は空。返り値 shape 一貫性のため literal で明示。
+      schemaHealth: { nullDeaths: [], degenerate: [] },
       // (sc-7bv/sc-xyw) read-only agentType fallback の最終状態。ここは roAgent helper 定義前の早期中断=
       // read-only agent を一度も起動していない=fallback は評価すらされていない → literal false で一貫させる。
       roFallbackActive: false,
@@ -183,6 +185,74 @@ async function roAgent(prompt, opts) {
     throw e // not found 以外は透過(既存 .catch 意味論を保つ)
   }
 }
+
+//SCJ32_BLOCK_START
+// ── (sc-j32) schema 強制 agent の placeholder 最終値化 / null 死ガード ──── [self-test anchor: sc-j32:schema-guard]
+// dynamic WF の schema 付き agent は StructuredOutput(構造化出力)を「作業完了後に一度だけ・実データで」呼ぶべき
+// だが、実発(wf_c2cd03d4)で 2 故障を観測した: (a) 試し打ちの placeholder(summary=test 等)が **初回呼出しで
+// 最終値化**(StructuredOutput は初回が確定し上書き不能)、(b) schema 検証 retry 上限(5)超過で **null 死**。対策:
+//  (1) 全 schema prompt に SCHEMA_DISCIPLINE を前置(試し打ち禁止・完了後に一度だけ・実データで)。
+//  (2) 骨格側で degenerate(placeholder 形状)を検知して既存の失敗経路(null 相当)へ倒す=fail-closed。
+//  (3) null(retry 超過)/degenerate を success 扱いせず schemaHealth へ記録し返り値へ載せる(receivedArgs と対称)。
+const SCHEMA_DISCIPLINE =
+  '\n\n## StructuredOutput 規律（厳守・sc-j32）\n' +
+  'この応答は schema で構造化出力(StructuredOutput)を強制される。StructuredOutput ツールは **作業を完了し実データが' +
+  '揃ってから一度だけ** 呼ぶこと。試し打ち・動作確認・placeholder(例: summary="test"・空/仮の配列で仮確定)で' +
+  '呼んではならない。**初回の呼出しが最終値として確定し後から上書きできない** ため、値が確定するまで呼ばないこと。'
+
+// placeholder 文字列の検知(試し打ちの典型値 or 空文字)。substantive であるべき string フィールドに使う。
+// (sc-j32 errata) 長さヒューリスティック(旧 `t.length < 2`)は撤去した — 'x'/'r' のような terse だが正当な実データ
+// を『試し打ち』と誤断定し、正当な finding を degenerate 化して検証経路ごと落とす false-positive を招いた(既存
+// fallback 回帰テストを RED 化)。退化とみなすのは trim 後の空文字か既知 placeholder 語のみ(短さでは落とさない)。
+const __PLACEHOLDER_STRINGS = new Set([
+  'test', 'todo', 'tbd', 'placeholder', 'foo', 'bar', 'baz', 'qux', 'xxx',
+  'sample', 'example', 'dummy', 'asdf', 'lorem', 'string',
+])
+const isPlaceholderStr = (s) => {
+  if (typeof s !== 'string') return false
+  const t = s.trim().toLowerCase()
+  return t.length < 1 || __PLACEHOLDER_STRINGS.has(t)
+}
+
+// schema 健全性の集計(返り値 audit 用・receivedArgs と対称)。null 死 / degenerate を label 付きで記録する。
+const schemaHealth = { nullDeaths: [], degenerate: [] }
+
+// 各 schema の degenerate 判定(placeholder 形状=試し打ちの最終値化)。substantive フィールドが placeholder なら true。
+// findings は「空(=clean)」を degenerate にしない=非空かつ全 finding が placeholder のときだけ試し打ちと見なす。
+const __findingIsPlaceholder = (f) =>
+  f && isPlaceholderStr(f.rationale) && (isPlaceholderStr(f.title) || isPlaceholderStr(f.location))
+const degClassify = (r) => isPlaceholderStr(r && r.rationale) // taskType は enum 制約ゆえ rationale で見る
+const degPlan = (r) => isPlaceholderStr(r && r.acceptance)
+const degFindings = (r) =>
+  Array.isArray(r && r.findings) && r.findings.length > 0 && r.findings.every(__findingIsPlaceholder)
+const degVerdict = (r) => isPlaceholderStr(r && r.reasoning)
+const degFix = (r) => isPlaceholderStr(r && r.summary)
+
+// schemaAgent: schema 付き agent 呼出しの共通ラッパ。
+//  - prompt に SCHEMA_DISCIPLINE を前置。
+//  - runner(roAgent/runAgent/agent)を await。null(retry 超過=StructuredOutput 未確定)は握り潰さず
+//    schemaHealth.nullDeaths へ記録し null を返す(呼出元の既存 null 失敗経路を温存)。
+//  - degenerate(placeholder 形状)検知時は schemaHealth.degenerate へ記録し null を返す(既存の失敗経路
+//    =fail-closed へ倒す=placeholder を最終値として下流に流さない)。
+//  - throw はそのまま透過(呼出元の既存 .catch 失敗正規化=不変条件(5)を壊さない)。
+// 返り値型を「有効な schema オブジェクト or null」に保つため、各呼出サイトの `x && x.field` / `if (!x)` /
+// `.then(v => ...)` 分岐を一切変えずに null/degenerate が既存の失敗網へ合流する。
+async function schemaAgent(runner, prompt, opts, degenerate) {
+  const label = (opts && opts.label) || 'schema-agent'
+  const r = await runner(prompt + SCHEMA_DISCIPLINE, opts)
+  if (r == null) {
+    schemaHealth.nullDeaths.push(label)
+    log(`[schema-null] ${label}: agent が null(retry 上限超過で StructuredOutput 未確定)。success 扱いせず失敗経路へ(sc-j32)。`)
+    return null
+  }
+  if (typeof degenerate === 'function' && degenerate(r)) {
+    schemaHealth.degenerate.push(label)
+    log(`[schema-degenerate] ${label}: placeholder 形状(試し打ちの最終値化)を検知。reject して失敗経路へ倒す(sc-j32 fail-closed)。`)
+    return null
+  }
+  return r
+}
+//SCJ32_BLOCK_END
 
 // receivedArgs 要約: キー一覧 + 各キーの受信型 + 生の受信型(parse 前)。呼出元監査用に返り値へ載せる。
 const receivedArgs = {
@@ -668,7 +738,7 @@ cd "${worktree}" && ${selfTestCmd}
 - 終了コードを記録する(exit 0 = pass=true / それ以外 = false)。
 - stdout と stderr を合わせた**生ログ**を rawLog に入れる(長すぎる場合は末尾を優先して切り詰めてよい)。
 - コマンドが起動できない/見つからない等で実行不能なら ran=false・passed=false・理由を rawLog に入れる。
-JSON で {ran, passed, exitCode, rawLog} を返せ。`
+JSON で {ran, passed, exitCode, rawLog} を返せ。${SCHEMA_DISCIPLINE}`
 }
 
 // selfTestCmd を worktree で 1 回実行し {ran, skipped, passed, exitCode, rawLog} に正規化する。
@@ -752,6 +822,7 @@ if (isWorkerCell) {
       selfTestBaseline: { ran: false, skipped: true, skipReason: 'args fail-fast(必須 args 欠落)で agent 未起動', passed: null, exitCode: null, rawLog: '' },
       selfTestFinal: { ran: false, skipped: true, skipReason: 'args fail-fast(必須 args 欠落)で agent 未起動', passed: null, exitCode: null, rawLog: '' },
       receivedArgs, // 何が届いたか(キー一覧 + 受信型)を呼出元監査用に明示
+      schemaHealth: { nullDeaths: schemaHealth.nullDeaths.slice(), degenerate: schemaHealth.degenerate.slice() }, // (sc-j32) fail-fast=schema agent 未起動ゆえ空。返り値 shape 一貫性
       roFallbackActive, // (sc-xyw) read-only agentType fallback の最終状態(fail-fast=agent 未起動ゆえ RO_FORCE_NONE 以外は false)
       gate: `ESCALATE: ${reason} 呼出元/人間が args を補って再 invoke すること。`,
     }
@@ -762,13 +833,13 @@ if (isWorkerCell) {
 phase('Classify')
 let verifyStrategy = ''
 if (!taskType) {
-  const c = await roAgent(classifyPrompt(), {
+  const c = await schemaAgent(roAgent, classifyPrompt(), {
     label: 'classify',
     phase: 'Classify',
     model: stageModel, // roAgent が RO agentType('scribe:explore')注入 + not found fallback(read-only 段)
     effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
     schema: CLASSIFY_SCHEMA,
-  })
+  }, degClassify) // (sc-j32) SCHEMA_DISCIPLINE 前置 + null/degenerate → null(下の (c && c.taskType) fallback へ合流)
   taskType = (c && c.taskType) || 'executable'
   log(`task-type = ${taskType}${c && c.rationale ? ` (${c.rationale})` : ''}`)
 } else {
@@ -779,13 +850,13 @@ verifyStrategy = VERIFY_STRATEGY[taskType] || VERIFY_STRATEGY.executable
 // ── 1. Plan(任意): 受入基準の導出/精緻化 ─────────────────────────────────────
 if (doPlan) {
   phase('Plan')
-  const p = await roAgent(planPrompt(), {
+  const p = await schemaAgent(roAgent, planPrompt(), {
     label: 'plan',
     phase: 'Plan',
     model: stageModel, // roAgent が RO agentType('scribe:explore')注入 + not found fallback(read-only 段)
     effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
     schema: PLAN_SCHEMA,
-  })
+  }, degPlan) // (sc-j32) null/degenerate → null(下の (p && p.acceptance) で精緻化スキップへ合流)
   if (p && p.acceptance) {
     refinedAcceptance = p.acceptance
     log('受入基準を精緻化した')
@@ -915,26 +986,26 @@ while (round < effectiveCap) {
   const perDim = await pipeline(
     dimensions,
     (d) =>
-      runAgent(reviewPrompt(d, round, roundDiff), {
+      schemaAgent(runAgent, reviewPrompt(d, round, roundDiff), {
         label: `review:${d.key} r${round}`,
         phase: 'Review',
         model: reviewModel, // 既定=MODEL(opus)。fable 指定時のみ runAgent が ≤2 cap を適用。runAgent 内 roAgent が RO agentType 注入 + fallback
         effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
         schema: FINDINGS_SCHEMA,
-      }).catch(() => ({ findings: [], __reviewFailed: true })),
+      }, degFindings).catch(() => ({ findings: [], __reviewFailed: true })), // (sc-j32) null/degenerate → null → 下の reviewFailed=!review へ合流(machinery 失敗=escalate)
     (review, d) => {
       // review が null(skip/枯渇)/__reviewFailed(throw)のいずれも「観点が実行できなかった」=痕跡を残す。
       const reviewFailed = !review || review.__reviewFailed === true
       const findings = (review && review.findings) || []
       return parallel(
         findings.map((f) => () =>
-          runAgent(verifyPrompt(f, d.key, roundDiff), {
+          schemaAgent(runAgent, verifyPrompt(f, d.key, roundDiff), {
             label: `verify:${d.key}:${shortTitle(f)} r${round}`,
             phase: 'Verify',
             model: verifyModel, // 既定=MODEL(opus)。fable 指定時のみ runAgent が ≤2 cap を適用。runAgent 内 roAgent が RO agentType 注入 + fallback
             effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
             schema: VERDICT_SCHEMA,
-          })
+          }, degVerdict) // (sc-j32) null/degenerate → null → verdict:null(unverified=verdict 鵜呑み禁止へ合流)
             .then((v) => ({ ...f, dimension: d.key, verdict: v }))
             .catch(() => ({ ...f, dimension: d.key, verdict: null }))
         )
@@ -1014,13 +1085,13 @@ while (round < effectiveCap) {
 
   // gated autoFix: confirmed blocking のみ + self-test fail-closed + amend
   phase('Fix')
-  const fix = await agent(fixPrompt(blocking, roundDiff), {
+  const fix = await schemaAgent(agent, fixPrompt(blocking, roundDiff), {
     label: `autofix r${round}`,
     phase: 'Fix',
     model: stageModel, // 編集するので roAgent(read-only agentType)を使わず agent() 直呼び(全ツール)
     effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
     schema: FIX_SCHEMA,
-  })
+  }, degFix) // (sc-j32) null/degenerate(summary=test 等)→ null → 下の if(!fix) escalate へ合流(fail-closed)
   if (!fix) {
     escalate = true
     escalateReason = `round ${round}: autoFix agent 失敗/skip`
@@ -1119,6 +1190,9 @@ const result = {
   selfTestBaseline,
   selfTestFinal,
   receivedArgs, // un-2yy: 何が届いたか(キー一覧 + 受信型 + 生の受信型)を呼出元監査用に明示
+  // (sc-j32) schema 強制 agent の健全性(retry 超過の null 死 / placeholder 試し打ち検知)。receivedArgs と対称の
+  // 一次監査面: 非空なら当該 schema agent の出力は不採用(既存の失敗経路へ倒れている)=呼出元/gate が人手確認する。
+  schemaHealth: { nullDeaths: schemaHealth.nullDeaths.slice(), degenerate: schemaHealth.degenerate.slice() },
   roFallbackActive, // (sc-7bv/sc-xyw) read-only agentType fallback が最終的に発火したか(true=agentType 解決不能で降格した run)。receivedArgs.roAgentType は「解決した型」だけで発火有無は読めないため別途載せる。
 }
 
@@ -1129,11 +1203,17 @@ const machNote =
   lastH.reviewFailed || lastH.snapshotFailed
     ? ` ※machinery 失敗(reviewFailed=${lastH.reviewFailed || 0}, snapshotFailed=${!!lastH.snapshotFailed})= この round の blocking=0 は信頼不可、人手確認。`
     : ''
+// (sc-j32) schema 強制 agent の retry 超過 null / placeholder 試し打ちが起きた run は、当該 agent の出力が不採用
+// (既存の失敗経路へ倒れている)=収束/escalate に関わらず注記して silent ship させない。
+const schemaNote =
+  schemaHealth.nullDeaths.length || schemaHealth.degenerate.length
+    ? ` ※schema 健全性: nullDeaths=${schemaHealth.nullDeaths.length}, degenerate=${schemaHealth.degenerate.length}(StructuredOutput の retry 超過/試し打ち検知=当該 agent の出力は不採用・schemaHealth を直読して人手確認)。`
+    : ''
 result.gate = escalate
-  ? 'ESCALATE: 未収束/self-test 失敗/machinery 失敗。silent ship 禁止 — 人間が判断すること。' + unvNote + machNote
+  ? 'ESCALATE: 未収束/self-test 失敗/machinery 失敗。silent ship 禁止 — 人間が判断すること。' + unvNote + machNote + schemaNote
   : converged
-    ? 'CONVERGED: 収束。outward/risk(boot-path/全ホスト/破壊的)があれば merge 前に人間 ratify。' + unvNote + machNote
-    : 'OPEN: 呼出元が confirmed を修正し再 invoke(single モードのループ駆動)。' + unvNote + machNote
+    ? 'CONVERGED: 収束。outward/risk(boot-path/全ホスト/破壊的)があれば merge 前に人間 ratify。' + unvNote + machNote + schemaNote
+    : 'OPEN: 呼出元が confirmed を修正し再 invoke(single モードのループ駆動)。' + unvNote + machNote + schemaNote
 
 log(`cell-quality done: ${result.gate}`)
 return result
