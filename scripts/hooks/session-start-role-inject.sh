@@ -153,6 +153,39 @@ _scribe_header() {
     echo ""
 }
 
+# --- 機械防御 carrier self-check（split-brain 検出・sc-99c） ---
+# worker の機械防御——`edit-write-guard.py`（Edit/Write を自 worktree 境界へ縛る PreToolUse guard・
+# protocol.md §3）と env-probe / zombie sentinel / 実効 effort 統制——は scribe-spawn が焼く
+# env signal（`SCRIBE_WORKER=1` / `SCRIBE_WORKTREE`）と spawn prompt の operative コマンドが唯一の
+# carrier。しかし本 script の role 判定は cwd（`.worktrees/` / `.claude/worktrees/`）で worker を
+# 分類するため、scribe-spawn を経ない CC-native worktree（EnterWorktree 等・`.claude/worktrees/`
+# 配下）は worker 分類されても env signal を伴わず**機械防御がゼロになる**（split-brain）。この空白を
+# worker が黙って踏まないよう、SCRIBE_WORKER/SCRIBE_WORKTREE 不在を検査し loud warning を stdout
+# （＝context 注入）へ出す。carrier モデルの本文 SSOT は docs/protocol.md §2（本注入と spawn prompt の
+# 両 carrier がここを引く＝drift 停止）。※注入内容に protocol.md の top-level 見出し（`## N.`）文字列を
+# 混ぜない——worker 注入は §2-4 のみという既存不変条件（テスト pin）を壊さないため。
+_scribe_worker_defense_warn() {
+    local wt="${SCRIBE_WORKTREE:-}"
+    if [ "${SCRIBE_WORKER:-}" != "1" ]; then
+        cat <<'DEFWARN'
+⚠️ **機械防御が無効（このセッションは scribe-spawn 経由ではありません・sc-99c）** ⚠️
+- このセッションは cwd（worktree 配下）で **worker 分類**されましたが、環境変数 `SCRIBE_WORKER=1` / `SCRIBE_WORKTREE` が**不在**です＝**scribe-spawn を経ていない**（例: `EnterWorktree` 等の CC-native worktree）。
+- そのため scribe-spawn が据える**機械防御が全て無効**です:
+  - **`edit-write-guard.py`（Edit/Write/NotebookEdit を自 worktree 境界へ縛る PreToolUse guard・B/hybrid 境界）は `SCRIBE_WORKER=1` のときだけ発火**するため、今は発火せず——**worktree 外への書込を機械的に止められません**。
+  - **env-probe / zombie pane sentinel（spawn prompt の operative コマンド carrier）と 実効 effort 統制（env-file の `CLAUDE_CODE_EFFORT_LEVEL`＝env signal carrier）——いずれも scribe-spawn だけが据える carrier**ゆえ**未注入**です——env 劣化の fail-closed 検出・全ツール死（zombie）検知・effort 実効化が効きません。
+- 対処: **自律実装セルとして走らせるなら、この窓を捨てて `scribe-spawn`（`.worktrees/` 配下に spawn）で起動し直す**（機械防御が要るため）。手動で続けるなら、**自 worktree 境界の遵守と env 健全性は自己責任**で、人間監督下で行うこと（この窓では B/hybrid 境界を機械が守りません）。
+
+DEFWARN
+    elif [ -z "$wt" ] || [ ! -d "$wt" ]; then
+        cat <<DEFWARN2
+⚠️ **worktree 境界を確立できません（SCRIBE_WORKER=1 だが SCRIBE_WORKTREE 不正・sc-99c）** ⚠️
+- \`SCRIBE_WORKER=1\` ですが \`SCRIBE_WORKTREE\`（='${wt}'）が未設定／実在ディレクトリではありません。
+- **\`edit-write-guard.py\` は境界不確立で fail-closed＝全 Edit/Write/NotebookEdit を block** し、env-probe も境界を解決できません。scribe-spawn は SCRIBE_WORKTREE を自 worktree の絶対パスへ焼きます——手動起動なら SCRIBE_WORKTREE を自 worktree の絶対パスへ設定し直してください。
+
+DEFWARN2
+    fi
+}
+
 case "$role" in
     admin)
         if [ ! -r "$PROTOCOL_DOC" ]; then
@@ -183,6 +216,9 @@ case "$role" in
         _scribe_header
         echo "あなたは scribe worker(worktree セッション)です。自 issue の write だけを行い graph は触りません(B/hybrid)。bd create / bd dep / bd dolt push は禁止、follow-up は notes で提案します。以下は protocol.md の worker 関連節(§2 prompt 規約 / §3 役割境界 / §4 close→gate→errata)です。"
         echo ""
+        # 機械防御 carrier self-check（split-brain 検出・sc-99c）: scribe-spawn を経ない worker
+        # （env signal 不在）には「機械防御が無効」の loud warning を注入する。SSOT=protocol.md §2。
+        _scribe_worker_defense_warn
         _scribe_emit_protocol_sections "$PROTOCOL_DOC" "2 3 4"
         ;;
     consult)
