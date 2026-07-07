@@ -463,3 +463,64 @@ _link_bin_without_awk() {
     [[ "$output" == *"role=admin"* ]]
     [[ "$output" == *"gate funnel"* ]]
 }
+
+# ---- 機械防御 carrier self-check（split-brain 検出・sc-99c） ----
+# worker 分類は cwd で行われるが、機械防御（edit-write-guard / env-probe / sentinel / effort）は
+# scribe-spawn の env signal（SCRIBE_WORKER=1 / SCRIBE_WORKTREE）と spawn prompt が唯一の carrier。
+# scribe-spawn を経ない CC-native worktree（.claude/worktrees/）は worker 分類されても防御ゼロになる
+# （split-brain）。role-inject は SCRIBE_WORKER/SCRIBE_WORKTREE 不在を検査し loud warning を注入する。
+# 注: SCRIBE_WORKER/SCRIBE_WORKTREE は ambient env から継承されうる（本 test は scribe worker window で
+#     走りうる）ため、各ケースで env -u / 明示代入して決定論化する。
+
+@test "機械防御(sc-99c): 非 spawn worker(SCRIBE_WORKER 不在・CC-native worktree) → 機械防御無効の loud warning を注入" {
+    run --separate-stderr bash -c "printf '%s' '$CC_WT_JSON' | env -u SCRIBE_ROLE -u SCRIBE_WORKER -u SCRIBE_WORKTREE CLAUDE_PLUGIN_ROOT='$REPO' '$SCRIPT'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=worker"* ]]
+    # loud warning ブロック固有の signature（§2 本文の carrier モデル散文にも「機械防御が無効」の
+    # 語は現れるため、warning ブロックだけが持つ文言で discriminate する＝docs prose への誤一致回避）
+    [[ "$output" == *"このセッションは scribe-spawn 経由ではありません"* ]]
+    [[ "$output" == *"edit-write-guard.py"* ]]
+    [[ "$output" == *"起動し直す"* ]]
+    # §2-4 本文は従来どおり注入される（warning は追加であって置換ではない）
+    [[ "$output" == *"## 2. worker prompt 規約"* ]]
+    # §2-4-only 不変条件を warning が壊さない（禁止見出しを混ぜない）
+    [[ "$output" != *"## 1. spawn 規約"* ]]
+    [[ "$output" != *"## 5. gate funnel 手順"* ]]
+    [[ "$output" != *"## 6. 監視"* ]]
+    # ultracode リマインダ（admin 専用）が混入しない回帰も兼ねる
+    [[ "$output" != *"/effort ultracode"* ]]
+}
+
+@test "機械防御(sc-99c): spawn worker(SCRIBE_WORKER=1 + 実在 SCRIBE_WORKTREE) → warning を出さない" {
+    run --separate-stderr bash -c "printf '%s' '$WT_JSON' | env -u SCRIBE_ROLE SCRIBE_WORKER=1 SCRIBE_WORKTREE='$WT_DIR' CLAUDE_PLUGIN_ROOT='$REPO' '$SCRIPT'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=worker"* ]]
+    # 機械防御が active なので split-brain warning ブロックは出さない（誤警報ゼロ）。§2 本文の
+    # carrier モデル散文（「機械防御が無効」の語を含む）は出るため、warning ブロック固有の signature で判定。
+    [[ "$output" != *"このセッションは scribe-spawn 経由ではありません"* ]]
+    [[ "$output" != *"境界を確立できません"* ]]
+    # 従来どおり §2 本文は注入される
+    [[ "$output" == *"## 2. worker prompt 規約"* ]]
+}
+
+@test "機械防御(sc-99c): SCRIBE_WORKER=1 だが SCRIBE_WORKTREE 不正 → 境界確立不能 warning を注入" {
+    run --separate-stderr bash -c "printf '%s' '$WT_JSON' | env -u SCRIBE_ROLE -u SCRIBE_WORKTREE SCRIBE_WORKER=1 CLAUDE_PLUGIN_ROOT='$REPO' '$SCRIPT'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=worker"* ]]
+    # SCRIBE_WORKTREE 不在 = edit-write-guard は fail-closed（全 Edit block）ゆえ別文言で警告する
+    [[ "$output" == *"境界を確立できません"* ]]
+    [[ "$output" == *"edit-write-guard.py"* ]]
+    # §2 本文は従来どおり注入される
+    [[ "$output" == *"## 2. worker prompt 規約"* ]]
+}
+
+# ---- docs SSOT pin（carrier モデルが protocol.md §2 に成文化されている・sc-99c drift 停止） ----
+@test "docs(sc-99c): protocol.md §2 に機械防御 carrier モデル（split-brain・SCRIBE_WORKER）が SSOT 化されている" {
+    local proto="$REPO/docs/protocol.md"
+    grep -q '機械防御の carrier は scribe-spawn' "$proto"
+    grep -q 'split-brain' "$proto"
+    grep -q 'SCRIBE_WORKER' "$proto"
+    grep -q 'SCRIBE_WORKTREE' "$proto"
+    # role-inject の warning 本文 SSOT がここである旨（両 carrier がこれを引く＝drift 停止）
+    grep -q 'session-start-role-inject.sh' "$proto"
+}

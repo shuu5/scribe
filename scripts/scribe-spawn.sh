@@ -541,6 +541,11 @@ SANDBOX_OPTOUT=0
 
 # --- 3. task prompt 生成（protocol.md §2）---
 build_prompt() {
+  # この spawn prompt は worker 機械防御（env-probe/sentinel/effort/autonomous 規律）の operative
+  # instantiation（worktree/anchor/ID を焼いた具体コマンド）である。その carrier モデルと規律本文の
+  # SSOT は docs/protocol.md §2（「機械防御の carrier は scribe-spawn」項 + autonomous 規律項）——本
+  # prompt と SessionStart role-inject の両 carrier が §2 を引く（drift 停止・sc-99c/sc-3p9）。非 spawn
+  # worker（env signal 不在）への split-brain warning は role-inject が §2 を SSOT に注入する。
   # env-probe の base は spawn 時点の commit を SHA へ凍結して焼く。既定 BASE="HEAD" をリテラルで
   # 焼くと verify 時の `HEAD..HEAD`=常に 0 commit になり健全 worker を誤 blocked にする（un-k02 同型・
   # review#1 critical）。scribe_git で GIT_DIR/GIT_WORK_TREE 継承を隔離して解決（sc-e1w）。
