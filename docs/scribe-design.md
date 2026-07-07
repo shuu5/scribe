@@ -209,7 +209,7 @@ A↔B 差分（ここだけ）:
 
 - `embeddeddolt/` / `.dolt/` / `.beads/issues.jsonl` / `.beads/interactions.jsonl` は **gitignore**。issues.jsonl は **可読エクスポートであって同期チャネルではない**（Dolt が SSOT、`refs/dolt/data` で同期）。
 - bd は **worktree redirect 機構**（`.beads/redirect` = anchor の `.beads/` への相対パス）→ **全 worktree が anchor の単一 embeddeddolt を auto-share**（siloed ではない）。
-- **マシン間同期は実在**: origin に `refs/dolt/data` が存在。`bd dolt push`/`pull` で同期（git 同様の明示 push/pull）。**bd は v1.0.4 に pin**（v1.0.5+ の migration 0043 がマルチマシン同期を破壊）。
+- **マシン間同期は実在**: origin に `refs/dolt/data` が存在。`bd dolt push`/`pull` で同期（git 同様の明示 push/pull）。**bd のバージョンは pin しない**（upgrade 前に migration のマルチマシン同期破壊が無いか検証してから上げる人間ポリシー。旧・v1.0.4 ピンは撤廃。参考: v1.0.5+ の migration 0043 が #4259 で同期破壊した経緯）。
 
 ### 確定（worker↔beads = B/hybrid）
 
