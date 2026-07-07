@@ -252,9 +252,12 @@ def _find_dash_c_inline(words, start, shell=None):
     return None, False
 
 
-def peel(words):
+def peel(words, env_out=None):
     """透過ランチャ / VAR= / 制御キーワードを剥がして実コマンドへ。
-    返り値: (core_words, inline_cmd_or_None, is_xargs, cwd_override)。"""
+    返り値: (core_words, inline_cmd_or_None, is_xargs, cwd_override)。
+    env_out に list を渡すと、剥がしたコマンド前置の VAR=VALUE 代入（＝実コマンドの環境になる代入）を
+    そこへ順に append する（後方互換の out-param・既定 None で従来動作。sc-dn3: env prefix 経由の config
+    注入検出用。peel 自身の skip 規則で拾うため `X=v git` も `env X=v git` も同一に捕捉できる）。"""
     i = 0
     cwd_override = None
     # 先頭の制御キーワード（{ } if then else for while do ... ）を除去
@@ -264,6 +267,8 @@ def peel(words):
         w = words[i]
         b = os.path.basename(w)
         if VAR_ASSIGN_RE.match(w) and not w.startswith("/"):
+            if env_out is not None:
+                env_out.append(w)  # コマンド前置の環境代入（sc-dn3: env prefix 経由 config 注入検出）
             i += 1
             continue
         if i < len(words) and words[i] in KEYWORDS:
@@ -357,6 +362,8 @@ def peel(words):
                         i += 1
                     continue
                 if VAR_ASSIGN_RE.match(t) and not t.startswith("/"):
+                    if env_out is not None:
+                        env_out.append(t)  # launcher(env/sudo…)後続の環境代入（sc-dn3）
                     i += 1
                     continue
                 if DURATION_RE.match(t):
@@ -384,7 +391,7 @@ def track_cd(words, eff):
             eff["cwd"] = final
 
 
-def iter_commands(cmd, cwd=None, depth=0):
+def iter_commands(cmd, cwd=None, depth=0, with_env=False, _parent_env=()):
     """cmd 中の「本物のコマンド呼び出し」を (core_words, eff_cwd) で逐次 yield する。
 
     - クォート認識で文/パイプライン分割 → shlex トークン化 → 透過ランチャ/シェル peel。
@@ -392,6 +399,13 @@ def iter_commands(cmd, cwd=None, depth=0):
     - `cd DIR &&` / `env --chdir` を追跡し、各コマンドの実効 cwd を返す（anchor 判定等で使用）。
     - shlex 解析不能 segment（壊れたクォート等）は skip（= その segment は fail-open。rm-guard と同方針）。
     - 空コマンド置換 $()/${}/`` は難読化バイパス対策で除去してから解析。
+
+    with_env=True のとき yield は (core_words, eff_cwd, env_assigns) の 3-tuple になる（sc-dn3・後方互換
+    オプション。既定 False は従来の 2-tuple を維持＝rm-guard 等の既存呼出しは無改変）。env_assigns は当該
+    コマンドが実際に受け取る "K=V" 環境代入 list（GIT_CONFIG_KEY 経由の config 注入を guard が検出するため）。
+    シェルの VAR=値 前置代入はそのコマンドの環境になり子プロセス（`bash -c '...'` 等）へ継承されるため、
+    inline 展開へも env prefix を伝播させる（`GIT_CONFIG_KEY_0=... sh -c 'git commit'` の hooksPath 注入が
+    inline 側へ素通る fail-open を塞ぐ）。_parent_env は内部再帰用（呼出側は渡さない）。
     """
     if cwd is None:
         cwd = os.getcwd()
@@ -409,18 +423,27 @@ def iter_commands(cmd, cwd=None, depth=0):
             continue
         track_cd(seg_words[0], eff)
         for words in seg_words:
-            core, inline, _is_xargs, cwd_ovr = peel(words)
+            env_out = [] if with_env else None
+            core, inline, _is_xargs, cwd_ovr = peel(words, env_out)
             if cwd_ovr:
                 seg_cwd = cwd_ovr if os.path.isabs(cwd_ovr) else os.path.normpath(os.path.join(eff["cwd"], cwd_ovr))
             else:
                 seg_cwd = eff["cwd"]
+            # この segment の実効 env = 親から継承した prefix + 当該 segment 前置の代入（sc-dn3）。
+            seg_env = list(_parent_env) + env_out if with_env else ()
             if inline is not None:
-                yield from iter_commands(inline, seg_cwd, depth + 1)
+                # inline（bash -c 等）は前置 env を継承する子プロセス → seg_env を伝播（sc-dn3: ラッパ 1 枚での
+                # env bypass を塞ぐ）。
+                yield from iter_commands(inline, seg_cwd, depth + 1,
+                                         with_env=with_env, _parent_env=seg_env)
                 continue
             core = strip_redirections(core)
             if not core:
                 continue
-            yield core, seg_cwd
+            if with_env:
+                yield core, seg_cwd, seg_env
+            else:
+                yield core, seg_cwd
 
 
 # --- 軽量サニティ（python3 cmdtokens.py --self-test） --------------------------
@@ -466,6 +489,39 @@ def _self_test():
     for tok, name, exp in abbr_cases:
         if long_opt_abbrev(tok, name) != exp:
             fails.append(f"long_opt_abbrev({tok!r},{name!r}): got {long_opt_abbrev(tok, name)} expected {exp}")
+
+    # sc-dn3: with_env=True の env prefix 収集（実コマンド名より前の VAR= のみ・launcher 貫通・
+    # クォート内/引数側の VAR= 風は拾わない）を検証。
+    def cmds_env(c, cwd="/x"):
+        return [(tuple(core), env) for core, _cwd, env in iter_commands(c, cwd, with_env=True)]
+
+    env_cases = [
+        ("GIT_CONFIG_KEY_0=core.hooksPath git commit",
+         [(("git", "commit"), ["GIT_CONFIG_KEY_0=core.hooksPath"])]),
+        ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit",
+         [(("git", "commit"), ["GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.hooksPath", "GIT_CONFIG_VALUE_0=/dev/null"])]),
+        ("env GIT_CONFIG_KEY_0=x git commit",
+         [(("git", "commit"), ["GIT_CONFIG_KEY_0=x"])]),       # env launcher 貫通（"env" は VAR= でない）
+        ("FOO=bar rm -rf x", [(("rm", "-rf", "x"), ["FOO=bar"])]),
+        ("git commit -m 'GIT_CONFIG_KEY_0=x'",
+         [(("git", "commit", "-m", "GIT_CONFIG_KEY_0=x"), [])]),  # 引数側 VAR= 風は env でない
+        ("git status", [(("git", "status"), [])]),
+        # sc-dn3: env prefix が inline（bash/sh -c）へ継承される（子プロセスが前置 env を継承）→ 伝播を検証。
+        ("GIT_CONFIG_KEY_0=core.hooksPath sh -c 'git commit'",
+         [(("git", "commit"), ["GIT_CONFIG_KEY_0=core.hooksPath"])]),
+        ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null bash -c 'git commit'",
+         [(("git", "commit"), ["GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.hooksPath", "GIT_CONFIG_VALUE_0=/dev/null"])]),
+        ("env GIT_CONFIG_KEY_0=x sudo bash -c 'git commit'",   # launcher 貫通 + inline 伝播の合成
+         [(("git", "commit"), ["GIT_CONFIG_KEY_0=x"])]),
+        ("X=1 bash -c 'git a; git b'",                          # inline 内の全コマンドが env を継承
+         [(("git", "a"), ["X=1"]), (("git", "b"), ["X=1"])]),
+        ("sh -c 'git status'", [(("git", "status"), [])]),      # env 無しラッパは空（over-collect しない）
+    ]
+    for c, expect in env_cases:
+        got = cmds_env(c)
+        want = [(tuple(t), e) for t, e in expect]
+        if got != want:
+            fails.append(f"env {c!r}: got {got} expected {want}")
 
     if fails:
         for f in fails:
