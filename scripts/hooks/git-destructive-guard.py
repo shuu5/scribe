@@ -23,9 +23,12 @@
 #   全 Bash を exit2 で brick しない（rm-guard と同方針）。deploy はツリー一括同期で lib 欠落は非現実。
 # 検証: `python3 git-destructive-guard.py --self-test`（hermetic）。env-prefix（GIT_CONFIG_KEY_n /
 #   GIT_CONFIG_PARAMETERS）経由の core.hooksPath 注入検査は cmdtokens lib の with_env 対応に依存する。
-#   canonical/global lib（別 lane sc-6kp が同期）が旧版=with_env 非対応の窓では当該検査は不活性(fail-open)で、
-#   self-test は該当 env ケースを skip 表示し（documented invocation を偽 RED にしない）、実行時は loud に
-#   degrade を通知する。co-ship 検証は `selftest-sc-dn3.local.sh`（CMDTOKENS_LIB を worktree lib へ向け
+#   ★本番の既定 import 先は canonical plugin lib（~/.claude/plugins/cmdtokens/lib）で現状 with_env 非対応
+#   ＝この env 検査は **本番で inert(fail-open)**。canonical への with_env 着地は別 issue sc-880 が追跡する
+#   （sc-6kp は無関係＝global git-guard 同期）。その窓では self-test は該当 env ケースを skip 表示し
+#   （documented invocation を偽 RED にしない）、実行時は stderr へ degrade を書く（ただし PreToolUse exit0 の
+#   stderr は既定で surface されず debug log 止まり＝可視保証のない best-effort marker）。co-ship 検証は
+#   `selftest-sc-dn3.local.sh`（CMDTOKENS_LIB を worktree lib へ向け
 #   with_env 有効化）が全 env ケースを skip なしで厳格判定する＝env 保護 live の唯一の証跡はこちら。
 
 import sys
@@ -385,7 +388,7 @@ def render(reason):
 def _iter_commands_env(cmd, cwd):
     """iter_commands を with_env=True（3-tuple）で回す。canonical cmdtokens lib が **旧署名（with_env 非対応）**
     でも guard 全体を fail-open 全開させないためのフォールバック（sc-dn3）。この guard と cmdtokens lib は別々に
-    配備されうる（lib の canonical/global 同期は別 lane sc-6kp）ため、新 guard + 旧 lib の temporal-coupling 窓が
+    配備されうる（canonical/global lib への with_env 着地は別 issue sc-880 が追跡）ため、新 guard + 旧 lib の temporal-coupling 窓が
     生じうる。その窓で `iter_commands(...,with_env=True)` が TypeError を送出すると main の except が exit0 に倒し、
     force-push/reset --hard/anchor 保護まで含む **全ルールが無ガード化**する（塞ごうとした穴より重い後退）。
     ここで TypeError を feature-detect し 2-tuple にフォールバックすれば、env 検査だけ無効化して他ルールは生かす。
@@ -396,12 +399,13 @@ def _iter_commands_env(cmd, cwd):
     except TypeError:
         # 旧 lib（with_env 非対応）の窓では env-prefix 経由（GIT_CONFIG_KEY_n / GIT_CONFIG_PARAMETERS）の
         # core.hooksPath 注入検査が **不活性**＝fail-open する（sc-dn3 findings 2/4）。緑 self-test を『env
-        # 保護 live』の証跡と誤読させないため、当該ベクタを含みうるコマンドに限り loud に degrade を通知する
-        # （lib の canonical/global 同期 = sc-6kp 着地で有効化。既存の fail-open 経路と同じ stderr 通知方針）。
+        # 保護 live』の証跡と誤読させないため、当該ベクタを含みうるコマンドに限り stderr へ degrade を書く
+        # （canonical lib への with_env 着地 = sc-880 で本番有効化。ただし PreToolUse exit0 の stderr は既定で
+        # surface されず debug log 止まり＝可視保証のない best-effort marker。既存 fail-open と同方針）。
         if "GIT_CONFIG" in cmd:
             sys.stderr.write(
                 "[git-guard] WARNING: cmdtokens lib が with_env 非対応のため GIT_CONFIG_* 経由の "
-                "core.hooksPath 注入検査は不活性(fail-open)です。cmdtokens 同期(sc-6kp)後に有効化されます。"
+                "core.hooksPath 注入検査は不活性(fail-open)です。canonical cmdtokens への with_env 着地(sc-880)後に有効化されます。"
                 "設定が改竄されていないか手動で確認してください。\n")
         for core, seg_cwd in iter_commands(cmd, cwd):
             yield core, seg_cwd, ()
@@ -727,7 +731,7 @@ def run_self_test():
     ]
 
     # 読み込んだ cmdtokens lib が with_env（env-prefix 収集の 3-tuple）を実サポートするか feature-detect
-    # する（sc-dn3 findings 1/3）。guard は canonical/global lib（別 lane sc-6kp が同期）を import しうるが、
+    # する（sc-dn3 findings 1/3）。guard は既定で canonical/global lib（with_env 着地は sc-880 が追跡）を import しうるが、
     # その旧版は with_env 非対応で `_iter_commands_env` が env 検査を fail-open にフォールバックする。その環境で
     # env-prefix block を無条件に要求すると documented invocation（`--self-test`・CMDTOKENS_LIB 無指定）が
     # 恒常 RED になり acceptance ゲートが偽 red で空回りする。lib が with_env 非対応のときは env 依存 block
@@ -758,9 +762,9 @@ def run_self_test():
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
     if not with_env_supported and skipped:
-        # 緑を『env 保護 live』と誤読させないための loud 注記（実行時も _iter_commands_env が同旨を warn）。
+        # 緑を『env 保護 live』と誤読させないための注記（実行時も _iter_commands_env が同旨を stderr へ warn）。
         print(f"git-guard self-test: NOTE cmdtokens lib が with_env 非対応のため env-prefix 注入の "
-              f"{len(skipped)} ケースを skip（実配備でも当該ベクタは不活性・sc-6kp の cmdtokens 同期で有効化）。")
+              f"{len(skipped)} ケースを skip（本番の既定 canonical lib でも当該ベクタは inert・sc-880 の with_env 着地で有効化）。")
         for s in skipped:
             print(" ", s)
     if failures:
