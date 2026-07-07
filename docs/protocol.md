@@ -208,6 +208,16 @@ admin が worker 群の稼働を見るときの 3 規律。folio admin の停止
 
 > `consult-`（grill-consult）window の沈黙を fleet-monitor が**自動検知**する拡張は **v1・sc-3pq**（fleet-monitor の degraded 検出拡張・所有は scriptorium）。本節の規律はその自動検知に依存せず v0 手動監視で成立する。fleet-monitor の「使用義務」を厳密文言化するのは sc-3pq の確定 contract と整合させてから（salvage 手順〔下記〕は incident+memory で実体確定済ゆえ先行・bd sc-ydg 注）。
 
+### bd ラベル/notes ベース完了検知の作法（監視トリガー衛生）
+
+上の「監視の規律」は『**自前の監視 poll を作らない**』と定めるが、それでも admin が bd の**ラベル/notes を完了 signal として読む**場面は残る（`gate-pending` ラベルの有無・`STATUS:` で始まる定型行の一致）。本作法はその読み取りが **false positive（誤検知）** を起こさないための隙間埋めの追補である。2026-07-06 の sc-7bv/sc-xyw 運用で admin 自作 monitor の誤検知が**同日 2 回実発生**したことを構造原因として規約化する（doobidoo `75e6c821`・信頼度 `verified`）:
+
+- **ラベル判定は labels 配列の完全一致で行う（bead 全文 grep 禁止）**: 完了ラベル（`gate-pending` 等）の有無は `bd show --json` の `labels` 配列に対する**完全一致**（`grep -qx` ／ jq の配列 membership）で判定する。bead 全文を対象にした部分文字列 grep はしない——description/notes 本文に同じ語が現れて誤一致する（記憶 [monitor trigger-string hygiene] と整合）。
+- **定型行トリガー語を自分の notes に verbatim で書かない（引用・説明文中でも）**: 完了検知に定型行（`STATUS:` 始まりの行 等）の文字列一致を使うなら、admin は**自分の notes append にそのトリガー文字列を verbatim で書かない**——たとえ引用符で括っても、「この文字列は書かない」と説明する文の中でも書かない（間接参照・言い換えにする）。grep は引用符を区別しないため、引用・注意書きのつもりの一致でも monitor は実 signal と誤認する（2026-07-06 の **2 回目**の誤発火がまさにこの形＝『この文字列は書かない』と説明する文中の引用に一致した）。
+- **可能なら独立信号の複合条件（AND）で判定する**: 単一の文字列一致に賭けず、**独立した 2 信号の AND** で複合判定する——marker の厳密形式（`grep -qx` の完全一致 or 行頭アンカー付き厳密 regex）**∧** commit の実在（§5 step1 の Layer2 commit-count 照合）。片方が偽陽性でも他方が抑える（2026-07-06 の **1 回目**の誤発火＝admin 進捗メモ中のトリガー語への一致は、commit 実在との AND を課していれば抑止できた）。
+
+> 自己言及の注意: 上の 2 点目は『admin が bd **notes** にトリガー語を verbatim で書くな』であって、**docs（本 protocol.md 等）に監視語彙・トリガー例を書くことは違反でない**——監視 monitor が読むのは bd の notes/labels であって docs ではないからだ。規約の自己ホスト上、追補文自体に監視語彙が現れるのは不可避（§6 sentinel 節と同じ論点）。
+
 ### busy 判定の regex
 
 worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定する regex:
@@ -239,7 +249,7 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 
 検知の足場（2 層）: **worker 側 = sc-sau env-probe**（cross-call sentinel + `base..HEAD` 0-commit で fail-closed＝env 劣化時に worker 自身が `STATUS: blocked` を書き done を申告しない・Layer1）。**admin 側 = §5 step1 の commit-count 独立照合**（Layer2）+ 本節の窓生死（fleet-monitor `✗`）+ **pane idle-at-prompt 持続の併読（zombie 変種向け）**。**zombie 変種では Layer1 が構造的に沈黙する**（Bash ごと死ぬため blocked を書けない）ため、**fail-closed の主網は Layer2 の idle-at-prompt × 0-commit 併読**であり、pane sentinel（sc-c7c・上記 line 238）はそれを補う追加信号にとどまる（sentinel 出力前に LLM ループごと死にうるため主網の代替にはしない）。**§7 の grill-consult 中断リカバリ（3段）は、この一般 salvage の consult 版**（出力がコードでなく決定・session-comm inject → 残 facet 再 spawn → admin 引き取り）。
 
-> 一次出典: doobidoo `6d11f667`(un-8q5 pilot 横断 GOTCHA: session-state が WF 実行中に input-waiting を返す false-DONE／`verified`)・bd un-jax 引き継ぎ / scribe-design.md §9 通信モデル（PUSH=操舵注入）/ ubuntu-note-system `docs/session-orchestration-strategy.md` §3.2（外部・本リポ未同梱・session-comm wait-ready→inject）／ doobidoo `0264028f`（folio incident: 自前 poll silent cap 失効・CLOSED 依存・degraded 検出不能で停止見落とし＝本節監視規律の構造原因・真因は CC infra Bash 非永続〔`44f17714` で訂正〕）・`5ee99c7`（degraded-but-committed salvage = 週次上限 window 消失でも work は durable・admin gate 引取り）／ doobidoo `45d7ccb4`・folio bd `folio-nufl` notes【admin incident 記録 2026-07-04】（zombie 変種: 全ツール死で blocked 書込不能・3 信号全沈黙・idle-at-prompt × 0-commit 検知・pane 引き継ぎの admin 代筆・同一契約 respawn で回復）／ bd sc-ydg（salvage 2 系統 + 監視規律の成文化）・sc-sau（worker env-probe Layer1・§5 step1 が Layer2）・sc-48w（zombie 第 3 変種の成文化・folio admin cross-ledger handoff 起点）。
+> 一次出典: doobidoo `6d11f667`(un-8q5 pilot 横断 GOTCHA: session-state が WF 実行中に input-waiting を返す false-DONE／`verified`)・bd un-jax 引き継ぎ / scribe-design.md §9 通信モデル（PUSH=操舵注入）/ ubuntu-note-system `docs/session-orchestration-strategy.md` §3.2（外部・本リポ未同梱・session-comm wait-ready→inject）／ doobidoo `0264028f`（folio incident: 自前 poll silent cap 失効・CLOSED 依存・degraded 検出不能で停止見落とし＝本節監視規律の構造原因・真因は CC infra Bash 非永続〔`44f17714` で訂正〕）・`5ee99c7`（degraded-but-committed salvage = 週次上限 window 消失でも work は durable・admin gate 引取り）／ doobidoo `45d7ccb4`・folio bd `folio-nufl` notes【admin incident 記録 2026-07-04】（zombie 変種: 全ツール死で blocked 書込不能・3 信号全沈黙・idle-at-prompt × 0-commit 検知・pane 引き継ぎの admin 代筆・同一契約 respawn で回復）／ bd sc-ydg（salvage 2 系統 + 監視規律の成文化）・sc-sau（worker env-probe Layer1・§5 step1 が Layer2）・sc-48w（zombie 第 3 変種の成文化・folio admin cross-ledger handoff 起点）／ doobidoo `75e6c821`（sc-7bv/sc-xyw monitoring lesson 2026-07-06: admin 自作 monitor の false positive が同日 2 回実発生・labels 配列完全一致 ∧ トリガー語 verbatim 禁止〔引用/説明文中でも〕∧ 独立信号 AND 複合判定＝監視トリガー衛生・`verified`）・bd sc-7ie（§6「bd ラベル/notes ベース完了検知の作法」小節の成文化）。
 
 ---
 
