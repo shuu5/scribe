@@ -166,7 +166,7 @@ if [[ -n "$BASE" ]]; then
     scribe_die "commit-count を取得できません（base が解決不能?: '$BASE'・worktree=$WORKTREE）"
   fi
   [[ "$count" =~ ^[0-9]+$ ]] || scribe_die "commit-count が数値でありません（内部異常）: '$count'"
-  [[ "$count" -gt 0 ]] || degraded "base..HEAD が 0 commit（worker の実装が永続していない/未コミット＝done を申告できない）: base=$BASE worktree=$WORKTREE" 4
+  [[ "$count" -gt 0 ]] || degraded "base..HEAD が 0 commit（worker の実装が永続していない/未コミット＝done を申告できない）: base=$BASE worktree=$WORKTREE ／ 実装をまだ commit していないならこれは正常であり env 劣化ではない（verify を commit より前に呼んだ『早すぎる呼出し』の可能性）——commit 後に verify --base を 1 回だけ再実行（ただし前段の exit4 で sentinel は掃除済みゆえ、再 verify の前に plant で sentinel を再設置し新 token を控え直すこと＝再 plant なしの再 verify は sentinel 不在で偽 exit3 になる）し、それでも 0 commit のときだけ劣化として扱え（sc-bp7）" 4
 fi
 
 # .git 書込可否（sc-owj）: 上の sentinel/0-commit を通過しても .git が read-only 化していれば commit を
