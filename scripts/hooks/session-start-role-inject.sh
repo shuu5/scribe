@@ -162,6 +162,11 @@ case "$role" in
         _scribe_header
         echo "あなたは scribe admin(anchor)です。graph の所有者・gate funnel の実行者・唯一の bd dolt push 同期点です。以下のプロトコル全文が役割規約の SSOT です。"
         echo ""
+        # ultracode 打鍵リマインダ(sc-icb): ultracode は CC 仕様上 session-only(settings/env/flag で
+        # 永続化不可・公式 docs verified=sc-ex2 裁定)。hook からも /effort を起動できないため、
+        # 人間の打鍵を促す 1 行を admin にだけ出す(worker/consult は effort 統制=sc-dc9 の管轄)。
+        echo "(リマインダ) ultracode 運用を意図する session では、人間が「/effort ultracode」を打鍵してください(session-only 設定のため自動化・永続化は不可)。"
+        echo ""
         cat "$PROTOCOL_DOC"
         ;;
     worker)
