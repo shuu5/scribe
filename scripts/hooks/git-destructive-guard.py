@@ -48,6 +48,25 @@ except Exception as e:  # lib ロード不能 → fail-open（guard 無効化を
 GIT_GLOBAL_VAL = {"-C", "--git-dir", "--work-tree", "--namespace", "--exec-path",
                   "--config-env", "--super-prefix"}
 GPGSIGN_FALSE = re.compile(r"commit\.gpgsign\s*=\s*false", re.I)
+# `git config` サブコマンドの read/write 弁別（sc-yuf）。read 形の診断（`git config --get
+# core.hooksPath` 等）は『フックが無効化されていないか』を確かめる純読取りで、これを block すると
+# 対策側が自ら env friction を注入する（幻影予防）。write 形（値代入・--add/--replace-all/--unset 系）のみ block。
+# CONFIG_READ_OPS は *真の read verb* のみ（sc-yuf admin errata）。--show-scope/--show-origin は
+# 表示修飾子であって read verb ではない: git は `--show-scope <key> <value>` を書込みとして実行する
+# （実機 git 2.43・exit0）ため read 免除に含めると `--show-scope core.hooksPath /dev/null` が素通しになる。
+CONFIG_READ_OPS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l"}
+# 明示 write verb（値代入なしでも core.hooksPath を書換/削除する形）の *bare 名*（`--` 抜き）。
+# long_opt_abbrev で **接頭辞照合**する（sc-yuf errata round2）: git parse-options は非曖昧な接頭辞省略を
+# 受理し `git config --unset-a core.hooksPath` を --unset-all として実削除する（実機 git 2.43・rc0＝配布
+# フック無効化）。完全一致だと省略形が漏れ、値を取らない --unset 系は positional>=2 にも掛からず ALLOW へ
+# 落ちる回帰だった。曖昧省略（--unse 等）を block しても git 自身が rc129 拒否する形ゆえ実害なし（over-block
+# 安全側）。read verb（get/list 等）はこれら write 名の接頭辞にならないので正当 read は落ちない。
+# --remove-section/--rename-section は含めない: section 名（`core`）を引数にとり key 名 core.hooksPath を
+# 含まないため本ガード（先頭で core.hooksPath 文字列を要求）では現実形 `git config --remove-section core` を
+# 捕捉できず素通り。実効しない誤主張なのでスコープ外（section 単位封じは admin 別 issue 追跡）。
+CONFIG_WRITE_OPS = ("add", "replace-all", "unset", "unset-all")
+# 値をとる config オプション（positional 抽出時にオプション値を name/value と誤認しないため）。
+CONFIG_VAL_OPTS = {"--file", "-f", "--blob", "--type", "-t", "--default"}
 # checkout/switch で必ず現ブランチ(main)を離脱するフラグ（新ブランチ作成/detach/tracking）。短フラグ
 # (単一文字)はそのまま、長フラグ(--orphan/--detach/--track)は getopt 短縮も拾う(sc-i13: long_opt_abbrev)。
 ANCHOR_LEAVE_SHORT = {"-b", "-B", "-c", "-C", "-t"}
@@ -180,6 +199,55 @@ def _anchor_switch_allowed(sub, sub_args, args):
     return False
 
 
+def _config_hookspath_write(sub_args):
+    """`git config ...` の sub_args が core.hooksPath を *書き換える* write 形か（sc-yuf・admin errata で
+    fail-closed 強化）。純読取り診断（`git config --get core.hooksPath` 等）のみ allow、write は全て block。
+
+    **fail-closed の評価順序**（旧版は read-op トークンの『存在』で先に allow 短絡し、write 末尾に read-op を
+    1 個付すだけでガードを貫通した＝回帰。実機 git 2.43 は read-op を値位置で受理して実書込みする）:
+      (1) core.hooksPath 不在 → allow。
+      (2) 明示 write-op（--add/--replace-all/--unset/--unset-all）→ read-op の有無・位置に関わらず block。
+      (3) 値代入形（key + value = positional>=2）→ block。ただし *真の read verb が key より前に先頭する*
+          （= git が読取り mode を確定し書込まない）場合のみ免除。末尾 read-op の後置は免除しない。
+      (4) それ以外（positional<=1 の bare 読み / 先頭 read verb の読取り）→ allow。
+    --show-scope/--show-origin は read verb でなく表示修飾子（CONFIG_READ_OPS から除外済み）＝(3) の免除に効かず、
+    `git config --show-scope core.hooksPath /dev/null` は positional>=2 で block される。"""
+    if not any("core.hooksPath" in a for a in sub_args):
+        return False
+    # (2) 明示 write-op は位置に関わらず block（read-op 短絡より先に評価＝末尾 read-op で素通しさせない）。
+    #     完全一致でなく long_opt_abbrev で接頭辞照合する（git の非曖昧接頭辞省略 `--unset-a`=--unset-all を
+    #     捕捉。sc-yuf errata round2 の fail-open 修正。曖昧省略の over-block は git 自身が拒否ゆえ無害）。
+    if any(any(long_opt_abbrev(a, w) for w in CONFIG_WRITE_OPS) for a in sub_args):
+        return True
+    # positional（非フラグ語）を *元インデックス付き* で抽出（val-opt とその値は飛ばす）。加えて最初に
+    # 現れた真の read verb のインデックスを控える（key より前に先頭するか＝git の read mode 確定を判定するため）。
+    positionals = []  # (idx, token)
+    first_read_idx = None
+    i = 0
+    while i < len(sub_args):
+        a = sub_args[i]
+        base = a.split("=", 1)[0]
+        if first_read_idx is None and base in CONFIG_READ_OPS:
+            first_read_idx = i
+        if base in CONFIG_VAL_OPTS and "=" not in a:
+            i += 2  # オプションとその値を飛ばす（glued `--opt=val` は "=" 有りで単一トークン）
+            continue
+        if a.startswith("-") and a != "-":
+            i += 1
+            continue
+        positionals.append((i, a))
+        i += 1
+    # (3) 値代入形（value positional あり）。真の read verb が key(先頭 positional)より前に先頭すれば
+    #     読取り（git は書込まない）＝免除、そうでなければ block（末尾 read-op の後置バイパスを塞ぐ）。
+    if len(positionals) >= 2:
+        key_idx = positionals[0][0]
+        read_leads = first_read_idx is not None and first_read_idx < key_idx
+        if not read_leads:
+            return True
+    # (4) positional<=1 / 先頭 read verb の純読取り = allow。
+    return False
+
+
 def check_git(core, seg_cwd):
     """git コマンドの token 列を判定。ブロック理由(str) か None。"""
     args = core[1:]
@@ -196,8 +264,11 @@ def check_git(core, seg_cwd):
         if "core.hooksPath" in cfg or GPGSIGN_FALSE.search(cfg):
             return "フック/署名の無効化(core.hooksPath/commit.gpgsign=false)は禁止。設定問題を調査・修正する。"
     # `git config core.hooksPath ...` の永続設定も同じ無効化ベクタ（config サブコマンドの引数に限定＝
-    # データ文字列の誤ブロックを避けつつ永続的フック無効化は捕捉維持）。
-    if sub == "config" and any("core.hooksPath" in a or GPGSIGN_FALSE.search(a) for a in sub_args):
+    # データ文字列の誤ブロックを避けつつ永続的フック無効化は捕捉維持）。ただし read 形の診断
+    # （`git config --get core.hooksPath` 等）は allow し、write 形（値代入・--add/--replace-all）のみ
+    # block する（sc-yuf: read/write 未区別で純読取り診断を誤 DENY していた退行を修正）。
+    if sub == "config" and (_config_hookspath_write(sub_args)
+                            or any(GPGSIGN_FALSE.search(a) for a in sub_args)):
         return "フック/署名の無効化(core.hooksPath/commit.gpgsign=false)は禁止。設定問題を調査・修正する。"
 
     if sub is None:
@@ -411,6 +482,45 @@ def run_self_test():
         ("git add core.hooksPath", tmp, A, "sc-9j2: hooksPath as filename = allow"),
         ("git commit -m 'set commit.gpgsign=false later'", tmp, A, "sc-9j2: gpgsign in commit msg = allow"),
         ("git config core.hooksPath /dev/null", tmp, B, "sc-9j2: git config core.hooksPath = block 維持"),
+        # sc-yuf: config の read/write 弁別。read 形の診断（'フックが無効化されていないか' の確認）は allow、write 形のみ block。
+        ("git config --get core.hooksPath", tmp, A, "sc-yuf: --get core.hooksPath read allow"),
+        ("git config --get-all core.hooksPath", tmp, A, "sc-yuf: --get-all read allow"),
+        ("git config --get-regexp core.hooksPath", tmp, A, "sc-yuf: --get-regexp read allow"),
+        ("git config --get-urlmatch core.hooksPath https://x", tmp, A, "sc-yuf: --get-urlmatch read allow"),
+        ("git config --show-origin --get core.hooksPath", tmp, A, "sc-yuf: --show-origin --get read allow"),
+        ("git config --show-scope --get core.hooksPath", tmp, A, "sc-yuf: --show-scope --get read allow"),
+        ("git config core.hooksPath", tmp, A, "sc-yuf: bare 読み(値なし) allow"),
+        ("git config --global core.hooksPath", tmp, A, "sc-yuf: --global bare 読み allow"),
+        ("git config --type path core.hooksPath", tmp, A, "sc-yuf: --type path bare 読み allow"),
+        ("git config --list", tmp, A, "sc-yuf: --list allow"),
+        ("git config -l", tmp, A, "sc-yuf: -l list allow"),
+        ("git config --add core.hooksPath /dev/null", tmp, B, "sc-yuf: --add write block"),
+        ("git config --replace-all core.hooksPath /dev/null", tmp, B, "sc-yuf: --replace-all write block"),
+        ("git config --global core.hooksPath /dev/null", tmp, B, "sc-yuf: --global 値代入 write block"),
+        ("git config --type path core.hooksPath /dev/null", tmp, B, "sc-yuf: --type 付き 値代入 write block"),
+        # sc-yuf autofix: --unset 系 write は core.hooksPath を消す無効化ベクタ → block（値なしでも write）。
+        ("git config --unset core.hooksPath", tmp, B, "sc-yuf: --unset write block"),
+        ("git config --unset-all core.hooksPath", tmp, B, "sc-yuf: --unset-all write block"),
+        ("git config --global --unset core.hooksPath", tmp, B, "sc-yuf: --global --unset write block"),
+        # sc-yuf admin errata: read-op 短絡 fail-open の回帰固定。実機 git 2.43 で書込み成立を実証した敵対形を block。
+        # (1) 値代入末尾に read-op を後置しても write（read-op 存在での allow 短絡を塞ぐ）。
+        ("git config --replace-all core.hooksPath /dev/null --get", tmp, B, "errata#1: write-op + 末尾--get 貫通不可"),
+        ("git config core.hooksPath /dev/null --get", tmp, B, "errata#1: 値代入 + 末尾--get 貫通不可"),
+        ("git config core.hooksPath /dev/null -l", tmp, B, "errata#1: 値代入 + 末尾-l 貫通不可"),
+        # (2) --show-scope/--show-origin は read verb でなく表示修飾子＝値代入を read 化しない。
+        ("git config --show-scope core.hooksPath /dev/null", tmp, B, "errata#2: --show-scope 値代入 block"),
+        ("git config --show-scope --add core.hooksPath /dev/null", tmp, B, "errata#2: --show-scope + --add block"),
+        ("git config --show-origin core.hooksPath /dev/null", tmp, B, "errata#2: --show-origin 値代入 block(defense-in-depth)"),
+        # 正当 read の allow 維持（read verb が key より前に先頭＝git 読取り mode）。
+        ("git config --show-scope --get core.hooksPath", tmp, A, "errata: --show-scope --get は read allow 維持"),
+        ("git config --get core.hooksPath /dev/null", tmp, A, "errata: 先頭--get は git exit1(非書込)＝allow 維持"),
+        # sc-yuf admin errata round2: 長オプション接頭辞省略の fail-open 固定（実機 git 2.43 で実削除実証）。
+        # git は非曖昧接頭辞省略を受理し core.hooksPath を実削除/実書込する → 接頭辞照合で block。
+        ("git config --unset-a core.hooksPath", tmp, B, "errata2: --unset-a (=--unset-all abbrev) block"),
+        ("git config --unset-al core.hooksPath", tmp, B, "errata2: --unset-al abbrev block"),
+        ("git config --global --unset-al core.hooksPath", tmp, B, "errata2: --global --unset-al abbrev block"),
+        ("git config --replace-al core.hooksPath /dev/null", tmp, B, "errata2: --replace-al (=--replace-all abbrev) block"),
+        ("git config --ad core.hooksPath /dev/null", tmp, B, "errata2: --ad (=--add abbrev) block"),
         # --- anchor branch-switch guard ---
         (f"git -C {anchor} switch feature", tmp, B, "anchor: switch feature"),
         (f"git -C {anchor} checkout -b feature", tmp, B, "anchor: checkout -b new"),
