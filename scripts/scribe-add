@@ -15,6 +15,15 @@
 #   で使う(worker prompt §2・SCRIBE_SANDBOX 時のみ規律注入)。手癖で `git add -A` に戻れば loud に rc=128 で死に、
 #   §5 step1/§6 の 0-commit 検出網が salvage に回す(サイレント漏れより安全)。
 #
+# 追補(sc-lct): sandbox の null-mount dotfile は turn 跨ぎで char device→**0バイト通常ファイル**へ再実体化しうる。
+#   通常ファイル化すると上記の型ガード([-h]||[-f])をすり抜けて junk が stage される(sc-rvq で20件混入の実害)。
+#   null-mount 対象は本質的に home dotfile / .dotdir(.bashrc/.mcp.json/.claude/… )ゆえ、未追跡の
+#   **hidden(dotfile-shaped) path かつ 0バイト**の通常ファイルを stage せず warn する。判定は名前リストでなく
+#   「hidden path × size0」の構造規則で行い(sc-yqa の型ベース原則の延長＝CC の null-mount churn に強い・共有
+#   info/exclude を汚さない=論点3 も維持)、非 hidden の空ファイル(__init__.py 等)や symlink(mode 120000 で size
+#   無関係・blocking#2)は従来どおり stage する。正当な空 dotfile(.gitkeep 等)が要れば worker が明示 add する
+#   (サイレント混入より loud skip が安全＝本 script の設計方針)。
+#
 # fail-closed: git リポジトリでなければ非0(exit 2)。stage 処理が回れば exit 0（空 stage でも commit 側が
 #   "nothing to commit" で fail-closed に倒れ 0-commit 検出網が捕捉する）。
 # 設計判断の SSOT = docs/protocol.md §2 / verify-sandbox-e2e.sh が e2e 番人(sc-yqa 4b)。
@@ -34,9 +43,26 @@ git add -u --ignore-errors >/dev/null 2>&1 || true
 #    限界: 未追跡のネスト git repo / 中身が列挙されない単一ディレクトリ entry は stage しない(worker はネスト repo を
 #    作らない前提・sc-yqa gate minor)。char-device 特有の rc=128 回避は root を要し単体不可ゆえ e2e(実 sandbox)が番人。
 n=0
+skipped=0
 while IFS= read -r -d '' f; do
-  { [ -h "$f" ] || [ -f "$f" ]; } && git add -- "$f" >/dev/null 2>&1 && n=$((n+1))
+  if [ -h "$f" ]; then
+    # symlink: リンク先の有効性に依らず mode 120000 で commit 可能ゆえ size を見ず stage（sc-yqa gate blocking#2）。
+    git add -- "$f" >/dev/null 2>&1 && n=$((n+1)); continue
+  fi
+  [ -f "$f" ] || continue   # char/block/fifo/socket device は型で無視（sc-yqa）。
+  # sandbox の null-mount dotfile が char device→0バイト通常ファイルへ再実体化し型ガードをすり抜ける junk
+  # ハザード(sc-lct・sc-rvq で20件実害)を、名前リストでなく「hidden path × size0」の構造規則で弾く。null-mount
+  # 対象は本質的に home dotfile/.dotdir ゆえ hidden 判定で class を構造被覆する(CC churn 耐性)。非 hidden の空
+  # ファイル(__init__.py 等)は従来どおり stage する(sc-yqa 契約維持)。正当な空 dotfile は worker が明示 add。
+  if [ ! -s "$f" ]; then
+    case "$f" in
+      .*|*/.*)
+        echo "scribe-add: 0バイト hidden ファイルを skip（sandbox 再実体化 junk ハザード sc-lct・必要なら git add で明示追加）: $f" >&2
+        skipped=$((skipped+1)); continue ;;
+    esac
+  fi
+  git add -- "$f" >/dev/null 2>&1 && n=$((n+1))
 done < <(git ls-files -o --exclude-standard -z)
 
-echo "scribe-add: 未追跡の通常ファイル $n 件 + 追跡変更を stage（CC null-mount の非通常ファイルは型で除外）" >&2
+echo "scribe-add: 未追跡の通常ファイル $n 件 + 追跡変更を stage（非通常ファイルは型で除外・0バイト hidden $skipped 件を skip）" >&2
 exit 0
