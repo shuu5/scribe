@@ -1808,6 +1808,36 @@ STUB
   [[ "$output" != *"settings.local.json"* ]]       # 除外尊重(--exclude-standard)で ephemeral 維持
 }
 
+@test "sc-lct(scribe-add): 0バイト hidden(sandbox 再実体化 junk)は skip・非hidden空/中身あり/symlink は stage" {
+  # sandbox の null-mount dotfile が char device→0バイト通常ファイルへ再実体化すると型ガード([-h]||[-f])を
+  # すり抜けて junk が混入する(sc-lct・sc-rvq で20件実害)。fix は「hidden path × size0」の構造規則で弾く。
+  # 非 hidden の空ファイル(sc-yqa 契約)は従来どおり stage する narrow carve-out であることも固定する。
+  local r; r="$SCRIBE_TEST_CWD"
+  git -C "$r" config core.excludesFile /dev/null   # global gitignore を排し、skip の理由を本 fix に限定
+  ( cd "$r" && : > .bashrc && : > .mcp.json && mkdir -p .claude && : > .claude/settings.json \
+       && mkdir -p sub && : > sub/.hidden-empty \
+       && : > plain-empty.txt && printf x > realfile.txt && printf y > .keeprc && ln -s /nonexistent dlink )
+  local errlog; errlog="$(mktemp)"   # stderr を repo 外に捕捉（repo 内だと ls-files が拾い skip 件数を汚す）
+  run bash -c "cd '$r' && '$SCRIPTS/scribe-add' 2>'$errlog'"
+  [ "$status" -eq 0 ]
+  run git -C "$r" diff --cached --name-only
+  [[ "$output" != *".bashrc"* ]]                   # 0バイト hidden dotfile は skip(型ガードすり抜け junk)
+  [[ "$output" != *".mcp.json"* ]]
+  [[ "$output" != *".claude/settings.json"* ]]     # hidden dir 配下(*/.* path)も skip
+  [[ "$output" != *"sub/.hidden-empty"* ]]         # ネスト hidden(basename dot)も skip
+  [[ "$output" == *"plain-empty.txt"* ]]           # 非 hidden の空ファイルは stage(sc-yqa 契約・過剰除外しない)
+  [[ "$output" == *"realfile.txt"* ]]              # 中身ありは stage
+  [[ "$output" == *".keeprc"* ]]                   # 中身あり hidden も stage(判定は名前でなくサイズ×hidden)
+  [[ "$output" == *"dlink"* ]]                     # symlink は size 無関係で stage(blocking#2 維持)
+  # loud skip の回帰保護: skip は stderr に per-file warn 行 + 要約件数を出す。silent skip 化(echo 削除=正当な
+  # 空 hidden ファイルが黙って消える data-loss 型リスク)を検出するため warn deliverable を明示 assert する(sc-lct 生存 minor)。
+  run cat "$errlog"
+  [[ "$output" == *"sc-lct"* ]]                    # skip warn 行が sc-lct を明記して出る
+  [[ "$output" == *".bashrc"* ]]                   # skip した具体パスを warn する(可観測性)
+  [[ "$output" == *"0バイト hidden 4 件を skip"* ]] # 要約件数(skipped=4)を pin し件数回帰を捕捉
+  ( cd "$r" && rm -f .bashrc .mcp.json dlink && rm -rf .claude sub ); rm -f "$errlog"
+}
+
 @test "sc-yqa(B 規律/sc-u53): worker prompt の scribe-add 規律は sandbox 時に注入される（既定 on・SCRIBE_SANDBOX=0 で外れる）" {
   # 非 sandbox（明示 opt-out）: 注入されない(通常 worker は素の git で良い)。
   run env SCRIBE_SANDBOX=0 "$SPAWN" --dry-run --anchor "$REPO_ROOT" un-4nm
