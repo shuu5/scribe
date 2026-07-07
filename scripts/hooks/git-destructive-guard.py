@@ -48,6 +48,21 @@ except Exception as e:  # lib ロード不能 → fail-open（guard 無効化を
 GIT_GLOBAL_VAL = {"-C", "--git-dir", "--work-tree", "--namespace", "--exec-path",
                   "--config-env", "--super-prefix"}
 GPGSIGN_FALSE = re.compile(r"commit\.gpgsign\s*=\s*false", re.I)
+# `git config` サブコマンドの read/write 弁別（sc-yuf）。read 形の診断（`git config --get
+# core.hooksPath` 等）は『フックが無効化されていないか』を確かめる純読取りで、これを block すると
+# 対策側が自ら env friction を注入する（幻影予防）。write 形（値代入・--add/--replace-all）のみ block。
+CONFIG_READ_OPS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch",
+                   "--list", "-l", "--show-origin", "--show-scope"}
+# 明示 write verb（値代入なしでも core.hooksPath を書換/削除する形）。--unset/--unset-all は
+# core.hooksPath を消して既定 .git/hooks へ戻す＝配布フックを外す無効化ベクタ（値代入のみ block だと
+# --unset 系が fail-open だった）。--remove-section/--rename-section は含めない: section 名（`core`）を
+# 引数にとり key 名 core.hooksPath を含まないため本ガード（先頭で core.hooksPath 文字列を要求）では
+# 現実形 `git config --remove-section core` を捕捉できず素通り。実効しない誤主張なので撤回する
+# （sc-yuf self-review: 旧 self-test は git が受理しない `--remove-section core.hooksPath` を渡して
+# 無関係な値代入分岐に落ち block していた＝false-green。section 単位封じは本 issue のスコープ外）。
+CONFIG_WRITE_OPS = {"--add", "--replace-all", "--unset", "--unset-all"}
+# 値をとる config オプション（positional 抽出時にオプション値を name/value と誤認しないため）。
+CONFIG_VAL_OPTS = {"--file", "-f", "--blob", "--type", "-t", "--default"}
 # checkout/switch で必ず現ブランチ(main)を離脱するフラグ（新ブランチ作成/detach/tracking）。短フラグ
 # (単一文字)はそのまま、長フラグ(--orphan/--detach/--track)は getopt 短縮も拾う(sc-i13: long_opt_abbrev)。
 ANCHOR_LEAVE_SHORT = {"-b", "-B", "-c", "-C", "-t"}
@@ -180,6 +195,38 @@ def _anchor_switch_allowed(sub, sub_args, args):
     return False
 
 
+def _config_hookspath_write(sub_args):
+    """`git config ...` の sub_args が core.hooksPath を *書き換える* write 形か（sc-yuf）。
+    read 形（--get/--get-all/--get-regexp/--get-urlmatch/--list/-l/--show-origin/--show-scope・
+    bare 読み=値なし）は False（allow）。値代入・CONFIG_WRITE_OPS（--add/--replace-all/--unset/
+    --unset-all）の write 形のみ True（block）。"""
+    if not any("core.hooksPath" in a for a in sub_args):
+        return False
+    # read operator を含む形は純読取り → 非 write（診断コマンドを封じない）。
+    for a in sub_args:
+        if a.split("=", 1)[0] in CONFIG_READ_OPS:
+            return False
+    # --add / --replace-all は明示 write。
+    if any(a.split("=", 1)[0] in CONFIG_WRITE_OPS for a in sub_args):
+        return True
+    # positional を抽出（値をとるオプションとその値を飛ばし、その他フラグを除外）して
+    # [name] のみ=bare 読み(allow) / [name, value...]=値代入(write) を弁別する。
+    positionals = []
+    i = 0
+    while i < len(sub_args):
+        a = sub_args[i]
+        base = a.split("=", 1)[0]
+        if base in CONFIG_VAL_OPTS and "=" not in a:
+            i += 2  # オプションとその値を飛ばす（glued `--opt=val` は "=" 有りで単一トークン）
+            continue
+        if a.startswith("-") and a != "-":
+            i += 1
+            continue
+        positionals.append(a)
+        i += 1
+    return len(positionals) >= 2
+
+
 def check_git(core, seg_cwd):
     """git コマンドの token 列を判定。ブロック理由(str) か None。"""
     args = core[1:]
@@ -196,8 +243,11 @@ def check_git(core, seg_cwd):
         if "core.hooksPath" in cfg or GPGSIGN_FALSE.search(cfg):
             return "フック/署名の無効化(core.hooksPath/commit.gpgsign=false)は禁止。設定問題を調査・修正する。"
     # `git config core.hooksPath ...` の永続設定も同じ無効化ベクタ（config サブコマンドの引数に限定＝
-    # データ文字列の誤ブロックを避けつつ永続的フック無効化は捕捉維持）。
-    if sub == "config" and any("core.hooksPath" in a or GPGSIGN_FALSE.search(a) for a in sub_args):
+    # データ文字列の誤ブロックを避けつつ永続的フック無効化は捕捉維持）。ただし read 形の診断
+    # （`git config --get core.hooksPath` 等）は allow し、write 形（値代入・--add/--replace-all）のみ
+    # block する（sc-yuf: read/write 未区別で純読取り診断を誤 DENY していた退行を修正）。
+    if sub == "config" and (_config_hookspath_write(sub_args)
+                            or any(GPGSIGN_FALSE.search(a) for a in sub_args)):
         return "フック/署名の無効化(core.hooksPath/commit.gpgsign=false)は禁止。設定問題を調査・修正する。"
 
     if sub is None:
@@ -411,6 +461,26 @@ def run_self_test():
         ("git add core.hooksPath", tmp, A, "sc-9j2: hooksPath as filename = allow"),
         ("git commit -m 'set commit.gpgsign=false later'", tmp, A, "sc-9j2: gpgsign in commit msg = allow"),
         ("git config core.hooksPath /dev/null", tmp, B, "sc-9j2: git config core.hooksPath = block 維持"),
+        # sc-yuf: config の read/write 弁別。read 形の診断（'フックが無効化されていないか' の確認）は allow、write 形のみ block。
+        ("git config --get core.hooksPath", tmp, A, "sc-yuf: --get core.hooksPath read allow"),
+        ("git config --get-all core.hooksPath", tmp, A, "sc-yuf: --get-all read allow"),
+        ("git config --get-regexp core.hooksPath", tmp, A, "sc-yuf: --get-regexp read allow"),
+        ("git config --get-urlmatch core.hooksPath https://x", tmp, A, "sc-yuf: --get-urlmatch read allow"),
+        ("git config --show-origin --get core.hooksPath", tmp, A, "sc-yuf: --show-origin --get read allow"),
+        ("git config --show-scope --get core.hooksPath", tmp, A, "sc-yuf: --show-scope --get read allow"),
+        ("git config core.hooksPath", tmp, A, "sc-yuf: bare 読み(値なし) allow"),
+        ("git config --global core.hooksPath", tmp, A, "sc-yuf: --global bare 読み allow"),
+        ("git config --type path core.hooksPath", tmp, A, "sc-yuf: --type path bare 読み allow"),
+        ("git config --list", tmp, A, "sc-yuf: --list allow"),
+        ("git config -l", tmp, A, "sc-yuf: -l list allow"),
+        ("git config --add core.hooksPath /dev/null", tmp, B, "sc-yuf: --add write block"),
+        ("git config --replace-all core.hooksPath /dev/null", tmp, B, "sc-yuf: --replace-all write block"),
+        ("git config --global core.hooksPath /dev/null", tmp, B, "sc-yuf: --global 値代入 write block"),
+        ("git config --type path core.hooksPath /dev/null", tmp, B, "sc-yuf: --type 付き 値代入 write block"),
+        # sc-yuf autofix: --unset 系 write は core.hooksPath を消す無効化ベクタ → block（値なしでも write）。
+        ("git config --unset core.hooksPath", tmp, B, "sc-yuf: --unset write block"),
+        ("git config --unset-all core.hooksPath", tmp, B, "sc-yuf: --unset-all write block"),
+        ("git config --global --unset core.hooksPath", tmp, B, "sc-yuf: --global --unset write block"),
         # --- anchor branch-switch guard ---
         (f"git -C {anchor} switch feature", tmp, B, "anchor: switch feature"),
         (f"git -C {anchor} checkout -b feature", tmp, B, "anchor: checkout -b new"),
