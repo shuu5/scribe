@@ -2,12 +2,12 @@
 # scribe-gate-attest.sh — gate の ground-truth 証跡プロデューサ（sc-ex2・幻影 backstop の機械化）。
 #
 # 背景（十全性監査 wf_c2cd03d4 agent D・2026-07-07）: 幻影（confabulation）の実効 backstop は admin gate の
-# 独立 env 検証（protocol.md §5「gate の 3 義務」(b) selfTestCmd 再実行）ただ一つだが、実行者の admin 自身が
+# 独立 env 検証（protocol.md §5「gate の義務」(b) selfTestCmd 再実行）ただ一つだが、実行者の admin 自身が
 # xhigh 長ターンの幻影発生源で、その再実行に**機械強制も証跡も無い**（塔の頂点に検証層が無い）。本道具は
-# gate の ground-truth 三点を『**実際に叩いた**証跡』として機械記録し、read-only subagent（scribe:explore）へ
+# gate の ground-truth 四点を『**実際に叩いた**証跡』として機械記録し、read-only subagent（scribe:explore）へ
 # 構造分離できる形にする。admin が anchor で叩く想定（worker sandbox 内では使わない）。
 #
-# 三点（protocol.md §5「gate の 3 義務」）:
+# 四点（protocol.md §5「gate の義務」）:
 #   (b) selfTestCmd 再実行     → worktree で自ら再実行し exit code + 出力 sha256 + cmd sha256 を記録。
 #                                actor 報告の「self-test PASS」を信じず ground-truth を取る。
 #   commit-count（Layer2）     → base..HEAD の commit 数（= **liveness**。completeness ではない）。
@@ -15,7 +15,7 @@
 #   (a) acceptance 逐条        → 意味判定は admin 領分（機械化不能）。本道具は --acceptance-file を受けたとき
 #                                だけ逐条 scaffold（未記入 checklist）を emit する。PASS/FAIL の裁定は admin/
 #                                subagent が埋め、埋めたものを record する（道具は判定を捏造しない）。
-#   (4) transcript-forensics   → worker .jsonl の tool_use / tool_result **件数**と marker **件数**を報告。
+#   (d) transcript-forensics   → worker .jsonl の tool_use / tool_result **件数**と marker **件数**を報告。
 #                                先例 4 件（un-df2 / orch-wzq / orch-8dl / scm-5gp）が transcript-verified。
 #
 # 監視トリガー衛生（protocol.md §6・最重要の設計制約）: 本道具の**出力（= bd notes へ入る証跡）には検知
@@ -52,7 +52,7 @@ Usage:
                                [--acceptance-file F] [--acceptance-path GLOB]... [--strict]
   scribe-gate-attest.sh record --id ID [--anchor A] [--attestation-file F] [--dry-run]
 
-probe  : gate ground-truth 三点を『実際に叩いた証跡』として stdout へ emit（read-only=bd/git を書かない）。
+probe  : gate ground-truth 四点を『実際に叩いた証跡』として stdout へ emit（read-only=bd/git を書かない）。
 record : その証跡を bdw 経由で bd notes へ append（admin の write 段）。
 出力に検知文字列は焼かない（protocol.md §6・monitor 誤発火防止）＝件数・ハッシュのみ。
 EOF
@@ -141,6 +141,18 @@ done
 [[ -n "$SELFTEST" ]] || scribe_die "--self-test（必須・gate が自ら再実行する ground-truth コマンド）がありません。"
 [[ -z "$ID" ]] || ID="$(scribe_normalize_bd_id "$ID")" || scribe_die "bd id の形式が不正です: '$ID'"
 
+# --marker-regex は使用前に ERE として妥当かを検証する（gate errata・admin 代替 review finding）。
+# 不正 regex は grep exit 2 → 従来は `|| true` が握り潰し marker-hits=0 として emit され、scan 未実行と
+# 真の 0 件が区別不能（幻影 backstop の silent 偽陰性）。他の構造入力（worktree/base/self-test）と同じく
+# fail-loud に揃える。空入力への -q マッチで regex コンパイルだけを試す（exit 0/1=妥当・exit>=2=不正）。
+if [[ -n "$MARKER_RE" ]]; then
+  set +e
+  printf '' | grep -qE "$MARKER_RE" 2>/dev/null
+  _re_rc=$?
+  set -e
+  [[ "$_re_rc" -lt 2 ]] || scribe_die "--marker-regex が ERE として不正です（grep exit=${_re_rc}）: $MARKER_RE"
+fi
+
 HOST="$(hostname 2>/dev/null || echo unknown)"
 UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -192,9 +204,18 @@ if [[ -n "$TRANSCRIPT" ]]; then
     [[ "$tuse" =~ ^[0-9]+$ ]] || tuse=0
     [[ "$tres" =~ ^[0-9]+$ ]] || tres=0
     if [[ -n "$MARKER_RE" ]]; then
-      mk="$(grep -cE "$MARKER_RE" "$TRANSCRIPT" 2>/dev/null || true)"
-      [[ "$mk" =~ ^[0-9]+$ ]] || mk=0
-      mk_field="$mk"
+      # regex 妥当性は上流で検証済み。それでも scan が exit>=2（IO 等）で失敗したら 0 と混同させず
+      # scan-error を明示 emit する（件数 0 は「scan 済みで 0 件」のときだけ・偽陰性防止）。
+      set +e
+      mk="$(grep -cE "$MARKER_RE" "$TRANSCRIPT" 2>/dev/null)"
+      _mk_rc=$?
+      set -e
+      if [[ "$_mk_rc" -ge 2 ]]; then
+        mk_field="scan-error（grep exit=${_mk_rc}・0 件と混同しないこと・要再実行）"
+      else
+        [[ "$mk" =~ ^[0-9]+$ ]] || mk=0
+        mk_field="$mk"
+      fi
     else
       mk_field="n/a（--marker-regex 未指定・件数を焼かない）"
     fi

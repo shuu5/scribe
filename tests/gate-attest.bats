@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # scripts/scribe-gate-attest.sh（gate ground-truth 証跡プロデューサ・sc-ex2）を検証する。
 # **実 bd write・実 admin gate はしない**（probe は read-only／record は --dry-run のみ・コスト大ゆえ）。
-# 道具がコード化する規約の SSOT = docs/protocol.md §5「gate の 3 義務」+ 幻影 backstop 追補。
+# 道具がコード化する規約の SSOT = docs/protocol.md §5「gate の義務」+ 幻影 backstop 追補。
 
 bats_require_minimum_version 1.5.0
 
@@ -33,7 +33,7 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
-@test "gate-attest(probe): 三点 + forensics + touch-check + scaffold を emit し exit 0" {
+@test "gate-attest(probe): 四点 + touch-check + scaffold を emit し exit 0" {
   run "$GA" probe --worktree "$WT" --base "$BASE" --self-test 'echo ok; true' --id sc-ex2 \
         --transcript "$WT/ts.jsonl" --marker-regex 'MARKERTOK' \
         --acceptance-file "$WT/acc.txt" --acceptance-path 'docs/*.md'
@@ -133,4 +133,18 @@ teardown() {
   [ "$status" -ne 0 ]
   run "$GA" probe --worktree "$WT" --base "$BASE" --self-test 'true' --nope
   [ "$status" -ne 0 ]
+}
+
+@test "gate-attest(probe): 不正な --marker-regex は fail-loud（silent に marker-hits=0 としない）" {
+  # 不正 ERE（未閉の '['）は grep exit 2。従来は 0 件と区別不能な marker-hits=0 に握り潰されていた
+  # （scan 未実行の偽陰性＝幻影 backstop の無音無効化）。上流検証で die することを固定する。
+  run "$GA" probe --worktree "$WT" --base "$BASE" --self-test 'true' \
+        --transcript "$WT/ts.jsonl" --marker-regex '['
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--marker-regex"* ]]
+  # 妥当な regex の真の 0 件は従来どおり件数 0 を emit する（fail-loud の巻き添えにしない）。
+  run "$GA" probe --worktree "$WT" --base "$BASE" --self-test 'true' \
+        --transcript "$WT/ts.jsonl" --marker-regex 'NO_SUCH_MARKER_ZZZ'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"marker-hits=0"* ]]
 }
