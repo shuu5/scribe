@@ -78,6 +78,14 @@ export const meta = {
 //        - 発火条件は selfTestCmd の有無のみ。未定義 bead(admin read-only gate=scribe-gate-args.sh は
 //          selfTestCmd を渡さない)では graceful skip(fail-open・skip を JSON へ明示)=read-only gate 経路が不変。
 //        - snapshot 合成・autoFix fail-closed ゲート・escalate 判定は一切触らない(独立追加)。
+// (11) per-stage effort(sc-94z・SSOT=sc-npa 論点5): sc-dc9 の「全 agent へ args.effort を一律 pin」を段別へ
+//      分化した。背骨原理『強度は gate 捕捉性 × confab でスケール』(methodology §1.1)の WF 内対応物=guard 段
+//      (Review/Verify/Fix)は cell effort の一括下げから構造独立に high 固定・mechanical guard 段(Self-test/
+//      Classify/Snapshot)は medium 固定・実装系(Plan/Implement)のみ再定義された args.effort(=cell effort)に
+//      従う。露出 knob は reviewEffort/verifyEffort の 2 つのみ(guard を xhigh へ opt-in)。effort 検証は
+//      sc-dc9 の EFFORT_ALLOWED(sc-ax4 SSOT mirror)を resolveEffort 経由で再利用し新検証路を作らない。
+//      返り値 effort は per-stage 要約 object{cell,review,verify,fix,classify,selfTest,snapshot}=呼出元が
+//      「guard 段が high に留まったか」を一次監査できる(receivedArgs/schemaHealth と対称の audit 面)。
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── (8) defensive args parse(un-2yy): string で届いたら JSON.parse、object はそのまま ──────────
@@ -111,7 +119,8 @@ if (typeof args === 'string') {
       autoFix: false, // 起動前に中断=自動修正は一切走っていない
       reviewModel: 'opus',
       verifyModel: 'opus',
-      effort: 'high', // (sc-dc9) EFFORT 定義前の早期中断=既定 high をリテラルで(return shape 一貫性)
+      // (sc-94z) per-stage effort 解決前の早期中断=既定をリテラルで(return shape 一貫性)。guard 段は high・mechanical 段は medium。
+      effort: { cell: 'high', review: 'high', verify: 'high', fix: 'high', classify: 'medium', selfTest: 'medium', snapshot: 'medium' },
       fableCapped: false,
       maxConcurrency: 0, // (D2) args 不明=cap 計算前。0=無 cap
       opusCapped: false,
@@ -312,21 +321,58 @@ if (_rawScribeAdd && !scribeAddPath) {
   log(`警告: scribeAddPath が path 安全文字を外れ無効化(${_rawScribeAdd.slice(0, 60)})。autoFix/implement が走る run では stage が scribe-add 固定でなく旧経路へ後退する(sandbox では git add -A の rc=128 死 risk・fail-open=autoFix は続行)。install path を ASCII-clean にするか args を見直すこと。`)
 }
 const MODEL = A.model || 'opus' // substantive 既定 = opus(cheap→opus 格上げ)
-// ── effort 統制(sc-dc9): 全 agent() 呼出しに opts.effort を明示 pin する。既定 high。──────────────
-// 目的: machine-global settings.json の "effortLevel":"xhigh" が dynamic WF の全 agent へ無差別波及するのを
-// 断つ(worker の xhigh 幻覚事例の根治=doobidoo 1e98254c)。既定 high・args.effort で上書き可(admin/worker が
-// 大規模設計等で xhigh を渡せる)。allowlist(low|medium|high|xhigh|max) 外は既定 high へ **fail-safe**(warn log)
-// = 予防を優先し、壊れた args でも WF を止めず安全側(high)へ倒す(scribe-spawn.sh の allowlist は spawn 時に
-// fail-loud で弾くが、WF 直叩き経路の防御として fail-safe を二重化する)。opts.effort は Workflow tool が受理する
+// ── per-stage effort 統制(sc-dc9 起源・sc-94z で per-stage 分化): 段ごとに effort を分けて pin する。────
+// 目的(sc-dc9): machine-global settings.json の "effortLevel":"xhigh" が dynamic WF の全 agent へ無差別波及
+// するのを断つ(worker の xhigh 幻覚事例の根治=doobidoo 1e98254c)。opts.effort は Workflow tool が受理する
 // (admin 実証済み)。roAgent/runAgent は opts を透過するため(base={...opts}, delete は agentType のみ)効く。
+// per-stage 分化(sc-94z・SSOT=sc-npa 論点5): 従来の「全 agent へ args.effort を一律 pin」を、背骨原理
+// 『強度は gate 捕捉性 × confab リスクでスケール』(methodology §1.1)に沿って段別へ分ける。段の割当:
+//   - Review/Verify/Fix = guard 段(WF 内の gate その物)= 但し書き(1) の WF 内対応物ゆえ **high 固定**。
+//     args.effort(cell effort)の一括下げから【構造的に独立】(cell effort を下げても guard は下がらない)。
+//     xhigh 化は reviewEffort/verifyEffort の個別 opt-in knob(reviewModel/verifyModel と同じ流儀)。Fix は
+//     knob を持たず high 固定(論点5①: 露出 knob は reviewEffort/verifyEffort の 2 つに絞る)。
+//   - Self-test/Classify/Snapshot = **medium 固定**。self-test は guard 連鎖の一部ゆえ low でなく medium 止まり
+//     (論点5②)。classify は誤分類が劣化止まり=gate 捕捉圏内ゆえ medium(③)。snapshot は契約(sc-94z)が段区分を
+//     明示しないが、self-test と同じ mechanical な read-only(git diff 収集)で、その失敗は snapshotFailed 網が
+//     gate で拾う(不変条件(5))ゆえ model litmus『純 read-only 探索』(methodology §1.1)で self-test と同区分に
+//     グルーピングし medium とする(sc-94z 実装判断・契約が明示せぬ段の解釈)。
+//   - Plan/Implement = **cell effort に従う**(args.effort を「実装系の段だけに効く cell effort」へ再定義・④)。
+// allowlist(low|medium|high|xhigh|max)外・未設定は既定へ **fail-safe**(warn log)= 壊れた args でも WF を止めず
+// 安全側へ倒す(scribe-spawn.sh の allowlist は spawn 時に fail-loud で弾くが、WF 直叩き経路の防御として二重化)。
 // SSOT-MIRROR(sc-ax4): この集合は bash 側 SSOT `SCRIBE_EFFORT_ALLOWLIST`(scripts/lib/scribe-lib.sh)の
 // mirror。WF sandbox は実行時に lib を source 不可(filesystem 非公開)ゆえ literal で複製する。両者の
 // drift は tests/effort-allowlist-ssot.bats が fail-loud で検知する(CC 新 tier 追加時の同時更新漏れ検知)。
 const EFFORT_ALLOWED = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
-const _rawEffort = typeof A.effort === 'string' ? A.effort.trim() : ''
-const EFFORT = EFFORT_ALLOWED.has(_rawEffort) ? _rawEffort : 'high'
-if (_rawEffort && !EFFORT_ALLOWED.has(_rawEffort)) {
-  log(`警告: effort='${_rawEffort}' は許可外(low|medium|high|xhigh|max)。既定 high へ fail-safe(sc-dc9)。`)
+// effort 解決の単一路(sc-94z consistency (a)=sc-ax4 SSOT 再利用): 全 effort は EFFORT_ALLOWED(=bash 側
+// allowlist の mirror)で検証し、allowlist 外・未設定は fallback へ fail-safe する。新 knob 用に別 validator を
+// 作らない(検証路を一本化=新検証路の増殖を防ぐ)。fallback を warn log で可視化する(silent に倒さない)。
+const resolveEffort = (raw, fallback, label) => {
+  const t = typeof raw === 'string' ? raw.trim() : ''
+  if (t && !EFFORT_ALLOWED.has(t)) {
+    log(`警告: ${label}='${t}' は許可外(low|medium|high|xhigh|max)。既定 ${fallback} へ fail-safe(sc-94z)。`)
+  }
+  return EFFORT_ALLOWED.has(t) ? t : fallback
+}
+// cell effort(sc-94z ④): 再定義された args.effort。Plan/Implement(実装系の段)にのみ効く。既定 high。
+const CELL_EFFORT = resolveEffort(A.effort, 'high', 'effort')
+// guard 段 knob(sc-94z ①): Review/Verify は既定 high 固定・reviewEffort/verifyEffort で xhigh 等へ opt-in する。
+// 既定は CELL_EFFORT でなく 'high'(cell effort の一括下げから構造独立=guard を道連れに下げない=但し書き(1))。
+const reviewEffort = resolveEffort(A.reviewEffort, 'high', 'reviewEffort')
+const verifyEffort = resolveEffort(A.verifyEffort, 'high', 'verifyEffort')
+// 固定 effort 段(sc-94z ①②③): Fix=high 固定(guard・knob 無し)。Classify/Self-test/Snapshot=medium 固定。
+const FIX_EFFORT = 'high'
+const CLASSIFY_EFFORT = 'medium'
+const SELFTEST_EFFORT = 'medium'
+const SNAPSHOT_EFFORT = 'medium'
+// 返り値監査用の per-stage effort 要約(呼出元/admin が「guard 段が high に留まったか」を返り値から直読する)。
+const effortSummary = {
+  cell: CELL_EFFORT, // Plan/Implement(実装系の段)
+  review: reviewEffort, // 既定 high・reviewEffort knob で opt-in
+  verify: verifyEffort, // 既定 high・verifyEffort knob で opt-in
+  fix: FIX_EFFORT, // high 固定(guard・knob 無し)
+  classify: CLASSIFY_EFFORT, // medium 固定
+  selfTest: SELFTEST_EFFORT, // medium 固定
+  snapshot: SNAPSHOT_EFFORT, // medium 固定
 }
 const maxRounds = Number.isInteger(A.maxRounds) && A.maxRounds > 0 ? A.maxRounds : 3 // hard cap
 // ── (D2) opus 並列 cap(un-3yc): review fan-out / verify parallel(= opus 経路)の同時実行を args で絞る。
@@ -757,7 +803,7 @@ async function runSelfTest(when) {
     // mechanical run(substantive reasoning でない)。read-only(roAgent=scribe:explore: Bash あり/Edit・Write
     // なし=self-test を実行するが編集はできない)tools + sonnet。roAgent が RO agentType を注入 + not found fallback。
     model: 'sonnet',
-    effort: EFFORT, // (sc-dc9) settings.json xhigh 波及を断ち既定 high で pin(全 agent 一律)
+    effort: SELFTEST_EFFORT, // (sc-94z ②) self-test = medium 固定(guard 連鎖の一部ゆえ low でなく medium 止まり)
     schema: SELFTEST_RUN_SCHEMA,
   }).catch(() => null)
   if (!r) {
@@ -810,7 +856,7 @@ if (isWorkerCell) {
       autoFix: false, // 起動前に中断=自動修正は一切走っていない
       reviewModel,
       verifyModel,
-      effort: EFFORT, // (sc-dc9) 解決した実効 effort(監査用・return shape 一貫性)
+      effort: effortSummary, // (sc-94z) 解決した per-stage effort(監査用・return shape 一貫性)
       fableCapped: isFable(reviewModel) || isFable(verifyModel),
       maxConcurrency, // (D2) opus 経路 cap(監査用)。0=無 cap
       opusCapped: maxConcurrency > 0,
@@ -840,7 +886,7 @@ if (!taskType) {
     label: 'classify',
     phase: 'Classify',
     model: stageModel, // roAgent が RO agentType('scribe:explore')注入 + not found fallback(read-only 段)
-    effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
+    effort: CLASSIFY_EFFORT, // (sc-94z ③) classify = medium 固定(誤分類は劣化止まり=gate 捕捉圏内)
     schema: CLASSIFY_SCHEMA,
   }, degClassify) // (sc-j32) SCHEMA_DISCIPLINE 前置 + null/degenerate → null(下の (c && c.taskType) fallback へ合流)
   taskType = (c && c.taskType) || 'executable'
@@ -857,7 +903,7 @@ if (doPlan) {
     label: 'plan',
     phase: 'Plan',
     model: stageModel, // roAgent が RO agentType('scribe:explore')注入 + not found fallback(read-only 段)
-    effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
+    effort: CELL_EFFORT, // (sc-94z ④) plan = cell effort に従う(args.effort=実装系の段に効く cell effort)
     schema: PLAN_SCHEMA,
   }, degPlan) // (sc-j32) null/degenerate → null(下の (p && p.acceptance) で精緻化スキップへ合流)
   if (p && p.acceptance) {
@@ -883,7 +929,7 @@ if (doImplement) {
     label: 'implement',
     phase: 'Implement',
     model: stageModel, // 編集するので roAgent(read-only agentType)を使わず agent() 直呼び(全ツール)
-    effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
+    effort: CELL_EFFORT, // (sc-94z ④) implement = cell effort に従う(args.effort=実装系の段に効く cell effort)
   })
   log(`implement: ${impl ? String(impl).slice(0, 120) : '(no output)'}`)
 }
@@ -934,7 +980,7 @@ while (round < effectiveCap) {
       label: `snapshot r${round}`,
       phase: 'Review',
       model: stageModel, // roAgent が RO agentType('scribe:explore')注入 + not found fallback(read-only 段)
-      effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
+      effort: SNAPSHOT_EFFORT, // (sc-94z) snapshot = medium 固定(mechanical read-only=git diff 収集・失敗は snapshotFailed 網が gate で拾う=self-test と同区分)
     })
     // snapshot agent には「生 diff のみ・空なら EMPTY_DIFF の一語」を指示しているが、LLM は説明文を前置しがち
     // (例: "Both (a) and (b) are empty.\n\nEMPTY_DIFF")。exact-match(snap.trim()!=='EMPTY_DIFF')だと説明文付きの
@@ -993,7 +1039,7 @@ while (round < effectiveCap) {
         label: `review:${d.key} r${round}`,
         phase: 'Review',
         model: reviewModel, // 既定=MODEL(opus)。fable 指定時のみ runAgent が ≤2 cap を適用。runAgent 内 roAgent が RO agentType 注入 + fallback
-        effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
+        effort: reviewEffort, // (sc-94z ①) review = guard 段ゆえ既定 high 固定(cell effort 一括下げから独立)・reviewEffort knob で xhigh opt-in
         schema: FINDINGS_SCHEMA,
       }, degFindings).catch(() => ({ findings: [], __reviewFailed: true })), // (sc-j32) null/degenerate → null → 下の reviewFailed=!review へ合流(machinery 失敗=escalate)
     (review, d) => {
@@ -1006,7 +1052,7 @@ while (round < effectiveCap) {
             label: `verify:${d.key}:${shortTitle(f)} r${round}`,
             phase: 'Verify',
             model: verifyModel, // 既定=MODEL(opus)。fable 指定時のみ runAgent が ≤2 cap を適用。runAgent 内 roAgent が RO agentType 注入 + fallback
-            effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
+            effort: verifyEffort, // (sc-94z ①) verify = guard 段ゆえ既定 high 固定(cell effort 一括下げから独立)・verifyEffort knob で xhigh opt-in
             schema: VERDICT_SCHEMA,
           }, degVerdict) // (sc-j32) null/degenerate → null → verdict:null(unverified=verdict 鵜呑み禁止へ合流)
             .then((v) => ({ ...f, dimension: d.key, verdict: v }))
@@ -1092,7 +1138,7 @@ while (round < effectiveCap) {
     label: `autofix r${round}`,
     phase: 'Fix',
     model: stageModel, // 編集するので roAgent(read-only agentType)を使わず agent() 直呼び(全ツール)
-    effort: EFFORT, // (sc-dc9) settings.json 非依存で pin(既定 high)
+    effort: FIX_EFFORT, // (sc-94z ①) fix = guard 段ゆえ high 固定(knob 無し・cell effort 一括下げから独立)
     schema: FIX_SCHEMA,
   }, degFix) // (sc-j32) null/degenerate(summary=test 等)→ null → 下の if(!fix) escalate へ合流(fail-closed)
   if (!fix) {
@@ -1176,7 +1222,9 @@ const result = {
   autoFix: canAutoFix,
   reviewModel, // per-stage model(既定=MODEL)。監査用に明示
   verifyModel,
-  effort: EFFORT, // (sc-dc9) 全 agent に pin した実効 effort(既定 high・settings.json 非依存)。呼出元監査用
+  effort: effortSummary, // (sc-94z) per-stage effort 要約{cell,review,verify,fix,classify,selfTest,snapshot}。呼出元監査用(guard 段が high か直読)
+  reviewEffort, // (sc-94z) review 段の解決 effort(既定 high・knob 上書き可)。監査用に明示
+  verifyEffort, // (sc-94z) verify 段の解決 effort(既定 high・knob 上書き可)
   fableCapped: isFable(reviewModel) || isFable(verifyModel), // fable ≤2 cap が効いた経路か
   maxConcurrency, // (D2) opus 経路 cap(0=無 cap=harness 任せ)。監査用
   opusCapped: maxConcurrency > 0, // (D2) opus limiter が effective だった経路か

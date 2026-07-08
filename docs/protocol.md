@@ -60,7 +60,7 @@ worker の effort（`scribe-spawn --effort <LEVEL>`・既定 high）は spawn **
 
 **非対称 override**: high へ倒すのは**常に無条件可**（迷ったら high）。medium へ落とすのは**②条件充足が必須**。②を充足していながら high を選ぶ場合は**理由 1 行**を添える（無自覚なデフォルト回帰＝「何でも high」に摩擦を付ける）。判定時点は spawn 前ゆえ材料は issue 自然言語のみ——完全機械化はしない（signal 不足）・純裁量にもしない（「全部 high」の失敗実績）。
 
-**transitional 例外（sc-94z 着地まで）**: 自己点検経路は worker 実効 effort を cell-quality の `args.effort` へ自動伝播する（`scribe-selftest-args.sh`）が、per-stage 分離（guard 段を下げない）は未実装ゆえ medium spawn は gate 段まで medium へ降格する。**それまでは②が medium 適格でも high を選ぶ**（理由 1 行に「sc-94z pending」）。SSOT = `docs/methodology.md` §1.1 per-stage 表 caveat。
+**per-stage effort（sc-94z 着地済）**: 自己点検経路は worker 実効 effort を cell-quality の `args.effort`（＝cell effort）へ伝播する（`scribe-selftest-args.sh`）が、WF 側の per-stage 分離により `args.effort` は **Plan/Implement 段にのみ**効き **guard 段（Review/Verify/Fix）は high 固定で独立**する。ゆえに **②が medium 適格なら medium で spawn してよい**（medium worker でも guard 段は high に留まり但し書き(1)＝gate 側を下げないを充足。e2e pin = `tests/cell-quality-selftest.bats` の sc-o10 errata assert）。guard 段を高リスク cell で xhigh へ上げるなら `--review-effort`/`--verify-effort` を明示する。SSOT = `docs/methodology.md` §1.1 per-stage 表。
 
 > 一次出典: bd `sc-npa` notes 論点3（medium 判定の運用 = C 中間案: 2 問チェックリスト + 1 行記録 + 非対称 override・完全機械化A/純裁量B を却下）・論点2（2 枝決定木・spawn 前判定）。基準本文の SSOT = `docs/methodology.md` §1.1。
 

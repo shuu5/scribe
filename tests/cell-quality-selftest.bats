@@ -18,6 +18,7 @@ setup() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   DRIVER="$REPO_ROOT/tests/cell-quality-selftest.driver.mjs"
   WF="$REPO_ROOT/workflows/cell-quality.workflow.js"
+  SELFTEST="$REPO_ROOT/scripts/scribe-selftest-args.sh" # (sc-94z) 標準 worker 経路の args 生成器(e2e sc-o10 assert 用)
   # worker-cell(autoFix)の完全な args(fail-fast を通過する最小充足)。
   ARGS_WORKER='{"taskTitle":"cell","worktree":"/tmp/wt","goal":"do x","selfTestCmd":"bats tests/x.bats","autoFix":true,"taskType":"testable"}'
   # single モード(autoFix off)= selfTestCmd 未定義。静的 diff を渡してレビュー対象を確保。
@@ -177,46 +178,144 @@ setup() {
   grep -q 'skipped: true' "$WF"
 }
 
-# ── effort 統制(sc-dc9): 全 agent() に opts.effort が pin される ──────────────────────
-@test "sc-dc9: 既定(args.effort 未指定)で全 agent 呼出しが effort=high で pin される" {
-  run env CQ_ARGS="$ARGS_WORKER" node "$DRIVER" run
-  [ "$status" -eq 0 ]
-  # 全 agent 呼出しに effort が届き(undefined 無し)、distinct 値は 'high' のみ=全箇所 pin かつ既定 high。
-  [[ "$output" == *"K effortAllPinned true"* ]]
-  [[ "$output" == *"K effortDistinct high"* ]]
-  # 返り値サマリにも解決 effort が載る(呼出元監査用)。
-  [[ "$output" == *"K resultEffort high"* ]]
-}
+# ── per-stage effort(sc-94z・SSOT=sc-npa 論点5): sc-dc9 の「全 agent 一律 pin」を段別へ分化 ────────────
+# guard 段(Review/Verify/Fix)は cell effort の一括下げから構造独立に high 固定・mechanical 段(Self-test/
+# Classify/Snapshot)は medium 固定・実装系(Plan/Implement)のみ cell effort(=再定義 args.effort)に従う。
+# 露出 knob は reviewEffort/verifyEffort の 2 つのみ。effort pin 自体(sc-dc9)= settings.json 非依存は不変。
 
-@test "sc-dc9: args.effort=xhigh で全 agent が xhigh に pin される(settings.json 非依存で args 上書きが効く)" {
-  run env CQ_ARGS='{"taskTitle":"cell","worktree":"/tmp/wt","goal":"do x","selfTestCmd":"bats tests/x.bats","autoFix":true,"taskType":"testable","effort":"xhigh"}' \
+@test "sc-94z: 既定 cell effort で mechanical 段=medium・guard 段(Review/Verify)=high(段別分化・behavioral)" {
+  # taskType 未指定で classify を走らせ、finding 1 件を refute させて review+verify も走らせる(fix は不発=clean 収束)。
+  run env CQ_ARGS='{"taskTitle":"cell","worktree":"/tmp/wt","goal":"do x","selfTestCmd":"bats tests/x.bats","autoFix":true}' \
+    CQ_REVIEW_FINDINGS='[{"title":"x","severity":"critical","location":"a:1","rationale":"r"}]' \
+    CQ_VERIFY_REFUTED=true \
     node "$DRIVER" run
   [ "$status" -eq 0 ]
+  # 全 agent 呼出しに effort が届く(undefined 無し)=sc-dc9 の pin 自体は不変。
   [[ "$output" == *"K effortAllPinned true"* ]]
-  [[ "$output" == *"K effortDistinct xhigh"* ]]
-  [[ "$output" == *"K resultEffort xhigh"* ]]
+  # mechanical 段 = medium 固定(behavioral)。
+  [[ "$output" == *"K effortStage.classify medium"* ]]
+  [[ "$output" == *"K effortStage.selftest medium"* ]]
+  [[ "$output" == *"K effortStage.snapshot medium"* ]]
+  # guard 段(Review/Verify) = 既定 high(behavioral)。
+  [[ "$output" == *"K effortStage.review high"* ]]
+  [[ "$output" == *"K effortStage.verify high"* ]]
+  # 返り値 per-stage 要約(呼出元監査面)。
+  [[ "$output" == *"K resultEffort.cell high"* ]]
+  [[ "$output" == *"K resultEffort.fix high"* ]]
+  [[ "$output" == *"K resultEffort.classify medium"* ]]
+  [[ "$output" == *"K resultEffort.selfTest medium"* ]]
+  [[ "$output" == *"K resultEffort.snapshot medium"* ]]
 }
 
-@test "sc-dc9: allowlist 外の args.effort は既定 high へ fail-safe(WF は止めず警告 log・spawn の fail-loud と二重化)" {
-  run env CQ_ARGS='{"taskTitle":"cell","worktree":"/tmp/wt","goal":"do x","selfTestCmd":"bats tests/x.bats","autoFix":true,"taskType":"testable","effort":"bogus"}' \
+@test "sc-94z ④: Plan/Implement は cell effort(args.effort)に従う(medium cell → plan/implement=medium)" {
+  # doPlan+doImplement を有効化し effort=medium(cell effort)を渡す。single モード(autoFix 無し)+ 静的 diff。
+  run env CQ_ARGS='{"taskTitle":"cell","worktree":"/tmp/wt","goal":"do x","taskType":"testable","effort":"medium","doPlan":true,"doImplement":true,"diff":"diff --git a/x b/x\n@@ -1 +1 @@\n-o\n+n\n"}' \
     node "$DRIVER" run
   [ "$status" -eq 0 ]
-  [[ "$output" == *"K effortDistinct high"* ]]
-  [[ "$output" == *"K resultEffort high"* ]]
-  # fail-safe を warn log で可視化する(silent に既定へ倒さない)=behavioral に発火を確認。
+  # 実装系の段 = cell effort(medium)に追随(behavioral)。
+  [[ "$output" == *"K effortStage.plan medium"* ]]
+  [[ "$output" == *"K effortStage.implement medium"* ]]
+  # 返り値の cell フィールドも medium。
+  [[ "$output" == *"K resultEffort.cell medium"* ]]
+}
+
+@test "sc-94z ①(核心): guard 段は cell effort の一括下げから独立(effort=medium でも Review/Verify=high)" {
+  # cell effort=medium を渡しても guard 段(Review/Verify)は high を保つ=但し書き(1)の WF 内対応物。
+  run env CQ_ARGS='{"taskTitle":"cell","worktree":"/tmp/wt","goal":"do x","selfTestCmd":"bats tests/x.bats","autoFix":true,"effort":"medium"}' \
+    CQ_REVIEW_FINDINGS='[{"title":"x","severity":"critical","location":"a:1","rationale":"r"}]' \
+    CQ_VERIFY_REFUTED=true \
+    node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  # cell effort=medium だが guard 段は high(構造独立)。
+  [[ "$output" == *"K effortStage.review high"* ]]
+  [[ "$output" == *"K effortStage.verify high"* ]]
+  # mechanical 段は medium・cell も medium。
+  [[ "$output" == *"K effortStage.classify medium"* ]]
+  [[ "$output" == *"K resultEffort.cell medium"* ]]
+  [[ "$output" == *"K resultEffort.review high"* ]]
+  [[ "$output" == *"K resultEffort.verify high"* ]]
+  [[ "$output" == *"K resultEffort.fix high"* ]]
+}
+
+@test "sc-94z(sc-o10 errata): scribe-selftest-args.sh 経由で medium worker を模しても Review/Verify/Fix が high に留まる" {
+  # sc-o10 gate errata の再発防止(sc-7ac 伝播が前提): 標準 worker 経路(selftest-args)で medium worker を模し、
+  # 生成 args を WF driver に流して guard 段(Review/Verify/Fix)が high に留まることを e2e で確認する。
+  # confirmed blocking(refuted=false)+ self-test pass で fix 段も走らせて high を観測する。
+  local ARGS
+  ARGS="$(CLAUDE_CODE_EFFORT_LEVEL=medium "$SELFTEST" --dry-run --worktree /tmp/wt \
+    --self-test 'bats tests/x.bats' --task-type testable sc-94z)"
+  # selftest-args が effort=medium を焼いた(cell effort)ことを前提として担保する。
+  echo "$ARGS" | python3 -c 'import json,sys; assert json.load(sys.stdin).get("effort")=="medium", "selftest-args が effort=medium を焼いていない"'
+  run env CQ_ARGS="$ARGS" \
+    CQ_REVIEW_FINDINGS='[{"title":"x","severity":"critical","location":"a:1","rationale":"boom"}]' \
+    CQ_VERIFY_REFUTED=false CQ_FIX_SELFTEST_PASSED=true \
+    node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  # medium worker(cell effort=medium)でも guard 段は high に留まる(核心 assert・sc-o10 再発防止)。
+  [[ "$output" == *"K effortStage.review high"* ]]
+  [[ "$output" == *"K effortStage.verify high"* ]]
+  [[ "$output" == *"K effortStage.fix high"* ]]
+  # cell effort は medium へ追随(返り値 cell フィールドで確認)。
+  [[ "$output" == *"K resultEffort.cell medium"* ]]
+}
+
+@test "sc-94z ①: reviewEffort/verifyEffort knob で guard 段を xhigh へ opt-in できる" {
+  run env CQ_ARGS='{"taskTitle":"cell","worktree":"/tmp/wt","goal":"do x","selfTestCmd":"bats tests/x.bats","autoFix":true,"reviewEffort":"xhigh","verifyEffort":"xhigh"}' \
+    CQ_REVIEW_FINDINGS='[{"title":"x","severity":"critical","location":"a:1","rationale":"r"}]' \
+    CQ_VERIFY_REFUTED=true \
+    node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"K effortStage.review xhigh"* ]]
+  [[ "$output" == *"K effortStage.verify xhigh"* ]]
+  [[ "$output" == *"K resultEffort.review xhigh"* ]]
+  [[ "$output" == *"K resultEffort.verify xhigh"* ]]
+  # Fix は knob を持たず high 固定(reviewEffort/verifyEffort に引きずられない)。
+  [[ "$output" == *"K resultEffort.fix high"* ]]
+}
+
+@test "sc-94z: allowlist 外の effort/reviewEffort は既定へ fail-safe(warn log で可視化)" {
+  run env CQ_ARGS='{"taskTitle":"cell","worktree":"/tmp/wt","goal":"do x","selfTestCmd":"bats tests/x.bats","autoFix":true,"effort":"bogus","reviewEffort":"ultra"}' \
+    node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  # cell effort は既定 high・review は既定 high(いずれも fail-safe)。
+  [[ "$output" == *"K resultEffort.cell high"* ]]
+  [[ "$output" == *"K resultEffort.review high"* ]]
+  # fail-safe を warn log で可視化(silent に倒さない)=behavioral に発火を確認。
   [[ "$output" == *"K effortFailSafeWarned true"* ]]
 }
 
-# ── WF 本体の静的 pin 検査: 全 agent()/roAgent()/runAgent() opts に effort が明示されている ──
-@test "sc-dc9: WF 本体の agent 呼出し全箇所に effort: EFFORT が明示 pin されている(静的)" {
+# ── WF 本体の静的 pin 検査: per-stage effort 定数 + 各段割当て(sc-dc9 一律 pin から分化) ──
+@test "sc-94z: WF 本体が per-stage effort 定数と各段割当てを持つ(静的)" {
   [ -f "$WF" ]
-  # EFFORT 解決(allowlist + fail-safe high)が存在する。
-  grep -q "const EFFORT = EFFORT_ALLOWED.has" "$WF"
+  # EFFORT_ALLOWED(sc-ax4 SSOT mirror)は温存(検証路の単一 SSOT・drift 検知は effort-allowlist-ssot.bats)。
   grep -q "EFFORT_ALLOWED = new Set(\['low', 'medium', 'high', 'xhigh', 'max'\])" "$WF"
-  # agent 呼出し 8 箇所 + result 2 箇所 = effort: EFFORT が 10 回以上。
+  # 旧・一律 pin の `const EFFORT =` / `effort: EFFORT` は撤去済み(段別へ分化)。
+  ! grep -qE 'const EFFORT =' "$WF"
+  ! grep -qE 'effort: EFFORT\b' "$WF"
+  # 新検証路を作らず既存 allowlist を再利用する単一 resolver(consistency (a))。
+  grep -q 'const resolveEffort = ' "$WF"
+  grep -q 'EFFORT_ALLOWED.has(t)' "$WF"
+  # per-stage 定数が存在する。
+  grep -q 'const CELL_EFFORT = resolveEffort' "$WF"
+  grep -q 'const reviewEffort = resolveEffort' "$WF"
+  grep -q 'const verifyEffort = resolveEffort' "$WF"
+  grep -qE "const FIX_EFFORT = 'high'" "$WF"
+  grep -qE "const CLASSIFY_EFFORT = 'medium'" "$WF"
+  grep -qE "const SELFTEST_EFFORT = 'medium'" "$WF"
+  grep -qE "const SNAPSHOT_EFFORT = 'medium'" "$WF"
+  # 各段が正しい per-stage 定数へ割り当たる(guard=knob/固定・mechanical=medium)。
+  grep -q 'effort: reviewEffort,' "$WF"
+  grep -q 'effort: verifyEffort,' "$WF"
+  grep -q 'effort: FIX_EFFORT,' "$WF"
+  grep -q 'effort: CLASSIFY_EFFORT,' "$WF"
+  grep -q 'effort: SELFTEST_EFFORT,' "$WF"
+  grep -q 'effort: SNAPSHOT_EFFORT,' "$WF"
+  # Plan/Implement は cell effort(2 箇所)。
   local n
-  n="$(grep -c 'effort: EFFORT' "$WF")"
-  [ "$n" -ge 10 ]
+  n="$(grep -c 'effort: CELL_EFFORT,' "$WF")"
+  [ "$n" -ge 2 ]
+  # 返り値 effort は per-stage 要約 object。
+  grep -q 'effort: effortSummary,' "$WF"
   # CLAUDE_EFFORT(非正規名)を WF が使わない(念のため・WF は env を書かないが方針として)。
   ! grep -q 'CLAUDE_EFFORT\b' "$WF"
 }
