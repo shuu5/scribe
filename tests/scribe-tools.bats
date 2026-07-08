@@ -801,6 +801,33 @@ _mk_beads() {
   [[ "$output" == *'CLAUDE_CODE_EFFORT_LEVEL:-<unset>'* ]]
 }
 
+@test "spawn(sc-0df): 起動直後の SPAWNED marker write mandate が worker prompt に焼かれる（受入条件・orch-gv9）" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  # mandate 節が存在する。
+  [[ "$output" == *"起動直後の SPAWNED marker write"* ]]
+  # marker 形式が検知側契約どおり正確に焼かれる（bd-id 展開後・prefix 完全一致）。
+  [[ "$output" == *"[SPAWNED--un-4nm]"* ]]
+  # bdw --append-notes 経由で自 issue へ write する具体コマンドが焼かれる。
+  [[ "$output" == *"bdw"*"update un-4nm --append-notes"*"[SPAWNED--un-4nm]"* ]]
+  # write 失敗時は zombie fallback の pane sentinel へ接続する（§6 規律）。
+  [[ "$output" == *"SCRIBE-ENV-DEGRADED: un-4nm"* ]]
+}
+
+@test "spawn(sc-0df): 焼かれた SPAWNED marker が検知側 regex（行頭空白許容・prefix 完全一致）に一致する" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  # prompt に marker literal が焼かれている（dry-run は各行を "  | " で prefix するため prose 内・部分一致で拾う）。
+  [[ "$output" == *"[SPAWNED--un-4nm]"* ]]
+  # 検知側契約（scriptorium orch-gv9）: marker を行頭に置いたとき厳密 regex に一致する。TUI インデントの
+  # 先頭空白は許容し、prefix [SPAWNED-- は完全一致で pin する。
+  DET_RE='^[[:space:]]*\[SPAWNED--un-4nm\]'
+  printf '%s\n' '[SPAWNED--un-4nm]'    | grep -Eq "$DET_RE"   # 素の行頭
+  printf '%s\n' '   [SPAWNED--un-4nm]' | grep -Eq "$DET_RE"   # TUI インデント（先頭空白許容）
+  # prefix 完全一致: 近縁 prefix は検知側に拾われない（一意性 pin）。
+  ! printf '%s\n' '[SPAWNED-Xun-4nm]'  | grep -Eq "$DET_RE"
+}
+
 @test "spawn(sc-dc9): cld-spawn --help に --effort が実在するときだけ spawn 行へ --effort（feature-detect・un-ivb 防御）" {
   detect="$BATS_TEST_TMPDIR/cld-effort-detect"
   printf '#!/usr/bin/env bash\n[ "$1" = --help ] && { echo "Usage: cld-spawn [--model M] [--effort L]"; exit 0; }\nexit 0\n' > "$detect"
