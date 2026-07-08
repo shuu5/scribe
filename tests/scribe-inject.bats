@@ -27,9 +27,11 @@ case "$sub" in
   capture-pane)
     # STUB_NO_BOX=1 なら入力ボックスを含まない capture（send の INCONCLUSIVE 経路検証用）。
     if [[ "${STUB_NO_BOX:-0}" == 1 ]]; then printf '%s\n' 'Thinking… (esc to interrupt)'; exit 0; fi
+    # 実 CC TUI 構造（水平罫線ペア + ❯ + status bar）を模す（Type A 経路を send でも通す）。
     n=$(cat "$S/enters"); thr="${STUB_CLEAR_AFTER:-2}"
-    if (( n >= thr )); then printf '%s\n' '╭────────────╮' '│ >          │' '╰────────────╯'
-    else printf '%s\n' '╭────────────╮' '│ > payload-tail-marker │' '╰────────────╯'; fi ;;
+    R='──────────────────────────────────'
+    if (( n >= thr )); then printf '%s\n' "$R" '❯ ' "$R" '  user@host  scribe  main'
+    else printf '%s\n' "$R" '❯ payload-tail-marker' "$R" '  user@host  scribe  main'; fi ;;
 esac
 STUB
   chmod +x "$STUB_DIR/tmux"
@@ -121,6 +123,45 @@ EOF
 @test "verify: capture を stdin からも読める" {
   run bash -c "printf '%s\n' '╭──╮' '│ >  │' '╰──╯' | '$INJECT' verify --marker x"
   [ "$status" -eq 0 ]
+}
+
+# --- 実 CC TUI capture（sc-6vj gate errata・水平罫線ペア + ❯ + status bar + 上方に bd テーブル corner box）---
+# fixture = admin が本物の pane を capture-pane -p した生データ（email/username のみサニタイズ・構造保存）。
+# 旧実装は上方 corner box を誤選択し、空入力欄なのに拾えず fail-open した。以下 3 assert で pin する。
+
+@test "real capture: 空 ❯ 入力欄 + 不在 marker → DELIVERED exit0（誤選択 corner box を排除）" {
+  run "$INJECT" verify --marker zzz-nonexistent --capture-file "$REPO_ROOT/tests/fixtures/real-cc-capture.txt"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *INJECT_DELIVERED* ]]
+}
+
+@test "real capture: ❯ 行へ marker 挿入 → RESIDUAL exit3（実入力欄の残留を検知）" {
+  python3 - "$REPO_ROOT/tests/fixtures/real-cc-capture.txt" > "$CAP" <<'PY'
+import sys
+L = open(sys.argv[1], encoding="utf-8").read().split("\n")
+# 空 ❯ 行（末尾から探す）へ marker を挿入。
+for i in range(len(L)-1, -1, -1):
+    if L[i].startswith("❯"):
+        L[i] = "❯ STEER-MARKER-XYZ"; break
+sys.stdout.write("\n".join(L))
+PY
+  run "$INJECT" verify --marker STEER-MARKER-XYZ --capture-file "$CAP"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *INJECT_RESIDUAL* ]]
+}
+
+@test "real capture: ❯ 行へ paste placeholder 挿入 → RESIDUAL exit3" {
+  python3 - "$REPO_ROOT/tests/fixtures/real-cc-capture.txt" > "$CAP" <<'PY'
+import sys
+L = open(sys.argv[1], encoding="utf-8").read().split("\n")
+for i in range(len(L)-1, -1, -1):
+    if L[i].startswith("❯"):
+        L[i] = "❯ [Pasted text +7 lines]"; break
+sys.stdout.write("\n".join(L))
+PY
+  run "$INJECT" verify --marker zzz-nonexistent --capture-file "$CAP"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *INJECT_RESIDUAL* ]]
 }
 
 # --- send: オーケストレーション（stub tmux）---------------------------------

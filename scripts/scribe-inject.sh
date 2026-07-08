@@ -31,10 +31,15 @@
 #             verify する。RESIDUAL なら Enter を追送して再検証（incident A の回復を機械化）。retry 尽きても
 #             残留なら fail-loud。tmux バイナリは SCRIBE_TMUX で差し替え可（テスト seam）。
 #
-# 入力ボックス検知: CC TUI は角丸ボックス（╭ … │ > … │ … ╰）で入力欄を描く。capture の *最後* の
-#   ボックス（bottom corner ╰/└ から直上の top corner ╭/┌ まで）を入力欄と見なし、内部から枠 glyph と
-#   先頭プロンプト '>' を剥がした残りを interior とする。ボックスが見つからなければ INCONCLUSIVE（保守的に
-#   fail-loud＝確認できないのに『送信済み』と主張しない・incident B 対策）。
+# 入力ボックス検知（sc-6vj gate errata で実 CC TUI と突合し改訂）: 検知は capture の *最下部に最も近い*
+#   構造へ anchor する（scrollback 中の引用/描画由来の box を誤選択しない）。2 型に両対応:
+#   - Type A（実 CC TUI・優先）: 入力欄は角丸枠でなく *水平罫線 ─ のペア*（末尾装飾「… ultracode ─」
+#     許容）で描かれ、プロンプトは ❯（U+276F）。最下部の罫線行を下端・直上の罫線行を上端とし間を interior
+#     とする（下端罫線より下の status bar 行は interior 外）。空入力欄は「❯ + NBSP(U+00A0)」で描かれる。
+#   - Type B（fallback）: 角丸/角ボックス（╭ … │ > … ╰）。最下部の ╰/└ から直上の ╭/┌ まで。
+#   プロンプトは ❯ / > 両対応。ボックス未検出なら INCONCLUSIVE（保守的 fail-loud＝確認できないのに
+#   『送信済み』と主張しない・incident B 対策）。旧実装は角丸枠のみ前提で、実 TUI の水平罫線入力欄を拾えず
+#   上方の corner box（bd テーブル等）を誤選択し、その interior が空だと残留を見落とす fail-open があった。
 #
 # 残留判定（interior に対して順に評価）:
 #   1. marker が interior に含まれる            → RESIDUAL（自分の注入テキストが入力欄に居る＝未送信）
@@ -73,35 +78,67 @@ EOF
   exit "${1:-0}"
 }
 
-# _extract_input_box — stdin の capture から「最後の入力ボックス interior」を stdout に出す。
-#   枠 glyph（│ と box-drawing）を除去し、先頭プロンプト '>' を剥ぐ。ボックス未検出なら return 4。
+# _is_input_rule <line> — 入力欄の「水平罫線行」か判定する（実 CC TUI の入力欄は角丸枠でなく
+#   水平罫線 ─ のペアで描かれる・sc-6vj gate errata で実測）。条件: ─ を 10 連以上含み、かつ
+#   縦線/コーナー/交差 glyph（│┌┐└┘├┤┬┴┼╭╮╰╯）を一切含まない。これで bd テーブル等の枠線
+#   （必ず │ や交差を含む）を除外しつつ、末尾装飾（例「… ultracode ─」）付きの罫線も拾う。
+_is_input_rule() {
+  case "$1" in
+    *"│"* | *"┌"* | *"┐"* | *"└"* | *"┘"* | *"├"* | *"┤"* | *"┬"* | *"┴"* | *"┼"* \
+      | *"╭"* | *"╮"* | *"╰"* | *"╯"*) return 1 ;;
+  esac
+  case "$1" in
+    *"──────────"*) return 0 ;;   # ─ × 10 連以上
+    *) return 1 ;;
+  esac
+}
+
+# _extract_input_box — stdin の capture から「入力欄 interior」を stdout に出す。ボックス未検出なら return 4。
+#   最下部に最も近い構造へ anchor し、遠い（scrollback 中の）box を誤選択しない（sc-6vj gate errata）。
+#   Type A（実 CC TUI・優先）= 水平罫線ペア: 最下部の罫線行を下端、その直上の罫線行を上端とし、
+#     間を interior とする（下端罫線より下の status bar 行は interior 外）。プロンプトは ❯ / > 両対応。
+#   Type B（fallback）= 角丸/角 box: 最下部の ╰/└ から直上の ╭/┌ まで。
 _extract_input_box() {
   local -a lines=()
   mapfile -t lines
-  local n=${#lines[@]} bot=-1 top=-1 i
+  local n=${#lines[@]} i start=-1 end=-1
+  # --- Type A: 水平罫線ペア（最下部優先）---
+  local r2=-1 r1=-1
   for ((i = n - 1; i >= 0; i--)); do
-    case "${lines[i]}" in
-      *"╰"* | *"└"*) bot=$i; break ;;
-    esac
+    if _is_input_rule "${lines[i]}"; then r2=$i; break; fi
   done
-  (( bot >= 0 )) || return 4
-  for ((i = bot - 1; i >= 0; i--)); do
-    case "${lines[i]}" in
-      *"╭"* | *"┌"*) top=$i; break ;;
-    esac
-  done
-  (( top >= 0 )) || return 4
+  if (( r2 >= 0 )); then
+    for ((i = r2 - 1; i >= 0; i--)); do
+      if _is_input_rule "${lines[i]}"; then r1=$i; break; fi
+    done
+    if (( r1 >= 0 )); then start=$((r1 + 1)); end=$((r2 - 1)); fi
+  fi
+  # --- Type B: corner box（最下部の ╰/└ → 直上の ╭/┌）---
+  if (( start < 0 )); then
+    local bot=-1 top=-1
+    for ((i = n - 1; i >= 0; i--)); do
+      case "${lines[i]}" in *"╰"* | *"└"*) bot=$i; break ;; esac
+    done
+    (( bot >= 0 )) || return 4
+    for ((i = bot - 1; i >= 0; i--)); do
+      case "${lines[i]}" in *"╭"* | *"┌"*) top=$i; break ;; esac
+    done
+    (( top >= 0 )) || return 4
+    start=$((top + 1)); end=$((bot - 1))
+  fi
+  # --- interior emit（両 Type 共通）---
   local first=1 line
-  for ((i = top + 1; i < bot; i++)); do
+  for ((i = start; i <= end; i++)); do
     line="${lines[i]}"
-    # 枠側面と box-drawing glyph を除去（内容だけ残す）。
+    # 枠側面・box-drawing・交差 glyph を除去（内容だけ残す）。
     line="${line//│/}"; line="${line//─/}"
     line="${line//╭/}"; line="${line//╮/}"; line="${line//╰/}"; line="${line//╯/}"
     line="${line//┌/}"; line="${line//┐/}"; line="${line//└/}"; line="${line//┘/}"
+    line="${line//├/}"; line="${line//┤/}"; line="${line//┬/}"; line="${line//┴/}"; line="${line//┼/}"
     if (( first )); then
-      # 先頭 interior 行だけプロンプト '>' を 1 つ剥ぐ（前後空白ごと）。
+      # 先頭 interior 行だけプロンプト（❯ か >）を 1 つ剥ぐ（前後空白ごと）。
       line="${line#"${line%%[![:space:]]*}"}"   # ltrim
-      line="${line#>}"
+      line="${line#❯}"; line="${line#>}"
       first=0
     fi
     printf '%s\n' "$line"
@@ -136,10 +173,13 @@ _classify_interior() {
       body="$out"
     done <<< "$ignore"
   fi
-  # 空（空白と余剰プロンプト '>' のみ）なら送信された。
+  # 空（空白と余剰プロンプト '>'/'❯' のみ）なら送信された。実 CC TUI の空入力欄は「❯ +
+  # NBSP(U+00A0)」で、NBSP は [:space:] に含まれない（C locale の tr）ため明示除去する（sc-6vj gate errata）。
   local core
   core="$(printf '%s' "$body" | tr -d '[:space:]')"
+  core="${core//$'\xc2\xa0'/}"   # NBSP（❯ 後の空白）
   core="${core//>/}"
+  core="${core//❯/}"
   if [[ -z "$core" ]]; then
     return "$INJECT_DELIVERED"
   fi
