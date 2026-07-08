@@ -1,0 +1,63 @@
+❯ consultが終わったので確認して
+  方向: native 化は「層2 background agents」のみが候補（subagent/agent-teams
+  は寿命・nested 制約で構造的失格）。ただし即移行せず PoC-gate——4
+  本の実機検証（carrier e2e → sandbox → 監視 → cross-account 回収）を通過したら GA
+  を待たず昇格、tmux は恒久 fallback として保持（loud 切替・version pin
+  なし）。mailbox 拡張（案B）は棄却し、その動機の半分だった「気づきの保証」は
+  attention-hub 構想として scriptorium への調整依頼に分離。
+
+  follow-up 5 bead（整合性 wire 済み・dolt push 済み）
+
+  ┌───────┬──────────────────────┬───────────────────────────────────────────────┐
+  │ bead  │         内容         │                     備考                      │
+  ├───────┼──────────────────────┼───────────────────────────────────────────────┤
+  │ sc-y5 │                      │                                               │
+  │ b     │ PoC-gate spike 4 leg │ 昇格判定の材料を揃える                        │
+  │ (P2)  │                      │                                               │
+  ├───────┼──────────────────────┼───────────────────────────────────────────────┤
+  │ sc-5r │ scribe-spawn へ --bg │ sc-y5b が blocks・sc-0df                      │
+  │ l     │  launcher            │ と同一ファイル直列化を明記                    │
+  │ (P3)  │                      │                                               │
+  ├───────┼──────────────────────┼───────────────────────────────────────────────┤
+  │ sc-03 │ 成文化 bundle（境界  │                                               │
+  │ 5     │ 二本立て・§6         │ protocol.md 直列化注記・暫定部は暫定と明記    │
+  │ (P3)  │ 段階移行・§9/§8）    │                                               │
+  ├───────┼──────────────────────┼───────────────────────────────────────────────┤
+  │ sc-fl │ attention-hub +      │ needs-orch・必須 3 節 front-load・scriptorium │
+  │ k     │ transport 構造封鎖   │  所掌との整合確認を前提条件に明記・本日の注入 │
+  │ (P2)  │                      │ 未送達事故 2 件と sc-6vj を関連付け           │
+  ├───────┼──────────────────────┼───────────────────────────────────────────────┤
+  │ sc-23 │ 層3 GA /             │                                               │
+  │ x     │ WorktreeCreate hook  │ —                                             │
+  │ (P4)  │ のイベント駆動 watch │                                               │
+  └───────┴──────────────────────┴───────────────────────────────────────────────┘
+
+  現在の盤面
+
+  - sc-6vj worker 稼働中（scribe-inject.sh 実装済み 1 commit・gate
+  監視稼働）——完了次第 gate → merge。
+  - その後の推奨順: sc-0df（SPAWNED marker・scriptorium が rollout 待ち）→
+  sc-y5b（PoC）or sc-035/sc-2wv（medium cell 候補）。
+  - scriptorium キューには sc-flk が加わり needs-orch は計 7 件（+ sc-me8 照会中）。
+
+✻ Cogitated for 5m 3s · 1 shell still running
+
+※ recap: scribe のタスク消化を推奨順で進行中。sc-o10/sc-94z/sc-pp9 は完了し、いま
+  sc-6vj worker（pane 入力送達確認ヘルパ）が実装中。次は sc-6vj の gate-pending
+  検知を待って検収し、その後 sc-0df を spawn します。
+
+● Background command "sc-6vj の gate-pending を 60 秒間隔で監視（120
+分タイムアウト）" completed (exit code 0)
+
+● sc-6vj が gate-pending。gate funnel を開始します。
+
+  Ran 2 shell commands
+
+● DONE 報告の note がまた見  1 new message (ctrl+End) ↓  認します。
+
+──────────────────────────────────────────────────────────────────────── ultracode ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────────
+  user@examplehost (user@example.com)  scribe  main*     /rc active
+  29% 290k/1M Fable 5 [xhigh] 5h:22%(4h1m) 7d:15%(23h1m)
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
