@@ -31,22 +31,79 @@ ultracode（multi-agent fan-out で網羅性・確信度・スケールを買う
 
 > 一次出典: Workflow tool 方法論（"Scale to what the user asked for"・quality patterns）/ doobidoo `c06ab15b`（un-8q5 pilot milestone・rate 53→80%）・`6d11f667`（un-8q5 GOTCHA）/ doobidoo `e5d79cc9`（2026-06-15 grill: 強度キャリブレーション = 規模×不確実性×リスク）。
 
-### 1.1 effort ルーティング（worker/WF agent の推論強度・sc-dc9）
+### 1.1 effort ルーティング（worker/WF agent の推論強度・sc-dc9 / 強度キャリブ = sc-npa）
 
 強度キャリブレーションの**もう一つの制御軸が effort**（推論に費やす思考量）。fan-out の幅・票数とは独立に、**1 エージェントあたりの推論深度**を選ぶ。既定は **high**。settings.json の `"effortLevel":"xhigh"` を全 worker/WF agent へ無差別波及させない（xhigh の超長単一ターンは confabulation＝幻影ツール結果を誘発した実害がある・doobidoo `1e98254c`。gate funnel は diff 欠陥の二次防御で、diff が生成されない幻影は捕捉外ゆえ effort=high 化の一次便益は「幻覚の予防」）。
 
+#### 背骨原理（強度は gate 捕捉性 × confab リスクでスケール・sc-npa 論点1）
+
+強度（model × effort）は **失敗が gate で拾えるか（gate 捕捉性）× confabulation リスク**でスケールする。gate が拾う失敗（初回実装力の不足）は安くてよく、gate 外の失敗（confabulation・security 境界の誤り）は高いまま保つ。effort 軸（gate で拾えるか）と後述の model 軸（事実か判断か）はこの一つの原理の二つの投影である。但し書き 2 点を必ず併読する:
+
+- **(1) gate 強度不変が前提条件**: worker effort を下げてよい根拠は「失敗を gate/review が拾う」ことゆえ、worker と **gate 側（cell-quality の review/verify 段）を同時に下げない**（下げると根拠が消える）。この WF 内対応物が後述の per-stage 表で Review/Verify/Fix を high 固定にする理由。
+- **(2) confab 減少の実証は xhigh→high のみ・high→medium は外挿**: 「effort を下げると幻影が減る」の実証範囲は xhigh→high（doobidoo `1e98254c`）。**high→medium は外挿**であって実証ではない——medium がさらに幻影を減らす保証はなく、medium の便益は「実装力を案件相応へ適正化する（コスト側）」であって「幻影のさらなる予防」ではない、と区別して読む。
+
+#### worker effort の選び方（2 枝決定木・判定は spawn 前・sc-npa 論点2）
+
+default=high は維持する。medium へ落とすかは次の 2 枝を **spawn 前に issue 記述から予見**して判定する（判定手順の成文化 = `protocol.md` §1 の 2 問チェックリスト）:
+
+- **high 必須（medium 禁止）**: **security / 認可 / 入力パース / sandbox・hook enforce 系（`scripts/hooks/`・enforce-policy・apparmor）/ secrets / 不可逆・データ移行（bd migrate・dolt schema・破壊的 script）** に触れると予見されるとき。これらは gate 外失敗（confab・security 境界）の巣ゆえ実装力を落とさない。
+- **medium 可**: 上記 high 必須領域に触れず、かつ『**新規制御フロー無し・docs/config/機械的修正色・局所変更**』を満たすとき。**security について書くだけの docs 変更は medium 可**（実行経路に触れず gate 捕捉圏内）。
+- **tie-breaker =『迷ったら high』を維持**（medium 肯定条件の crisp さが「何でも high」への回帰を防ぐ防波堤）。判定は issue 自然言語からの予見ゆえ完全機械化しない・純裁量にもしない（`protocol.md` §1 の非対称 override が中間案）。spawn 前予見の取りこぼしは gate 側の事後 escalation（`protocol.md` §4）が fail-closed で拾う。
+
+#### effort の選択メニュー = medium / high / xhigh の 3 値（sc-npa 論点5 メタ決定）
+
+方針として**選ぶ** effort はこの 3 値のみ（`low`・`max` は方針メニューに入れない）。**技術層 allowlist（`low|medium|high|xhigh|max`・sc-ax4 SSOT・CLOSED）はフェイルセーフ検証用に不変**——本メニューは policy 層の縛りであって allowlist を縮小するものではない（allowlist は縮小禁止）。
+
 | タスク種別 | effort | 指定方法 |
 |---|---|---|
-| docs 追補 / 軽微修正 | **medium** | admin が `scribe-spawn --effort medium`（or `SCRIBE_WORKER_EFFORT=medium`） |
+| docs 追補 / 軽微修正（上記 medium 可を満たす） | **medium** | admin が `scribe-spawn --effort medium`（or `SCRIBE_WORKER_EFFORT=medium`） |
 | 標準実装 cell | **high（既定）** | 無指定でよい（既定 high） |
 | probe / 調査 | **high** | 無指定でよい（既定 high） |
 | 大規模設計 / 高不確実 / 高リスク | **xhigh** | admin が `scribe-spawn --effort xhigh` を**明示**（opt-in なしで盛らない原則と整合） |
 
+#### per-stage effort 方針（cell-quality WF・sc-npa 論点5）
+
+cell-quality の段別 effort は uniform でなく gate 捕捉性で分ける（実装 SSOT = `~/.claude/workflows/cell-quality.workflow.js`・本表は方針）:
+
+| 段 | effort | 理由 |
+|---|---|---|
+| **Review / Verify / Fix** | **high 固定**（`args.effort` 一括下げから構造独立） | WF 内の gate その物＝但し書き(1) の WF 内対応物。「gate に守られる側」でなく「gate 側」ゆえ下げ対象外。xhigh は `reviewEffort`/`verifyEffort` の個別 opt-in knob（`reviewModel`/`verifyModel` と同じ流儀） |
+| **Self-test** | **medium** | guard 連鎖の一部ゆえ low でなく medium 止まり |
+| **Classify** | **medium** | 誤分類は劣化止まり＝gate 捕捉圏内 |
+| **Plan / Implement** | **cell effort に従う** | `args.effort` を「実装系の段だけに効く cell effort」へ再定義 |
+
+arg 露出は全段でなく個別 knob 2 つ（`reviewEffort` / `verifyEffort`）に絞る。**本表は決定済みの方針であって現行実装ではない**——実装は別 cell（sc-94z）で、それが着地するまで `cell-quality.workflow.js` は全 `agent()` へ `args.effort` を**一律**に適用する（`reviewEffort`/`verifyEffort` knob も guard 段の独立も未実装）。したがって sc-94z 着地までは **cell-quality へ `args.effort` で下げた effort を渡さない**（渡すと Review/Verify/Fix も一律下がり但し書き(1)＝gate 側を下げないに抵触する）。`scribe-spawn --effort` は worker 本体の effort であって WF の `args.effort` へ自動伝播しないため、既定運用では抵触しない。
+
+#### model litmus（事実か判断か・sc-npa 論点6）
+
+段の model（sonnet vs opus）は次の litmus で判定する — 段の出力が **事実の収集・転記・機械的実行の報告**で正しさを機械/下流が検証できる → **sonnet**。出力が **判断・統合・生成**でその質が下流を直接規定する（gate でしか裁けない）→ **opus**。cell-quality 適用例:
+
+| 段 | model |
+|---|---|
+| Self-test 実行 / 純 read-only 探索 | **sonnet** |
+| Classify / Plan / Implement / Review / Verify / Fix | **opus** |
+
+境界則: **fable は WF agent へ不投入**（既存維持・§4）・**haiku は使い捨て実験のみ**。フルマッピングの SSOT は §4 と `~/.claude/CLAUDE.md`「Workflow モデル階層ルーティング」節（本表は litmus からの再導出例＝新規 WF へ汎化可）。
+
+#### CALIB 監査ループ（軽量構造化記録・sc-npa 論点1 追加要素 / 論点4）
+
+基準の妥当性を継続検証する軽量記録。gate close 時に固定文法 1 行を当該 issue の bd notes へ焼く（手順 = `protocol.md` §4）:
+
+```
+CALIB: effort=<medium|high|xhigh> type=<タスク種別> gateRounds=<gate 収束ラウンド数> confab=<幻影観測 有/無> escalate=<medium→high 事後 escalation 有/無>
+```
+
+`escalate` フィールドは gate 側で medium→high の事後 escalation（`protocol.md` §4）が発生したか（`有`/`無`）を記録する slot——spawn 前予見の取りこぼしを gate が拾った回数を CALIB 行の 1 フィールドとして残す（別行にせず同一行に焼く）。
+
+**見直しトリガーは時間でなく件数 = medium cell が 5 本到達した時点**で基準を見直す（流量が細い時期の空振り・検知遅れを防ぐ）。集計は不足したら初めて別 cell でスクリプト化する（本格的な幻影自動検出器は未存在ゆえ却下・軽量記録に留める＝基盤構築が節約を食う逆転を避ける）。
+
+#### 指定方法の mechanics（sc-dc9）
+
 - **worker（spawn）**: `scribe-spawn.sh --effort <LEVEL>`（既定 high・env `SCRIBE_WORKER_EFFORT` で既定上書き・allowlist `low|medium|high|xhigh|max`）。CC 正規名 `CLAUDE_CODE_EFFORT_LEVEL` を worker env-file へ後勝ち注入する（`CLAUDE_EFFORT` は CC **非正規名で silent no-op** ゆえ使わない）。cld-spawn への `--effort` flag passthrough は feature-detect（`--help` に実在時のみ・un-ivb 防御）。
-- **WF agent（cell-quality）**: 全 `agent()` 呼出しが `opts.effort` を既定 high で pin する（settings.json 依存を断つ）。`args.effort` で上書き可（admin/worker が xhigh 等を渡せる）。allowlist 外は既定 high へ fail-safe。
+- **WF agent（cell-quality）**: 全 `agent()` 呼出しが `opts.effort` を既定 high で pin する（settings.json 依存を断つ）。`args.effort` で上書き可。上記 per-stage 方針は `args.effort` を「実装系の段だけに効く cell effort」へ再定義し guard 段を独立させる**決定**だが、これは sc-94z 着地後に有効になる方針であって現行実装は全段一律（前段 per-stage 表の caveat 参照）。allowlist 外は既定 high へ fail-safe。
 - **admin session は不変**（settings.json の xhigh のまま）: この統制は worker/WF agent への波及のみを止める。opt-in なしで xhigh を盛らない（コスト事故＋幻覚リスク）。
 
-> 一次出典: doobidoo `1e98254c`（xhigh worker の confabulation 3/3 再現）/ bd `sc-dc9`（effort 統制の機構訂正: 真因 = machine-global settings.json の xhigh を admin/worker 双方が読む・process env の `CLAUDE_EFFORT` は CC 非正規名）/ CC 正規 precedence: `--effort` フラグ > `CLAUDE_CODE_EFFORT_LEVEL` env > `settings.effortLevel` > model 既定。
+> 一次出典: doobidoo `1e98254c`（xhigh worker の confabulation 3/3 再現）/ bd `sc-dc9`（effort 統制の機構訂正: 真因 = machine-global settings.json の xhigh を admin/worker 双方が読む・process env の `CLAUDE_EFFORT` は CC 非正規名）/ **bd `sc-npa`（強度キャリブレーション再設計 grill 7/7 確定: 背骨原理B〔gate 捕捉性 × confab・但し書き 2 点〕・medium 2 枝決定木・3 値メニュー・per-stage effort・model litmus・CALIB 監査ループ。SSOT = sc-npa notes 論点1-7）** / CC 正規 precedence: `--effort` フラグ > `CLAUDE_CODE_EFFORT_LEVEL` env > `settings.effortLevel` > model 既定。
 
 ---
 
