@@ -736,6 +736,12 @@ build_prompt() {
 ## 起動直後の実効 effort 自己申告（sc-dc9・受入条件）
 - **最初の Bash 呼出しで実効 effort を自己 log**: \`echo "effort=\${CLAUDE_CODE_EFFORT_LEVEL:-<unset>}"\` を実行し、その値（例: \`effort=$EFFORT\`）を最初の応答テキストに 1 行明記する。admin は capture-pane でこれを一次確認し、--effort/env override が CC で実効しているかを e2e で読む（既知バグ #50099: flag/env 無視の前例があるため fail-loud 検証必須）。env-file 経由で $EFFORT が注入されているので、\`<unset>\` が出たら env 注入が壊れている合図（admin へ報告）。
 
+## 起動直後の SPAWNED marker write（宣言 write 経路の生存証明・orch-gv9）
+- **effort echo（上記①）の直後・本作業に入る前**に、**別 Bash 呼出し**で自分の契約 bead へ bdw で行頭 marker を **1 回だけ** write する: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $ID --append-notes "[SPAWNED--$ID]"\`。
+- marker は正確に \`[SPAWNED--$ID]\`（prefix \`[SPAWNED--\` は一意・**行頭**・検知側は先頭空白のみ許容）。この write 自体が「bd 宣言 write 経路が生きている」ことの最早 smoke——orch-7ti incident（sandbox allowWrite bug で bd write が silent 断絶し完了検知が漏れた）の機械検知の**書込側**。**起動直後に 1 回だけ**であり、作業途中・完了時に再送しない（gate-pending/DONE とは別経路）。
+- **起動時 Bash の順序（一意）**: ①effort echo〔純 env 読取〕→ ②この marker write〔宣言 write 経路の最早証明〕→ ③下記 env-probe plant〔worktree sentinel〕。②は③より前に置く（marker write が最早の write-path smoke ゆえ）。
+- **write 失敗時の挙動**: この marker write が失敗しても回避策を打たず、後続の env 健全性 gate（下記）へそのまま進む——env-probe verify が同じ write 層の劣化を exit code で機械判定し、その規律で停止する。bdw が繰り返し失敗する／全ツールが空応答（Bash/Read 再実行でも無返答＝ツール層の全死）なら、下記 **zombie fallback** の規律どおり \`SCRIBE-ENV-DEGRADED: $ID <一行理由>\` を応答テキスト行頭に出力して停止する（\`STATUS: blocked\` すら bdw で書けない全ツール死と同じ扱い・sc-c7c）。
+
 ## 契約（SSOT）
 - 契約 = bd issue の description: \`cd "$ANCHOR" && bd show $ID\`（着手前に必ず読む。bd graph 所在 = anchor $ANCHOR・worktree からは解決しない）。
 - 配置: worktree（= cwd）$WORKTREE — **ここから出ない**（bd graph 参照のための anchor への一時 cd は除く）。branch=$BRANCH / window=$WINDOW。
