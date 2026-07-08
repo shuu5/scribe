@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+# scribe-account-select — worker/consult アカウント自動選択の selector（sc-1rq）
+#
+# 役割（facet⑦ = selector 分離・純粋計算・fs 非接触）:
+#   claude-usage --json を消費 → 防御パース(B-lite) → 適格フィルタ(usage 側) → maximin
+#   ランキング → 上位順の候補を stdout（TSV・残量降順）へ。**fs は一切触らない**（preflight /
+#   env-file 注入 / bd notes は呼出元 scribe-spawn.sh の責務）。単体テスト容易・手動実行で
+#   「いま誰が選ばれるか」を可視化する（監査直結・facet⑥）。
+#
+# 入力ソース（優先順位）:
+#   1. env SCRIBE_USAGE_JSON      … 生 JSON 文字列（第一のテスト seam）。set かつ非空なら最優先。
+#   2. --stdin / 位置引数 '-'      … stdin から JSON を読む（第二のテスト seam）。
+#   3. exec SCRIBE_USAGE_CMD --json（既定 SCRIBE_USAGE_CMD=claude-usage）… 実運用経路。
+#      不在 / 非0 exit / stdout が JSON 不正 = **API 故障**。
+#   ※ 現在時刻は env SCRIBE_USAGE_NOW（ISO8601）で上書き可（resets_at 比較のテスト決定性）。
+#
+# 出力（stdout・TSV・ヘッダ無し・1 行 1 アカウント）:
+#   適格候補を maximin ランキング（score 降順・同点は label 辞書順）で先に、続けて除外アカウントを
+#   label 辞書順で並べる。列:
+#     1 label   2 eligible(1|0)  3 score  4 h5  5 h7  6 pct5  7 pct7  8 resets5  9 resets7  10 reason
+#   ・h5/h7 = 積極解釈込みの実効残量%（=maximin が使った値。resets_at が null/過去なら 100）。
+#   ・score = min(h5, h7)。除外行は 3-5 空・reason に除外理由。
+#   ・呼出元の lazy walk は `awk -F'\t' '$2=="1"{print $1}'` で上位順ラベル列を得る（jq 不要）。
+#
+# exit code:
+#   0 = 正常（適格 0 件でも 0。適格 0 件の fail-loud 判断は呼出元 spawn の責務・facet⑤②）。
+#   3 = **API 故障**（claude-usage 不在/非0/JSON 不正/accounts 不在 or 非 list/空）。stdout 空 +
+#       stderr に理由（呼出元は loud-warn + 主アカ fallback・facet⑤①）。
+#   2 = 使い方エラー（引数不正）。
+#
+# ★VERIFIED セマンティクス（sc-1rq 契約・admin が uns ソース直読で確認）:
+#   ・five_hour_pct/seven_day_pct = utilization(使用率%・int or null)。**残量% = 100 − pct**。
+#     取り違え（pct を残量とみなす）= maximin が枯渇寸前アカを選ぶ逆選択バグ → 必ず 100−pct。
+#   ・*_resets_at = 生 ISO 文字列 or null。*_remaining は「リセットまでの時間」で残量ではない →
+#     スコアに使わない。
+#   残量算出は headroom() 1 箇所へ集約する（sc-me8 の uns 公式回答後に最小差分で flip 可能に）。
+
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+USAGE_CMD_DEFAULT = "claude-usage"
+
+# selector が要求する必須キー（B-lite・facet⑧a）。dict.get デフォルト埋めは禁止（欠落が「読めた風」に
+# 化け誤選定するため）＝存在検査は `key in acct` で行う。
+_UNIVERSAL_KEYS = ("label", "ok", "stale")
+# 適格アカのみに要求するスコア算出キー（ok=false のアカは data 欠落が正常＝claude-usage の to_json 契約）。
+_SCORE_KEYS = (
+    "five_hour_pct",
+    "five_hour_resets_at",
+    "seven_day_pct",
+    "seven_day_resets_at",
+)
+
+
+def _api_failure(reason):
+    """API 故障で終了（exit 3・stdout は空のまま）。"""
+    sys.stderr.write("scribe-account-select: API 故障: %s\n" % reason)
+    sys.exit(3)
+
+
+def _load_input(argv):
+    """入力 JSON テキストを優先順位で解決して返す。exec 経路の失敗は API 故障で exit。"""
+    env_json = os.environ.get("SCRIBE_USAGE_JSON")
+    if env_json:  # set かつ非空
+        return env_json
+    if "--stdin" in argv or "-" in argv:
+        return sys.stdin.read()
+    cmd = os.environ.get("SCRIBE_USAGE_CMD") or USAGE_CMD_DEFAULT
+    try:
+        proc = subprocess.run(
+            [cmd, "--json"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except FileNotFoundError:
+        _api_failure("claude-usage コマンド不在: %s" % cmd)
+    except OSError as e:
+        _api_failure("claude-usage 実行不能: %s" % e)
+    if proc.returncode != 0:
+        _api_failure(
+            "claude-usage が非0 exit (%d): %s"
+            % (proc.returncode, proc.stderr.decode("utf-8", "replace").strip())
+        )
+    return proc.stdout.decode("utf-8", "replace")
+
+
+def _now(argv):
+    """比較基準時刻（aware UTC）。SCRIBE_USAGE_NOW で上書き可（テスト決定性）。"""
+    ov = os.environ.get("SCRIBE_USAGE_NOW")
+    if ov:
+        dt = _parse_iso(ov)
+        if dt is None:
+            _api_failure("SCRIBE_USAGE_NOW が ISO8601 として解釈できません: %s" % ov)
+        return dt
+    return datetime.now(timezone.utc)
+
+
+def _parse_iso(s):
+    """ISO8601 文字列 → aware datetime。失敗は None。tz 無しは UTC とみなす。"""
+    if not isinstance(s, str) or not s:
+        return None
+    t = s.strip()
+    # Python 3.11 未満の fromisoformat は 'Z' を解さないため正規化する。
+    if t.endswith("Z"):
+        t = t[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(t)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def headroom(pct, resets_at, now):
+    """残量%（=積極解釈込み）を返す。判定不能は None（→ 呼出側で当該アカを除外）。
+
+    ★残量算出の唯一の accessor（sc-1rq 契約: sc-me8 解決時はここだけ差し替える）。
+      ・resets_at is null または過去（<= now）→ 窓なし=満残量 100.0（積極解釈・facet⑧b）。
+      ・窓ありだが pct 不明（None）→ 判定不能 None。
+      ・それ以外 → 残量% = 100 − pct（★utilization を残量へ変換。pct を残量と読まない）。
+      ・resets_at が非 null だが ISO 解釈不能 → 窓の有無を判定できない=判定不能 None（garbage に
+        満残量を与えない fail-closed）。
+    """
+    if resets_at is None:
+        return 100.0
+    dt = _parse_iso(resets_at)
+    if dt is None:
+        return None  # 非 null だが解釈不能 = 判定不能
+    if dt <= now:
+        return 100.0  # 窓は既にリセット済み = 満残量
+    if pct is None:
+        return None  # 窓あり × 使用率不明 = 判定不能
+    return 100.0 - float(pct)
+
+
+def _is_pct(v):
+    """pct フィールドの型検査（int or null・bool は int だが pct ではない）。"""
+    if v is None:
+        return True
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _fmt_num(x):
+    """整数なら整数表記、そうでなければ短い小数表記（golden TSV を汚さない）。"""
+    if x is None:
+        return ""
+    f = float(x)
+    if f == int(f):
+        return str(int(f))
+    return ("%.4f" % f).rstrip("0").rstrip(".")
+
+
+def _fmt_raw(v):
+    return "" if v is None else str(v)
+
+
+def main(argv):
+    text = _load_input(argv)
+    try:
+        doc = json.loads(text)
+    except (ValueError, TypeError):
+        _api_failure("claude-usage の出力が JSON として解釈できません")
+    if not isinstance(doc, dict):
+        _api_failure("claude-usage の JSON top-level が object ではありません")
+    accounts = doc.get("accounts")
+    if not isinstance(accounts, list):
+        _api_failure("claude-usage の JSON に accounts（list）がありません")
+    if not accounts:
+        _api_failure("claude-usage が 0 アカウントを返しました（未セットアップ/発見不能）")
+
+    now = _now(argv)
+    eligible = []  # (score, label, h5, h7, pct5, pct7, r5, r7)
+    excluded = []  # (label, reason, pct5, pct7, r5, r7)
+
+    for acct in accounts:
+        if not isinstance(acct, dict):
+            excluded.append(("?", "malformed:非 object", None, None, None, None))
+            continue
+        # --- B-lite (1): 汎用必須キー（label/ok/stale）の存在+型 ---
+        label = acct.get("label")
+        if not isinstance(label, str) or not label:
+            excluded.append(("?", "malformed:label 欠落/型不正", None, None, None, None))
+            continue
+        if "ok" not in acct or not isinstance(acct["ok"], bool) \
+                or "stale" not in acct or not isinstance(acct["stale"], bool):
+            excluded.append((label, "malformed:ok/stale 欠落/型不正", None, None, None, None))
+            continue
+        # --- 適格 (usage 側・facet②): ok==true ∧ stale==false ---
+        if acct["ok"] is not True or acct["stale"] is not False:
+            why = "stale(認証切れ/フォールバック)" if acct["stale"] else (
+                "not-ok:%s" % (acct.get("error") or "取得不能"))
+            excluded.append((label, why, acct.get("five_hour_pct"),
+                             acct.get("seven_day_pct"), acct.get("five_hour_resets_at"),
+                             acct.get("seven_day_resets_at")))
+            continue
+        # --- B-lite (2): 適格アカのスコア算出キーの存在+型 ---
+        missing = [k for k in _SCORE_KEYS if k not in acct]
+        if missing:
+            excluded.append((label, "malformed:欠落 %s" % ",".join(missing),
+                             None, None, None, None))
+            continue
+        p5, p7 = acct["five_hour_pct"], acct["seven_day_pct"]
+        r5, r7 = acct["five_hour_resets_at"], acct["seven_day_resets_at"]
+        if not _is_pct(p5) or not _is_pct(p7):
+            excluded.append((label, "malformed:pct 型不正", p5 if _is_pct(p5) else None,
+                             p7 if _is_pct(p7) else None, r5, r7))
+            continue
+        if not (r5 is None or isinstance(r5, str)) or not (r7 is None or isinstance(r7, str)):
+            excluded.append((label, "malformed:resets_at 型不正", p5, p7, None, None))
+            continue
+        # --- 残量算出 + maximin score ---
+        h5 = headroom(p5, r5, now)
+        h7 = headroom(p7, r7, now)
+        if h5 is None or h7 is None:
+            excluded.append((label, "indeterminate:残量判定不能", p5, p7, r5, r7))
+            continue
+        score = min(h5, h7)
+        eligible.append((score, label, h5, h7, p5, p7, r5, r7))
+
+    # maximin ランキング: score 降順・同点 label 辞書順・主アカ優先バイアスなし（facet③）。
+    eligible.sort(key=lambda e: (-e[0], e[1]))
+    excluded.sort(key=lambda e: e[0])
+
+    out = []
+    for score, label, h5, h7, p5, p7, r5, r7 in eligible:
+        out.append("\t".join([
+            label, "1", _fmt_num(score), _fmt_num(h5), _fmt_num(h7),
+            _fmt_raw(p5), _fmt_raw(p7), _fmt_raw(r5), _fmt_raw(r7), "",
+        ]))
+    for label, reason, p5, p7, r5, r7 in excluded:
+        out.append("\t".join([
+            label, "0", "", "", "",
+            _fmt_raw(p5), _fmt_raw(p7), _fmt_raw(r5), _fmt_raw(r7), reason,
+        ]))
+    if out:
+        sys.stdout.write("\n".join(out) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
