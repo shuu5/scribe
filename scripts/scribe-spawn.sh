@@ -853,9 +853,13 @@ if [[ "$SANDBOX_ON" == "1" ]]; then
   #      同一の `bdw lock-file` を consume する（subshell `(cd "$ANCHOR" && bdw lock-file)` で worker の bd write
   #      と同一 invocation にする＝repo_id は cwd 依存で BDW_REPO_DIR override は効かない・verified。cross-repo cell
   #      でも worker が使う鍵と byte 一致・gen と drift しない）。
-  #  (2) .beads runtime サブパス = established anchor では既存 dir/file。汎用 `mkdir -p` ループで存在保証する
-  #      （既存 dir は no-op・既存 file は "File exists" warn になるが bind には既存で十分）。lock file は (1) で
-  #      touch 済みゆえ **除外**する（汎用ループが触れて dir 化する事故を構造的に排除＝(1) の touch が失敗しても安全）。
+  #  (2) .beads runtime サブパス = file と dir の混在（gen-sandbox-settings.sh が present な .beads/* を grant する＝
+  #      interactions.jsonl 等の **file** と embeddeddolt/ 等の **dir**）。gen は present エントリのみ列挙する契約ゆえ
+  #      established anchor では全て既在＝**存在すれば file/dir 問わず bwrap bind-safe** なので触れない。旧実装は
+  #      これらに一律 `mkdir -p` していたが、それは (a) 不在 file 位置に **dir を作り .beads を破損**しうる（例:
+  #      interactions.jsonl の場所に dir・sc-0nb (a)）・(b) 既存 file には "File exists" warn を **毎 spawn** 吐く
+  #      （sc-0nb (b)）という二重の害があった。よって「既存なら skip・不在なら自動生成せず fail-loud warn」に改める
+  #      （種別不明の leaf を作らない＝破損を構造的に排除）。lock file は (1) で touch 済みゆえ **除外**する。
   _sb_lock_file="$(cd "$ANCHOR" && "$SCRIPT_DIR/bdw" lock-file 2>/dev/null)" || _sb_lock_file=""
   if [[ -n "$_sb_lock_file" ]]; then
     if ! { mkdir -p "$(dirname "$_sb_lock_file")" 2>/dev/null && touch "$_sb_lock_file" 2>/dev/null; }; then
@@ -864,9 +868,15 @@ if [[ "$SANDBOX_ON" == "1" ]]; then
   fi
   if command -v jq >/dev/null 2>&1; then
     while IFS= read -r _sb_aw; do
-      if [[ -n "$_sb_aw" && "$_sb_aw" != "$_sb_lock_file" ]]; then
-        mkdir -p "$_sb_aw" || echo "scribe: warn: sandbox allowWrite path の mkdir に失敗（worker 起動が failIfUnavailable で止まりうる）: $_sb_aw" >&2
-      fi
+      [[ -n "$_sb_aw" && "$_sb_aw" != "$_sb_lock_file" ]] || continue
+      # 既存パス（file/dir どちらでも）は bwrap bind-safe ゆえ何もしない。gen が present な .beads/* のみを grant
+      # する契約下では established anchor で常にここへ入り、旧 `mkdir -p <file>` が毎 spawn 吐いていた "File exists"
+      # スケア警告を構造的に消す（sc-0nb (b)）。
+      [[ -e "$_sb_aw" ]] && continue
+      # 不在は gen 契約（present のみ grant）下では通常起きない異常。file/dir 種別が不明ゆえ `mkdir` で dir を作ると
+      # 本来 file の runtime パス（interactions.jsonl 等）を dir 化して .beads を破損しうる（sc-0nb (a)）。安全側で
+      # leaf は自動生成せず fail-loud に warn する（bwrap bind 失敗＝worker が failIfUnavailable で気付く ＞ 黙って破損）。
+      echo "scribe: warn: sandbox allowWrite path が不在です（gen は present のみ grant するはず・種別不明ゆえ自動生成せず。worker 起動が failIfUnavailable で止まりうる）: $_sb_aw" >&2
     done < <(jq -r '.sandbox.filesystem.allowWrite[]?' "$WORKTREE/.claude/settings.local.json" 2>/dev/null || true)
   fi
   echo "sandbox: worker を bwrap sandbox に封じます（既定 on・opt-out=SCRIBE_SANDBOX=0・settings=$WORKTREE/.claude/settings.local.json）"
