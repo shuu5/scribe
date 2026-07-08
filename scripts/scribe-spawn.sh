@@ -92,6 +92,10 @@ Options:
   --account LABEL worker/consult を起動する Claude アカウント（config dir 追随・sc-rvq）。LABEL → <accounts-base>/<label>
                   の規約導出（既定 accounts-base=$HOME/.claude-accounts）。省略時は admin の CLAUDE_CONFIG_DIR を mirror
                   （未設定=~/.claude 既定）。優先順位: --account > SCRIBE_WORKER_CONFIG_DIR env > admin env mirror
+  --account auto  claude-usage 残量ベース maximin で最も空いているアカウントを自動選択（sc-1rq・opt-in）。
+                  適格=usage(ok∧非stale)+preflight(login/onboarding/plugin) の lazy 交差。API故障=主アカ fallback・
+                  適格0件=fail-loud。default が選ばれたら ~/.claude(unset)へ写像。--bd-id ある spawn は選定 snapshot を
+                  issue notes へ自動追記（接頭辞 account-select:）。dry-run で選定予定ランキングを可視化。
   --consult       consult role セッションを anchor で起動（worktree/worker prompt なし）
   --context FILE  consult 専用。admin 集約 brief（FILE）を grill 材料として焼き込み grill-consult モードへ（§7・grill-issue id 必須）。
                   grill-consult は brief を grill し決定を own grill-issue の bd notes へ書く（bdw 経由・read-only 限定緩和）
@@ -200,8 +204,16 @@ fi
 #     ~/.cld-env からの CLAUDE_CONFIG_DIR 混入に対する fail-closed 防御（後勝ちで打ち消す）。
 ACCOUNTS_BASE="${SCRIBE_ACCOUNTS_BASE:-$HOME/.claude-accounts}"
 WCFG_DIR=""       # 注入予定 config dir（空=unset を注入＝既定 ~/.claude）
-WCFG_SOURCE=""    # 解決元（account|env|mirror|unset）— dry-run 表示・監査用
-if [[ -n "$ACCOUNT" ]]; then
+WCFG_SOURCE=""    # 解決元（account|env|mirror|unset|auto:<label>|auto-fallback|auto-fallback-mirror）— dry-run 表示・監査用
+# --account auto（sc-1rq・facet①=明示 opt-in）: claude-usage 残量ベース maximin で config dir を自動選択する。
+# 特別ラベル "auto" は <accounts-base>/auto という実在しない dir へ導出してはならないため、通常ラベル分岐より
+# 前に intercept する。実解決（selector 実行 + preflight lazy walk）は probe_config_dir/SCRIPT_DIR が要るため
+# 関数定義後の resolve_account_auto() へ委ねる（ここでは AUTO=1 のマークのみ）。
+AUTO=0
+if [[ "$ACCOUNT" == "auto" ]]; then
+  AUTO=1
+  WCFG_SOURCE="auto"   # 実解決は下記 resolve_account_auto() で確定（selector + lazy walk）
+elif [[ -n "$ACCOUNT" ]]; then
   # label は path 導出に使うため sanitize（path traversal を上流で拒否・bd id 検証と同姿勢）。
   case "$ACCOUNT" in
     *[!A-Za-z0-9._-]*) scribe_die "--account のラベルに使えない文字が含まれます: '$ACCOUNT'（許可: 英数 . _ -）" ;;
@@ -246,34 +258,182 @@ config_dir_plan_line() {
 # 配下 plugin）から発火するため、plugin 欠落 dir で worker を起こすと edit-write-guard（SBX-ESC-1 境界）/
 # bd-write-guard / git-destructive-guard / session-start-role-inject が全て黙って無効化される（無防備 worker を
 # 黙って起こさない）。
-preflight_config_dir() {
-  [[ -n "$WCFG_DIR" ]] || return 0
-  [[ -d "$WCFG_DIR" ]] \
-    || scribe_die "spawn preflight: 注入予定 config dir が存在しません（源=$WCFG_SOURCE）: $WCFG_DIR（黙って既定 ~/.claude へ fallback しない・sc-rvq）"
+# 単一の config dir が worker/consult を安全に起こせるかを検査する **非致命** probe（sc-1rq で抽出）。
+# 引数 $1=dir $2=source。合格なら 0 を返す（無出力）。不合格なら理由を stdout へ echo し 1 を返す
+# （die しない）。この probe を 2 者が共有する: (1) preflight_config_dir（globals 上で die 版・既存挙動）と
+# (2) --account auto の lazy walk（候補を非致命に試す・sc-1rq facet②）。検査本体を 1 箇所へ集約し drift を防ぐ。
+# 検査は fs 読取りのみ（-d/-f/jq read/grep）＝side-effect ゼロ（dry-run でも安全）。
+probe_config_dir() {
+  local _d="$1" _src="$2"
+  [[ -n "$_d" ]] || return 0
+  [[ -d "$_d" ]] \
+    || { echo "spawn preflight: 注入予定 config dir が存在しません（源=$_src）: $_d（黙って既定 ~/.claude へ fallback しない・sc-rvq）"; return 1; }
   # (a) credentials: 未 login dir は claude 起動が sign-in オンボーディングで停止する（doobidoo 82e2fc50）。
-  [[ -f "$WCFG_DIR/.credentials.json" ]] \
-    || scribe_die "spawn preflight: $WCFG_DIR/.credentials.json が無い＝未 login config dir（claude 起動が sign-in で停止・sc-rvq）。当該アカウントで一度 login してください。"
+  [[ -f "$_d/.credentials.json" ]] \
+    || { echo "spawn preflight: $_d/.credentials.json が無い＝未 login config dir（claude 起動が sign-in で停止・sc-rvq）。当該アカウントで一度 login してください。"; return 1; }
   # (b) onboarding 完了: hasCompletedOnboarding=true（theme 選択ハング=doobidoo 82e2fc50）。jq があれば厳密判定、
   #     無ければ grep フォールバック（この経路は sandbox gen 前で jq 保証が無いため defensive に両対応）。
-  local _cj="$WCFG_DIR/.claude.json"
+  local _cj="$_d/.claude.json"
   [[ -f "$_cj" ]] \
-    || scribe_die "spawn preflight: $_cj が無い＝オンボーディング未完了 config dir（claude 起動が停止・sc-rvq）。"
+    || { echo "spawn preflight: $_cj が無い＝オンボーディング未完了 config dir（claude 起動が停止・sc-rvq）。"; return 1; }
   if command -v jq >/dev/null 2>&1; then
     jq -e '.hasCompletedOnboarding == true' "$_cj" >/dev/null 2>&1 \
-      || scribe_die "spawn preflight: $_cj の hasCompletedOnboarding が true でない＝オンボーディング未完了（theme 選択→sign-in で停止・doobidoo 82e2fc50・sc-rvq）。"
+      || { echo "spawn preflight: $_cj の hasCompletedOnboarding が true でない＝オンボーディング未完了（theme 選択→sign-in で停止・doobidoo 82e2fc50・sc-rvq）。"; return 1; }
   else
     grep -Eq '"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true' "$_cj" \
-      || scribe_die "spawn preflight: $_cj の hasCompletedOnboarding が true でない（jq 不在の grep 判定・sc-rvq）。"
+      || { echo "spawn preflight: $_cj の hasCompletedOnboarding が true でない（jq 不在の grep 判定・sc-rvq）。"; return 1; }
   fi
   # (c) scribe(+beads-bdw+cmdtokens) plugin が当該 config dir で enable（=<dir>/plugins/<name> 実在。local dev
   #     plugin は symlink 存在が enable シグナル・settings.json の enabledPlugins には載らない＝実測）。dangling
   #     symlink は -e が偽になる＝真に不在扱い（意図どおり）。
   local _p
   for _p in scribe beads-bdw cmdtokens; do
-    [[ -e "$WCFG_DIR/plugins/$_p" ]] \
-      || scribe_die "spawn preflight: plugin '$_p' が config dir で enable されていません（$WCFG_DIR/plugins/$_p 不在・源=$WCFG_SOURCE）。plugin 欠落 dir で worker を起こすと edit-write-guard/bd-write-guard/git-destructive-guard/session-start-role-inject が黙って無効化されます（無防備 worker を黙って起こさない・sc-rvq）。"
+    [[ -e "$_d/plugins/$_p" ]] \
+      || { echo "spawn preflight: plugin '$_p' が config dir で enable されていません（$_d/plugins/$_p 不在・源=$_src）。plugin 欠落 dir で worker を起こすと edit-write-guard/bd-write-guard/git-destructive-guard/session-start-role-inject が黙って無効化されます（無防備 worker を黙って起こさない・sc-rvq）。"; return 1; }
   done
+  return 0
 }
+
+preflight_config_dir() {
+  [[ -n "$WCFG_DIR" ]] || return 0
+  local _r
+  _r="$(probe_config_dir "$WCFG_DIR" "$WCFG_SOURCE")" || scribe_die "$_r"
+}
+
+# ===========================================================================
+# --account auto の実解決（sc-1rq・facet①〜⑥⑧ の統合点）。IMPLEMENTATION CONTRACT 2026-07-08 準拠。
+# ===========================================================================
+# selector（scripts/scribe-account-select・純粋計算・fs 非接触）を実行して claude-usage 残量 maximin の
+# ランキング TSV を得、適格候補を残量降順に preflight lazy walk して最初に通った候補を採用する
+# （facet② の usage∧preflight を lazy 交差で実現・preflight 実装は 1 箇所のまま）。
+#   ・API 故障（selector exit 3）→ loud-warn + 主アカ(default=~/.claude・unset)へ fallback（spawn は成立・facet⑤①）。
+#   ・usage 側で適格 0 件（selector が eligible 0 行）→ fail-loud（不適格と分かって主アカで起こさない・facet⑤②）。
+#   ・適格はあるが preflight 全滅 → fail-loud（login/onboarding/plugin 欠落・facet⑤②）。
+#   ・default が選ばれたら ~/.claude（unset 意味論）へ写像（facet④）。preflight は ~/.claude に対しても一様に実施。
+#   ・dry-run は fs preflight walk を行わず top-by-usage を表示用に採用（実起動時のみ preflight・side-effect 規律）。
+AUTO_TSV=""       # selector の生 TSV（監査 note / dry-run plan 用）
+AUTO_CHOSEN=""    # 採用 label（監査用）
+AUTO_FALLBACK=0   # API 故障 fallback を踏んだか（監査用）
+resolve_account_auto() {
+  # selector の exit code（特に API 故障=3）を set -e に殺されず捕捉する。plain 代入 `x=$(cmd)` は
+  # cmd 失敗で set -e が発火し `; _rc=$?` に到達しないため、`|| _rc=$?` で左辺化して抑止する（sc-1rq）。
+  local _tsv _rc=0
+  _tsv="$("$SCRIPT_DIR/scribe-account-select")" || _rc=$?
+  AUTO_TSV="$_tsv"
+  if [[ "$_rc" -eq 3 ]]; then
+    # facet⑤①: API 故障 → 主アカウント（=admin 自身の稼働アカウント）へ fallback。plain 経路（--account 未指定時の
+    # mirror-then-unset・227-231）と同一規約で解決する（sc-1rq finding1）: admin が CLAUDE_CONFIG_DIR を持てば
+    # それを mirror（WCFG_DIR 非空）、無ければ unset（~/.claude）。~/.claude ハードコードは admin が ~/.claude 稼働の
+    # ときだけ正しく、black4 等の非 ~/.claude admin では preflight_config_dir が空を無検査 skip するため guard 欠落 dir
+    # （login/onboarding/scribe・beads-bdw・cmdtokens 欠落＝各 guard 無効化）に無防備 worker を起こす fail-open だった。
+    # mirror で WCFG_DIR を非空にすれば呼出元の preflight_config_dir が採用 dir の実在を一様検査する（guard 欠落なら
+    # loud-fail・sc-rvq の不変条件を fallback でも保つ）。
+    AUTO_FALLBACK=1
+    if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+      WCFG_DIR="$CLAUDE_CONFIG_DIR"; WCFG_SOURCE="auto-fallback-mirror"
+      echo "scribe: ⚠ --account auto: claude-usage が読めません（API 故障）→ 主アカウント（admin 稼働 config dir を mirror=$WCFG_DIR）へ fallback します（この spawn は成立・採用 dir を preflight で一様検査・facet⑤①・sc-1rq）。" >&2
+    else
+      WCFG_DIR=""; WCFG_SOURCE="auto-fallback"
+      echo "scribe: ⚠ --account auto: claude-usage が読めません（API 故障）→ 主アカウント（~/.claude・unset 経路）へ fallback します（この spawn は成立・facet⑤①・sc-1rq）。" >&2
+    fi
+    return 0
+  fi
+  [[ "$_rc" -eq 0 ]] || scribe_die "--account auto: selector が想定外 exit（$_rc）で失敗しました（sc-1rq）"
+  local _labels
+  _labels="$(awk -F'\t' '$2=="1"{print $1}' <<<"$_tsv")"
+  if [[ -z "$_labels" ]]; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      WCFG_DIR=""; WCFG_SOURCE="auto(適格0件・実起動時 fail-loud)"; return 0
+    fi
+    scribe_die "--account auto: claude-usage 上で適格アカウントが 0 件でした（ok∧非stale を満たすアカウント無し・facet⑤②・sc-1rq）。全アカウントが認証切れ/劣化しています。"
+  fi
+  local _label _probe_dir _inject_dir _reason
+  while IFS= read -r _label; do
+    [[ -n "$_label" ]] || continue
+    # facet④: default は ~/.claude（unset 意味論）へ写像。preflight は ~/.claude へ一様に実施し、採用時の注入は
+    # unset（WCFG_DIR=""）にする。他ラベルは <accounts-base>/<label>。
+    if [[ "$_label" == "default" ]]; then
+      _probe_dir="$HOME/.claude"; _inject_dir=""
+    else
+      _probe_dir="$ACCOUNTS_BASE/$_label"; _inject_dir="$_probe_dir"
+    fi
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      # dry-run は fs preflight walk を行わない（実起動時のみ）。top-by-usage を表示用に採用する。
+      WCFG_DIR="$_inject_dir"; WCFG_SOURCE="auto(dry-run:top-by-usage=$_label・実起動時に preflight walk)"
+      AUTO_CHOSEN="$_label"; return 0
+    fi
+    if _reason="$(probe_config_dir "$_probe_dir" "auto:$_label")"; then
+      WCFG_DIR="$_inject_dir"; WCFG_SOURCE="auto:$_label"; AUTO_CHOSEN="$_label"
+      echo "scribe: --account auto: '$_label' を採用（残量 maximin 上位で preflight 通過・源=$WCFG_SOURCE・sc-1rq）" >&2
+      return 0
+    fi
+    echo "scribe: --account auto: 候補 '$_label'（残量上位）は preflight 不通過で skip: ${_reason%%$'\n'*}" >&2
+  done <<<"$_labels"
+  scribe_die "--account auto: 残量上位の適格候補が preflight を全て不通過でした（usage は適格だが login/onboarding/plugin が欠落・facet⑤②・sc-1rq）。候補: $(tr '\n' ' ' <<<"$_labels")"
+}
+
+# facet⑥ 監査: --account auto の選定 snapshot を安定接頭辞 account-select: の機械可読ブロックへ整形する
+# （後で横断 grep 集計し maximin 見直し材料に）。候補全員（適格+除外）を tab→'|'・空→'-' で列挙する。
+format_account_select_snapshot() {
+  local _chosen="${AUTO_CHOSEN:-none}"
+  local _fb="no"
+  if [[ "$AUTO_FALLBACK" -eq 1 ]]; then
+    _fb="yes"
+    # fallback 採用 dir を監査に正確に映す（sc-1rq finding1）: mirror なら admin 稼働 dir、unset なら ~/.claude。
+    if [[ "$WCFG_SOURCE" == "auto-fallback-mirror" ]]; then
+      _chosen="FALLBACK:mirror($WCFG_DIR)"
+    else
+      _chosen="FALLBACK:default(~/.claude)"
+    fi
+  fi
+  printf 'account-select: chosen=%s fallback=%s method=maximin(残量%%=100-pct・積極解釈) source=%s\n' \
+    "$_chosen" "$_fb" "$WCFG_SOURCE"
+  printf 'account-select: cols=label|eligible|score|h5|h7|pct5|pct7|resets5|resets7|reason\n'
+  if [[ -n "$AUTO_TSV" ]]; then
+    awk -F'\t' '{ for(i=1;i<=10;i++){ f=$i; if(f=="") f="-"; printf "%s%s", (i>1?"|":"account-select:   "), f } print "" }' <<<"$AUTO_TSV"
+  else
+    printf 'account-select:   (selector 出力なし＝API故障 fallback)\n'
+  fi
+}
+
+# facet⑥ 監査（実起動時）: --bd-id ある spawn のみ該当 issue notes へ snapshot を自動追記（bdw 経由・best-effort）。
+# --bd-id 無い spawn（素 consult 等）は notes 書き先が無いため stderr 表示のみ。
+emit_account_select_note() {
+  local _snap; _snap="$(format_account_select_snapshot)"
+  local _nid; _nid="$(scribe_normalize_bd_id "$BD_ID" 2>/dev/null || true)"
+  if [[ -z "$_nid" ]]; then
+    { echo "scribe: account-select 監査（--bd-id 無し→ notes 書き先なし・表示のみ）:"; echo "$_snap"; } >&2
+    return 0
+  fi
+  ( cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update "$_nid" --append-notes "$_snap" ) >/dev/null 2>&1 \
+    || echo "scribe: warn: account-select 監査 note の追記に失敗（bdw・best-effort・spawn は継続）: $_nid" >&2
+}
+
+# facet⑥ 監査（dry-run）: 選定予定を plan 行で可視化する（候補ランキング + 選定結果）。
+account_select_plan() {
+  echo "[plan] --account auto（sc-1rq・facet①=opt-in）: claude-usage 残量 maximin 自動選択（残量%=100-pct・積極解釈・resets_at null/過去=満残量）"
+  if [[ "$AUTO_FALLBACK" -eq 1 ]]; then
+    if [[ "$WCFG_SOURCE" == "auto-fallback-mirror" ]]; then
+      echo "[plan]   selector=API故障 → 主アカ（admin 稼働 config dir を mirror=$WCFG_DIR）へ fallback（採用 dir を preflight で一様検査・facet⑤①）"
+    else
+      echo "[plan]   selector=API故障 → 主アカ(~/.claude・unset)へ fallback（実起動でも fallback・facet⑤①）"
+    fi
+  elif [[ -n "$AUTO_TSV" ]]; then
+    echo "[plan]   selector ランキング（上位=残量最大・el=適格1/0・min=maximin score）:"
+    awk -F'\t' '{printf "[plan]     %s\tel=%s\tmin=%s\th5=%s\th7=%s\t%s\n",$1,$2,($3==""?"-":$3),($4==""?"-":$4),($5==""?"-":$5),$10}' <<<"$AUTO_TSV"
+    echo "[plan]   選定予定（top-by-usage）=${AUTO_CHOSEN:-none}（実起動時に上位から preflight lazy walk・facet②）"
+  else
+    echo "[plan]   selector=適格0件 → 実起動時に fail-loud（facet⑤②）"
+  fi
+}
+
+# --account auto の解決を関数定義後・分岐前に実行する（worker/consult 両経路が resolved WCFG を共有）。
+# dry-run でも selector を回してランキングを plan へ出す（read-only usage 読取り）。実起動時は preflight lazy
+# walk + 監査 note まで行う。
+if [[ "$AUTO" -eq 1 ]]; then
+  resolve_account_auto
+  [[ "$DRY_RUN" -eq 0 ]] && emit_account_select_note
+fi
 
 # fable の許否は role で非対称（道具は規約を変えない）:
 #   - worker: fable 厳禁（protocol.md §1: worker は opus 必須＝コスト爆発防止）。worker 分岐内で die する。
@@ -440,6 +600,7 @@ PROMPT
       echo "[plan] scribe-spawn(consult): anchor=$ANCHOR${TOPIC:+ 議題参照=$TOPIC（read-only）}"
     fi
     config_dir_plan_line
+    [[ "$AUTO" -eq 1 ]] && account_select_plan
     echo "[plan] env-file（anchor 外＝anchor リポを汚さない・spawn 後 rm）:"
     echo "         ENV_FILE=\$(mktemp /tmp/scribe-consult-XXXXXX.env)"
     echo "         printf '%s\\n' '$ENV_LINE' > \"\$ENV_FILE\""
@@ -665,6 +826,7 @@ emit_plan() {
     echo "[plan] effort: $EFFORT（cld-spawn --help に --effort 未検出→ env-file の CLAUDE_CODE_EFFORT_LEVEL=$EFFORT のみ・flag は付けない=un-ivb 防御）"
   fi
   config_dir_plan_line
+  [[ "$AUTO" -eq 1 ]] && account_select_plan
   # 値は引用して表示する（実 invocation 行 §下記と同じく 1 argv であることを dry-run 監査でも視覚化する。
   # 将来 WORKER_DISALLOWED_TOOLS が内部空白を持つ spec〔例 Bash(git push:*)〕を含む場合に「2 引数」と誤読
   # させない・gate finding orch-4dm-review [nit]）。--env-file は全 worker（sandbox on/off 問わず）無条件ゆえ
