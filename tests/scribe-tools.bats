@@ -1589,6 +1589,70 @@ _make_noop_cld_spawn() {
   rm -rf "$anchorY"
 }
 
+# ---------- spawn(sandbox pre-create): sc-0nb allowWrite pre-create の file/dir/不在 挙動 ----------
+# sc-0nb 修正の回帰ガード（出荷物 scripts/ の silent 再発防止）。旧ループは lock_file 以外の allowWrite path へ
+# 一律 `mkdir -p` していたため (a) 不在 path 位置に dir を作り .beads を破損しうる・(b) present な runtime **file**
+# (interactions.jsonl 等)に毎 spawn "File exists"/"mkdir に失敗" スケア警告を吐いた。fix は present(file/dir)は skip・
+# 不在は自動生成せず fail-loud warn。既存の pre-create テスト(sc-s68/sc-lkg/sc-mcx)は lock **file** 枝しか弁別せず
+# この loop 枝を検出しないため、旧 `mkdir -p "$_sb_aw"` へ revert しても緑のまま＝下記 2 本で mutation を pin する。
+
+@test "spawn(sandbox/sc-0nb b): present な .beads runtime file(interactions.jsonl)は dir 化されず 'mkdir に失敗' スケア警告も出ない（旧無条件 mkdir -p 退行を捕捉）" {
+  # 実 gen 経由の spawn を走らせ、gen が grant する present **file** に対し新ループが何もしない(skip)ことを assert する。
+  # 旧 `mkdir -p "$_sb_aw"` は present file に mkdir -p が失敗し "File exists"(mkdir stderr)+"mkdir に失敗"(warn)を吐いて RED。
+  local repo wt noop il sp_out
+  repo="$SCRIBE_TEST_CWD"
+  _mk_beads "$repo"                 # interactions.jsonl 等を present file として用意（gen が runtime を grant）
+  il="$repo/.beads/interactions.jsonl"
+  [ -f "$il" ] && [ ! -d "$il" ]
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  wt="$repo/.worktrees/spawn/un-4nm-101010"
+  # 実 gen を走らせる（BDW_PRESENT_STUB で host 非依存＝canonical plugin 不在でも skip 不要）。preflight/cld-spawn は noop。
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_PREFLIGHT="$noop" \
+      BDW_LOCK_DIR="$BATS_TEST_TMPDIR/rt" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop"
+  [ "$status" -eq 0 ]
+  # spawn の $output を退避する（直後の `run jq` が $output/$status を上書きする＝この退避を怠ると 1622-1623 が
+  # jq 出力を検査して常に真の vacuous になる・sc-0nb self-review finding 1）。
+  sp_out="$output"
+  # 前提: gen が interactions.jsonl を allowWrite に grant している（この loop 枝を実際に通る証跡＝vacuous でない）。
+  run jq -e --arg f "$il" '.sandbox.filesystem.allowWrite | index($f)!=null' "$wt/.claude/settings.local.json"
+  [ "$status" -eq 0 ]
+  # 核心1(sc-0nb (a) 保険): present file は file のまま（dir 化・消失していない）。
+  [ -f "$il" ] && [ ! -d "$il" ]
+  # 核心2(sc-0nb (b) 回帰ガード): 旧 `mkdir -p <file>` 由来のスケア警告が出ない（旧実装なら毎 spawn 出て RED）。
+  #   "mkdir に失敗"=scribe warn(locale 非依存の主 mutation-kill)・"File exists"=mkdir stderr(英語 locale の補助)。
+  [[ "$sp_out" != *"mkdir に失敗"* ]]
+  [[ "$sp_out" != *"File exists"* ]]
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+}
+
+@test "spawn(sandbox/sc-0nb a): 不在 allowWrite path は自動生成(dir 化)されず fail-loud に warn する（旧 mkdir -p による .beads 破損の回帰ガード）" {
+  # gen を stub し allowWrite に *不在* path を1件注入して実 pre-create ループを駆動する。新ループは種別不明の leaf を
+  # 作らず不在 warn を出すのみ。旧 `mkdir -p "$_sb_aw"` は不在 path 位置に dir を生やす（本来 file の runtime パスなら
+  # .beads 破損＝sc-0nb (a)）ため [ ! -e ] が落ちて RED。
+  local repo wt noop genstub absjson absent
+  repo="$SCRIBE_TEST_CWD"
+  wt="$repo/.worktrees/spawn/un-4nm-101010"
+  absent="$repo/.beads/sc-0nb-absent-leaf.jsonl"   # 不在 leaf（本来 file 相当・dir 化されてはならない）
+  [ ! -e "$absent" ]
+  # gen を stub: FO-2 attestation(enabled/failIfUnavailable/allowUnsandboxedCommands)を満たしつつ allowWrite に不在 path のみ注入。
+  absjson="$(mktemp)"
+  jq -n --arg a "$absent" '{sandbox:{enabled:true,failIfUnavailable:true,allowUnsandboxedCommands:false,filesystem:{allowWrite:[$a]}}}' > "$absjson"
+  genstub="$(mktemp)"; printf '#!/usr/bin/env bash\ncat %q\n' "$absjson" > "$genstub"; chmod +x "$genstub"
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_PREFLIGHT="$noop" \
+      SCRIBE_SANDBOX_GEN="$genstub" BDW_LOCK_DIR="$BATS_TEST_TMPDIR/rt" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop" "$genstub" "$absjson"
+  [ "$status" -eq 0 ]
+  # 核心1(sc-0nb (a) 回帰ガード): 不在 leaf は生成されない(dir も file も)。旧 `mkdir -p` は dir を生やす → [ ! -e ] が落ちて RED。
+  [ ! -e "$absent" ]
+  # 核心2: fail-loud（黙って破損させず不在を warn する）。
+  [[ "$output" == *"sandbox allowWrite path が不在"* ]]
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+}
+
 @test "spawn(sandbox/sc-s68): gen 失敗時は die（非0）し settings.local.json を残さず temp も後始末する" {
   local repo wt noop genfail
   repo="$SCRIBE_TEST_CWD"
