@@ -22,6 +22,13 @@ _effort_of() {
 _has_effort() {
   echo "$1" | python3 -c 'import json,sys; print("effort" in json.load(sys.stdin))'
 }
+# ヘルパ（sc-94z）: 任意 key の有無/値を読む（reviewEffort/verifyEffort の焼き込みを effort と対称に pin）。
+_has_key() {
+  echo "$2" | KEY="$1" python3 -c 'import json,os,sys; print(os.environ["KEY"] in json.load(sys.stdin))'
+}
+_val_of() {
+  echo "$2" | KEY="$1" python3 -c 'import json,os,sys; print(json.load(sys.stdin).get(os.environ["KEY"],"<absent>"))'
+}
 
 # --- 系1: allowlist 内は焼ける（正規 5 値すべて） ---
 @test "selftest-args(sc-7ac): CLAUDE_CODE_EFFORT_LEVEL が allowlist 内なら args.effort へ焼ける（5 値）" {
@@ -57,4 +64,57 @@ _has_effort() {
   CLAUDE_CODE_EFFORT_LEVEL="HIGH" run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' un-4nm
   [ "$status" -eq 0 ]
   [ "$(_has_effort "$output")" = "False" ]
+}
+
+# === reviewEffort/verifyEffort（sc-94z・guard 段の個別 opt-in knob）=================================
+# env 由来 effort（fail-soft）と posture が逆で、明示フラグゆえ allowlist 外は fail-loud で die する。
+# 系3: 指定時は args.reviewEffort/verifyEffort へ allowlist 5 値が焼ける。
+# 系4: 未指定なら key を載せない（effort と対称の有無 2 系）。
+# 系5: allowlist 外指定は非ゼロ die し stderr に allowlist メッセージ（SSOT 由来）を出す（fail-loud）。
+
+# --- 系3: --review-effort/--verify-effort は allowlist 内なら焼ける（正規 5 値すべて） ---
+@test "selftest-args(sc-94z): --review-effort/--verify-effort が allowlist 内なら args.reviewEffort/verifyEffort へ焼ける（5 値）" {
+  for lvl in low medium high xhigh max; do
+    run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'bats tests/foo.bats' \
+      --review-effort "$lvl" --verify-effort "$lvl" un-4nm
+    [ "$status" -eq 0 ]
+    echo "$output" | python3 -m json.tool >/dev/null              # valid JSON
+    [ "$(_has_key reviewEffort "$output")" = "True" ]
+    [ "$(_has_key verifyEffort "$output")" = "True" ]
+    [ "$(_val_of reviewEffort "$output")" = "$lvl" ]
+    [ "$(_val_of verifyEffort "$output")" = "$lvl" ]
+  done
+}
+
+# --- 系3b: 片側のみ指定でも独立に焼ける（もう片側は載せない） ---
+@test "selftest-args(sc-94z): --review-effort のみ指定なら reviewEffort だけ焼け verifyEffort は載せない" {
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' --review-effort xhigh un-4nm
+  [ "$status" -eq 0 ]
+  [ "$(_has_key reviewEffort "$output")" = "True" ]
+  [ "$(_val_of reviewEffort "$output")" = "xhigh" ]
+  [ "$(_has_key verifyEffort "$output")" = "False" ]
+}
+
+# --- 系4: 未指定なら reviewEffort/verifyEffort key を載せない（effort と対称の有無 2 系） ---
+@test "selftest-args(sc-94z): --review-effort/--verify-effort 未指定なら key を載せない（WF 既定 high に委譲）" {
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' un-4nm
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -m json.tool >/dev/null
+  [ "$(_has_key reviewEffort "$output")" = "False" ]
+  [ "$(_has_key verifyEffort "$output")" = "False" ]
+}
+
+# --- 系5: allowlist 外は fail-loud で die（env fail-soft と posture が逆）+ allowlist メッセージ ---
+@test "selftest-args(sc-94z): allowlist 外 --review-effort は非ゼロ die し stderr に allowlist メッセージ" {
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' --review-effort ultra un-4nm
+  [ "$status" -ne 0 ]                          # fail-loud（焼かず素通しではなく die）
+  [[ "$output" == *"--review-effort"* ]]       # どのフラグが弾かれたか
+  [[ "$output" == *"low|medium|high|xhigh|max"* ]]  # SSOT 由来 allowlist メッセージ（scribe_effort_allowlist_join）
+}
+
+@test "selftest-args(sc-94z): allowlist 外 --verify-effort は非ゼロ die し stderr に allowlist メッセージ" {
+  run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' --verify-effort HIGH un-4nm
+  [ "$status" -ne 0 ]                          # 大文字は完全一致を外れる＝die
+  [[ "$output" == *"--verify-effort"* ]]
+  [[ "$output" == *"low|medium|high|xhigh|max"* ]]
 }

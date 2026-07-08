@@ -227,7 +227,30 @@ function printResult(result, calls, logs, agentTypeCalls, promptCalls, effortCal
   K('effortAgentCalls', ec.length)
   K('effortAllPinned', ec.length > 0 && ec.every((e) => e && e.effort !== undefined))
   K('effortDistinct', Array.from(new Set(ec.map((e) => String(e && e.effort)))).sort().join(','))
-  K('resultEffort', result.effort)
+  // (sc-94z) per-stage effort の behavioral 検証: 各段の agent 呼出しに届いた opts.effort を label prefix 別に読む。
+  // guard 段(review/verify/fix)が cell effort の一括下げから独立に high を保つか等を段ごとに pin する。
+  // 該当段が走らなかった run(clean review で fix なし・doPlan/doImplement 無しで plan/implement なし)は '<none>'。
+  const effortOf = (prefix) => {
+    const hit = ec.find((e) => e && typeof e.label === 'string' && e.label.startsWith(prefix))
+    return hit ? String(hit.effort) : '<none>'
+  }
+  K('effortStage.classify', effortOf('classify'))
+  K('effortStage.selftest', effortOf('selftest:'))
+  K('effortStage.snapshot', effortOf('snapshot'))
+  K('effortStage.plan', effortOf('plan'))
+  K('effortStage.implement', effortOf('implement'))
+  K('effortStage.review', effortOf('review:'))
+  K('effortStage.verify', effortOf('verify:'))
+  K('effortStage.fix', effortOf('autofix'))
+  // (sc-94z) result.effort は per-stage 要約 object へ変わった(旧: 単一 string)。各フィールドを個別に出す。
+  const re = result.effort && typeof result.effort === 'object' ? result.effort : {}
+  K('resultEffort.cell', re.cell)
+  K('resultEffort.review', re.review)
+  K('resultEffort.verify', re.verify)
+  K('resultEffort.fix', re.fix)
+  K('resultEffort.classify', re.classify)
+  K('resultEffort.selfTest', re.selfTest)
+  K('resultEffort.snapshot', re.snapshot)
   // (sc-dc9) allowlist 外 args.effort → 既定 high へ fail-safe した際、warn log が実際に発火したか(behavioral)。
   // logs は既定では stdout に dump しないため、この behavioral K 行で fail-safe の可視化(silent に倒さない)を検証する。
   K('effortFailSafeWarned', (logs || []).some((l) => String(l).includes('許可外')))
