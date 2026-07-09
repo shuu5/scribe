@@ -1247,6 +1247,21 @@ _make_noop_cld_spawn() {
   grep -q '停止してよいのは 2 例外のみ' "$proto"
 }
 
+# sc-123: fix は worker mandate（carrier=build_prompt・上の 2 bats で pin）と admin gate 検知（§5 step1）の
+# 二面。検知側は in-repo prose ゆえ sc-46h/sc-c7c と同型で docs 側 grep pin が要る（carrier だけ pin すると
+# 検知側半分が将来 protocol.md 編集で silent に drift/削除されても RED にならない・cell-quality gate minor）。
+@test "docs(sc-123): protocol.md §5 step1 に DONE note 実在照合＋差し戻しが成文化されている" {
+  local proto="$REPO_ROOT/docs/protocol.md"
+  # 検知側 bullet の見出し（gate-pending 検知時に durable 報告の実在を照合する契約）。
+  grep -q 'DONE note 実在照合' "$proto"
+  # 照合対象 = [DONE--<id>] marker 行の実在（carrier 側 marker と対称）。
+  grep -q 'marker 行が実在' "$proto"
+  # 不在時の方針 = 未完了扱いで merge せず差し戻す（pane 手動回収へ落とさない）。
+  grep -q '未完了扱いで merge せず差し戻す' "$proto"
+  # commit-count Layer2 との AND 複合判定（§6「独立信号の複合条件」に接続・3 信号 AND）。
+  grep -q '3 信号 AND' "$proto"
+}
+
 # 上の positive テストは cell-quality/receivedArgs/bdw のみ assert し、build_prompt が焼く
 # selftest-args 呼出（cell-quality の自己点検 args 1 コマンド化）を pin しない＝行の脱落/改変が
 # 緑通過する純 test-gap（sc-e22）。dry-run prompt 出力に selftest-args の核要素が焼けることを pin する。
