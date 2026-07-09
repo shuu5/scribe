@@ -59,6 +59,39 @@ scribe_effort_allowlist_join() {
   printf '%s' "${SCRIBE_EFFORT_ALLOWLIST[*]}"
 }
 
+# === guard 段 effort 下限フロア（sc-2wv・sc-94z gate 申し送り）=====================
+# cell-quality の guard 段（Review/Verify/Fix）は docs（methodology §1.1・protocol §1）上
+# 「high 固定・xhigh へ opt-in で上げる」framing で、下げ経路を規約として持たない（但し書き(1)＝
+# gate 側を下げない＝worker effort を下げてよい根拠が「失敗を gate/review が拾う」ことゆえ、gate 自身は
+# 下げない）。ところが guard knob（reviewEffort/verifyEffort）は allowlist 全値を受理し high 未満へ
+# 下げられる doc/impl 非対称があった。これを機械 enforce する floor を足す（fail-closed 文化と整合）。
+# **EFFORT_ALLOWED（sc-ax4 SSOT）は不変**——rank/floor は allowlist 集合とは別概念として追加する。
+# floor 値も別 literal を持たず allowlist と同じ SSOT 語彙から採る（drift 源を作らない）。
+SCRIBE_GUARD_EFFORT_FLOOR=high
+
+# scribe_effort_rank <value> — allowlist 内の intensity 順位（0=最弱 low … 4=最強 max）を stdout へ echo。
+#   allowlist 外・空は非0 で返す（rank 無し）。SCRIBE_EFFORT_ALLOWLIST は intensity 昇順で宣言され
+#   （effort-allowlist-ssot.bats が順序を pin）ゆえ配列 index を rank として導出する＝別の順序付き SSOT を
+#   持たず drift 源を作らない（rank は allowlist 集合とは別概念だが同じ順序付き配列から一意に導く）。
+scribe_effort_rank() {
+  local v="${1-}" allowed i=0
+  for allowed in "${SCRIBE_EFFORT_ALLOWLIST[@]}"; do
+    [[ "$v" == "$allowed" ]] && { printf '%s' "$i"; return 0; }
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# scribe_effort_meets_guard_floor <value> — <value> が guard 下限フロア（SCRIBE_GUARD_EFFORT_FLOOR=high）
+#   以上の intensity なら exit 0・未満/allowlist 外は非0。guard knob 専用の floor 判定 SSOT。allowlist 外は
+#   rank 取得失敗で非0 に倒れる（呼出側は is_valid を先に通す前提だが、素通しでも floor で二重に安全側）。
+scribe_effort_meets_guard_floor() {
+  local v="${1-}" vr fr
+  vr="$(scribe_effort_rank "$v")" || return 1
+  fr="$(scribe_effort_rank "$SCRIBE_GUARD_EFFORT_FLOOR")" || return 1
+  [[ "$vr" -ge "$fr" ]]
+}
+
 # scribe_normalize_bd_id <raw> — bd id を正規化・検証する（protocol.md §1 / session-name.sh producer 準拠）。
 #   - 許容: 英数始まり + 英数 '.' '-'（dotted 階層 id un-3sh.3.5 を通す）。先頭 '#' は剥がす。
 #   - 拒否: path traversal（'..' を含む・'/' を含む）= path/window 名へ埋め込むため構造的に防御。

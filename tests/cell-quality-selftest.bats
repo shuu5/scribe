@@ -282,6 +282,25 @@ setup() {
   [[ "$output" == *"K resultEffort.review high"* ]]
   # fail-safe を warn log で可視化(silent に倒さない)=behavioral に発火を確認。
   [[ "$output" == *"K effortFailSafeWarned true"* ]]
+  # allowlist 外(fallback=high)は floor を満たすゆえ floor-clamp 経路は発火しない(=別経路の弁別)。
+  [[ "$output" == *"K effortFloorClamped false"* ]]
+}
+
+@test "sc-2wv: guard knob(reviewEffort/verifyEffort)を floor(high)未満で渡すと WF は fail-safe で high へ引き上げ warn" {
+  # WF 直叩き経路(scribe-selftest-args を経ない)の二重防御: allowlist 内だが high 未満(low/medium)の guard knob は
+  # 黙って下げず floor(high)へ引き上げ、'下限フロア' warn を発火する(gate 側を下げない=但し書き(1)の機械 enforce)。
+  run env CQ_ARGS='{"taskTitle":"cell","worktree":"/tmp/wt","goal":"do x","selfTestCmd":"bats tests/x.bats","autoFix":true,"reviewEffort":"medium","verifyEffort":"low"}' \
+    CQ_REVIEW_FINDINGS='[{"title":"x","severity":"critical","location":"a:1","rationale":"r"}]' \
+    CQ_VERIFY_REFUTED=true \
+    node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  # guard 段は floor(high)へ clamp(下げ拒否・behavioral)。
+  [[ "$output" == *"K effortStage.review high"* ]]
+  [[ "$output" == *"K effortStage.verify high"* ]]
+  [[ "$output" == *"K resultEffort.review high"* ]]
+  [[ "$output" == *"K resultEffort.verify high"* ]]
+  # floor-clamp の warn が発火(silent に下げない)。'許可外'(allowlist 外)経路とは別マーカーで弁別。
+  [[ "$output" == *"K effortFloorClamped true"* ]]
 }
 
 # ── WF 本体の静的 pin 検査: per-stage effort 定数 + 各段割当て(sc-dc9 一律 pin から分化) ──
@@ -295,10 +314,15 @@ setup() {
   # 新検証路を作らず既存 allowlist を再利用する単一 resolver(consistency (a))。
   grep -q 'const resolveEffort = ' "$WF"
   grep -q 'EFFORT_ALLOWED.has(t)' "$WF"
+  # guard 段 floor(sc-2wv): guard knob 専用 resolver は共通 resolveEffort を内部再利用しつつ high 未満を clamp する。
+  grep -q 'const resolveGuardEffort = ' "$WF"
+  grep -q "const GUARD_EFFORT_FLOOR = 'high'" "$WF"
+  grep -q 'const EFFORT_RANK_ORDER = ' "$WF"
   # per-stage 定数が存在する。
   grep -q 'const CELL_EFFORT = resolveEffort' "$WF"
-  grep -q 'const reviewEffort = resolveEffort' "$WF"
-  grep -q 'const verifyEffort = resolveEffort' "$WF"
+  # guard knob は floor 付き resolver(resolveGuardEffort)経由(下げ拒否)。
+  grep -q 'const reviewEffort = resolveGuardEffort' "$WF"
+  grep -q 'const verifyEffort = resolveGuardEffort' "$WF"
   grep -qE "const FIX_EFFORT = 'high'" "$WF"
   grep -qE "const CLASSIFY_EFFORT = 'medium'" "$WF"
   grep -qE "const SELFTEST_EFFORT = 'medium'" "$WF"
