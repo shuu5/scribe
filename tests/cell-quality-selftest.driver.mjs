@@ -254,6 +254,10 @@ function printResult(result, calls, logs, agentTypeCalls, promptCalls, effortCal
   // (sc-dc9) allowlist 外 args.effort → 既定 high へ fail-safe した際、warn log が実際に発火したか(behavioral)。
   // logs は既定では stdout に dump しないため、この behavioral K 行で fail-safe の可視化(silent に倒さない)を検証する。
   K('effortFailSafeWarned', (logs || []).some((l) => String(l).includes('許可外')))
+  // (sc-2wv) guard 段 knob(reviewEffort/verifyEffort)を floor(high)未満で渡した際、WF が fail-safe で high へ
+  // 引き上げ warn したか(behavioral)。floor-clamp は '許可外'(allowlist 外)とは別経路(allowlist 内だが下げ拒否)
+  // ゆえ専用マーカー '下限フロア' で弁別する。これが消える(silent に下げる)退行を behavioral に捕える。
+  K('effortFloorClamped', (logs || []).some((l) => String(l).includes('下限フロア')))
   console.log(`ESCALATE_REASON ${String(result.escalateReason || '')}`)
   console.log(`RESULT ${JSON.stringify(result)}`)
 }

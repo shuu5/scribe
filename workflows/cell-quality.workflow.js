@@ -355,10 +355,32 @@ const resolveEffort = (raw, fallback, label) => {
 }
 // cell effort(sc-94z ④): 再定義された args.effort。Plan/Implement(実装系の段)にのみ効く。既定 high。
 const CELL_EFFORT = resolveEffort(A.effort, 'high', 'effort')
+// guard 段 effort 下限フロア(sc-2wv・sc-94z gate 申し送り): guard 段(Review/Verify)は high 未満へ下げられない
+// (但し書き(1)=gate 側を下げない)。従来 resolveEffort(A.reviewEffort,'high') は allowlist 全値を受理し明示指定なら
+// guard を low/medium へ下げられる doc/impl 非対称があった。EFFORT_RANK_ORDER(=EFFORT_ALLOWED と同メンバの
+// intensity 昇順配列・rank は集合とは別概念)で floor を機械 enforce する。bash 側(scribe-selftest-args)は明示
+// フラグゆえ fail-loud die・WF 側は args 直叩き経路の二重防御として fail-safe(floor へ clamp + warn)。allowlist
+// SSOT(sc-ax4)自体は不変。SSOT-MIRROR(sc-ax4): EFFORT_RANK_ORDER も bash SCRIBE_EFFORT_ALLOWLIST の順序 mirror で
+// effort-allowlist-ssot.bats が順序込みで drift を検知する(cell effort は下げてよいが guard は下げない=段で posture 差)。
+const EFFORT_RANK_ORDER = ['low', 'medium', 'high', 'xhigh', 'max']
+const GUARD_EFFORT_FLOOR = 'high'
+const effortRank = (v) => EFFORT_RANK_ORDER.indexOf(v)
+// guard knob 専用 resolver: 共通 resolveEffort(allowlist 検証・fallback high)を通した後、floor(high)未満なら
+// fail-safe で floor へ引き上げ warn する(silent に下げない)。fallback=high 経路(allowlist 外)は floor を満たすので
+// 追加 warn せず既存 '許可外' warn のみ。resolveEffort の fallback も GUARD_EFFORT_FLOOR で一貫させる。
+const resolveGuardEffort = (raw, label) => {
+  const r = resolveEffort(raw, GUARD_EFFORT_FLOOR, label)
+  if (effortRank(r) < effortRank(GUARD_EFFORT_FLOOR)) {
+    log(`警告: ${label}='${r}' は guard 段の下限フロア(${GUARD_EFFORT_FLOOR})未満。floor へ引き上げ(sc-2wv・gate 側を下げない=但し書き(1))。`)
+    return GUARD_EFFORT_FLOOR
+  }
+  return r
+}
 // guard 段 knob(sc-94z ①): Review/Verify は既定 high 固定・reviewEffort/verifyEffort で xhigh 等へ opt-in する。
 // 既定は CELL_EFFORT でなく 'high'(cell effort の一括下げから構造独立=guard を道連れに下げない=但し書き(1))。
-const reviewEffort = resolveEffort(A.reviewEffort, 'high', 'reviewEffort')
-const verifyEffort = resolveEffort(A.verifyEffort, 'high', 'verifyEffort')
+// high 未満への下げは floor(sc-2wv)が fail-safe で high へ引き上げる(上げ方向 opt-in のみ)。
+const reviewEffort = resolveGuardEffort(A.reviewEffort, 'reviewEffort')
+const verifyEffort = resolveGuardEffort(A.verifyEffort, 'verifyEffort')
 // 固定 effort 段(sc-94z ①②③): Fix=high 固定(guard・knob 無し)。Classify/Self-test/Snapshot=medium 固定。
 const FIX_EFFORT = 'high'
 const CLASSIFY_EFFORT = 'medium'

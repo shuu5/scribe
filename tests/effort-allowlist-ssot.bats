@@ -66,3 +66,50 @@ setup() {
   bash_members="$(printf '%s\n' "${SCRIBE_EFFORT_ALLOWLIST[@]}" | sort | tr '\n' ' ')"
   [ "$js_members" = "$bash_members" ]
 }
+
+# === guard 段 effort 下限フロア（sc-2wv）: rank/floor ヘルパ + JS mirror の順序 drift 検知 ==========
+# guard knob（reviewEffort/verifyEffort）を high 未満へ下げさせない floor の SSOT を pin する。rank は
+# EFFORT_ALLOWED（集合）とは別概念だが同じ順序付き配列 SCRIBE_EFFORT_ALLOWLIST から index として導く。
+
+# ── rank: allowlist の intensity 順位（index）を返す・allowlist 外は非0 ──
+@test "sc-2wv: scribe_effort_rank が intensity 昇順 index を返す（allowlist 外・空は非0）" {
+  [ "$(scribe_effort_rank low)" = "0" ]
+  [ "$(scribe_effort_rank medium)" = "1" ]
+  [ "$(scribe_effort_rank high)" = "2" ]
+  [ "$(scribe_effort_rank xhigh)" = "3" ]
+  [ "$(scribe_effort_rank max)" = "4" ]
+  for v in ultra "" HIGH " high"; do
+    run scribe_effort_rank "$v"
+    [ "$status" -ne 0 ]
+  done
+}
+
+# ── floor: guard 下限フロア（high）以上のみ受理・low/medium 拒否 ──
+@test "sc-2wv: scribe_effort_meets_guard_floor は high 以上のみ受理（low/medium・allowlist 外を拒否）" {
+  [ "$SCRIBE_GUARD_EFFORT_FLOOR" = "high" ]
+  for v in high xhigh max; do
+    scribe_effort_meets_guard_floor "$v"
+  done
+  for v in low medium ultra "" HIGH; do
+    run scribe_effort_meets_guard_floor "$v"
+    [ "$status" -ne 0 ]
+  done
+}
+
+# ── JS mirror ↔ bash SSOT: EFFORT_RANK_ORDER の順序込み drift 検知（rank は index 依存ゆえ順序を pin）──
+@test "sc-2wv: cell-quality.workflow.js の EFFORT_RANK_ORDER が bash SSOT と順序込みで一致する（rank drift 検知）" {
+  [ -f "$WF" ]
+  local js_line js_members bash_members
+  js_line="$(grep -oE "EFFORT_RANK_ORDER = \[[^]]*\]" "$WF")"
+  [ -n "$js_line" ]
+  # 順序を保って抽出（sort しない）＝rank は配列 index 依存ゆえ集合一致でなく順序一致を要求する。
+  js_members="$(printf '%s' "$js_line" | grep -oE "'[^']+'" | tr -d "'" | tr '\n' ' ')"
+  bash_members="$(printf '%s ' "${SCRIBE_EFFORT_ALLOWLIST[@]}")"
+  [ "$js_members" = "$bash_members" ]
+}
+
+# ── WF の guard floor 定数が bash SSOT floor と一致する（policy 値の drift 検知）──
+@test "sc-2wv: cell-quality.workflow.js の GUARD_EFFORT_FLOOR が bash SCRIBE_GUARD_EFFORT_FLOOR と一致する" {
+  [ -f "$WF" ]
+  grep -q "const GUARD_EFFORT_FLOOR = '$SCRIBE_GUARD_EFFORT_FLOOR'" "$WF"
+}

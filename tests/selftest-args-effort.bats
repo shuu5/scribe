@@ -68,13 +68,14 @@ _val_of() {
 
 # === reviewEffort/verifyEffort（sc-94z・guard 段の個別 opt-in knob）=================================
 # env 由来 effort（fail-soft）と posture が逆で、明示フラグゆえ allowlist 外は fail-loud で die する。
-# 系3: 指定時は args.reviewEffort/verifyEffort へ allowlist 5 値が焼ける。
+# 系3: 指定時は args.reviewEffort/verifyEffort へ **floor(high)以上**の値が焼ける（上げ方向のみ opt-in）。
+# 系3-floor（sc-2wv）: high 未満（low/medium）は guard floor 未満ゆえ fail-loud で die（gate 側を下げない）。
 # 系4: 未指定なら key を載せない（effort と対称の有無 2 系）。
 # 系5: allowlist 外指定は非ゼロ die し stderr に allowlist メッセージ（SSOT 由来）を出す（fail-loud）。
 
-# --- 系3: --review-effort/--verify-effort は allowlist 内なら焼ける（正規 5 値すべて） ---
-@test "selftest-args(sc-94z): --review-effort/--verify-effort が allowlist 内なら args.reviewEffort/verifyEffort へ焼ける（5 値）" {
-  for lvl in low medium high xhigh max; do
+# --- 系3: --review-effort/--verify-effort は floor(high)以上なら焼ける（high/xhigh/max） ---
+@test "selftest-args(sc-94z/sc-2wv): --review-effort/--verify-effort が floor(high)以上なら args へ焼ける（high/xhigh/max）" {
+  for lvl in high xhigh max; do
     run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'bats tests/foo.bats' \
       --review-effort "$lvl" --verify-effort "$lvl" un-4nm
     [ "$status" -eq 0 ]
@@ -83,6 +84,25 @@ _val_of() {
     [ "$(_has_key verifyEffort "$output")" = "True" ]
     [ "$(_val_of reviewEffort "$output")" = "$lvl" ]
     [ "$(_val_of verifyEffort "$output")" = "$lvl" ]
+  done
+}
+
+# --- 系3-floor（sc-2wv）: guard 段は上げる方向のみ opt-in。high 未満（low/medium）は fail-loud で die ---
+@test "selftest-args(sc-2wv): --review-effort が floor(high)未満（low/medium）なら非ゼロ die し floor メッセージ" {
+  for lvl in low medium; do
+    run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' --review-effort "$lvl" un-4nm
+    [ "$status" -ne 0 ]                          # allowlist 内だが floor 未満＝die（焼かない）
+    [[ "$output" == *"--review-effort"* ]]
+    [[ "$output" == *"下限フロア"* ]]            # floor 由来メッセージ（allowlist メッセージと弁別）
+  done
+}
+
+@test "selftest-args(sc-2wv): --verify-effort が floor(high)未満（low/medium）なら非ゼロ die し floor メッセージ" {
+  for lvl in low medium; do
+    run "$SELFTEST" --dry-run --worktree /tmp/wt --self-test 'x' --verify-effort "$lvl" un-4nm
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--verify-effort"* ]]
+    [[ "$output" == *"下限フロア"* ]]
   done
 }
 
