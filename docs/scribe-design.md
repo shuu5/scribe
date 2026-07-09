@@ -252,6 +252,8 @@ A↔B 差分（ここだけ）:
 
 → scribe は重い mailbox を作らず、beads + cc-session inject + 薄い status ファイル板を **compose** するだけ。
 
+> **`session_msg recv`/`ack`/`list` stub = 意図的未実装（mailbox-as-store 棄却・sc-pp9 論点5）**: cc-session session-comm の双方向 mailbox 相当（`session_msg recv` / `ack` / `list`）は **stub のまま意図的に未実装**として維持する（未実装は欠陥でなく設計判断）。sc-pp9 論点5 で「mailbox を worker↔admin 通信の**保管庫（store）として二重化する案B（cc-session mailbox 拡張）」を棄却したため——上記 2 チャネル（PUSH=操舵 inject／PULL=beads ボード）で足り、永続 store + id + poll + ack 台帳という新サブシステムの実コストに見合う純増価値は**構造化 ack のみ**で薄く、CC native の agent teams Mailbox が GA 化すれば再発明が陳腐化するリスクも大きい。**再評価トリガは並列規模が 3-5 worker を大幅に超過したときのみ**（それ未満では本 2 チャネル compose で YAGNI＝§8「3-5 worker は想定内」と整合）。決定 SSOT = bd sc-pp9 論点5 notes。
+
 ---
 
 ## 10. 監視ループ機構 = (b) 薄い背景 supervisor
