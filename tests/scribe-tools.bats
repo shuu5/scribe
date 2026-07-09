@@ -828,6 +828,38 @@ _mk_beads() {
   ! printf '%s\n' '[SPAWNED-Xun-4nm]'  | grep -Eq "$DET_RE"
 }
 
+@test "spawn(sc-123): 完了 mandate が note→label 2 段固定 + [DONE--<id>] marker を worker prompt に焼く（受入条件）" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  # DONE marker 形式が bd-id 展開後・prefix 完全一致で焼かれる。
+  [[ "$output" == *"[DONE--un-4nm]"* ]]
+  # DONE note を bdw --append-notes で先に write する具体コマンドが焼かれる。
+  [[ "$output" == *"bdw"*"update un-4nm --append-notes"*"[DONE--un-4nm]"* ]]
+  # note→label の順序固定: marker が gate-pending 付与より前に現れる。
+  [[ "$output" == *"[DONE--un-4nm]"*"add-label gate-pending"* ]]
+  # bd show による note landed 実在確認が焼かれる（含意不変量の前提）。
+  [[ "$output" == *"bd show un-4nm"* ]]
+  # 不変量の言明（ラベルが DONE note の実在を含意）が焼かれる。
+  [[ "$output" == *"含意"* ]]
+  [[ "$output" == *"gate-pending"* ]]
+}
+
+@test "spawn(sc-123): 焼かれた DONE marker が検知側 regex（行頭空白許容・prefix 完全一致）に一致する" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  # prompt に marker literal が焼かれている（dry-run は各行を "  | " で prefix するため部分一致で拾う）。
+  [[ "$output" == *"[DONE--un-4nm]"* ]]
+  # 検知側契約（§5 step1 / §6 トリガー衛生）: marker を行頭に置いたとき厳密 regex に一致する。
+  # TUI インデントの先頭空白は許容し、prefix [DONE-- は完全一致で pin する。
+  DET_RE='^[[:space:]]*\[DONE--un-4nm\]'
+  printf '%s\n' '[DONE--un-4nm]'    | grep -Eq "$DET_RE"   # 素の行頭
+  printf '%s\n' '   [DONE--un-4nm]' | grep -Eq "$DET_RE"   # TUI インデント（先頭空白許容）
+  # prefix 完全一致: 近縁 prefix は検知側に拾われない（一意性 pin）。
+  ! printf '%s\n' '[DONE-Xun-4nm]'    | grep -Eq "$DET_RE"
+  # SPAWNED marker は DONE 検知に拾われない（別経路 note・§6 非衝突）。
+  ! printf '%s\n' '[SPAWNED--un-4nm]' | grep -Eq "$DET_RE"
+}
+
 @test "spawn(sc-dc9): cld-spawn --help に --effort が実在するときだけ spawn 行へ --effort（feature-detect・un-ivb 防御）" {
   detect="$BATS_TEST_TMPDIR/cld-effort-detect"
   printf '#!/usr/bin/env bash\n[ "$1" = --help ] && { echo "Usage: cld-spawn [--model M] [--effort L]"; exit 0; }\nexit 0\n' > "$detect"
@@ -1213,6 +1245,21 @@ _make_noop_cld_spawn() {
   grep -q '追加信号であって主網の代替ではない' "$proto"
   # §2: 停止許可が「のみ」1 条件から pane sentinel を含む 2 例外へ更新された（巻き戻し検出）。
   grep -q '停止してよいのは 2 例外のみ' "$proto"
+}
+
+# sc-123: fix は worker mandate（carrier=build_prompt・上の 2 bats で pin）と admin gate 検知（§5 step1）の
+# 二面。検知側は in-repo prose ゆえ sc-46h/sc-c7c と同型で docs 側 grep pin が要る（carrier だけ pin すると
+# 検知側半分が将来 protocol.md 編集で silent に drift/削除されても RED にならない・cell-quality gate minor）。
+@test "docs(sc-123): protocol.md §5 step1 に DONE note 実在照合＋差し戻しが成文化されている" {
+  local proto="$REPO_ROOT/docs/protocol.md"
+  # 検知側 bullet の見出し（gate-pending 検知時に durable 報告の実在を照合する契約）。
+  grep -q 'DONE note 実在照合' "$proto"
+  # 照合対象 = [DONE--<id>] marker 行の実在（carrier 側 marker と対称）。
+  grep -q 'marker 行が実在' "$proto"
+  # 不在時の方針 = 未完了扱いで merge せず差し戻す（pane 手動回収へ落とさない）。
+  grep -q '未完了扱いで merge せず差し戻す' "$proto"
+  # commit-count Layer2 との AND 複合判定（§6「独立信号の複合条件」に接続・3 信号 AND）。
+  grep -q '3 信号 AND' "$proto"
 }
 
 # 上の positive テストは cell-quality/receivedArgs/bdw のみ assert し、build_prompt が焼く
