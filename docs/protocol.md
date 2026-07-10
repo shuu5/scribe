@@ -275,6 +275,10 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 - **`session-state.sh` は Workflow tool 実行中の worker に `input-waiting` を返す**: WF はバックグラウンドで走り main loop の入力欄が空くため、**state ベース監視は WF 実行中に false-DONE する**。
 - robust な監視は、pane 下部の **WF 進捗ボックス（`N/M agents done`）と spinner 行を併読**して判定する（state だけに頼らない・bd un-jax 引き継ぎ）。
 
+### transport 構造封鎖（管理窓への生 send-keys 禁止・scribe-inject 必須化・sc-164）
+
+- **管理窓（非 `wt-` window＝admin/orchestrator/consult 等）への生 `tmux send-keys` は PreToolUse guard（`tmux-send-keys-guard.py`）が exit2 で deny する**。session 間送信は送達確認つき `scripts/scribe-inject.sh send`（RESIDUAL/INCONCLUSIVE を機械検知して fail-loud）を必須とし、その失敗コード（exit 3＝RESIDUAL＝入力欄残留の未送達／exit 4＝INCONCLUSIVE＝入力欄を特定不能で確認不能）を**握りつぶして成功扱いにしない**（生 send-keys は bracketed-paste 滞留・誤『送信済み』判定・Enter 未押下で silent に未送達となる＝2026-07-08/09 の注入未送達 incident・sc-6vj が構造根拠）。worker 窓（`wt-*`）への steering は封鎖対象外だが scribe-inject を推奨。guard は `dolt_database=='sc'` session のみ発火し foreign（orchestrator の `orch` 等）session では no-op ゆえ orchestrator の spawn/inject 運用は brick されない。target が window ID `@N`／`session:index`／`%pane` 等で名前が直接見えない場合は tmux で window 名を解決して判定し、解決不能（tmux 到達可）は deny（fail-closed）・tmux 到達不能（tmux 外＝send-keys 自体実行不能）は素通しする。`capture-pane`（監視 read）は封鎖対象外＝pane 監視は無傷。
+
 ### 停止時の復旧 = session-comm inject（env が健全な idle worker 向け）
 
 - worker が idle に落ちた（prompt で停止した・queue exhausted）場合で **env が健全**なら、cc-session の `session-comm` で操舵注入して復旧する: `wait-ready`（input-waiting を待つ）→ `inject-file`（flock で確実配送）。
