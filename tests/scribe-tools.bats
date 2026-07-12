@@ -696,7 +696,10 @@ _mk_beads() {
   run grep -F -- '--disallowed-tools "$WORKER_DISALLOWED_TOOLS"' "$SPAWN"
   [ "$status" -eq 0 ]
   # 実起動行（"$CLD_SPAWN" で始まる行）にその引用形が在ることまで固定（dry-run echo の \" 形と別物であることを担保）。
-  run bash -c 'grep -E "^\"\\\$CLD_SPAWN\".*--disallowed-tools \"\\\$WORKER_DISALLOWED_TOOLS\"" "$1"' _ "$SPAWN"
+  # sc-5rl: transport 分岐で cld-spawn 起動行は `if [[ "$EFFECTIVE_TRANSPORT" == "tmux" ]]` ブロック内へ移り先頭が
+  # インデントされたため、行頭アンカーは先頭空白を許容する（`echo "[plan] $CLD_SPAWN…` の dry-run echo 行とは
+  # 依然弁別される＝そちらは `echo "[plan]` で始まる）。1 argv 二重引用の不変条件は不変。
+  run bash -c 'grep -E "^[[:space:]]*\"\\\$CLD_SPAWN\".*--disallowed-tools \"\\\$WORKER_DISALLOWED_TOOLS\"" "$1"' _ "$SPAWN"
   [ "$status" -eq 0 ]
 }
 
