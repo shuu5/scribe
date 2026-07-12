@@ -55,6 +55,17 @@
 #                   既定反転（bg 化）は本ヘルパのスコープ外＝別 PR。切替は全て loud（silent 降格ゼロ・AC11）。
 #   --dry-run       実行するはずのコマンド列を arg-echo するだけ（実 spawn しない）
 #   -h | --help
+#
+# === post-spawn submit 検証（sc-8g5・tmux worker 経路のみ・実起動時のみ）===
+#   cld-spawn の "prompt injected" は pane への **到着** の証拠であって **submit** の証拠ではない（sentinel-presence
+#   の短絡評価・session-comm.sh:730）。ゆえに cld-spawn success 直後に turn 開始の積極証拠（worker が起動直後に書く
+#   bd notes の行頭 marker `[SPAWNED--<id>]` の **新規出現**）を待ち、未 submit（入力欄に prompt が残留＝RESIDUAL）
+#   なら Enter を冪等再送して回復する。証拠が取れなければ **loud-fail**（非 0 exit・自動 teardown なし）。詳細な
+#   根因・設計原理・DJ は下記 spawn_confirm ブロックのヘッダを参照（bg は原理免疫・consult は oracle 不在で scope 外）。
+#   env: SCRIBE_SPAWN_CONFIRM_BUDGET（秒・既定 90）/ SCRIBE_SPAWN_CONFIRM_POLL（既定 2）/
+#        SCRIBE_SPAWN_CONFIRM_SETTLE（既定 1）/ SCRIBE_SPAWN_CONFIRM_MAX_ENTER（Enter 再送の上限・既定 5・
+#        超過後は Enter を撃たず marker 待ちへ移行）/ SCRIBE_SPAWN_CAPTURE（pane capture の stub seam・$1=window-id）/
+#        SCRIBE_TMUX（tmux バイナリ）/ SCRIBE_BD（bd バイナリ・READ は bdw flock を通らない）。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -688,6 +699,33 @@ esac
 scribe_effort_is_valid "$EFFORT" \
   || scribe_die "--effort/SCRIBE_WORKER_EFFORT が不正: '$EFFORT'（許可: $(scribe_effort_allowlist_join '|')）"
 
+# --- post-spawn submit 検証層（sc-8g5）の env は **launch より前**に解決・検証する（preflight）---
+# なぜここか（review finding#1）: これらは worktree / cld-spawn に一切依存しない **純粋な入力検証**。もし
+# spawn_confirm() の中（＝cld-spawn success の *後*）で die すると、window + worktree + bdw writer が既に
+# 生きているのに exit 7 の案内ブロック（「この id を再 spawn しないでください」「一次観測」「scribe-cleanup」）を
+# 通らず、admin には「spawn がエラーで落ちた＝起動していない」としか見えない → 同じ id を再 spawn して
+# 1 bead に 2 worker / 2 bdw writer（graph 汚染・lost-update）を招く。純粋検証は launch 前に前倒しして
+# 「起動前に落ちる＝孤児ゼロ」を保証する（launch 後にしか判明しない失敗だけが exit 7 経路を使う）。
+# 非数値を silent に無視すると sleep が no-op 化し実質 0 budget で偽 loud-fail を招くため fail-loud。
+SPAWN_CONFIRM_RC=7                                          # 検証失敗の専用 exit code（cld-spawn 自身の rc と弁別）
+SPAWN_CONFIRM_BUDGET="${SCRIBE_SPAWN_CONFIRM_BUDGET:-90}"   # 秒。並列 fan-out 時の worst-case SPAWNED 遅延を上回る generous 既定
+SPAWN_CONFIRM_POLL="${SCRIBE_SPAWN_CONFIRM_POLL:-2}"        # 秒。happy-path は数秒で SPAWNED が出て即 return
+SPAWN_CONFIRM_SETTLE="${SCRIBE_SPAWN_CONFIRM_SETTLE:-1}"    # 秒。Enter nudge 後に pane が落ち着くのを待つ
+# 持続 RESIDUAL（Enter を撃っても入力欄がクリアされない＝pane が false-RESIDUAL に張り付く / 実際に Enter が
+# 効かない modality）で live pane へ Enter を無制限に撃ち続けないための上限。上限到達後は Enter を撃たず
+# **marker 待ち**へ移行する（DJ-b が前提にする「RESIDUAL とダイアログは排他」が万一崩れた場合の被害を上限で縛る）。
+SPAWN_CONFIRM_MAX_ENTER="${SCRIBE_SPAWN_CONFIRM_MAX_ENTER:-5}"
+SPAWN_TMUX="${SCRIBE_TMUX:-tmux}"
+SPAWN_CONFIRM_BASELINE=""   # spawn 前の SPAWNED marker 出現数（空=取得不能＝marker 差分による OK 判定を無効化）
+[[ "$SPAWN_CONFIRM_BUDGET" =~ ^[0-9]+$ ]] \
+  || scribe_die "SCRIBE_SPAWN_CONFIRM_BUDGET は非負整数（秒）です: '$SPAWN_CONFIRM_BUDGET'"
+[[ "$SPAWN_CONFIRM_POLL" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+  || scribe_die "SCRIBE_SPAWN_CONFIRM_POLL は非負の数値（秒）です: '$SPAWN_CONFIRM_POLL'"
+[[ "$SPAWN_CONFIRM_SETTLE" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+  || scribe_die "SCRIBE_SPAWN_CONFIRM_SETTLE は非負の数値（秒）です: '$SPAWN_CONFIRM_SETTLE'"
+[[ "$SPAWN_CONFIRM_MAX_ENTER" =~ ^[0-9]+$ ]] \
+  || scribe_die "SCRIBE_SPAWN_CONFIRM_MAX_ENTER は非負整数（回）です: '$SPAWN_CONFIRM_MAX_ENTER'"
+
 # --- AC2: 既定 repo が linked（副）worktree のとき fail-loud（un-ag7）---
 # `--repo` 未指定（= cwd 既定）で cwd が副 worktree のとき、`git worktree add` が
 # <linked-wt>/.worktrees/spawn/... へネストし、base=HEAD も origin/main でなく副 branch HEAD になる
@@ -1303,6 +1341,239 @@ fi
 
 PROMPT_TEXT="$(build_prompt)"
 
+# ===========================================================================
+# post-spawn submit 検証層（sc-8g5・tmux worker 経路のみ・positive-proof-only）
+# ===========================================================================
+# 【根因（VERIFIED・session-comm.sh:702-770 直読）】cld-spawn(tmux) は launch(プロンプト無し)→wait-ready→
+#   session-comm.sh inject-file --confirm-receipt の read-back で送達確認する。その受理述語は
+#     (1) sentinel-presence（prompt 先頭非空行の先頭24字が pane に出現 AND baseline 画面に無い・:730-735）
+#     (2) processing 2連続（:744-746）
+#   の 2 つで、「入力欄が空」判定は**存在しない**。しかも (1) が input-waiting 救済 Enter 分岐（:752-761）より
+#   **前に短絡評価**される（:730 で即 break）。ゆえに初回 Enter（:640）が swallow されると（CC 2.1.207 起動時の
+#   promo 通知 dismiss が Enter を食う経路を実観測）、prompt テキストが**入力欄に残留＝可視**なので sentinel が
+#   当たって即受理し、偽の "prompt injected" を返す。**sentinel-presence は「到着」の証拠であって「submit」の
+#   証拠ではない**——これが silent unsubmitted worker（spawn 済みに見えて何もしない）の gap（sc-5rl 実害）。
+#
+# 【設計原理】**OK は turn 開始の積極証拠でのみ宣言する。証拠の不在で OK を宣言しない。**
+#   - pane 由来の do_verify（scribe-inject の pure core）は 3 値のうち **RESIDUAL だけが「未 submit」を積極証明**
+#     する。DELIVERED / INCONCLUSIVE は「未 submit の可視証拠が無い」に過ぎず submit の積極証拠ではない
+#     （入力欄が空でも turn が始まっていない状態はありうる＝ここで OK を返すのが v2 設計の fail-open だった）。
+#   - ゆえに **OK 判定の唯一 oracle = worker が起動直後に書く SPAWNED marker**（bd notes の行頭 `[SPAWNED--<id>]`・
+#     worker prompt の起動時 mandate②）の **新規出現**。marker が出た＝turn が実際に始まり tool を 1 本回した
+#     ground truth（collision-free / durable / id-anchored）。
+#   - **baseline 差分**で数える: 再 spawn 時に残る旧 marker や description 中のリテラルを「新規出現」と誤読すると
+#     起動していない worker を OK と宣言する stale-marker fail-open になる。ゆえに cld-spawn の**前**に出現数を
+#     数えておき（spawn_confirm_baseline）、**増分**のみを positive proof として受理する。
+#   - do_verify は **RESIDUAL 回復専用**（Enter 冪等 nudge）。turn 判定・OK 判定には使わない。busy-regex は
+#     一切使わない（pane 文字列の busy 判定は silent-miss を構造的に生む）。
+# 【DJ-a】回復は **Enter 冪等再送のみ**（prompt 全文の再 inject をしない）＝二重 submit / 二重実行を原理排除
+#   （空 Enter は素の入力欄で no-op・session-comm.sh:654 verified）。do_send は冒頭で payload を再 paste する
+#   （:304-305）ため**再利用不可**——本層は do_verify（pure core）と marker 導出（marker subcommand）だけを再利用する。
+# 【DJ-b】Enter は **do_verify == RESIDUAL のときだけ**撃つ（marker が入力欄 interior に積極確認された時のみ）。
+#   INCONCLUSIVE / DELIVERED では撃たない。RESIDUAL とダイアログ表示は排他（ダイアログは box interior を占め
+#   marker 不在→INCONCLUSIVE を返す）ゆえ、この RESIDUAL-gate は session-comm の dialog modality ガードを
+#   **subsume する**（post-submit のダイアログへ空 Enter を撃つ fail-open を再導入しない）。
+# 【scope】tmux worker のみ。bg は `claude --bg "$PROMPT"` の positional prompt で send-keys / TUI 入力欄 /
+#   read-back を一切通らず swallowed-Enter race が**原理的に不成立**（免疫）。consult は SPAWNED marker を
+#   書かない＝本層の唯一 oracle が構造的に不在ゆえ**明示的に scope 外**（human-in-loop grill が backstop＝
+#   consult の停止は即人間に露見する・documented 境界）。
+# 【安全方向】loud-fail は false-positive 方向（健全だが遅い worker を誤検知しても loud に surface するだけで
+#   admin が pane / bd show で一次確認して継続できる）。**silent に broken worker を「起動済み」と誤宣言する
+#   fail-open は原理的に起きない**（OK は SPAWNED 積極証拠のみ）。
+# 【seam】capture=SCRIBE_SPAWN_CAPTURE（$1=WID で capture を stdout・SCRIBE_BG_PREFLIGHT 同型）/ tmux バイナリ=
+#   SCRIBE_TMUX（scribe-inject と同名 seam）/ bd バイナリ=SCRIBE_BD（既存 seam・READ は bdw flock を通らない
+#   ＝poll は lock 非競合）。budget/poll/settle は env で可変（テストは 0 に落として決定論化する）。
+# 定数・env（SPAWN_CONFIRM_{RC,BUDGET,POLL,SETTLE,MAX_ENTER} / SPAWN_TMUX / SPAWN_CONFIRM_BASELINE）は
+# **launch より前**の preflight（上記「post-spawn submit 検証層の env は launch より前に…」ブロック）で解決・
+# 検証済み（review finding#1: 純粋な入力検証を launch 後に die させると生きた worker を孤児化しつつ exit 7 の
+# 再 spawn 禁止案内を通らない）。ここでは関数だけを定義する。
+
+# pane capture（既定 tmux capture-pane -p -t <WID>）。$1=WID。stub seam=SCRIBE_SPAWN_CAPTURE。
+spawn_confirm_capture() {
+  if [[ -n "${SCRIBE_SPAWN_CAPTURE:-}" ]]; then
+    "$SCRIBE_SPAWN_CAPTURE" "$1"
+    return $?
+  fi
+  "$SPAWN_TMUX" capture-pane -p -t "$1"
+}
+
+# SPAWNED marker の ERE（行頭・先頭空白のみ許容・id 完全一致。dotted id の '.' は ERE ワイルドカードになるためエスケープ）。
+spawn_confirm_marker_re() { printf '^[[:space:]]*\\[SPAWNED--%s\\]' "${ID//./\\.}"; }
+
+# bd notes 中の SPAWNED marker 出現数を stdout に出す（読めなければ非 0＝count を出さない）。
+#   READ ゆえ bdw flock を通さない（poll は lock 非競合）。jq があれば notes/labels を decode して**行頭アンカー**で
+#   数える。jq 不在 / 非 JSON 応答（テスト stub 等）では生テキストの出現数へ degrade する——**baseline 差分**で
+#   判定するため、description 等に静的に含まれるリテラルは相殺され fail-open しない。
+spawn_confirm_marker_count() {
+  local _js _txt _n
+  _js="$( ( cd "$ANCHOR" 2>/dev/null && "${SCRIBE_BD:-bd}" show "$ID" --json ) 2>/dev/null )" || return 1
+  [[ -n "$_js" ]] || return 1
+  if command -v jq >/dev/null 2>&1 \
+     && _txt="$(printf '%s' "$_js" | jq -r '.[]? | ((.notes // "") + "\n" + (((.labels // [])|join("\n"))))' 2>/dev/null)" \
+     && [[ -n "$_txt" ]]; then
+    _n="$(printf '%s\n' "$_txt" | grep -cE -- "$(spawn_confirm_marker_re)" || true)"
+  else
+    _n="$(printf '%s' "$_js" | grep -oF -- "[SPAWNED--$ID]" | grep -c . || true)"
+  fi
+  printf '%s' "${_n:-0}"
+}
+
+# baseline を cld-spawn の **前**に取る（stale-marker fail-open の封鎖・上記設計原理）。取得不能なら空にして
+# loud warn し、marker 差分による OK 判定を無効化する（fail-closed＝budget 内に確証が得られなければ loud-fail）。
+spawn_confirm_baseline() {
+  local _n
+  if _n="$(spawn_confirm_marker_count)"; then
+    SPAWN_CONFIRM_BASELINE="$_n"
+  else
+    SPAWN_CONFIRM_BASELINE=""
+    echo "scribe: ⚠ post-spawn 検証: [SPAWNED--$ID] の baseline を spawn 前に取得できません（bd show --json が読めない）→ marker 差分による OK 判定を無効化します（fail-closed・sc-8g5）。" >&2
+  fi
+}
+
+# SPAWNED marker が **新規に**出現したか（baseline 差分）。baseline 不明なら常に偽（positive proof を宣言しない）。
+spawn_confirm_spawned_new() {
+  [[ -n "$SPAWN_CONFIRM_BASELINE" ]] || return 1
+  local _n
+  _n="$(spawn_confirm_marker_count)" || return 1
+  (( _n > SPAWN_CONFIRM_BASELINE ))
+}
+
+# do_verify の返り値コード → 表示名（診断行用・scribe-inject.sh のヘッダ SSOT と一致）。
+spawn_confirm_verdict_name() {
+  case "$1" in
+    0) printf 'DELIVERED' ;;
+    3) printf 'RESIDUAL' ;;
+    4) printf 'INCONCLUSIVE' ;;
+    *) printf 'ERROR(%s)' "$1" ;;
+  esac
+}
+
+# spawn_confirm_orphan_guidance <WID> — **cld-spawn success 後**に検証層が失敗したときの共通案内（stderr）。
+#   launch 後の失敗は「worker が生きているかもしれない」状態ゆえ、どの失敗理由でも必ず同じ 3 点を出す:
+#   (1) 同じ id を再 spawn しない（1 bead 2 worker / 2 bdw writer = graph 汚染・lost-update）
+#   (2) 一次観測手順（pane / bd show の [SPAWNED--<id>]）
+#   (3) scribe-cleanup.sh 完全形（--window 明示）
+#   案内テキストを関数化して budget 失敗経路と marker 導出失敗経路の 2 者で共有する（review finding#1: 片方だけ
+#   scribe_die で落ちると案内が出ず、admin が再 spawn して二重 worker を作る）。
+spawn_confirm_orphan_guidance() {
+  local _wid="${1:-}"
+  echo "scribe: window / worktree は残しています（自動 teardown しません＝force 禁止・確認必須ポリシー）: window=$WINDOW window_id=${_wid:-?} worktree=$WORKTREE"
+  echo "scribe: **この id を再 spawn しないでください（二重 worker になります）**: window / worktree は生きている可能性が高く、同じ bead に 2 worker / 2 bdw writer が並走すると graph が汚染されます（lost-update 圏・protocol.md §1）。継続するか cleanup するかは下記の一次観測の後に決めてください。"
+  echo "scribe: 健全だが遅い worker を誤検知した可能性もあります（loud-fail は安全側＝silent に「起動済み」と誤宣言しない）。まず一次観測してください:"
+  echo "         tmux capture-pane -p -t \"${_wid:-$WINDOW}\" | tail -n 20"
+  echo "         cd \"$ANCHOR\" && bd show $ID   # [SPAWNED--$ID] が出ていれば worker は起動済み（継続してよい）"
+  echo "scribe: 掃除するには（force 系を使わない確認プロンプト付き cleanup）:"
+  echo "         $SCRIPT_DIR/scribe-cleanup.sh --repo \"$REPO\" --worktree \"$WORKTREE\" --branch \"$BRANCH\" --window \"$WINDOW\" $ID"
+}
+
+# spawn_confirm <WID> — cld-spawn success 直後に submit を積極証拠で確かめる（0=OK / SPAWN_CONFIRM_RC=loud-fail）。
+#   env（budget/poll/settle/max-enter）は launch 前 preflight で検証済み（ここでは die しない＝孤児化しない）。
+spawn_confirm() {
+  local _wid="${1:-}"
+
+  # (0) 検証が **構造的に不能** なときだけ loud skip する: seam 未設定 **かつ** WID 空（＝tmux 不在 / window 未解決で
+  #     capture の宛先そのものが無い。WID 空で既定 capture を叩くと tmux が `-t ''` を現在 pane と解釈し admin 自身の
+  #     pane を誤 capture しうるため、叩かずに skip する）。
+  #     **capture の一時失敗 / 空出力それ自体では skip しない**（review finding#2）: OK の唯一 oracle は bd notes 由来の
+  #     SPAWNED marker であって pane capture に依存しない。capture が 1 度失敗しただけで検証層を丸ごと放棄すると、
+  #     WID は解決済み（window は在る）なのに silent unsubmitted worker がそのまま「spawned:」で通過する＝本 issue が
+  #     塞ごうとした gap が残る。ゆえに capture 失敗はループ内で INCONCLUSIVE 相当（Enter を撃たない・DJ-b 維持）として
+  #     扱い、marker polling を budget まで継続する。
+  if [[ -z "$_wid" ]] && [[ -z "${SCRIBE_SPAWN_CAPTURE:-}" ]]; then
+    echo "scribe: ⚠ post-spawn submit 検証を実行できません（capture 対象が構造的に不在: window=$WINDOW window_id=未解決・tmux 不在 or window 未解決）→ この worker の prompt が実際に **submit されたか（turn が始まったか）は未検証**です（cld-spawn の 'prompt injected' は pane への到着の証拠であって submit の証拠ではない・sc-8g5）。admin は 'tmux capture-pane -p -t $WINDOW' と 'cd $ANCHOR && bd show $ID'（[SPAWNED--$ID] marker）で一次確認してください。" >&2
+    return 0
+  fi
+
+  # marker は scribe-inject の pure core（_derive_marker）から導出する＝導出規則の SSOT を 2 箇所に持たない（DJ-a/DJ-g）。
+  # 導出失敗（install 破損等）は **launch 後**にしか判明しない失敗ゆえ scribe_die しない: 孤児化した worker を
+  # 抱えたまま案内なしで落ちると admin が再 spawn して二重 worker を作る（review finding#1）。exit 7 と同じ案内で終える。
+  local _marker
+  _marker="$(printf '%s' "$PROMPT_TEXT" | "$SCRIPT_DIR/scribe-inject.sh" marker 2>/dev/null)" || _marker=""
+  if [[ -z "$_marker" ]]; then
+    {
+      echo "scribe: error: post-spawn submit 検証を開始できません（worker prompt から marker を導出できません＝scribe-inject.sh marker が失敗・install 破損の疑い・sc-8g5）。"
+      echo "scribe: cld-spawn は成功を返しています（worker window は起動済みの可能性が高い）が、prompt が実際に submit された（turn が始まった）かは **未検証** です。"
+      spawn_confirm_orphan_guidance "$_wid"
+    } >&2
+    return "$SPAWN_CONFIRM_RC"
+  fi
+
+  local _cap="" _enter=0 _vc=0 _ok=0 _capwarn=0
+  SECONDS=0
+  while (( SECONDS < SPAWN_CONFIRM_BUDGET )); do
+    # capture 不能 / 空 → INCONCLUSIVE 相当（未 submit の可視証拠なし＝Enter は撃たない）。検証層は放棄せず
+    # marker polling を続ける（transient な capture 失敗で fail-open しない・finding#2）。
+    if _cap="$(spawn_confirm_capture "$_wid" 2>/dev/null)" && [[ -n "$_cap" ]]; then
+      _vc=0
+      printf '%s\n' "$_cap" | "$SCRIPT_DIR/scribe-inject.sh" verify --marker "$_marker" >/dev/null 2>&1 || _vc=$?
+    else
+      _vc=4
+      if (( _capwarn == 0 )); then
+        _capwarn=1
+        echo "scribe: ⚠ post-spawn 検証: pane capture に失敗/空（window=$WINDOW window_id=${_wid:-未解決}）→ pane 由来の RESIDUAL 回復は行えませんが、検証は放棄せず [SPAWNED--$ID] marker の出現（唯一の OK oracle）を budget まで待ちます（sc-8g5）。" >&2
+      fi
+    fi
+    if (( _vc == 3 )); then
+      # RESIDUAL = prompt が入力欄 interior に**積極的に**残留＝未 submit（定義的）。Enter を冪等再送して回復する。
+      # 二重 submit は原理排除（submit 済みの空入力欄への Enter は no-op）ゆえ、再観測のたび撃ってよい（DJ-a/DJ-b）。
+      # ただし **上限あり**: 持続 RESIDUAL（Enter で回復しない pane / box 抽出の誤取り）で live pane へ無制限に
+      # Enter を撃ち続けない。上限到達後は Enter を撃たず marker 待ちへ移行する（poll 間隔で回る）。
+      if (( _enter < SPAWN_CONFIRM_MAX_ENTER )); then
+        _enter=$((_enter + 1))
+        echo "scribe: post-spawn 検証: prompt が入力欄に残留（RESIDUAL＝未 submit・swallowed Enter）→ Enter を冪等再送します（#$_enter・sc-8g5）" >&2
+        "$SPAWN_TMUX" send-keys -t "$_wid" Enter 2>/dev/null || true
+        sleep "$SPAWN_CONFIRM_SETTLE" 2>/dev/null || true
+        if (( _enter >= SPAWN_CONFIRM_MAX_ENTER )); then
+          echo "scribe: ⚠ post-spawn 検証: RESIDUAL が持続し Enter 再送が上限（${SPAWN_CONFIRM_MAX_ENTER} 回）に到達 → 以降は Enter を撃たず [SPAWNED--$ID] marker の出現のみを待ちます（sc-8g5）。" >&2
+        fi
+      else
+        sleep "$SPAWN_CONFIRM_POLL" 2>/dev/null || true
+      fi
+      # RESIDUAL でも **必ず** marker を評価してから次周回へ回る: pane が false-RESIDUAL に張り付く（paste
+      # placeholder が残る / box 抽出の誤取り）状況でも、worker が実際に turn を始めていれば OK を宣言できる
+      # ようにする（この評価を欠くと真に起動した worker を budget 全域で見落として偽 loud-fail する）。
+      if spawn_confirm_spawned_new; then _ok=1; break; fi
+      continue
+    fi
+    # DELIVERED / INCONCLUSIVE は submit の積極証拠ではない → SPAWNED marker の新規出現だけを OK の根拠にする。
+    if spawn_confirm_spawned_new; then _ok=1; break; fi
+    sleep "$SPAWN_CONFIRM_POLL" 2>/dev/null || true
+  done
+
+  if (( _ok == 1 )); then
+    echo "scribe: post-spawn 検証 OK: worker の turn 開始を確認しました（[SPAWNED--$ID] marker が新規出現＝submit の積極証拠・Enter 再送=$_enter 回・${SECONDS}s・sc-8g5）" >&2
+    return 0
+  fi
+
+  # budget 到達。まず marker を **最終再評価**する（最後の poll sleep 中に出た SPAWNED を取りこぼして偽 loud-fail
+  # しない）。それでも積極証拠が無ければ最後の回復機会（RESIDUAL 再確認 + Enter 1 回）を撃ってから loud-fail。
+  if spawn_confirm_spawned_new; then
+    echo "scribe: post-spawn 検証 OK: worker の turn 開始を確認しました（[SPAWNED--$ID] marker が新規出現＝submit の積極証拠・budget 到達直前・Enter 再送=$_enter 回・${SECONDS}s・sc-8g5）" >&2
+    return 0
+  fi
+  # 最後の pane 判定（capture 不能なら INCONCLUSIVE 相当＝Enter を撃たない）。
+  if _cap="$(spawn_confirm_capture "$_wid" 2>/dev/null)" && [[ -n "$_cap" ]]; then
+    _vc=0
+    printf '%s\n' "$_cap" | "$SCRIPT_DIR/scribe-inject.sh" verify --marker "$_marker" >/dev/null 2>&1 || _vc=$?
+  else
+    _vc=4
+  fi
+  if (( _vc == 3 )); then
+    _enter=$((_enter + 1))
+    "$SPAWN_TMUX" send-keys -t "$_wid" Enter 2>/dev/null || true
+    echo "scribe: post-spawn 検証: budget 到達時も RESIDUAL → 最後の回復機会として Enter を 1 回再送しました（#$_enter）。" >&2
+  fi
+  {
+    echo "scribe: error: post-spawn submit 検証に失敗しました（budget ${SPAWN_CONFIRM_BUDGET}s 内に turn 開始の積極証拠 [SPAWNED--$ID] を確認できず・sc-8g5）。"
+    echo "scribe: cld-spawn は成功を返しましたが、その 'prompt injected' は pane への **到着** の証拠であって **submit** の証拠ではありません（sentinel-presence の短絡評価・session-comm.sh:730）。worker が silent no-op（起動済みに見えて何もしない）の可能性があります。"
+    [[ -z "$SPAWN_CONFIRM_BASELINE" ]] && echo "scribe: 注: SPAWNED marker の baseline を spawn 前に取得できなかったため、marker 差分による OK 判定は無効化されていました（fail-closed）。"
+    (( _capwarn == 1 )) && echo "scribe: 注: 本 run では pane capture に失敗しています（RESIDUAL 回復は不能・判定は marker のみ）。"
+    echo "scribe: 直近の pane 判定=$(spawn_confirm_verdict_name "$_vc") / Enter 再送=$_enter 回"
+    spawn_confirm_orphan_guidance "$_wid"
+  } >&2
+  return "$SPAWN_CONFIRM_RC"
+}
+
 # ===== launch: EFFECTIVE_TRANSPORT で bg / tmux を分岐（DJ1・AC3/AC6/AC7）=====
 # bg 明示 / auto→bg は claude を直呼び（cld-spawn 非経由・AC6）。auto の bg launch 失敗は tmux へ post-launch
 # fallback（EFFECTIVE_TRANSPORT を tmux へ倒して下の tmux ブロックへ落とす＝二重起動しない・AC3）。tmux（既定 /
@@ -1358,6 +1629,10 @@ if [[ "$EFFECTIVE_TRANSPORT" == "tmux" ]]; then
   # `|| _rc=$?` で実 exit code を捕捉（set -e 下でも中断させず、案内を出してから伝播）。成功時は
   # 下記案内を出さず従来の "spawned:" 経路へ抜ける＝happy-path 出力は byte 不変。
   _cld_rc=0
+  # sc-8g5: SPAWNED marker の baseline は cld-spawn の **前** に取る（起動後に取ると worker が既に書いた marker を
+  # baseline に含めてしまい、真の起動を「増分なし」と誤判定して偽 loud-fail する。逆に baseline を取らないと再 spawn
+  # 時の旧 marker を新規出現と誤読して fail-open する）。
+  spawn_confirm_baseline
   # --disallowed-tools は 1 argv verbatim（"$WORKER_DISALLOWED_TOOLS" を分割せず）で透過する（orch-4dm / H5・
   # 上記定数コメント参照＝分割 fail-open は cc-session gate round-1 で CONFIRMED）。cld-spawn は末尾 PROMPT の
   # 直前でこれを消費する（cld-spawn は --disallowed-tools を claude の末尾可変長 <tools...> として自身の起動行
@@ -1372,6 +1647,13 @@ if [[ "$EFFECTIVE_TRANSPORT" == "tmux" ]]; then
     } >&2
     exit "$_cld_rc"
   fi
+  # --- post-spawn submit 検証（sc-8g5・cld-spawn success 直後 / real tmux 分岐のみ）---
+  # cld-spawn の success は「prompt が pane に **到着** した」ことしか意味しない（sentinel-presence 短絡・上記根因）。
+  # ここで turn 開始の積極証拠（[SPAWNED--$ID] の新規出現）を待ち、未 submit（RESIDUAL）なら Enter 冪等再送で回復する。
+  # 失敗は loud-fail（非 0 exit・自動 teardown なし）＝silent に「起動済み」と宣言しない。
+  _confirm_rc=0
+  spawn_confirm "$(scribe_window_id "$WINDOW")" || _confirm_rc=$?
+  [[ "$_confirm_rc" -eq 0 ]] || exit "$_confirm_rc"
 fi
 
 # ===== monitor 案内（EFFECTIVE_TRANSPORT 別・AC8・DJ4 hybrid 温存）=====
