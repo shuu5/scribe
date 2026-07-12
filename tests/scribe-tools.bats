@@ -1773,7 +1773,7 @@ STUB
   rm -f "$noop" "$genbad"
   [ "$status" -ne 0 ]                                   # 黙って非 sandbox worker を起動せず fail-loud
   [[ "$output" == *"アテステーション失敗"* ]]          # 真因
-  [[ "$output" == *"強制キー"* ]]                       # どの不変条件が破れたか
+  [[ "$output" == *"enabled=true"* ]]                   # どの不変条件が破れたかを名指す（sc-5rl: 複合 attestation で die message を「sandbox 強制3キー」へ改稿したため旧 *"強制キー"* は「強制3キー」に割れ不成立＝破れた不変条件名 enabled=true へ追随）
   [[ "$output" != *"spawned: issue=un-4nm"* ]]          # cld-spawn（happy-path）へは到達しない
   git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
 }
