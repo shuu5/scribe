@@ -840,7 +840,7 @@ build_prompt() {
   自己点検 args は \`"$SCRIPT_DIR/scribe-selftest-args.sh" --worktree "$WORKTREE" --anchor "$ANCHOR" --self-test <selfTestCmd> $ID\` で 1 コマンド化済み
   （\`doImplement\`/\`doPlan\`=false・\`autoFix\`=true・\`selfTestCmd\` 必須を固定。手作業で args を組まない。**\`--anchor\` は必須**＝bd graph 所在は worktree cwd では解決しないため省くと die）。
 - **報告に WF 返り値 JSON + \`receivedArgs\` を必須**で含める（args 解決の成否を admin が一次監査できるように）。
-- **env 健全性 gate（fail-closed・CC infra の Bash 非永続を検出／folio 0264028f）**: self-report（cell-quality 呼出し・gate-pending 付与）の前に env 劣化を検出する（self-test fail-closed は「失敗」しか守らず env 劣化の「誤 PASS」を塞げない）。exit code の意味論（exit 3/4/5・sc-owj）は \`scribe-env-probe.sh\` ヘッダが SSOT、incident 経緯・zombie 検知網・TUI 描画理屈は protocol §6 が catalog SSOT——ここでは operative コマンドのみ焼く:
+- **env 健全性 gate（fail-closed・CC infra の Bash 非永続を検出／folio 0264028f）**: self-report（cell-quality 呼出し・gate-pending 付与）の前に env 劣化を検出する（self-test fail-closed は「失敗」しか守らず env 劣化の「誤 PASS」を塞げない）。exit code の意味論（exit 3/4/5・sc-owj）・incident 経緯・zombie 検知網・TUI 描画理屈は **protocol §6 が単一 SSOT**（意味論の表は §6「env 劣化 exit code catalog」・sc-sbb で env-probe ヘッダから実体移設）——ここでは operative コマンドのみ焼く:
   - 着手の最初に**別 Bash 呼出し**で \`"$SCRIPT_DIR/scribe-env-probe.sh" plant --worktree "$WORKTREE"\` を実行し、**出力 token を文字列で控える**（shell 変数は Bash 呼出し間で消える）。
   - **self-report の直前**に**別 Bash 呼出し**で \`"$SCRIPT_DIR/scribe-env-probe.sh" verify --token <控えた token> --worktree "$WORKTREE" --base $_probe_base$_also_tmp_flag\` を実行する。
   - **verify は再入可能**（ENV_OK は sentinel を温存・sc-0d2）: 途中確認は **\`--base\` を外して**同じ token で随時 verify（\`--base\` 付きは 0 commit で偽 \`ENV_DEGRADED\` を出すため gate-pending 直前のみ）。

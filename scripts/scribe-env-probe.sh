@@ -37,6 +37,8 @@
 #   scribe-env-probe.sh plant  --worktree W
 #   scribe-env-probe.sh verify --token T --worktree W [--base B] [--also-tmp]
 # 終了コード: 0=ENV_OK / 1=usage・die（scribe_die・fail-loud） / 3=cross-call 非永続 / 4=0 commit / 5=.git 書込劣化（sc-owj）。
+# 意味論の単一 SSOT = docs/protocol.md §6「env 劣化 exit code catalog」（sc-sbb 案B で実体移設。
+# 本ヘッダは実装注記＝drift したら §6 の表が勝つ）。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
