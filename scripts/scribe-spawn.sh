@@ -1359,6 +1359,19 @@ PROMPT_TEXT="$(build_prompt)"
 #   当たって即受理し、偽の "prompt injected" を返す。**sentinel-presence は「到着」の証拠であって「submit」の
 #   証拠ではない**——これが silent unsubmitted worker（spawn 済みに見えて何もしない）の gap（sc-5rl 実害）。
 #
+# 【confirm-receipt のもう 1 つの限界: co-submit を検知できない（sc-6mtm(4)・orch-thgx 裁定-comm-protocol(a)）】
+#   上記 (1)(2) はどちらも「何が submit されたか」を見ていない。ゆえに **注入時に human（or 他プロセス）が同じ
+#   入力欄に打鍵していた場合、両者が merge された 1 行として submit されても confirm-receipt は成功を返す**
+#   （sentinel は merge 行の中に居るため presence を満たす）。pane 由来の do_verify も同断——送信後の入力欄は
+#   空になるため DELIVERED を返す。**残留/到着ベースの検証は co-submit に対して原理的に偽陽性**であり、
+#   「DELIVERED ⇒ 注入テキストが無傷で submit された」は成り立たない。
+#   → 対策は事後検知でなく **事前 gate**: 入力欄が非空の窓へは push しない（no-push 原則・機械強制 =
+#     `scribe-inject.sh send` の送信前 busy-check gate〔exit 5 = DEFERRED = 送っていない〕/ 単体判定 =
+#     `scribe-inject.sh busy-check --target <pane>`）。規約 SSOT = docs/protocol.md §6「no-push 原則」。
+#   註: 本層（post-spawn submit 検証）が対象とするのは **spawn 直後の worker pane**＝human が打鍵していない窓
+#     ゆえ co-submit のリスク面は小さいが、OK 判定の oracle を pane 検証でなく **SPAWNED marker の新規出現**
+#     （下記【設計原理】）に置いている理由の一つでもある（pane 検証は原理的に「何が submit されたか」を見ない）。
+#
 # 【設計原理】**OK は turn 開始の積極証拠でのみ宣言する。証拠の不在で OK を宣言しない。**
 #   - pane 由来の do_verify（scribe-inject の pure core）は 3 値のうち **RESIDUAL だけが「未 submit」を積極証明**
 #     する。DELIVERED / INCONCLUSIVE は「未 submit の可視証拠が無い」に過ぎず submit の積極証拠ではない
