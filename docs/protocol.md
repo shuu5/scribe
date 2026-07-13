@@ -329,6 +329,20 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 - inject は worker の pane で起き、**admin の context には載らない**（PUSH チャネル・scribe-design.md §9）。`-t` 参照は window ID（`@N`）か `session:index` で行う（§1 の dotted id 衝突回避）。
 - **env が劣化している worker には inject は効かない**（注入した操舵も非永続環境で消える）→ 下記 salvage へ。
 
+### env 劣化 exit code catalog（単一 SSOT・sc-owj / sc-sbb 実体移設）
+
+`scribe-env-probe.sh`（sc-sau・fail-closed）の終了コード意味論の**単一 SSOT は本表**（旧 split-attribution〔意味論=env-probe ヘッダ / 経緯・検知網=§6〕を sc-sbb 案B で本節へ一本化。env-probe ヘッダと `scribe-spawn` build_prompt は本節への pointer を持ち、drift したら本表が勝つ）:
+
+| exit | 意味 | worker の停止規律（operative は build_prompt が焼く・§2） |
+|---|---|---|
+| 0 | `ENV_OK`（sentinel 温存＝再入可能・sc-0d2） | 続行 |
+| 1 | usage 誤り・die（`scribe_die`・fail-loud） | 呼出し方を直す（env 劣化ではない） |
+| 3 | cross-call filesystem 非永続（別 Bash 呼出しで sentinel 消失・folio 0264028f 同型） | **無条件停止**（done を申告せず blocked を書いて止まる） |
+| 4 | 0 commit（`--base` 付き verify で base..HEAD が空） | **条件付き**: 実装 commit 前の早すぎる呼出しは正常＝blocked を書かず commit → re-plant → 新 token で 1 回だけ再 verify（sc-bp7）。**commit 済み確認後もなお 4** のときだけ真の劣化として停止 |
+| 5 | `.git` 書込劣化（per-worktree GIT_DIR＋共有 objects への touch/rm round-trip 不能・sc-owj・folio-229 偽陰性の封鎖） | **無条件停止**。sandbox 相関異常の opt-out 判断（§1 sandbox 節）にも接続 |
+
+- 検出 3 面の実装詳細（sentinel パス・再入可能性・info/exclude 登録）は `scribe-env-probe.sh` ヘッダ（実装注記）を参照。incident 経緯・zombie 検知網・TUI 描画理屈は本 §6 の各小節（従来どおり）。
+
 ### degraded worker の salvage（env 劣化で self-report が信用できない）
 
 上の session-comm inject は **env が健全な idle worker** を蘇生する手段。**env が劣化した worker**（CC infra の Bash 非永続で commit/bd/dolt が呼出し間で消え、self-verify が嘘になる・folio incident 0264028f＝証拠種別は observable〔commit0〕admin-verified / mechanism〔Bash 非永続〕worker 自己申告・§6「事故 lore の証拠種別」凡例）は inject では直らない。env 劣化を検知したら、**worker を蘇生せず admin が引き取る**。劣化には作業の durable 性で 2 系統（扱いが違う）と、検知性で別枠の第 3 変種（zombie）がある:
