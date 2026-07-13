@@ -918,39 +918,10 @@ fi
 _effort_show=""
 [[ "$CLD_EFFORT_DETECTED" == "1" ]] && _effort_show=" --effort $EFFORT"
 
-# --- bg launch の --effort feature-detect（AC6・un-ivb 規律を bg にも適用）---
-# bg は cld-spawn を経由せず claude を直呼びするため、effort flag は cld-spawn ではなく **claude --help** で検出する。
-# 実在時のみ `--effort <EFFORT>` を付ける（未知フラグ落下防御）。非対応時は loud warn（bg では env effort=
-# CLAUDE_CODE_EFFORT_LEVEL が daemon fixation で無効ゆえ effort 指定不能＝sc-47l REFUTED）。**dry-run では claude を
-# 一切叩かない**（side-effect ゼロ・AC2/AC11）＝transport が bg を要し かつ 実起動のときだけ probe する。
-BG_EFFORT_ARG=()
-BG_EFFORT_DETECTED=0
-if [[ ( "$TRANSPORT" == "bg" || "$TRANSPORT" == "auto" ) && "$DRY_RUN" -eq 0 ]]; then
-  if "$CLAUDE_BIN" --help 2>/dev/null | grep -q -- '--effort'; then
-    BG_EFFORT_ARG=(--effort "$EFFORT")
-    BG_EFFORT_DETECTED=1
-  else
-    echo "scribe: ⚠ bg: '$CLAUDE_BIN --help' に --effort フラグが見当たりません → effort フラグを付けません。bg（native background agent）では process env / CLAUDE_CODE_EFFORT_LEVEL が daemon fixation で無効なため、この worker の実効 effort を指定できません（sc-47l REFUTED・env carrier では effort が届かない）。" >&2
-  fi
-fi
-
-# --- bg launch の --model feature-detect（finding#1・worker=opus 不変条件を bg にも運ぶ）---
-# tmux 経路は cld-spawn へ **必ず** --model "$MODEL" を渡し worker=opus を強制する（:680 で *fable* を die＝コスト
-# 爆発防止）。bg は cld-spawn を経由せず claude を直呼びするため、model を argv で明示しないと起動セッション/アカウント
-# 既定モデルへ帰着する——scribe-spawn を叩く admin main-loop はユーザー規約上 fable ゆえ bg worker が fable を継承しうる
-# ＝この不変条件が守ろうとしている当のコスト爆発を bg 経路が再導入する。effort と同型に **claude --help** で
-# feature-detect し、実在時のみ `--model "$MODEL"` を付す（未知フラグ落下防御・un-ivb）。非対応バイナリでは model を
-# 固定できない旨を loud warn（effort 非検出枝と対称）。**dry-run では claude を叩かない**（side-effect ゼロ・AC2/AC11）。
-BG_MODEL_ARG=()
-BG_MODEL_DETECTED=0
-if [[ ( "$TRANSPORT" == "bg" || "$TRANSPORT" == "auto" ) && "$DRY_RUN" -eq 0 ]]; then
-  if "$CLAUDE_BIN" --help 2>/dev/null | grep -q -- '--model'; then
-    BG_MODEL_ARG=(--model "$MODEL")
-    BG_MODEL_DETECTED=1
-  else
-    echo "scribe: ⚠ bg: '$CLAUDE_BIN --help' に --model フラグが見当たりません → model フラグを付けません。bg（native background agent）では起動セッション/アカウント既定モデルへ帰着し、この worker のモデルを '$MODEL'（worker=opus）に固定できません。admin main-loop が fable の場合 worker が fable を継承しコスト爆発しうる（tmux 経路は cld-spawn 経由で --model を必ず渡すため保護されるが、この bg バイナリでは model を運べません・finding#1）。" >&2
-  fi
-fi
+# bg launch の --effort/--model feature-detect（BG_EFFORT_ARG / BG_MODEL_ARG）は EFFECTIVE_TRANSPORT が bg に
+# **確定した後**に実行する（sc-vgl finding(a)）。ここ（TRANSPORT==bg||auto 段）で probe すると auto→tmux
+# fallback（bg preflight 不可）時に「effort/model 指定できません」loud warn が spurious に出る（tmux 経路は
+# cld-spawn 経由で effort/model を正しく渡すため誤 UX）。実装は下記 bg preflight 解決ブロック直後を参照。
 
 emit_plan() {
   echo "[plan] scribe-spawn: issue=$ID（実在検証 OK）"
@@ -1141,6 +1112,37 @@ if [[ "$TRANSPORT" == "bg" || "$TRANSPORT" == "auto" ]]; then
     (2) 既定の tmux 経路で起動する（--transport tmux もしくは --transport を外す）。
     (3) auto に任せる（--transport auto＝bg 不可時に tmux へ自動 fallback）。"
     fi
+  fi
+fi
+
+# --- bg launch の --effort/--model feature-detect（AC6/finding#1・un-ivb 規律を bg にも適用・sc-vgl finding(a)）---
+# ★配置理由（sc-vgl finding(a)）: この feature-detect は EFFECTIVE_TRANSPORT が **bg に確定した後** に置く。旧実装は
+# TRANSPORT==bg||auto 段（preflight より前）で probe していたため、auto→tmux fallback（bg preflight 不可）時に
+# 「effort/model 指定できません」loud warn が spurious に出ていた（tmux 経路は cld-spawn 経由で effort/model を
+# 正しく渡すのに誤 UX）。EFFECTIVE_TRANSPORT==bg のときだけ warn するよう launch 確定後へ restructure する。
+# bg は cld-spawn を経由せず claude を直呼びするため、effort/model flag は cld-spawn ではなく **claude --help** で
+# 検出し、実在時のみ付ける（未知フラグ落下防御・un-ivb）。dry-run はここへ到達しない（emit_plan で exit 0 済＝
+# side-effect ゼロ・AC2/AC11）ゆえ、この時点で claude を叩くのは実 bg 起動が確定した経路のみ。
+BG_EFFORT_ARG=()
+BG_EFFORT_DETECTED=0
+BG_MODEL_ARG=()
+BG_MODEL_DETECTED=0
+if [[ "$EFFECTIVE_TRANSPORT" == "bg" ]]; then
+  # --effort（bg では process env / CLAUDE_CODE_EFFORT_LEVEL が daemon fixation で無効ゆえ非対応時は effort 指定不能＝sc-47l REFUTED）。
+  if "$CLAUDE_BIN" --help 2>/dev/null | grep -q -- '--effort'; then
+    BG_EFFORT_ARG=(--effort "$EFFORT")
+    BG_EFFORT_DETECTED=1
+  else
+    echo "scribe: ⚠ bg: '$CLAUDE_BIN --help' に --effort フラグが見当たりません → effort フラグを付けません。bg（native background agent）では process env / CLAUDE_CODE_EFFORT_LEVEL が daemon fixation で無効なため、この worker の実効 effort を指定できません（sc-47l REFUTED・env carrier では effort が届かない）。" >&2
+  fi
+  # --model（worker=opus 不変条件を bg にも運ぶ・finding#1）: tmux 経路は cld-spawn へ **必ず** --model "$MODEL" を渡し
+  # worker=opus を強制する（:680 で *fable* を die＝コスト爆発防止）。bg は claude を直呼びするため model を argv で明示
+  # しないと起動セッション/アカウント既定モデル（admin main-loop=ユーザー規約上 fable）へ帰着し、当のコスト爆発を再導入する。
+  if "$CLAUDE_BIN" --help 2>/dev/null | grep -q -- '--model'; then
+    BG_MODEL_ARG=(--model "$MODEL")
+    BG_MODEL_DETECTED=1
+  else
+    echo "scribe: ⚠ bg: '$CLAUDE_BIN --help' に --model フラグが見当たりません → model フラグを付けません。bg（native background agent）では起動セッション/アカウント既定モデルへ帰着し、この worker のモデルを '$MODEL'（worker=opus）に固定できません。admin main-loop が fable の場合 worker が fable を継承しコスト爆発しうる（tmux 経路は cld-spawn 経由で --model を必ず渡すため保護されるが、この bg バイナリでは model を運べません・finding#1）。" >&2
   fi
 fi
 
