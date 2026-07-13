@@ -811,10 +811,19 @@ _mk_beads() {
   [[ "$output" == *"起動直後の SPAWNED marker write"* ]]
   # marker 形式が検知側契約どおり正確に焼かれる（bd-id 展開後・prefix 完全一致）。
   [[ "$output" == *"[SPAWNED--un-4nm]"* ]]
-  # bdw --append-notes 経由で自 issue へ write する具体コマンドが焼かれる。
-  [[ "$output" == *"bdw"*"update un-4nm --append-notes"*"[SPAWNED--un-4nm]"* ]]
+  # bdw --claim --append-notes 経由で自 issue へ write する具体コマンドが焼かれる（marker write と claim を同一ステップで・sc-dgk）。
+  [[ "$output" == *"bdw"*"update un-4nm --claim --append-notes"*"[SPAWNED--un-4nm]"* ]]
   # write 失敗時は zombie fallback の pane sentinel へ接続する（§6 規律）。
   [[ "$output" == *"SCRIBE-ENV-DEGRADED: un-4nm"* ]]
+}
+
+@test "spawn(sc-dgk): 起動時 marker write ステップに --claim が同梱される（claim 忘れ 2/3 対策・機械手順化）" {
+  run "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  # marker write と claim が **同一の bdw 呼出し**に焼かれる（別手順にせず prose 依存を排す）。
+  [[ "$output" == *"bdw"*"update un-4nm --claim --append-notes"*"[SPAWNED--un-4nm]"* ]]
+  # claim が in_progress 化を担う旨が mandate に明記される（可視性保証の理由）。
+  [[ "$output" == *"--claim"*"in_progress"* ]]
 }
 
 @test "spawn(sc-0df): 焼かれた SPAWNED marker が検知側 regex（行頭空白許容・prefix 完全一致）に一致する" {
