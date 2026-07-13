@@ -34,6 +34,50 @@
 #             送信を伴わない検証（既に他者が inject 済みの pane を verify する）で marker 導出を再実装させない
 #             ための口（sc-8g5: scribe-spawn の post-spawn submit 検証層が cld-spawn 経由で inject された
 #             worker prompt の marker をここから得る＝導出規則の SSOT を 1 箇所に保つ）。
+#   busy-check … **送信前** に target の入力欄が空か（＝push してよいか）だけを判定する（sc-6mtm・下記 gate の
+#             pure core を単体で露出。send はこれを内部で必ず通る）。0=IDLE（push 可）/ 5=DEFERRED（push 不可）。
+#
+# 送信前 busy-check gate（sc-6mtm・orch-thgx 裁定-comm-protocol(a) の scribe leg・**co-submit 事故の構造対策**）:
+#   send は send-keys の *前* に target を capture し、入力欄 interior が非空なら **一切送らずに** exit 5
+#   （INJECT_DEFERRED）で defer する（＝mailbox 降格。admin は bead / mailbox 経由で伝える）。
+#   - 何を防ぐか: 入力欄に human の打鍵途中テキストが居るとき send-keys -l は *その続き* に連結され、続く Enter で
+#     「human の書きかけ + admin の注入」が **1 行に merge されたまま submit** される（入力 merge / co-submit 事故）。
+#     この事故は事後検知できない——送信後の入力欄は空になるため、残留ベースの検証（verify / session-comm の
+#     confirm-receipt）はどちらも DELIVERED を返す（下記「confirm-receipt の限界」）。ゆえに **事前に送らない**
+#     ことだけが構造的な対策になる。
+#   - 判定は verify と **同一の入力欄構造検知**（`_extract_input_box` → `_classify_interior`）を再利用する＝
+#     pane 全文の grep はしない（pane 本文と主題が衝突して誤発火した先例 sc-11z を踏まない）。ghost text 等で
+#     誤 BUSY になるなら `--ignore-pattern` で調整する（verify と同じ口）。
+#   - **`--ignore-pattern` は gate を盲目化しうる**（sc-6mtm self-review）: ignore の適用は `grep -Ev` の *行削除*
+#     ゆえ、human の打鍵行に部分一致する広い pattern は **その行ごと消して busy を idle に化けさせる**。ゆえに
+#     gate は ignore を当てずに一次判定し、素で非空だが ignore 除去で空になった場合は silent に通さず
+#     `⚠ INJECT_IDLE_VIA_IGNORE` を stderr に出す（exit 0 だが loud）。gate へ渡す pattern は ghost text に
+#     厳密一致する狭いものだけにすること。
+#   - 3 値: IDLE（入力欄を **積極証拠つきで** 特定でき interior が空）→ 送る / BUSY（特定でき非空）→ defer /
+#     UNKNOWN（入力欄を capture 内に特定できない＝idle を *確認できない*）→ defer（**fail-closed**）。
+#     UNKNOWN も defer するのは「確認できないのに push しない」＝本ツールの保守側倒し（INCONCLUSIVE 同型）。
+#   - **IDLE は積極証拠でのみ宣言する**（scribe-spawn.sh ヘッダ【設計原理】と同型・sc-6mtm self-review）:
+#     罫線ペアは transcript 中の描画（区切り線・引用された box）にも現れうるため、「最下部の罫線ペアが在る」だけ
+#     では入力欄の証拠にならない。誤選択した box の interior はたいてい空に見え、そのまま IDLE を返すと gate が
+#     **fail-open** する。ゆえに interior 先頭行から実際にプロンプト（`❯` / `>`）を剥げたときだけ「入力欄だと
+#     確証できた」とみなし（`_extract_input_box --prompt-only`）、プロンプト不在なら IDLE ではなく **UNKNOWN**
+#     （＝defer）へ落とす。「空に見えた」は idle の証拠ではない。
+#   - **TOCTOU 残余は許容**（裁定に明記）: busy-check 後〜send-keys の間に human が打鍵し始める窓は残る。
+#     完全封鎖を狙って複雑化せず、指示の原本は durable な bead に置く（pane 注入は補助チャネル）。
+#
+# no-push 原則（docs SSOT = docs/protocol.md §6「transport 構造封鎖」）:
+#   **user が対話中の窓へは push しない**。busy-check gate はこの原則の機械強制であり、defer 時の回復手段は
+#   「入力欄を掃除して押し込む」ことでは **ない**（それは human の未送信テキストを破壊する）。bead / mailbox へ回す。
+#   - **入力欄 wipe（`C-u` 相当 / `--clear-first`）は禁止**: 本スクリプトに wipe 経路は存在せず（send-keys は
+#     `-l --` の literal 本文と `Enter` のみ＝キー名を注入する経路が構造的に無い。payload 中の "C-u" も literal
+#     文字列として送られキー入力にならない）、`--clear-first` 等が渡されたら **専用メッセージで die** する（sc-6mtm）。
+#
+# confirm-receipt / verify の限界（co-submit は検知できない・sc-6mtm(4)）:
+#   session-comm の `inject-file --confirm-receipt`（sentinel-presence）も本スクリプトの verify（入力欄残留）も、
+#   「**何が submit されたか**」は見ていない——前者は pane への *到着*、後者は入力欄が *空になったこと* しか見ない。
+#   ゆえに human と同時送信（co-submit）が起きて merge された 1 行が submit されても、両者とも DELIVERED を返す
+#   （**偽陽性**）。DELIVERED は「注入テキストが無傷で submit された」ことを含意しない。この限界は残留ベース検証の
+#   原理的なものであり、事前 gate（busy-check）と durable な bead 原本でのみ埋める。
 #
 # 入力ボックス検知（sc-6vj gate errata で実 CC TUI と突合し改訂）: 検知は capture の *最下部に最も近い*
 #   構造へ anchor する（scrollback 中の引用/描画由来の box を誤選択しない）。2 型に両対応:
@@ -56,8 +100,12 @@
 #   scribe-inject.sh send --target PANE (--file F | --text T) [--marker M] [--retries N]
 #                         [--no-enter] [--settle SEC] [--ignore-pattern RE]...
 #   scribe-inject.sh marker [--file F | --text T]        # 既定は stdin から payload を読む
-# 終了コード: 0=DELIVERED / 1=usage・die（scribe_die・fail-loud） / 3=RESIDUAL（未送達＝要 fail-loud） /
-#             4=INCONCLUSIVE（入力欄を特定不能 or 帰属不能な残留＝保守的 fail-loud）。marker は 0=導出成功。
+#   scribe-inject.sh busy-check (--target PANE | --capture-file F) [--ignore-pattern RE]...
+# 終了コード: 0=DELIVERED（send/verify）・IDLE（busy-check） / 1=usage・die（scribe_die・fail-loud） /
+#             3=RESIDUAL（未送達＝要 fail-loud） / 4=INCONCLUSIVE（入力欄を特定不能 or 帰属不能な残留＝保守的
+#             fail-loud） / 5=DEFERRED（**送っていない**＝busy-check gate が push を止めた・sc-6mtm）。
+#             marker は 0=導出成功。**3/4 は「送った後の確認結果」・5 は「送っていない」**（呼出側はこの差で
+#             再送の可否を判断できる＝5 で再送してはならない・bead/mailbox へ回す）。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -68,6 +116,7 @@ source "$SCRIPT_DIR/lib/scribe-lib.sh"
 readonly INJECT_DELIVERED=0
 readonly INJECT_RESIDUAL=3
 readonly INJECT_INCONCLUSIVE=4
+readonly INJECT_DEFERRED=5   # 送信前 busy-check gate が push を止めた（＝送っていない・sc-6mtm）
 
 # bracketed-paste placeholder（CC/端末が貼付を折り畳む表示）を残留として拾う。大小無視の ERE。
 readonly PASTE_PLACEHOLDER_RE='\[[Pp]asted text|\[[0-9]+ (more )?lines?( pasted)?\]|[Pp]asted [0-9]+ lines?'
@@ -79,7 +128,11 @@ Usage:
   scribe-inject.sh send --target PANE (--file F | --text T) [--marker M] [--retries N]
                         [--no-enter] [--settle SEC] [--ignore-pattern RE]...
   scribe-inject.sh marker [--file F | --text T]   # payload（既定 stdin）から verify 用 marker を導出
-終了コード: 0=DELIVERED / 1=usage・die / 3=RESIDUAL（未送達・fail-loud） / 4=INCONCLUSIVE（特定不能・fail-loud）。
+  scribe-inject.sh busy-check (--target PANE | --capture-file F) [--ignore-pattern RE]...
+                                                  # 送信前 gate: 入力欄が空か（push 可か）だけを判定
+終了コード: 0=DELIVERED/IDLE / 1=usage・die / 3=RESIDUAL（送った後・未送達・fail-loud） /
+            4=INCONCLUSIVE（送った後・特定不能・fail-loud） / 5=DEFERRED（**送っていない**＝busy-check gate が
+            push を止めた。入力欄が非空 or 特定不能。再送せず bead/mailbox 経由で伝えること）。
 EOF
   exit "${1:-0}"
 }
@@ -99,12 +152,18 @@ _is_input_rule() {
   esac
 }
 
-# _extract_input_box — stdin の capture から「入力欄 interior」を stdout に出す。ボックス未検出なら return 4。
+# _extract_input_box [--prompt-only] — stdin の capture から「入力欄 interior」を stdout に出す。ボックス未検出なら return 4。
 #   最下部に最も近い構造へ anchor し、遠い（scrollback 中の）box を誤選択しない（sc-6vj gate errata）。
 #   Type A（実 CC TUI・優先）= 水平罫線ペア: 最下部の罫線行を下端、その直上の罫線行を上端とし、
 #     間を interior とする（下端罫線より下の status bar 行は interior 外）。プロンプトは ❯ / > 両対応。
 #   Type B（fallback）= 角丸/角 box: 最下部の ╰/└ から直上の ╭/┌ まで。
+#   --prompt-only: interior を **出さず**、選んだ box が入力欄だという *積極証拠*（interior 先頭行から実際に
+#     プロンプト `❯`/`>` を剥げたか）だけを rc で返す（0=証拠あり / 4=box 未検出 or プロンプト不在）。
+#     busy-check gate が「罫線ペアを誤選択して interior が空に見えた」ケースを IDLE と誤宣言しないための口
+#     （sc-6mtm self-review・fail-open 封鎖）。verify は従来どおり既定モード（rc は box 検出のみを表す）。
 _extract_input_box() {
+  local prompt_only=0
+  [[ "${1:-}" == "--prompt-only" ]] && prompt_only=1
   local -a lines=()
   mapfile -t lines
   local n=${#lines[@]} i start=-1 end=-1
@@ -133,7 +192,7 @@ _extract_input_box() {
     start=$((top + 1)); end=$((bot - 1))
   fi
   # --- interior emit（両 Type 共通）---
-  local first=1 line
+  local first=1 line stripped has_prompt=0
   for ((i = start; i <= end; i++)); do
     line="${lines[i]}"
     # 枠側面・box-drawing・交差 glyph を除去（内容だけ残す）。
@@ -143,18 +202,28 @@ _extract_input_box() {
     line="${line//├/}"; line="${line//┤/}"; line="${line//┬/}"; line="${line//┴/}"; line="${line//┼/}"
     if (( first )); then
       # 先頭 interior 行だけプロンプト（❯ か >）を 1 つ剥ぐ（前後空白ごと）。
+      # 実際に剥げたか（＝この box が入力欄だという積極証拠）を has_prompt に記録する（--prompt-only の答え）。
       line="${line#"${line%%[![:space:]]*}"}"   # ltrim
-      line="${line#❯}"; line="${line#>}"
+      stripped="${line#❯}"; if [[ "$stripped" != "$line" ]]; then has_prompt=1; fi; line="$stripped"
+      stripped="${line#>}";  if [[ "$stripped" != "$line" ]]; then has_prompt=1; fi; line="$stripped"
       first=0
     fi
-    printf '%s\n' "$line"
+    (( prompt_only )) || printf '%s\n' "$line"
   done
+  if (( prompt_only )); then
+    # プロンプトを剥げなかった＝入力欄だと確証できない（罫線ペアの誤選択 / interior 皆無）→ 未検出と同値の 4。
+    (( has_prompt )) || return 4
+  fi
 }
 
-# _classify_interior <interior> <marker> <ignore_re_joined> — 残留判定して INJECT_* を return。
+# _classify_interior <interior> <marker> <ignore_re_joined> [strict_prompt] — 残留判定して INJECT_* を return。
 #   ignore_re_joined は '\n' 区切りの ERE 群（空可）。
+#   strict_prompt=1（busy-check gate 専用・sc-6mtm self-review）: 空判定で余剰プロンプト glyph（'>' / '❯'）を
+#     **剥がない**。gate では先頭プロンプトは既に _extract_input_box が剥いでおり、残った '>' は human が打鍵した
+#     *内容*（例「>>>」）である——それを空扱いにすると busy を idle と誤宣言して fail-open する。verify（既定＝0）は
+#     従来どおり剥ぐ（送信後の入力欄に残る描画上のプロンプトを残留と誤認しないための sc-6vj の措置）。
 _classify_interior() {
-  local interior="$1" marker="$2" ignore="$3"
+  local interior="$1" marker="$2" ignore="$3" strict_prompt="${4:-0}"
   # 1. marker（自分の注入テキスト）が入力欄に居る＝未送信。
   if [[ -n "$marker" ]] && printf '%s' "$interior" | grep -Fq -- "$marker"; then
     return "$INJECT_RESIDUAL"
@@ -184,8 +253,10 @@ _classify_interior() {
   local core
   core="$(printf '%s' "$body" | tr -d '[:space:]')"
   core="${core//$'\xc2\xa0'/}"   # NBSP（❯ 後の空白）
-  core="${core//>/}"
-  core="${core//❯/}"
+  if (( strict_prompt == 0 )); then
+    core="${core//>/}"
+    core="${core//❯/}"
+  fi
   if [[ -z "$core" ]]; then
     return "$INJECT_DELIVERED"
   fi
@@ -214,6 +285,114 @@ _emit_verdict() {
     printf '%s\n' "$line" >&2
     printf '%s\n' "$line"
   fi
+}
+
+# _busy_state <capture> <ignore_re_joined> — **送信前** の入力欄状態を判定する pure core（sc-6mtm gate）。
+#   stdout に理由トークンを出し、return は 0=IDLE（push 可） / INJECT_DEFERRED=push 不可。
+#     idle    … 入力欄を **積極証拠つきで** 特定でき（interior 先頭からプロンプト ❯/> を実際に剥げた）、かつ
+#               interior が空（human は打鍵していない）→ 0
+#     busy    … 入力欄を特定でき interior が非空（human 打鍵中 / 前回注入の残留 / paste 滞留、および
+#               --ignore-pattern が不正 ERE で空判定に落とせない場合＝いずれも「送ってはいけない」で同値）→ 5
+#     unknown … 入力欄を capture 内に特定できない、**または** 罫線ペアは在るがプロンプトが無く「入力欄だと確証
+#               できない」（＝transcript 由来の罫線を誤選択した疑い）＝idle を *確認できない* → 5（fail-closed）
+#   判定は verify と同一の構造検知（_extract_input_box → _classify_interior）を再利用する（pane 全文 grep をしない
+#   ＝誤発火の先例 sc-11z を踏まない）。marker は空で呼ぶ——送信前ゆえ自分の payload はまだ入力欄に無く、
+#   「空か否か」だけが問い（marker 一致は verify の問い）。
+#   **IDLE を積極証拠でのみ宣言する**（sc-6mtm self-review の fail-open 封鎖）: 「box を誤特定して空に見えた」は
+#   idle の証拠にならない。プロンプト不在は空/非空によらず unknown（＝defer）へ落とす。
+_busy_state() {
+  local capture="$1" ignore="$2"
+  local interior rc=0
+  interior="$(printf '%s\n' "$capture" | _extract_input_box)" || rc=$?
+  if (( rc == 4 )); then
+    printf 'unknown'
+    return "$INJECT_DEFERRED"
+  fi
+  # 入力欄の積極証拠（プロンプト glyph を実際に剥げたか）が無ければ idle を名乗らせない（fail-closed）。
+  local prc=0
+  printf '%s\n' "$capture" | _extract_input_box --prompt-only || prc=$?
+  if (( prc != 0 )); then
+    printf 'unknown'
+    return "$INJECT_DEFERRED"
+  fi
+  # まず **ignore を当てずに** 空判定する（gate の一次判定）。素で空なら文句なく idle。
+  local raw=0
+  _classify_interior "$interior" "" "" 1 || raw=$?
+  if (( raw == INJECT_DELIVERED )); then
+    printf 'idle'
+    return "$INJECT_DELIVERED"
+  fi
+  # 素では非空。ignore-pattern を当てて空になるなら「ghost text だった」＝idle だが、これは
+  # **gate を盲目化しうる経路**（grep -Ev は *行削除* ゆえ、広い pattern は human の打鍵行ごと消して
+  # busy を idle に化けさせる）。silent に通さず 'idle-via-ignore' として loud に告げる（sc-6mtm self-review）。
+  if [[ -n "$ignore" ]]; then
+    local cc=0
+    _classify_interior "$interior" "" "$ignore" 1 || cc=$?
+    if (( cc == INJECT_DELIVERED )); then
+      printf 'idle-via-ignore'
+      return "$INJECT_DELIVERED"
+    fi
+  fi
+  printf 'busy'
+  return "$INJECT_DEFERRED"
+}
+
+# _emit_busy_verdict <reason> <target> — busy-check / send gate の verdict 表示（fail-loud は stderr にも）。
+#   defer 時のメッセージは **回復手段を bead/mailbox に固定**する（入力欄 wipe や押し込みを示唆しない＝no-push 原則）。
+_emit_busy_verdict() {
+  local reason="$1" target="${2:-}" line
+  case "$reason" in
+    idle-via-ignore)
+      # 素の interior は非空で、--ignore-pattern の行削除で空になった＝gate が盲目化された可能性を loud に告げる
+      # （human の打鍵行に部分一致する広い pattern は busy を idle へ化けさせる・sc-6mtm self-review）。
+      line="INJECT_IDLE: 入力欄は --ignore-pattern 除去後に空（push 可${target:+・target=$target}）"
+      printf '%s\n' "⚠ INJECT_IDLE_VIA_IGNORE: 素の入力欄は **非空** で、--ignore-pattern が行ごと除去した結果 idle と判定しました（ghost text 想定）。pattern が human の打鍵行に一致していると busy を idle と誤判定します＝gate の盲目化。広い pattern を渡していないか確認してください。" >&2
+      printf '%s\n' "$line"
+      return "$INJECT_DELIVERED" ;;
+    idle)
+      line="INJECT_IDLE: 入力欄が空（push 可${target:+・target=$target}）"
+      printf '%s\n' "$line"
+      return "$INJECT_DELIVERED" ;;
+    busy)
+      line="INJECT_DEFERRED: reason=busy — 入力欄に未送信テキストあり（human 打鍵中 or 前回注入の残留）＝**送信していません**${target:+・target=$target}。押し込まず bead/mailbox 経由で伝えてください（no-push 原則・protocol §6）。" ;;
+    *)
+      line="INJECT_DEFERRED: reason=unknown — 入力欄を capture 内に特定できず idle を確認できません（fail-closed）＝**送信していません**${target:+・target=$target}。bead/mailbox 経由で伝えてください（no-push 原則・protocol §6）。" ;;
+  esac
+  printf '%s\n' "$line" >&2
+  printf '%s\n' "$line"
+  return "$INJECT_DEFERRED"
+}
+
+# do_busy_check — 送信前 gate を単体で回す（send は同じ core を内部で通る）。
+#   --target で live pane を capture するか、--capture-file / stdin で capture を与える（テスト・事後監査用）。
+do_busy_check() {
+  local target="" capture_file="" ignore=""
+  while (( $# )); do
+    case "$1" in
+      --target) scribe_need_val "${2:-}" --target; target="$2"; shift 2 ;;
+      --capture-file) scribe_need_val "${2:-}" --capture-file; capture_file="$2"; shift 2 ;;
+      --ignore-pattern) scribe_need_val "${2:-}" --ignore-pattern; ignore+="$2"$'\n'; shift 2 ;;
+      -h | --help) usage 0 ;;
+      --) shift; break ;;
+      -*) scribe_die "busy-check: 未知のオプション: $1" ;;
+      *) scribe_die "busy-check: 余分な引数: $1" ;;
+    esac
+  done
+  [[ -n "$target" && -n "$capture_file" ]] && scribe_die "busy-check: --target と --capture-file は排他です"
+  local capture
+  if [[ -n "$target" ]]; then
+    local TMUX_BIN="${SCRIBE_TMUX:-tmux}"
+    capture="$("$TMUX_BIN" capture-pane -p -t "$target")" \
+      || scribe_die "busy-check: capture-pane に失敗しました（target=$target・window/pane が解決できない？）"
+  elif [[ -n "$capture_file" ]]; then
+    [[ -r "$capture_file" ]] || scribe_die "busy-check: capture-file が読めません: $capture_file"
+    capture="$(cat -- "$capture_file")"
+  else
+    capture="$(cat)"
+  fi
+  local reason rc=0
+  reason="$(_busy_state "$capture" "$ignore")" || rc=$?
+  _emit_busy_verdict "$reason" "$target"
 }
 
 # do_verify — capture を読んで残留判定し verdict を出す（core・純粋文字列処理）。
@@ -312,6 +491,11 @@ do_send() {
       --settle) scribe_need_val "${2:-}" --settle; settle="$2"; shift 2 ;;
       --no-enter) no_enter=1; shift ;;
       --ignore-pattern) scribe_need_val "${2:-}" --ignore-pattern; ignore+="$2"$'\n'; ignore_args+=(--ignore-pattern "$2"); shift 2 ;;
+      # 入力欄 wipe（C-u 相当）の禁止を **機械的に** 拒否する（sc-6mtm(3)・no-push 原則）。本スクリプトに wipe 経路は
+      # 元より無い（send-keys は `-l --` の literal 本文と Enter のみ）が、"未知のオプション" という一般 die では
+      # 「なぜ禁止か」が伝わらず、呼出側が自前の生 send-keys で C-u を撃つ回避に流れる。専用メッセージで塞ぐ。
+      --clear-first | --clear | --wipe | --wipe-input)
+        scribe_die "send: $1 は禁止です（入力欄 wipe = C-u 相当は human の未送信テキストを破壊する・sc-6mtm no-push 原則）。入力欄が非空なら **押し込まず** bead/mailbox 経由で伝えてください（busy-check gate が既に defer します）。" ;;
       -h | --help) usage 0 ;;
       --) shift; break ;;
       -*) scribe_die "send: 未知のオプション: $1" ;;
@@ -340,7 +524,21 @@ do_send() {
   fi
 
   local TMUX_BIN="${SCRIBE_TMUX:-tmux}"
+
+  # --- 送信前 busy-check gate（sc-6mtm・**送る前に一度だけ**）---------------------------------
+  # 入力欄が非空（human 打鍵中の疑い）or 特定不能なら **send-keys を一切撃たずに** exit 5 で defer する。
+  # 送ってしまってからでは co-submit（merge された 1 行の submit）は検知できない（ヘッダ「confirm-receipt の限界」）。
+  local _gate_cap _gate_reason _gate_rc=0
+  _gate_cap="$("$TMUX_BIN" capture-pane -p -t "$target")" \
+    || scribe_die "send: 送信前 busy-check の capture-pane に失敗しました（target=$target・window/pane が解決できない？）"
+  _gate_reason="$(_busy_state "$_gate_cap" "$ignore")" || _gate_rc=$?
+  if (( _gate_rc != INJECT_DELIVERED )); then
+    _emit_busy_verdict "$_gate_reason" "$target" || true
+    return "$INJECT_DEFERRED"
+  fi
+
   # 注入: literal 本文 → Enter で submit。
+  # （キー名を撃つ経路はここに無い＝payload は常に `-l --` の literal。C-u 等の wipe は構造的に送れない・sc-6mtm）
   "$TMUX_BIN" send-keys -t "$target" -l -- "$payload"
   (( no_enter )) || "$TMUX_BIN" send-keys -t "$target" Enter
 
@@ -374,6 +572,7 @@ case "$mode" in
   verify) do_verify "$@" ;;
   send) do_send "$@" ;;
   marker) do_marker "$@" ;;
+  busy-check) do_busy_check "$@" ;;
   -h | --help) usage 0 ;;
-  *) scribe_die "未知のサブコマンド: $mode（verify|send|marker）" ;;
+  *) scribe_die "未知のサブコマンド: $mode（verify|send|marker|busy-check）" ;;
 esac
