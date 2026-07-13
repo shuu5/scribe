@@ -108,6 +108,11 @@ MOCKBD
     for t in bash cat sed head dirname jq python3 env printf grep; do
         p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$NOTIMEOUT_BIN/$t"
     done
+
+    # dedupe/TTL state は repo 外（XDG state）に置かれる（lib mailbox-common.sh）。実 $HOME を汚さないよう
+    # fixture 内へ隔離する（sc-b6w: SessionStart は surface した id を seen へ seed し、UserPromptSubmit
+    # 中間配送点がそれを既報として再通知しない＝両配送点の共有 state）。
+    STATE_DIR="$TEST_TMPDIR/state"
 }
 
 teardown() {
@@ -117,8 +122,9 @@ teardown() {
 # hook を実フック経路（stdin JSON → stdout）で起動。PATH に mock bd を前置し orch anchor を fixture へ固定。
 run_hook() { # $1=cwd  他=env 前置(KEY=VAL...)
     local cwd="$1"; shift
-    printf '{"cwd":"%s"}' "$cwd" \
-        | env "$@" PATH="$BIN:$PATH" SCRIBE_ORCH_ANCHOR="$ORCH_LEDGER" bash "$HOOK"
+    printf '{"cwd":"%s","session_id":"sess-bats-1"}' "$cwd" \
+        | env "$@" PATH="$BIN:$PATH" SCRIBE_ORCH_ANCHOR="$ORCH_LEDGER" \
+              SCRIBE_MAILBOX_STATE_DIR="$STATE_DIR" bash "$HOOK"
 }
 
 @test "static: hook が実行可能・bash 構文 OK" {
@@ -260,6 +266,41 @@ run_hook() { # $1=cwd  他=env 前置(KEY=VAL...)
     [[ "$output" != *"repo add"* ]]
     [[ "$output" != *" repo "* ]]                           # いかなる repo サブコマンドも無い
     [[ "$output" == *" list "* ]]                           # 発行したのは read(list)のみ
+}
+
+@test "(viii-seed) surface した bead id を seen state へ seed する(UserPromptSubmit 中間配送点の dedupe 種・sc-b6w)" {
+    run run_hook "$SELF_CWD" MOCK_BD_MODE=ok
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"orch-abc"* ]]                       # surface はした（非vacuous）
+    seen="$STATE_DIR/sess-bats-1__sc.seen"
+    [ -f "$seen" ]                                         # session 単位の seen state が作られ…
+    grep -Fxq "orch-abc" "$seen"                           # …surface した id が全て記録される
+    grep -Fxq "orch-xyz" "$seen"
+    [ -f "$STATE_DIR/sess-bats-1__sc.scan" ]               # TTL stamp も置かれる（毎 prompt hook の間引き用）
+}
+
+@test "(viii-seed-degrade) state 書込不能でも surface は行う(配送 > 静粛・fail-safe)" {
+    # state dir を作れない状況（親が既存ファイル＝mkdir -p が必ず失敗）でも SessionStart は必ず surface する。
+    # run_hook は SCRIBE_MAILBOX_STATE_DIR を末尾で固定するため、ここは env を直に組んで上書きする。
+    printf 'not-a-dir' > "$TEST_TMPDIR/blocked-state"
+    run bash -c "printf '{\"cwd\":\"%s\",\"session_id\":\"sess-bats-1\"}' '$SELF_CWD' \
+        | env MOCK_BD_MODE=ok PATH='$BIN:$PATH' SCRIBE_ORCH_ANCHOR='$ORCH_LEDGER' \
+              SCRIBE_MAILBOX_STATE_DIR='$TEST_TMPDIR/blocked-state/x' bash '$HOOK'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"orch-abc"* ]]
+}
+
+@test "(ix-prune) 下り便ゼロ(空配列)でも state prune と TTL stamp は走る(sc-b6w self-review [minor])" {
+    # 旧実装は prune / stamp を「surface できたとき」だけ実行しており、下り便ゼロが常態の project では
+    # ①XDG state が永久に伸び ②直後の UserPromptSubmit が同じ read を撃ち直した。両方を pin する。
+    mkdir -p "$STATE_DIR"
+    : > "$STATE_DIR/old__sc.seen"
+    touch -d "30 days ago" "$STATE_DIR/old__sc.seen" 2>/dev/null || touch -t 202001010000 "$STATE_DIR/old__sc.seen"
+    run run_hook "$SELF_CWD" MOCK_BD_MODE=empty
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]                                       # surface は無い（下り便ゼロ）
+    [ ! -f "$STATE_DIR/old__sc.seen" ]                     # …が prune は走った（7 日超の state を掃除）
+    [ -f "$STATE_DIR/sess-bats-1__sc.scan" ]               # …TTL stamp も前進（中間配送点が直後に再 read しない）
 }
 
 @test "(wire) hooks.json が mailbox-scan を role-inject と同形 fail-safe で SessionStart へ wire" {
