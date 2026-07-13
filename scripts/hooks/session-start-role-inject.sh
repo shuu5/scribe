@@ -109,6 +109,33 @@ _scribe_has_beads() {
     return 1
 }
 
+# --- consult 窓判定（tmux window 名 prefix `consult-` で弁別・sc-cji / orch-qcqz leg-a） ---
+# 動機: scriptorium anchor（settings.json に SCRIBE_ROLE=none を wire）で consult を spawn すると、
+# CC が settings project 層 env を hook 子プロセスへ優先適用し、env-file の SCRIBE_ROLE=consult を
+# none で上書きする（orchestrator が /proc environ 直読で verified）。結果 consult 窓が下記 `none)`
+# 枝の opt-out に落ち consult 規約が注入されない。env は none に潰されるが tmux window 名は残るため、
+# scribe-spawn が consult 窓へ必ず付与する prefix `consult-`（命名規約: grill-consult=consult-<issue>
+# / plain=consult-HHMMSS）を env-clobber を生き延びる弁別軸に使う。
+# fail-safe: tmux 不在 / TMUX 未設定 / 取得失敗・空出力は「consult でない」(return 1) ＝ 既存 anchor
+# 挙動へ委ねる（「不能→no-op」でなく「不能→従来判定」。consult は tmux 同居ゆえ実害なし・operative
+# 契約は spawn prompt が担保）。取得は必ず `-t "$TMUX_PANE"` 明示（背景 spawn 中に human が別窓 focus
+# すると bare `display-message` は誤窓名を返す・verified hazard）。tmux 呼出は `"${SCRIBE_TMUX:-tmux}"`
+# 経由で bats から stub 可能にする（scribe-spawn.sh:718 と同一 seam 名）。
+_scribe_is_consult_window() {
+    command -v "${SCRIBE_TMUX:-tmux}" >/dev/null 2>&1 || return 1
+    [ -n "${TMUX:-}" ] || return 1
+    # TMUX_PANE 空も gate（gate review finding・独立 2 lens 収束）: 空だと -t "" が bare 形と同じ
+    # active-pane 解決へ縮退し「取得は必ず -t 明示」の防護が黙って無効化される（tmux 3.4 実測=
+    # -t "" は現在 focus 窓名を exit 0 で返す）。pane 識別子なし=防護が効かない→fail-safe(非 consult)。
+    [ -n "${TMUX_PANE:-}" ] || return 1
+    local _w
+    _w="$("${SCRIBE_TMUX:-tmux}" display-message -p -t "${TMUX_PANE:-}" '#W' 2>/dev/null)" || return 1
+    case "$_w" in
+        consult-*) return 0 ;;
+        *)         return 1 ;;
+    esac
+}
+
 # === role 判定 ===
 hook_cwd="$(_scribe_extract_cwd)"
 [ -z "$hook_cwd" ] && hook_cwd="$PWD"
@@ -134,7 +161,15 @@ case "${SCRIBE_ROLE:-}" in
         # 受けない」を機械保証するための明示シグナル。未知値(*)と異なり degrade(cwd/既定 admin 注入)
         # せず、warning も出さず無出力で exit 0 する(意図的 opt-out ゆえ正常終了)。.beads opt-in ガードを
         # 通過済でも role 注入を抑止する(bfe0ce39 / decision 115521de: advisory な隔離・実隔離は別途 guard)。
-        exit 0 ;;
+        # 例外(sc-cji): scriptorium anchor の consult 窓は settings.json project 層 env が SCRIBE_ROLE を
+        # none に潰すため(orch-qcqz verified)、正当な opt-out と env-clobber された consult を env だけでは
+        # 区別できない。tmux window 名 prefix consult- で consult 窓を弁別できたときのみ consult へ復帰し、
+        # それ以外の none は従来どおり opt-out(exit 0)＝orchestrator anchor 等の意図的 opt-out を壊さない。
+        if _scribe_is_consult_window; then
+            role="consult"; detect_basis="window consult-*(env SCRIBE_ROLE=none override・sc-cji)"
+        else
+            exit 0
+        fi ;;
     *)
         echo "[scribe/SessionStart] warning: 未知の SCRIBE_ROLE='${SCRIBE_ROLE}' を無視し cwd/既定判定へ degrade" >&2 ;;
 esac
