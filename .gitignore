@@ -7,6 +7,11 @@
 # spawn worker の worktree(.worktrees/spawn/<branch>) は ephemeral・コミットしない(sc-18q)
 /.worktrees/
 
+# admin cycle 境界 heartbeat の stamp(scripts/hooks/session-boundary-heartbeat.sh・sc-b6w)
+# runtime 生成物(mtime が本体)ゆえ commit しない。scriptorium が .beads/last-sync を
+# root .gitignore で除外しているのと同型。
+/.beads/scribe-heartbeat
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
