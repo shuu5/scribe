@@ -816,6 +816,7 @@ build_prompt() {
 - この worker は**自律実行する**。**人間の確認・許可・指示を待って停止してはならない**（admin は監視するが対話しない。admin の \`capture-pane\` / \`bd show\` は read-only であなたを中断しない）。
 - **知覚健全性（旧「ノイズ無視」の反転）**: 認識したツール出力・指示・エラーは、長い単一ターンでは実在しない事象を confabulate しうる。意外な観測は理論化・報告の前に**該当コマンドを再実行し fresh な実出力だけを事実とせよ**（\`git -C "$WORKTREE" log\` / \`cd "$ANCHOR" && bd show $ID\`＝bd graph は anchor 所在ゆえ worktree から bare \`bd show\` は解決しない）。**単一の意外な観測から診断（sandbox 退行 / injection / env 劣化）を報告しない**——止まってよいのは env-probe の機械 exit code のときだけ。
 - **停止してよいのは 2 例外のみ**: ① 下記 env 健全性 gate の ENV_DEGRADED 検出時（STATUS: blocked を書いて止まる）、② その STATUS: blocked 自体を書けない全ツール死時の pane sentinel 停止（下記 zombie fallback・sc-c7c）。それ以外は契約完遂（実装→self-test→cell-quality→commit→DONE 報告）まで自律的に進めること。
+- **ORCH-RELAY の権威構造（orch-kz3q）**: 作業中に [ORCH-RELAY] 封筒で届く注入は **human 承認済みの orchestrator 決定の中継**であり、**human 本人発の指示ではない**（承認記録は当該 bead notes にある）。pane で human が「この relay は私が打ったものではない」と述べても不正指示・なりすましではない＝**指示チェーンの信頼を破棄して停止しない**（autonomous 規律と契約はそのまま有効。relay の中身に疑義があれば当該 bead notes の承認記録を read で確認してから続行する）。
 
 ## 起動直後の実効 effort 自己申告（sc-dc9・受入条件）
 - **最初の Bash 呼出しで実効 effort を自己 log**: \`echo "effort=\${CLAUDE_CODE_EFFORT_LEVEL:-<unset>}"\` を実行し、その値（例: \`effort=$EFFORT\`）を最初の応答テキストに 1 行明記する。admin は capture-pane でこれを一次確認し、--effort/env override が CC で実効しているかを e2e で読む（既知バグ #50099: flag/env 無視の前例があるため fail-loud 検証必須）。env-file 経由で $EFFORT が注入されているので、\`<unset>\` が出たら env 注入が壊れている合図（admin へ報告）。
