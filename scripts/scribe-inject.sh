@@ -30,6 +30,10 @@
 #   send    … 注入オーケストレーション。target pane へ payload を send-keys -l + Enter し、capture して
 #             verify する。RESIDUAL なら Enter を追送して再検証（incident A の回復を機械化）。retry 尽きても
 #             残留なら fail-loud。tmux バイナリは SCRIBE_TMUX で差し替え可（テスト seam）。
+#   marker  … payload（stdin / --file / --text）から verify 用 marker を導出して stdout に出す（純粋関数）。
+#             送信を伴わない検証（既に他者が inject 済みの pane を verify する）で marker 導出を再実装させない
+#             ための口（sc-8g5: scribe-spawn の post-spawn submit 検証層が cld-spawn 経由で inject された
+#             worker prompt の marker をここから得る＝導出規則の SSOT を 1 箇所に保つ）。
 #
 # 入力ボックス検知（sc-6vj gate errata で実 CC TUI と突合し改訂）: 検知は capture の *最下部に最も近い*
 #   構造へ anchor する（scrollback 中の引用/描画由来の box を誤選択しない）。2 型に両対応:
@@ -51,8 +55,9 @@
 #   scribe-inject.sh verify [--marker M] [--capture-file F] [--ignore-pattern RE]...
 #   scribe-inject.sh send --target PANE (--file F | --text T) [--marker M] [--retries N]
 #                         [--no-enter] [--settle SEC] [--ignore-pattern RE]...
+#   scribe-inject.sh marker [--file F | --text T]        # 既定は stdin から payload を読む
 # 終了コード: 0=DELIVERED / 1=usage・die（scribe_die・fail-loud） / 3=RESIDUAL（未送達＝要 fail-loud） /
-#             4=INCONCLUSIVE（入力欄を特定不能 or 帰属不能な残留＝保守的 fail-loud）。
+#             4=INCONCLUSIVE（入力欄を特定不能 or 帰属不能な残留＝保守的 fail-loud）。marker は 0=導出成功。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -73,6 +78,7 @@ Usage:
   scribe-inject.sh verify [--marker M] [--capture-file F] [--ignore-pattern RE]...
   scribe-inject.sh send --target PANE (--file F | --text T) [--marker M] [--retries N]
                         [--no-enter] [--settle SEC] [--ignore-pattern RE]...
+  scribe-inject.sh marker [--file F | --text T]   # payload（既定 stdin）から verify 用 marker を導出
 終了コード: 0=DELIVERED / 1=usage・die / 3=RESIDUAL（未送達・fail-loud） / 4=INCONCLUSIVE（特定不能・fail-loud）。
 EOF
   exit "${1:-0}"
@@ -258,6 +264,40 @@ _derive_marker() {
   printf '%s' "$last"
 }
 
+# do_marker — payload（stdin / --file / --text）から verify 用 marker を導出して stdout に出す（sc-8g5）。
+#   do_send は marker を内部導出するが、**送信を伴わない検証**（他者が inject 済みの pane を verify する）では
+#   その導出規則だけが要る。呼出側（scribe-spawn の post-spawn submit 検証層）に _derive_marker を再実装させると
+#   導出規則が 2 箇所に散り drift する（marker が食い違えば RESIDUAL を取りこぼし fail-open する）ため、pure core を
+#   subcommand として露出する。改行は付けない（$(...) で受けた側が末尾改行に悩まされない）。
+do_marker() {
+  local file="" text="" has_text=0
+  while (( $# )); do
+    case "$1" in
+      --file) scribe_need_val "${2:-}" --file; file="$2"; shift 2 ;;
+      --text) [[ $# -ge 2 ]] || scribe_die "--text に値を指定してください"; text="$2"; has_text=1; shift 2 ;;
+      -h | --help) usage 0 ;;
+      --) shift; break ;;
+      -*) scribe_die "marker: 未知のオプション: $1" ;;
+      *) scribe_die "marker: 余分な引数: $1" ;;
+    esac
+  done
+  local payload
+  if [[ -n "$file" ]]; then
+    (( has_text )) && scribe_die "marker: --file と --text は排他です"
+    [[ -r "$file" ]] || scribe_die "marker: --file が読めません: $file"
+    payload="$(cat -- "$file")"
+  elif (( has_text )); then
+    payload="$text"
+  else
+    payload="$(cat)"
+  fi
+  [[ -n "$payload" ]] || scribe_die "marker: payload が空です"
+  local m
+  m="$(_derive_marker "$payload")"
+  [[ -n "$m" ]] || scribe_die "marker: payload から marker を導出できません（全空白？）"
+  printf '%s' "$m"
+}
+
 # do_send — target pane へ注入し送達確認する（RESIDUAL は Enter 追送で回復）。
 do_send() {
   local target="" file="" text="" marker="" retries=2 settle="0.2" no_enter=0 ignore="" has_text=0
@@ -333,6 +373,7 @@ mode="$1"; shift
 case "$mode" in
   verify) do_verify "$@" ;;
   send) do_send "$@" ;;
+  marker) do_marker "$@" ;;
   -h | --help) usage 0 ;;
-  *) scribe_die "未知のサブコマンド: $mode（verify|send）" ;;
+  *) scribe_die "未知のサブコマンド: $mode（verify|send|marker）" ;;
 esac
