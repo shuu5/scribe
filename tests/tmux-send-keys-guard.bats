@@ -4,8 +4,10 @@
 # PreToolUse[Bash] hook（scripts/hooks/tmux-send-keys-guard.py・sc-164 transport 構造封鎖 B）の
 # **e2e（stdin JSON → exit code / stderr の実フック契約）** と **hooks.json wire 検査** の hermetic bats。
 #
-# 契約: 管理窓（非 'wt-' window）への生 tmux send-keys を exit2 で block し scribe-inject 経由へ funnel する。
+# 契約: 管理窓（非 'wt-' window）への生 tmux transport を exit2 で block し scribe-inject 経由へ funnel する。
 #   worker 窓（wt-*）への steering・capture-pane（監視 read）は封鎖対象外。foreign(orch) session は no-op。
+# sc-2g3: 対象 transport を send-keys 以外へ拡張（paste-buffer / load-buffer / run-shell / pipe-pane -I ＋
+#   payload に transport を包む exec carrier の再帰）。(k*) が sc-2g3 の e2e、(a)-(j) は sc-164 の非干渉 pin。
 #
 # 方式（hermetic・実 plugin/tmux server 非依存）:
 #   - 台帳 fixture: temp に scribe(dolt_database=sc) と foreign(dolt_database=orch) の .beads/metadata.json。
@@ -34,16 +36,20 @@ setup() {
     FOREIGN_CWD="$FOREIGN/sub"
 
     # stub tmux（到達可）: @3/admin:0→'admin'(管理窓)・@7→'wt-sc-1'(worker 窓)・他→解決失敗(exit1)。
+    #   guard が引く display-message の `-t`(target-pane) と `-c`(target-client・load-buffer 用) の両方を解決する。
     TMUX_OK="$TEST_TMPDIR/tmux-reachable"
     cat > "$TMUX_OK" <<'EOF'
 #!/usr/bin/env bash
 args="$*"
 case "$args" in *"#{socket_path}"*) echo /tmp/stub-sock; exit 0 ;; esac
-tgt=""; prev=""; for a in "$@"; do [ "$prev" = "-t" ] && tgt="$a"; prev="$a"; done
+tgt=""; prev=""
+for a in "$@"; do case "$prev" in -t|-c) tgt="$a" ;; esac; prev="$a"; done
 case "$tgt" in
-  @3|admin*) echo "admin"; exit 0 ;;
-  @7)        echo "wt-sc-1"; exit 0 ;;
-  *)         exit 1 ;;
+  @3|admin*)  echo "admin";   exit 0 ;;
+  @7)         echo "wt-sc-1"; exit 0 ;;
+  /dev/pts/9) echo "admin";   exit 0 ;;   # client(管理窓を見ている)
+  /dev/pts/7) echo "wt-sc-1"; exit 0 ;;   # client(worker 窓を見ている)
+  *)          exit 1 ;;
 esac
 EOF
     chmod +x "$TMUX_OK"
@@ -210,6 +216,168 @@ _json() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '"%s"' "$s"; }
     [[ "$output" == *"DENIED(tmux)"* ]]
 }
 
+@test "(k1/sc-2g3) 管理窓 paste-buffer(buffer 経由の間接送信)は alias/略記も block(exit2)" {
+    run run_guard "$SCRIBE_CWD" "tmux paste-buffer -t @3"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"DENIED(tmux)"* ]]
+    [[ "$output" == *"paste-buffer"* ]]
+    run run_guard "$SCRIBE_CWD" "tmux pasteb -b evil -t admin:0"
+    [ "$status" -eq 2 ]
+    run run_guard "$SCRIBE_CWD" "tmux pa -t @3"
+    [ "$status" -eq 2 ]
+    # value-less 束(-dpr) + 値取り(-s)を貫通して実効 target を読む（naive scanner は target を落とす）。
+    run run_guard "$SCRIBE_CWD" "tmux paste-buffer -dpr -s X -t admin:0"
+    [ "$status" -eq 2 ]
+}
+
+@test "(k1b/sc-2g3) worker 窓への paste-buffer は allow(exit0)・-t 無しは fail-closed で block" {
+    run run_guard "$SCRIBE_CWD" "tmux paste-buffer -t @7"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run run_guard "$SCRIBE_CWD" "tmux paste-buffer -b x -t wt-sc-164"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run run_guard "$SCRIBE_CWD" "tmux paste-buffer -b evil"   # -t 無し=現在窓(解決不能&到達可)
+    [ "$status" -eq 2 ]
+}
+
+@test "(k2/sc-2g3) load-buffer: -t は target-client。管理窓 client は block・staging(-t 無し)は allow" {
+    run run_guard "$SCRIBE_CWD" "tmux load-buffer -w -t /dev/pts/9 /tmp/f"   # client は管理窓を見ている
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"load-buffer"* ]]
+    run run_guard "$SCRIBE_CWD" "tmux load-buffer -w -t /dev/pts/7 /tmp/f"   # client は worker 窓を見ている
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run run_guard "$SCRIBE_CWD" "tmux loadb -t @99 /tmp/f"                   # 解決不能&到達可 → fail-closed
+    [ "$status" -eq 2 ]
+    # -t 無し = pane 配送先を持たない staging → allow（delivery 側 paste-buffer が管理窓宛なら block される）。
+    run run_guard "$SCRIBE_CWD" "tmux load-buffer -b x /tmp/f"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "(k2b/sc-2g3) 二段ベクタ(load→paste): 管理窓宛は delivery で block・worker 窓宛の合成は allow" {
+    run run_guard "$SCRIBE_CWD" "tmux load-buffer -b x /tmp/f && tmux paste-buffer -b x -t admin:0"
+    [ "$status" -eq 2 ]
+    run run_guard "$SCRIBE_CWD" "tmux load-buffer -b x /tmp/f && tmux paste-buffer -b x -t wt-sc-1"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "(k3/sc-2g3) run-shell: 管理窓 target は block・worker 窓 target + 無害 payload は allow" {
+    run run_guard "$SCRIBE_CWD" "tmux run-shell -t @3 'echo hi'"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"run-shell"* ]]
+    run run_guard "$SCRIBE_CWD" "tmux run-shell -t @7 'echo hi'"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    # bare run-shell（-t 無し）: 配送先を持たず pane へ何も注入しない → allow（no_target='allow'・sc-2g3 self-review）。
+    # 現在窓=admin へ誤 deny する over-block 回帰を pin。admin/orchestrator の `tmux run-shell 'cmd'` 運用を壊さない。
+    run run_guard "$SCRIBE_CWD" "tmux run-shell 'echo hi'"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run run_guard "$SCRIBE_CWD" "tmux run -c /tmp 'echo hi'"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "(k3b/sc-2g3) run-shell の payload 再帰: worker 窓 target でも payload が管理窓 transport なら block" {
+    # run-shell の -t は実効注入先を縛らない（payload が別窓へ送れる）→ target 判定だけでは素通りする穴。
+    run run_guard "$SCRIBE_CWD" "tmux run-shell -t @7 'tmux send-keys -t admin:0 evil Enter'"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"DENIED(tmux)"* ]]
+    # -C（payload=tmux コマンド）解釈でも捕捉する。
+    run run_guard "$SCRIBE_CWD" "tmux run -C -t wt-sc-1 'send-keys -t admin:0 evil Enter'"
+    [ "$status" -eq 2 ]
+    # payload 内の paste-buffer（transport 表 × 再帰の合成）。
+    run run_guard "$SCRIBE_CWD" "tmux run-shell -t wt-sc-1 'tmux paste-buffer -t admin:0'"
+    [ "$status" -eq 2 ]
+    # bare run-shell（-t 無し）でも payload が管理窓 transport なら再帰で block（no_target='allow' は payload 検査に非干渉）。
+    run run_guard "$SCRIBE_CWD" "tmux run-shell 'tmux send-keys -t admin:0 evil Enter'"
+    [ "$status" -eq 2 ]
+}
+
+@test "(k4/sc-2g3) pipe-pane: -I(pane 入力へ書込=typed 相当)だけ transport・-o/-O(read piping)は allow" {
+    run run_guard "$SCRIBE_CWD" "tmux pipe-pane -I -t @3 'cat /tmp/payload'"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"pipe-pane"* ]]
+    run run_guard "$SCRIBE_CWD" "tmux pipe-pane -o -t @3 'cat >> /tmp/log'"   # 監視 read → 壊さない
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run run_guard "$SCRIBE_CWD" "tmux pipe-pane -I -t @7 'echo hi'"           # worker 窓
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "(k5/sc-2g3) exec carrier(if-shell/new-window/split-window)の payload に管理窓 transport → block" {
+    run run_guard "$SCRIBE_CWD" "tmux if-shell -b true 'send-keys -t admin:0 evil Enter'"
+    [ "$status" -eq 2 ]
+    run run_guard "$SCRIBE_CWD" "tmux new-window 'tmux send-keys -t admin:0 evil Enter'"
+    [ "$status" -eq 2 ]
+    run run_guard "$SCRIBE_CWD" "tmux split-window -t wt-sc-1 'tmux pasteb -t @3'"
+    [ "$status" -eq 2 ]
+}
+
+@test "(k5b/sc-2g3) exec carrier 自体は無条件 deny にしない(FP を増やさない): 無害 payload は allow(exit0)" {
+    run run_guard "$SCRIBE_CWD" "tmux new-window -n wt-sc-9 htop"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run run_guard "$SCRIBE_CWD" "tmux new-window -t admin -n tools 'less /tmp/log'"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run run_guard "$SCRIBE_CWD" "tmux if-shell 'test -f /tmp/x' 'display-message ok'"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "(k5c/sc-2g3) exec carrier 再帰の FP 非増加: window/session 名が transport 略記と衝突しても allow(exit0)" {
+    # `-n run`/`-s pa` 等の名前が `tmux <名>` と再解釈され `-t` 無し→現在窓(admin)→誤 deny する回帰を pin。
+    run run_guard "$SCRIBE_CWD" "tmux new-window -n run htop"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run run_guard "$SCRIBE_CWD" "tmux new-window -n send"
+    [ "$status" -eq 0 ]
+    run run_guard "$SCRIBE_CWD" "tmux new-window -n pa htop"
+    [ "$status" -eq 0 ]
+    run run_guard "$SCRIBE_CWD" "tmux new-session -s run -d"
+    [ "$status" -eq 0 ]
+    run run_guard "$SCRIBE_CWD" "tmux new-session -s pa"
+    [ "$status" -eq 0 ]
+    # 実 vector（payload が明示 -t admin で管理窓を指す）は FP 修正後も変わらず block。
+    run run_guard "$SCRIBE_CWD" "tmux new-window -n run 'tmux send-keys -t admin:0 evil'"
+    [ "$status" -eq 2 ]
+}
+
+@test "(k5d/sc-2g3) tmux コマンド payload のセミコロン連鎖 fail-open(if-shell / -C)を block する" {
+    # `tmux ` 前置を payload 全体に一度だけ足すと `;` 以降が tmux invocation と認識されず素通りしていた回帰。
+    run run_guard "$SCRIBE_CWD" "tmux if-shell true 'x ; send-keys -t admin:0 evil'"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"DENIED(tmux)"* ]]
+    run run_guard "$SCRIBE_CWD" "tmux run -C -t wt-sc-1 'display-message hi ; send-keys -t admin:0 evil'"
+    [ "$status" -eq 2 ]
+    run run_guard "$SCRIBE_CWD" "tmux if-shell true 'display-message a ; pasteb -t @3'"
+    [ "$status" -eq 2 ]
+    # 無害な `;` 連鎖（transport 無し）は allow（新たな deny を増やさない）。
+    run run_guard "$SCRIBE_CWD" "tmux if-shell true 'display-message a ; display-message b'"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "(k6/sc-2g3) foreign(orch) session では新 transport も no-op(exit0)・orchestrator を brick しない" {
+    run run_guard "$FOREIGN_CWD" "tmux paste-buffer -t admin:0"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run run_guard "$FOREIGN_CWD" "tmux run-shell -t @3 'tmux send-keys -t admin:0 evil'"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "(k7/sc-2g3) tmux 到達不能なら新 transport も素通し(exit0・実行不能ゆえ実害なし)" {
+    run run_guard "$SCRIBE_CWD" "tmux paste-buffer -t @3" "$TMUX_UNREACH"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 @test "(j) garbage stdin → fail-open(exit0・traceback 無し)" {
     run bash -c "printf 'not json {{' | CMDTOKENS_LIB='$CT_LIB' python3 '$HOOK' 2>&1"
     [ "$status" -eq 0 ]
@@ -228,8 +396,9 @@ import importlib.util, sys
 spec = importlib.util.spec_from_file_location('tguard', sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
-# sabotage: 全 target を allow 固定 → (4)/(5)/(7) の block 期待が壊れる。
-m._decide_send_keys = lambda t: (False, '')
+# sabotage: 全 transport の target 判定を allow 固定 → (4)/(5)/(5b)/(7) の block 期待が壊れる。
+# 判定 funnel は _decide_targets（send-keys / paste-buffer / load-buffer / run-shell / pipe-pane 共通・sc-2g3）。
+m._decide_targets = lambda targets, kind='pane', no_target='current': (False, '')
 rc = m.run_self_test()
 sys.exit(0 if rc != 0 else 1)   # 検出できれば test pass。
 PY"
