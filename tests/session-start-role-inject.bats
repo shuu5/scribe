@@ -41,16 +41,46 @@ setup() {
     mkdir -p "$NOBEADS_WT"
     NOBEADS_ANCHOR_JSON="{\"cwd\":\"$NOBEADS_DIR\"}"
     NOBEADS_WT_JSON="{\"cwd\":\"$NOBEADS_WT\"}"
+
+    # --- consult 窓判定(sc-cji)の hermetic 化用 tmux stub ---
+    # hook は tmux を "${SCRIBE_TMUX:-tmux}" 経由で呼ぶ(gate の command -v も同 seam)。
+    # 実 tmux server に依存せず window 名を注入できるよう偽 tmux を用意する。
+    # 挙動は env で制御: STUB_TMUX_WINDOW=返す #W / STUB_TMUX_FAIL=1 で display-message が非0 exit。
+    STUB_TMUX="$BATS_TEST_TMPDIR/fake-tmux"
+    cat > "$STUB_TMUX" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = "display-message" ] || exit 0
+[ "${STUB_TMUX_FAIL:-0}" = "1" ] && exit 1
+printf '%s\n' "${STUB_TMUX_WINDOW:-}"
+STUB
+    chmod +x "$STUB_TMUX"
 }
 
 # inject <role|-> <plugin_root> <stdin_json>
 #   role が "-" なら SCRIBE_ROLE を unset、それ以外は env で焼き込む。
 inject() {
     local r="$1" root="$2" json="$3"
+    # tmux 系 env(TMUX/TMUX_PANE/SCRIBE_TMUX)を明示 unset して hermetic 化(sc-cji): これらを stub しない
+    # テストは consult 窓判定の gate が必ず偽になり fail-safe(既存 opt-out/判定)経路を取る。tmux セッション内で
+    # bats を走らせても none 枝が実 tmux を叩かない(継承 TMUX による非決定を排除)。consult 窓検出は inject_tmux で試す。
     if [ "$r" = "-" ]; then
-        printf '%s' "$json" | env -u SCRIBE_ROLE CLAUDE_PLUGIN_ROOT="$root" "$SCRIPT"
+        printf '%s' "$json" | env -u SCRIBE_ROLE -u TMUX -u TMUX_PANE -u SCRIBE_TMUX CLAUDE_PLUGIN_ROOT="$root" "$SCRIPT"
     else
-        printf '%s' "$json" | env SCRIBE_ROLE="$r" CLAUDE_PLUGIN_ROOT="$root" "$SCRIPT"
+        printf '%s' "$json" | env -u TMUX -u TMUX_PANE -u SCRIBE_TMUX SCRIBE_ROLE="$r" CLAUDE_PLUGIN_ROOT="$root" "$SCRIPT"
+    fi
+}
+
+# inject_tmux <role|-> <plugin_root> <stdin_json> <window|""> [fail:0|1]
+#   consult 窓判定(sc-cji)用に tmux を stub して呼ぶ。TMUX/TMUX_PANE を設定し SCRIBE_TMUX で偽 tmux を差す。
+#   window="" は display-message が空出力を返す状況(取得不能相当)、fail=1 は非0 exit(取得失敗)を再現する。
+inject_tmux() {
+    local r="$1" root="$2" json="$3" win="$4" fail="${5:-0}"
+    local base=(CLAUDE_PLUGIN_ROOT="$root" SCRIBE_TMUX="$STUB_TMUX" TMUX="fake-tmux" TMUX_PANE="%0"
+                STUB_TMUX_WINDOW="$win" STUB_TMUX_FAIL="$fail")
+    if [ "$r" = "-" ]; then
+        printf '%s' "$json" | env -u SCRIBE_ROLE "${base[@]}" "$SCRIPT"
+    else
+        printf '%s' "$json" | env SCRIBE_ROLE="$r" "${base[@]}" "$SCRIPT"
     fi
 }
 
@@ -178,6 +208,61 @@ inject() {
     [ "$status" -eq 0 ]
     [ -z "$output" ]
     [[ "$output" != *"role=worker"* ]]
+}
+
+# ---- consult 窓判定(sc-cji / orch-qcqz leg-a): env が settings.json project 層で none に潰される ----
+# scriptorium anchor の consult 窓を tmux window 名 prefix consult- で救済する。正当な none opt-out
+# (orchestrator anchor 等・非 consult 窓)は不変で壊さない。tmux は inject_tmux で stub。
+@test "consult 窓(sc-cji): SCRIBE_ROLE=none + window=consult-* + 非 worktree → consult へ復帰(注入あり)" {
+    run --separate-stderr inject_tmux none "$REPO" "$ANCHOR_JSON" "consult-sc-xyz"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=consult"* ]]
+    [[ "$output" == *"window consult-*"* ]]                      # detect_basis に override 根拠が出る
+    [[ "$output" == *"env SCRIBE_ROLE=none override"* ]]
+}
+
+@test "consult 窓(sc-cji): SCRIBE_ROLE=none + window=consult-* + worktree cwd でも window が勝つ(none 枝が cwd 判定より先)" {
+    run --separate-stderr inject_tmux none "$REPO" "$WT_JSON" "consult-1234"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=consult"* ]]                         # worker に落ちない(consult 窓が authoritative)
+}
+
+@test "consult 窓(sc-cji): SCRIBE_ROLE=none + window=非consult(wt-*) → 従来どおり opt-out(注入ゼロ・回帰ガード)" {
+    run --separate-stderr inject_tmux none "$REPO" "$ANCHOR_JSON" "wt-sc-abc"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]                                            # orchestrator anchor 等の正当な opt-out を壊さない
+    [[ "$output" != *"role="* ]]
+}
+
+@test "consult 窓(sc-cji) fail-safe: SCRIBE_ROLE=none + display-message が非0 exit → opt-out(不能→従来挙動)" {
+    run --separate-stderr inject_tmux none "$REPO" "$ANCHOR_JSON" "consult-sc-xyz" 1
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]                                            # 取得失敗は consult と誤認せず opt-out(fail-safe)
+}
+
+@test "consult 窓(sc-cji) fail-safe: SCRIBE_ROLE=none + window 名が空出力 → opt-out" {
+    run --separate-stderr inject_tmux none "$REPO" "$ANCHOR_JSON" ""
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]                                            # 空 #W は consult prefix 不一致 → opt-out
+}
+
+@test "consult 窓(sc-cji) fail-safe: SCRIBE_ROLE=none + TMUX 有 + TMUX_PANE 空 → opt-out(-t '' の active-pane 縮退を gate)" {
+    # TMUX_PANE 空だと -t "" が bare 形と同じ active-pane 解決へ縮退し「-t 明示」防護が無効化される
+    # (gate review finding・tmux 3.4 実測)。stub は window=consult-* を返す設定だが、pane gate が先に
+    # 偽になるため display-message へ到達せず opt-out になることを固定する。
+    run --separate-stderr bash -c '
+        printf "%s" "$1" | env SCRIBE_ROLE=none CLAUDE_PLUGIN_ROOT="$2" \
+            SCRIBE_TMUX="$3" TMUX="fake-tmux" TMUX_PANE="" STUB_TMUX_WINDOW="consult-sc-xyz" "$4"
+    ' _ "$ANCHOR_JSON" "$REPO" "$STUB_TMUX" "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]                                            # consult へ復帰しない(pane 識別なし=防護不能→fail-safe)
+}
+
+@test "consult 窓判定は none 枝限定(sc-cji): SCRIBE_ROLE=admin + window=consult-* でも admin(env が勝ち window は無視)" {
+    run --separate-stderr inject_tmux admin "$REPO" "$ANCHOR_JSON" "consult-sc-xyz"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=admin"* ]]                          # window 判定は none 枝だけ・global override ではない
+    [[ "$output" == *"env SCRIBE_ROLE"* ]]
 }
 
 # ---- .beads opt-in guard(bd un-7hx): .beads 有/無 × role ----
