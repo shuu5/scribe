@@ -44,16 +44,22 @@
 #   git-push: false    # Disable git push (export locally only)
 #   git-repo: ""       # Separate git repo for backups (default: project repo)
 
-# Auto-export to JSONL after each mutation.
+# Auto-export to JSONL after each mutation (bd-native).
 # Disabled (2026-07-07, sc-tq3): under the sandboxed worker profile the
 # post-mutation auto-export creates a temp file (.~issues.jsonl.<rand>) directly
 # inside .beads/, which the sandbox denies with EROFS. The failed export leaves
 # the issues.jsonl mirror stale and emits a warning on every bd write. On the
 # non-sandboxed admin side the same export hits git-add and warns because
-# .beads/issues.jsonl is gitignored. The Dolt store is the SSOT, so the
-# per-machine JSONL mirror is non-essential; disabling auto-export removes the
-# friction on both lanes without data loss. Run `bd export` manually when a
-# fresh mirror is wanted.
+# .beads/issues.jsonl is gitignored. Keeping bd-native auto-export off removes
+# that friction on both lanes.
+# Premise correction (2026-07-13, sc-uew): sc-tq3's rationale "the per-machine
+# JSONL mirror is non-essential" was wrong — orchestrator hydrate (bd repo
+# sync) reads this mirror, so it is the cross-repo visibility interface
+# (orch-89v). Mirror freshness is now provided by canonical bdw (beads-bdw
+# plugin, 246e610): every successful bdw WRITE re-exports .beads/issues.jsonl
+# inside the flock (fail-open; escape hatch BDW_NO_AUTOEXPORT=1; sandboxed
+# workers silently skip and the next unsandboxed write refreshes the mirror).
+# This setting stays false so bd itself never duplicates that export path.
 export.auto: false
 
 # Integration settings (access with 'bd config get/set')
