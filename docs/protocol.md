@@ -422,6 +422,22 @@ admin の受動監視（§7 ⑤）を即時化する read-only watcher。`script
 - **位置づけ**: 背景 supervisor（v1・`scribe-design.md` §14）の軽量 poll だが、LLM 不使用ゆえ admin が任意で使える v0 手動監視の補助としても成立する。`consult-` window の自動検知（grill-consult の沈黙検出）は別軸で v1（fleet-monitor 拡張・sc-3pq）。
 - STATUS の canonical 形式（`grilling (n/N)` / `done — …` / `blocked — 要admin: …`）の SSOT は grill-consult prompt（`scripts/scribe-spawn.sh`）と本 §7。
 
+### 7.2 承認要求の front-load 原則（user 裁定 2026-07-14・universal・orch-w3h4）
+
+scribe 含む agentic 開発の全 AI actor 対象の普遍ルール（user 原発話: 『こうこうこういう理由で推奨するからやっていい？と聞きに来れば俺はすぐに許可を出す。受動的に後回しにするな』）。以下の文面は user 確定の verbatim（2026-07-14 裁定）:
+
+> **承認要求の front-load 原則**（user 裁定 2026-07-14・universal）: 人間承認が必要な action は「聞けばすぐ出る」が**往復 latency が支配的**——承認要求を turn 末尾へ後置すると 1 語で済む承認が丸 1 往復に化ける。規律 6 項:
+> 1. **タスク順序を承認の有無で歪めない**＝最適順序で human-gated タスクが先頭なら、承認要求が turn の最初のアクション。
+> 2. **定型で直接問う**＝〔やりたいこと / 理由 / 代替案とトレードオフ / コスト・リスク / 推奨〕を添えて「やっていいですか?」と質問形で。対話中セッション（admin 対 user・consult）は AskUserQuestion 等で即時に。無人 actor（worker・対話 tool 物理封鎖済み）は NEEDS-USER 終端形 + 呼び鈴（park して放置しない）。
+> 3. **受動 offer 禁止**＝「go をもらえれば」「必要なら言ってください」等、user の再発話待ち形で human-gated タスクを turn 末尾に置かない。
+> 4. **ask-first, work-while-waiting**＝承認待ちの間に自律作業を並行してよい。承認要求を自律作業の後ろに回さない。
+> 5. **同一 turn の複数承認点は 1 回に束ねて問う**（往復最小化）。
+> 6. **過剰補正の禁止**＝承認不要な自律域まで質問化しない（なんでも聞きに行くのは本原則の誤用）。
+
+- **整合注記（scribe 語彙適合・最小）**: 本原則は「承認要求をいつ・どう出すか」の**タイミング規律**であり、grill 中の 1論点1問規律（grill-me が AskUserQuestion を禁じる・本 §7）とは別軸＝矛盾しない（grill は決定を深める対話方法論・本原則は human-gated action の承認をいつ問うか）。orchestrator 監視下で human が window に居ない admin session は 2 項の「無人 actor」側に倒す（bead 宣言 + 呼び鈴で終端＝AskUserQuestion を無人 window へ出さない）。
+
+> 一次出典: scriptorium orch-w3h4（user 裁定 2026-07-14・AskUserQuestion 一括承認・文面 verbatim 確定・3 層 codify〔scriptorium top-spec §5.4+CLAUDE.md / 本節 / global CLAUDE.md=uns 宛別便〕）/ bd sc-y28k（本反映 cell）。
+
 ---
 
 ## 8. cross-ledger 境界（自 `sc-` 台帳 ↔ 他 project 台帳・federated）
