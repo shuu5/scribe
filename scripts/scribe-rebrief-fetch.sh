@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# scribe-resume-fetch.sh — /scribe:resume の機械層 fetch engine（bd sc-8eyw・resume cycle core の scribe 層 hoist）
+# scribe-rebrief-fetch.sh — /scribe:rebrief の機械層 fetch engine（bd sc-8eyw・resume cycle core の scribe 層 hoist）
 #
-# 役割（機械=fetch / LLM=judgment）: admin respawn / compaction 後の resume 時に、judgment に必要な生データ
+# 役割（機械=fetch / LLM=judgment）: admin respawn / compaction 後の復元時に、judgment に必要な生データ
 #   （DATA）を **read-only** で fetch し、行頭 marker 付きの構造化ブロックとして stdout へ emit する。
-#   judgment（brief 生成・推奨・consumed 化の実行）は skill（skills/resume/SKILL.md）が担う。
+#   judgment（brief 生成・推奨・consumed 化の実行）は skill（skills/rebrief/SKILL.md）が担う。
 #
 # 本 script が担う **generic core 4 項目のみ**（bd sc-8eyw 設計cut②。以下の 4 つ以外は担わない）:
 #   (1) WM主張↔bd現在値 diff : current sid の Working Memory「命令・制約」節が言及する bead の主張 status を、
@@ -61,24 +61,24 @@
 #   cc-session の規律に倣い原因は断定しない（「sid が変わった自 session」か「別 session の残置」かは区別不能）。
 #
 # 環境変数（seam・すべて上書き可・bats を hermetic に保つ）:
-#   SCRIBE_RESUME_ANCHOR   resume 対象 repo root（既定: cwd から walk-up で最初に見つかる `.beads/` を持つ dir）。
+#   SCRIBE_REBRIEF_ANCHOR   復元対象 repo root（既定: cwd から walk-up で最初に見つかる `.beads/` を持つ dir）。
 #                          bd read と WM dir はここへ pin する（cwd 依存の誤読・台帳不在の false 空を封じる）。
-#   SCRIBE_RESUME_WM_DIR   Working Memory dir（既定: <ANCHOR>/.claude-session ＝ anchor 配下へ pin）。
-#   SCRIBE_RESUME_SID      current session id（既定: WM_SESSION_ID > CLAUDE_CODE_SESSION_ID > stdin JSON .session_id）。
-#   SCRIBE_RESUME_BD       bd 実体（既定: PATH 上の bd）。read-only（list --json のみ）。read 失敗は fail-loud。
-#   SCRIBE_RESUME_BD_TIMEOUT  bd 1 呼出の timeout 秒（既定 20）。dolt lock 競合での無期限 hang を防ぐ。
-#   SCRIBE_RESUME_AUTOCOMPACT_MARKER  auto-compact 発火 marker の path（既定: <WM_DIR>/.auto-compacted）。存在→force-recovery。
-#   SCRIBE_RESUME_SESSION_LIB  cc-session lib dir（既定: ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/session/scripts/lib）。
+#   SCRIBE_REBRIEF_WM_DIR   Working Memory dir（既定: <ANCHOR>/.claude-session ＝ anchor 配下へ pin）。
+#   SCRIBE_REBRIEF_SID      current session id（既定: WM_SESSION_ID > CLAUDE_CODE_SESSION_ID > stdin JSON .session_id）。
+#   SCRIBE_REBRIEF_BD       bd 実体（既定: PATH 上の bd）。read-only（list --json のみ）。read 失敗は fail-loud。
+#   SCRIBE_REBRIEF_BD_TIMEOUT  bd 1 呼出の timeout 秒（既定 20）。dolt lock 競合での無期限 hang を防ぐ。
+#   SCRIBE_REBRIEF_AUTOCOMPACT_MARKER  auto-compact 発火 marker の path（既定: <WM_DIR>/.auto-compacted）。存在→force-recovery。
+#   SCRIBE_REBRIEF_SESSION_LIB  cc-session lib dir（既定: ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/session/scripts/lib）。
 #                          CLAUDE_CONFIG_DIR を見るのは scribe が --account で config dir を切替えるため（F7）。
 #
-# 検証: tests/scribe-resume-fetch.bats（hermetic・3 陽性 modality〔diff / orphan / force-recovery〕+ mutation 非空虚 +
+# 検証: tests/scribe-rebrief-fetch.bats（hermetic・3 陽性 modality〔diff / orphan / force-recovery〕+ mutation 非空虚 +
 #   SELF_PREFIX walk-up の 2 台帳実測 + CLAUDE_CONFIG_DIR override + fail-loud 経路）。
 
 set -uo pipefail
 
 # ── SELF_DIR（script 実体の dir・symlink 解決） ───────────────────────────────
-_scribe_resume_real="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
-SELF_DIR="$(cd "$(dirname "$_scribe_resume_real")" 2>/dev/null && pwd || printf '%s' "$(dirname "$_scribe_resume_real")")"
+_scribe_rebrief_real="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+SELF_DIR="$(cd "$(dirname "$_scribe_rebrief_real")" 2>/dev/null && pwd || printf '%s' "$(dirname "$_scribe_rebrief_real")")"
 
 # ── scribe 既存 walk-up primitive を source（台帳解決の単一 SSOT・再実装しない） ──
 # mbx_resolve_ledger_root（cwd→上方向で最初の `.beads/` を持つ dir）/ mbx_resolve_self_db（同 walk-up で
@@ -90,14 +90,14 @@ if [ -r "$_SCRIBE_MAILBOX_LIB" ]; then
     . "$_SCRIBE_MAILBOX_LIB"
 fi
 if ! command -v mbx_resolve_self_db >/dev/null 2>&1; then
-    echo "[scribe-resume-fetch] FATAL: 台帳 resolver（mbx_resolve_self_db）不在＝共有 lib（$_SCRIBE_MAILBOX_LIB）を解決できず自台帳を識別できない → fail-closed で実行しない" >&2
+    echo "[scribe-rebrief-fetch] FATAL: 台帳 resolver（mbx_resolve_self_db）不在＝共有 lib（$_SCRIBE_MAILBOX_LIB）を解決できず自台帳を識別できない → fail-closed で実行しない" >&2
     exit 1
 fi
 
-# ── anchor 解決（resume 対象 repo root・env override 最優先） ─────────────────
-ANCHOR="${SCRIBE_RESUME_ANCHOR:-$(mbx_resolve_ledger_root "$PWD" 2>/dev/null || true)}"
+# ── anchor 解決（復元対象 repo root・env override 最優先） ─────────────────
+ANCHOR="${SCRIBE_REBRIEF_ANCHOR:-$(mbx_resolve_ledger_root "$PWD" 2>/dev/null || true)}"
 if [ -z "$ANCHOR" ] || [ ! -d "$ANCHOR" ]; then
-    echo "[scribe-resume-fetch] FATAL: resume 対象 anchor（.beads/ を持つ repo root）を cwd='$PWD' から walk-up で解決できない → 実行しない（SCRIBE_RESUME_ANCHOR で明示指定可）" >&2
+    echo "[scribe-rebrief-fetch] FATAL: 復元対象 anchor（.beads/ を持つ repo root）を cwd='$PWD' から walk-up で解決できない → 実行しない（SCRIBE_REBRIEF_ANCHOR で明示指定可）" >&2
     exit 1
 fi
 
@@ -121,16 +121,16 @@ fi
 # F4 が名指しで禁じた他台帳誤集計（＝母集団外へ落ちた自 bead が「乖離なし」に化ける）が起きる。
 # anchor 決定で walk-up は済んでいるので、self_db の再 walk-up は不要＝anchor 直下の実在を先に強制する。
 if [ ! -f "$ANCHOR/.beads/metadata.json" ]; then
-    echo "[scribe-resume-fetch] FATAL: anchor='$ANCHOR' 直下に .beads/metadata.json が無い＝台帳識別子（dolt_database）を確定できない → 実行しない（祖先の別台帳へ束ねると他台帳を自台帳と誤集計し『乖離なし』を騙るため fail-loud）" >&2
+    echo "[scribe-rebrief-fetch] FATAL: anchor='$ANCHOR' 直下に .beads/metadata.json が無い＝台帳識別子（dolt_database）を確定できない → 実行しない（祖先の別台帳へ束ねると他台帳を自台帳と誤集計し『乖離なし』を騙るため fail-loud）" >&2
     exit 1
 fi
 SELF_PREFIX="$(mbx_resolve_self_db "$ANCHOR" 2>/dev/null || true)"
 if [ -z "$SELF_PREFIX" ]; then
-    echo "[scribe-resume-fetch] FATAL: anchor='$ANCHOR' の台帳識別子（.beads/metadata.json の dolt_database）を walk-up で確定できない＝fetch 母集団を束ねられない → 実行しない（空 prefix で続行すると全 bead を取り漏らし『乖離なし』を騙るため fail-loud）" >&2
+    echo "[scribe-rebrief-fetch] FATAL: anchor='$ANCHOR' の台帳識別子（.beads/metadata.json の dolt_database）を walk-up で確定できない＝fetch 母集団を束ねられない → 実行しない（空 prefix で続行すると全 bead を取り漏らし『乖離なし』を騙るため fail-loud）" >&2
     exit 1
 fi
 
-BD="${SCRIBE_RESUME_BD:-bd}"
+BD="${SCRIBE_REBRIEF_BD:-bd}"
 
 # ── JSON parser 要件（jq → python3 の 2 段のみ・双方不在は fail-loud） ───────
 # **粗 grep の 3 段目を持たない**: 以前は `grep -oE '"(id|status)":"…"' | paste - -` を degraded fallback として
@@ -144,7 +144,7 @@ BD="${SCRIBE_RESUME_BD:-bd}"
 # よって「壊れた degraded mode を黙って使う」より「parser が無いことを loud に言う」を選ぶ（fail-closed）。
 if ! command -v jq >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
     # marker literal を診断文に埋め込まない（消費側の行頭 marker 判定に偽陽性を作らないため・下の WM dir gate 参照）。
-    echo "[scribe-resume-fetch] FATAL: JSON parser（jq / python3）が双方とも不在＝bd の --json 出力を確定的に parse できない → 実行しない（粗 grep で近似すると全 bead を『bd に存在しない』扱いの捏造乖離にし、bd の件数を全て 0 と騙るため fail-loud。jq か python3 を入れよ）" >&2
+    echo "[scribe-rebrief-fetch] FATAL: JSON parser（jq / python3）が双方とも不在＝bd の --json 出力を確定的に parse できない → 実行しない（粗 grep で近似すると全 bead を『bd に存在しない』扱いの捏造乖離にし、bd の件数を全て 0 と騙るため fail-loud。jq か python3 を入れよ）" >&2
     exit 1
 fi
 
@@ -158,7 +158,7 @@ _stdin_session_id() {
     sid="$(printf '%s' "$json" | grep -oE '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*"([^"]*)"$/\1/' | head -n1)"
     printf '%s' "$sid"
 }
-SID="${SCRIBE_RESUME_SID:-${WM_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}}"
+SID="${SCRIBE_REBRIEF_SID:-${WM_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}}"
 [ -z "$SID" ] && SID="$(_stdin_session_id)"
 # slug 化（session-env.sh と同型・[A-Za-z0-9-] のみ・path traversal 不能・64 文字上限）。
 SID="${SID//[^A-Za-z0-9-]/}"
@@ -166,7 +166,7 @@ SID="${SID:0:64}"
 
 # ── WM を anchor 配下へ pin してから cc-session lib を source（cwd 依存の誤読を封じる） ──
 # WORKING_MEMORY_DIR / WM_SESSION_ID を先に export → session-env.sh が scoped file 名を導出する。
-export WORKING_MEMORY_DIR="${SCRIBE_RESUME_WM_DIR:-$ANCHOR/.claude-session}"
+export WORKING_MEMORY_DIR="${SCRIBE_REBRIEF_WM_DIR:-$ANCHOR/.claude-session}"
 export WM_SESSION_ID="$SID"
 # **ambient を叩き落としてから source する（seam 貫通の封じ・必須）**: session-env.sh は
 # `WORKING_MEMORY_FILE="${WORKING_MEMORY_FILE:-$_wm_default_file}"` と **ambient 優先** で解決する。
@@ -176,9 +176,9 @@ export WM_SESSION_ID="$SID"
 # SKILL.md §4 の「[CONSUME-TARGET] を verbatim mv せよ」に従うと **別 repo の WM を mv する誤 write** に直結する
 # （read-only な fetch が誤 write を教唆する形）。unset して必ず pin 値から lib に導出させる。
 unset WORKING_MEMORY_FILE WORKING_MEMORY_CONSUMED_FILE
-SESSION_LIB="${SCRIBE_RESUME_SESSION_LIB:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/session/scripts/lib}"
+SESSION_LIB="${SCRIBE_REBRIEF_SESSION_LIB:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/session/scripts/lib}"
 if [ ! -r "$SESSION_LIB/session-env.sh" ] || [ ! -r "$SESSION_LIB/working-memory.sh" ]; then
-    echo "[scribe-resume-fetch] FATAL: cc-session lib 不在（$SESSION_LIB/{session-env,working-memory}.sh）＝WM path/節抽出の SSOT を解決できない。cc-session(session plugin) は user-scope enable が前提（silent skip しない・SCRIBE_RESUME_SESSION_LIB で override 可）" >&2
+    echo "[scribe-rebrief-fetch] FATAL: cc-session lib 不在（$SESSION_LIB/{session-env,working-memory}.sh）＝WM path/節抽出の SSOT を解決できない。cc-session(session plugin) は user-scope enable が前提（silent skip しない・SCRIBE_REBRIEF_SESSION_LIB で override 可）" >&2
     exit 1
 fi
 # shellcheck source=/dev/null
@@ -196,16 +196,16 @@ fi
 # 外部 lib にこそ同じ teeth を課す（防御の非対称を解消する）。
 for _f in extract_effort_directives; do
     command -v "$_f" >/dev/null 2>&1 || {
-        echo "[scribe-resume-fetch] FATAL: cc-session lib の API（$_f）が $SESSION_LIB に無い＝版ずれ（file は在るが記号が無い）。WM「命令・制約」節を抽出できず『乖離なし』を騙るため実行しない（cc-session を更新/再 enable せよ）" >&2
+        echo "[scribe-rebrief-fetch] FATAL: cc-session lib の API（$_f）が $SESSION_LIB に無い＝版ずれ（file は在るが記号が無い）。WM「命令・制約」節を抽出できず『乖離なし』を騙るため実行しない（cc-session を更新/再 enable せよ）" >&2
         exit 1
     }
 done
 if [ -z "${WORKING_MEMORY_FILE:-}" ] || [ -z "${WORKING_MEMORY_CONSUMED_FILE:-}" ]; then
-    echo "[scribe-resume-fetch] FATAL: cc-session lib が WORKING_MEMORY_FILE / WORKING_MEMORY_CONSUMED_FILE を定義しない＝WM path の SSOT を解決できない（版ずれ）→ 実行しない" >&2
+    echo "[scribe-rebrief-fetch] FATAL: cc-session lib が WORKING_MEMORY_FILE / WORKING_MEMORY_CONSUMED_FILE を定義しない＝WM path の SSOT を解決できない（版ずれ）→ 実行しない" >&2
     exit 1
 fi
 
-AUTOCOMPACT_MARKER="${SCRIBE_RESUME_AUTOCOMPACT_MARKER:-$WORKING_MEMORY_DIR/.auto-compacted}"
+AUTOCOMPACT_MARKER="${SCRIBE_REBRIEF_AUTOCOMPACT_MARKER:-$WORKING_MEMORY_DIR/.auto-compacted}"
 
 # ── WM dir は「在る」だけでなく「読める・辿れる」ことまで検証する（fail-loud ⑧・file 側 gate との対称化） ──
 # **dir の可読性を見ないと orphan scan と WM 検出が同時に silent な偽全クリアを出す**（実測 2 variant）:
@@ -217,12 +217,12 @@ AUTOCOMPACT_MARKER="${SCRIBE_RESUME_AUTOCOMPACT_MARKER:-$WORKING_MEMORY_DIR/.aut
 #       他の marker が健全に見えるため誰も異常を疑わない＝(a) より発見困難。
 # fail-loud ⑧ を file にだけ張って dir に張り忘れていた（その rationale が挙げた動機＝「別 uid 由来の
 # .claude-session」はまさに **dir** の所有権ずれで、本 repo の host/container 分業では container root が
-# mount 先へ `.claude-session` を作る経路が現実にある）。resume は boot path ゆえ他経路と対称に死ぬ。
+# mount 先へ `.claude-session` を作る経路が現実にある）。rebrief は boot path ゆえ他経路と対称に死ぬ。
 # dir が **存在しない**のは正当（新規 project / 退避未実施）＝ここでは死なない（missing と unreadable を弁別する）。
 if [ -d "$WORKING_MEMORY_DIR" ] && { [ ! -r "$WORKING_MEMORY_DIR" ] || [ ! -x "$WORKING_MEMORY_DIR" ]; }; then
     # **FATAL 文に marker literal を書かない**: 消費側（skill / bats / 運用の grep）は行頭 marker で判定するため、
     # 診断文へ marker を verbatim 埋め込むと「死んだのに marker が在る」偽陽性を作る（自分で嘘を撒く）。
-    echo "[scribe-resume-fetch] FATAL: WM dir は在るが読めない/辿れない（$WORKING_MEMORY_DIR）＝WM の実在も orphan の有無も確定できない → 実行しない（『WM なし・orphan なし・乖離なし』を名乗ると偽の全クリアになるため。権限/所有者を直してから再実行せよ）" >&2
+    echo "[scribe-rebrief-fetch] FATAL: WM dir は在るが読めない/辿れない（$WORKING_MEMORY_DIR）＝WM の実在も orphan の有無も確定できない → 実行しない（『WM なし・orphan なし・乖離なし』を名乗ると偽の全クリアになるため。権限/所有者を直してから再実行せよ）" >&2
     exit 1
 fi
 
@@ -237,16 +237,16 @@ fi
 # **権威値として** emit していた。これは本 header が「空 prefix で続行すると全 bead を取り漏らし
 # 『乖離なし』を騙るため fail-loud」と宣言して exit 1 させている当の欺瞞そのもので、
 # 「prefix 解決不能は loud death / 実行時に最も起きやすい bd read 失敗は silent degrade」という非対称だった。
-# resume は admin respawn の第一手（boot path）＝この DATA が brief の一次判断根拠になるため、
+# rebrief は admin respawn の第一手（boot path）＝この DATA が brief の一次判断根拠になるため、
 # 「読めなかった」を「異常なし」に化けさせない。空台帳の正当な `[]`（rc=0）とは rc で区別する（後述）。
 # dolt lock 競合での無期限 hang を避けるため mailbox-common.sh の既存 idiom に倣い timeout で包む。
-BD_TIMEOUT_SECS="${SCRIBE_RESUME_BD_TIMEOUT:-20}"
+BD_TIMEOUT_SECS="${SCRIBE_REBRIEF_BD_TIMEOUT:-20}"
 #
 # **データチャネル(stdout)と診断チャネル(stderr)を分離する（`2>&1` で畳み込まない）**: bd は rc=0・正当 JSON の
 # まま stderr へ **良性 warning** を出す（bd 1.1.0 実測: `warning: beads.role not configured (GH#2950)` /
 # `Warning: <path>/.beads has permissions 0775 (recommended: 0700)`）。stderr を stdout へ merge すると
 # out が `warning: …\n[{…}]` になり、**rc=0 ゆえ rc gate を素通りして** _parse_or_die の jq が先頭 warning で
-# 落ちる → 台帳も bd も健全なのに「JSON を parse できない＝台帳が壊れている」と誤診して resume が死ぬ
+# 落ちる → 台帳も bd も健全なのに「JSON を parse できない＝台帳が壊れている」と誤診して rebrief が死ぬ
 # （boot path の brick かつ診断が admin を存在しない台帳破損の修理へ誤誘導する）。しかも該当条件は
 # `git config beads.role` 未設定 / `.beads` が 0700 でない＝**新規 project の既定状態**（/scribe:setup も
 # どちらも設定しない）ゆえ、本 core が狙う「全 scribe project で使える generic core」が既定構成で不成立になる。
@@ -254,9 +254,9 @@ BD_TIMEOUT_SECS="${SCRIBE_RESUME_BD_TIMEOUT:-20}"
 # 混ぜてはならない。stderr は **rc≠0 のときの FATAL 要旨用にだけ** 保持する（原因の surface は維持）。
 _bd_json() {
     local out rc err errf
-    errf="$(mktemp "${TMPDIR:-/tmp}/scribe-resume-bderr.XXXXXX" 2>/dev/null)" || errf=""
+    errf="$(mktemp "${TMPDIR:-/tmp}/scribe-rebrief-bderr.XXXXXX" 2>/dev/null)" || errf=""
     if [ -z "$errf" ]; then
-        echo "[scribe-resume-fetch] FATAL: 一時ファイルを作成できない（bd の stderr を stdout と分離して捕捉するのに必要）→ 実行しない（stderr を JSON へ混ぜると健全な read を parse 不能と誤診するため）" >&2
+        echo "[scribe-rebrief-fetch] FATAL: 一時ファイルを作成できない（bd の stderr を stdout と分離して捕捉するのに必要）→ 実行しない（stderr を JSON へ混ぜると健全な read を parse 不能と誤診するため）" >&2
         exit 1
     fi
     if command -v timeout >/dev/null 2>&1; then
@@ -267,7 +267,7 @@ _bd_json() {
     err="$(cat "$errf" 2>/dev/null)"
     rm -f "$errf"
     if [ "$rc" -ne 0 ]; then
-        echo "[scribe-resume-fetch] FATAL: bd read 失敗（rc=$rc・anchor=$ANCHOR・args='$*'）＝bd 現在値を取得できない → 実行しない（空 map で続行すると全 bead を取り漏らし『乖離なし / BD-COUNT=0』を騙るため fail-loud）: ${err:-${out:-（出力なし）}}" >&2
+        echo "[scribe-rebrief-fetch] FATAL: bd read 失敗（rc=$rc・anchor=$ANCHOR・args='$*'）＝bd 現在値を取得できない → 実行しない（空 map で続行すると全 bead を取り漏らし『乖離なし / BD-COUNT=0』を騙るため fail-loud）: ${err:-${out:-（出力なし）}}" >&2
         exit 1
     fi
     printf '%s' "$out"
@@ -283,7 +283,7 @@ _parse_or_die() {
     case "$compact" in ''|'[]'|'null') return 0 ;; esac   # 正当な空台帳＝0 行（FATAL でない）
     lines="$(printf '%s' "$json" | _parse_id_status)"
     if [ -z "$lines" ]; then
-        echo "[scribe-resume-fetch] FATAL: bd の JSON 出力を parse できない（$label・anchor=$ANCHOR）＝bd 現在値を確定できない → 実行しない（空 map で続行すると『乖離なし / BD-COUNT=0』を騙るため fail-loud）: $(printf '%s' "$json" | head -c 200)" >&2
+        echo "[scribe-rebrief-fetch] FATAL: bd の JSON 出力を parse できない（$label・anchor=$ANCHOR）＝bd 現在値を確定できない → 実行しない（空 map で続行すると『乖離なし / BD-COUNT=0』を騙るため fail-loud）: $(printf '%s' "$json" | head -c 200)" >&2
         exit 1
     fi
     printf '%s\n' "$lines"
@@ -305,7 +305,7 @@ for o in (d or []):
     else
         # 到達不能（起動時の parser gate が jq/python3 双方不在で既に exit 1 している）。防御的に死ぬだけで、
         # ここで近似 parse に落ちない＝壊れた degraded mode を fail-loud 網の外側に作らない。
-        echo "[scribe-resume-fetch] FATAL: JSON parser（jq / python3）不在（parser gate を素通りした＝内部不整合）→ 実行しない" >&2
+        echo "[scribe-rebrief-fetch] FATAL: JSON parser（jq / python3）不在（parser gate を素通りした＝内部不整合）→ 実行しない" >&2
         exit 1
     fi
 }
@@ -350,14 +350,14 @@ _build_bd_status_map
 
 # (3) MODE 判定（auto-compact marker の有無だけを見る＝判定のみ・marker write は scope 外）。
 if [ -e "$AUTOCOMPACT_MARKER" ]; then
-    RESUME_MODE="force-recovery"
+    REBRIEF_MODE="force-recovery"
 else
-    RESUME_MODE="normal"
+    REBRIEF_MODE="normal"
 fi
 
-echo "=== [scribe-resume-fetch] resume DATA (機械層 fetch・bd sc-8eyw・read-only) ==="
-echo "[RESUME-MODE] $RESUME_MODE"
-if [ "$RESUME_MODE" = "force-recovery" ]; then
+echo "=== [scribe-rebrief-fetch] rebrief DATA (機械層 fetch・bd sc-8eyw・read-only) ==="
+echo "[REBRIEF-MODE] $REBRIEF_MODE"
+if [ "$REBRIEF_MODE" = "force-recovery" ]; then
     echo "  ⚠ auto-compact 発火 marker 検出（$AUTOCOMPACT_MARKER）＝WM の退避が間に合わなかった疑い。bd の現在値を一次 truth とし、WM 主張より bd を優先して再ブリーフせよ。"
 fi
 echo "[ANCHOR] $ANCHOR"
@@ -404,7 +404,7 @@ if [ -f "$WORKING_MEMORY_FILE" ]; then
     # には既に teeth を張っている以上、同じ「空文字が返る」variant である不可読も対称に fail-loud させる
     # （dir 側の同型 modality は上の WM dir gate が対称に受け持つ＝file にだけ張る非対称を作らない）。
     if [ ! -r "$WORKING_MEMORY_FILE" ]; then
-        echo "[scribe-resume-fetch] FATAL: WM は在るが読めない（$WORKING_MEMORY_FILE）＝WM 主張を抽出できず『乖離なし』を騙るため実行しない（権限/所有者を直してから再実行せよ）" >&2
+        echo "[scribe-rebrief-fetch] FATAL: WM は在るが読めない（$WORKING_MEMORY_FILE）＝WM 主張を抽出できず『乖離なし』を騙るため実行しない（権限/所有者を直してから再実行せよ）" >&2
         exit 1
     fi
     echo "[WM] file=$WORKING_MEMORY_FILE found"
@@ -423,7 +423,7 @@ else
         [ -n "$_cand" ] || continue
         WM_CAND_N=$((WM_CAND_N+1))
         echo "[WM-CANDIDATE] $(basename "$_cand")  ← 復元候補（未 consumed・mtime 降順＝先頭が最新）"
-        [ "$WM_CAND_N" -eq 1 ] && echo "  ⚠ current sid の WM は不在だがこの WM は未 consumed＝『sid が変わった自 session（respawn / \`/clear\`）の退避物』か『別 session の残置』のいずれか（fetch には **区別できない**）。復元するなら内容を Read し、bd と突合するなら SCRIBE_RESUME_SID=<候補の sid> で再 fetch せよ（採用/consume の判断は skill 層）。"
+        [ "$WM_CAND_N" -eq 1 ] && echo "  ⚠ current sid の WM は不在だがこの WM は未 consumed＝『sid が変わった自 session（respawn / \`/clear\`）の退避物』か『別 session の残置』のいずれか（fetch には **区別できない**）。復元するなら内容を Read し、bd と突合するなら SCRIBE_REBRIEF_SID=<候補の sid> で再 fetch せよ（採用/consume の判断は skill 層）。"
     done <<< "$(_wm_candidates)"
     [ "$WM_CAND_N" -eq 0 ] && echo "[WM-CANDIDATE-NONE] 復元候補なし（未 consumed の WM が 1 件も無い＝退避物自体が存在しない）"
 fi
@@ -496,7 +496,7 @@ if [ "$WM_FOUND" -eq 0 ]; then
     # 案内文にも marker literal を書かない（既存 FATAL 群と同規律）: 候補が 0 件でも本行が
     # 「WM-CANDIDATE」の字面を含むと、行頭 marker を grep する消費側が「候補が在る」と誤読する。
     if [ "$WM_CAND_N" -gt 0 ]; then
-        echo "[DIFF-UNKNOWN] 突合していない（current sid の WM 不在＝WM 主張が無い。これは『乖離なし』ではない）  → 上に復元候補 $WM_CAND_N 件（先頭が最新）。SCRIBE_RESUME_SID=<候補の sid> で再 fetch すれば突合できる"
+        echo "[DIFF-UNKNOWN] 突合していない（current sid の WM 不在＝WM 主張が無い。これは『乖離なし』ではない）  → 上に復元候補 $WM_CAND_N 件（先頭が最新）。SCRIBE_REBRIEF_SID=<候補の sid> で再 fetch すれば突合できる"
     else
         echo "[DIFF-UNKNOWN] 突合していない（current sid の WM 不在＝WM 主張が無い。これは『乖離なし』ではない）  → 復元候補も無し＝退避物が存在しない（真に新規 session）"
     fi
@@ -530,4 +530,4 @@ fi
 if [ "$_orphan_n" -eq 0 ]; then echo "[ORPHAN-NONE] orphan WM なし"; else echo "[ORPHAN-COUNT] orphan=$_orphan_n 件"; fi
 
 echo ""
-echo "=== end resume DATA ==="
+echo "=== end rebrief DATA ==="
