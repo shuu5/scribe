@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# scribe-resume-fetch.bats — resume cycle core（機械層 fetch）の検証（bd sc-8eyw）
+# scribe-rebrief-fetch.bats — rebrief cycle core（機械層 fetch）の検証（bd sc-8eyw）
 #
 # カバレッジ（bd sc-8eyw acceptance / notes fence 対応）:
 #   - 構文(bash -n)
@@ -37,7 +37,7 @@ bats_require_minimum_version 1.5.0
 
 setup() {
     REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
-    SCRIPT="$REPO/scripts/scribe-resume-fetch.sh"
+    SCRIPT="$REPO/scripts/scribe-rebrief-fetch.sh"
 
     CUR="sidCUR"
 
@@ -117,18 +117,18 @@ make_ledger() {
 # seam 付きで機械層 script を駆動（stdin は塞ぐ＝sid は seam 指定）。
 run_fetch() {
     run env \
-        SCRIBE_RESUME_ANCHOR="$ANCHOR" \
-        SCRIBE_RESUME_WM_DIR="$WMDIR" \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$BDSTUB" \
-        SCRIBE_RESUME_SESSION_LIB="$CC_LIB" \
-        SCRIBE_RESUME_AUTOCOMPACT_MARKER="$MARKER" \
+        SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
         bash "$SCRIPT" </dev/null
 }
 
 # ─────────────────────────── 構文 ───────────────────────────
 
-@test "(syntax) scribe-resume-fetch.sh が bash -n を通る" {
+@test "(syntax) scribe-rebrief-fetch.sh が bash -n を通る" {
     run bash -n "$SCRIPT"
     [ "$status" -eq 0 ]
 }
@@ -287,14 +287,14 @@ WMEOF
 @test "(3a) mode: marker 不在 → normal" {
     run_fetch
     [ "$status" -eq 0 ]
-    [[ "$output" == *"[RESUME-MODE] normal"* ]]
+    [[ "$output" == *"[REBRIEF-MODE] normal"* ]]
 }
 
 @test "(3b) mode toggle: marker 有 → force-recovery（非空虚）" {
     : > "$MARKER"
     run_fetch
     [ "$status" -eq 0 ]
-    [[ "$output" == *"[RESUME-MODE] force-recovery"* ]]
+    [[ "$output" == *"[REBRIEF-MODE] force-recovery"* ]]
     [[ "$output" == *"auto-compact 発火 marker 検出"* ]]
 }
 
@@ -368,11 +368,11 @@ WMEOF
 
 @test "(P4) SELF_PREFIX walk-up: 既定 anchor は cwd から .beads を walk-up して解決する（env 無し）" {
     sub="$ANCHOR/deep/nested"; mkdir -p "$sub"
-    run env -u SCRIBE_RESUME_ANCHOR \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$BDSTUB" \
-        SCRIBE_RESUME_SESSION_LIB="$CC_LIB" \
-        SCRIBE_RESUME_AUTOCOMPACT_MARKER="$MARKER" \
+    run env -u SCRIBE_REBRIEF_ANCHOR \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
         bash -c "cd '$sub' && bash '$SCRIPT'" </dev/null
     [ "$status" -eq 0 ]
     [[ "$output" == *"[ANCHOR] $ANCHOR"* ]]
@@ -385,11 +385,11 @@ WMEOF
 
 @test "(FL1) fail-loud: 台帳識別子（dolt_database）を確定できない → rc1 + FATAL（空 prefix で『乖離なし』を騙らない）" {
     bad="$BATS_TEST_TMPDIR/proj-nometa"; mkdir -p "$bad/.beads"   # .beads は在るが metadata.json 無し
-    run env SCRIBE_RESUME_ANCHOR="$bad" \
-        SCRIBE_RESUME_WM_DIR="$WMDIR" \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$BDSTUB" \
-        SCRIBE_RESUME_SESSION_LIB="$CC_LIB" \
+    run env SCRIBE_REBRIEF_ANCHOR="$bad" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
         bash "$SCRIPT" </dev/null
     [ "$status" -eq 1 ]
     [[ "$output" == *"FATAL"* ]]
@@ -398,10 +398,10 @@ WMEOF
 
 @test "(FL2) fail-loud: anchor（.beads を持つ root）を walk-up で解決できない → rc1 + FATAL" {
     outside="$BATS_TEST_TMPDIR/outside"; mkdir -p "$outside"
-    run env -u SCRIBE_RESUME_ANCHOR \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$BDSTUB" \
-        SCRIBE_RESUME_SESSION_LIB="$CC_LIB" \
+    run env -u SCRIBE_REBRIEF_ANCHOR \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
         bash -c "cd '$outside' && bash '$SCRIPT'" </dev/null
     [ "$status" -eq 1 ]
     [[ "$output" == *"FATAL"* ]]
@@ -409,11 +409,11 @@ WMEOF
 }
 
 @test "(FL3) fail-loud: cc-session lib 不在 → rc1 + FATAL（silent skip で green にしない）" {
-    run env SCRIBE_RESUME_ANCHOR="$ANCHOR" \
-        SCRIBE_RESUME_WM_DIR="$WMDIR" \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$BDSTUB" \
-        SCRIBE_RESUME_SESSION_LIB="$BATS_TEST_TMPDIR/no-such-lib" \
+    run env SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$BATS_TEST_TMPDIR/no-such-lib" \
         bash "$SCRIPT" </dev/null
     [ "$status" -eq 1 ]
     [[ "$output" == *"FATAL"* ]]
@@ -422,29 +422,29 @@ WMEOF
 
 # ────────────────── CLAUDE_CONFIG_DIR override 下の lib 解決（F7） ──────────────────
 
-@test "(F7a) lib 解決: SCRIBE_RESUME_SESSION_LIB 無しでも CLAUDE_CONFIG_DIR 配下の lib を解決する" {
+@test "(F7a) lib 解決: SCRIBE_REBRIEF_SESSION_LIB 無しでも CLAUDE_CONFIG_DIR 配下の lib を解決する" {
     cfg="$BATS_TEST_TMPDIR/altconfig"
     mkdir -p "$cfg/plugins/session/scripts/lib"
     cp "$CC_LIB/session-env.sh" "$CC_LIB/working-memory.sh" "$cfg/plugins/session/scripts/lib/"
-    run env -u SCRIBE_RESUME_SESSION_LIB \
+    run env -u SCRIBE_REBRIEF_SESSION_LIB \
         CLAUDE_CONFIG_DIR="$cfg" \
-        SCRIBE_RESUME_ANCHOR="$ANCHOR" \
-        SCRIBE_RESUME_WM_DIR="$WMDIR" \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$BDSTUB" \
-        SCRIBE_RESUME_AUTOCOMPACT_MARKER="$MARKER" \
+        SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
         bash "$SCRIPT" </dev/null
     [ "$status" -eq 0 ]
     [[ "$output" == *"[DIFF-DRIFT] sc-aaa WM=in_progress bd=closed"* ]]
 }
 
 @test "(FL4) fail-loud: bd 実体が不在 → rc1 + FATAL（BD-COUNT=0 / 乖離なし を騙らない）" {
-    run env SCRIBE_RESUME_ANCHOR="$ANCHOR" \
-        SCRIBE_RESUME_WM_DIR="$WMDIR" \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$BATS_TEST_TMPDIR/no-such-bd" \
-        SCRIBE_RESUME_SESSION_LIB="$CC_LIB" \
-        SCRIBE_RESUME_AUTOCOMPACT_MARKER="$MARKER" \
+    run env SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BATS_TEST_TMPDIR/no-such-bd" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
         bash "$SCRIPT" </dev/null
     [ "$status" -eq 1 ]
     [[ "$output" == *"FATAL"* ]]
@@ -463,12 +463,12 @@ echo "error: dolt: database locked" >&2
 exit 1
 EOF
     chmod +x "$failbd"
-    run env SCRIBE_RESUME_ANCHOR="$ANCHOR" \
-        SCRIBE_RESUME_WM_DIR="$WMDIR" \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$failbd" \
-        SCRIBE_RESUME_SESSION_LIB="$CC_LIB" \
-        SCRIBE_RESUME_AUTOCOMPACT_MARKER="$MARKER" \
+    run env SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$failbd" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
         bash "$SCRIPT" </dev/null
     [ "$status" -eq 1 ]
     [[ "$output" == *"FATAL"* ]]
@@ -485,12 +485,12 @@ EOF
 printf '%s' '{not json'
 EOF
     chmod +x "$badbd"
-    run env SCRIBE_RESUME_ANCHOR="$ANCHOR" \
-        SCRIBE_RESUME_WM_DIR="$WMDIR" \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$badbd" \
-        SCRIBE_RESUME_SESSION_LIB="$CC_LIB" \
-        SCRIBE_RESUME_AUTOCOMPACT_MARKER="$MARKER" \
+    run env SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$badbd" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
         bash "$SCRIPT" </dev/null
     [ "$status" -eq 1 ]
     [[ "$output" == *"FATAL"* ]]
@@ -501,7 +501,7 @@ EOF
 
 @test "(FL7) 空台帳は fail-loud に巻き込まない: bd が [] を返す → rc0 + BD-COUNT 全 0（正当な空）" {
     # fail-loud の判定が「出力の空虚さ」でなく rc / JSON 形状であることの teeth。
-    # ここが落ちると新規台帳（bead 0 件）で resume が使えなくなる＝過剰 fail-closed の回帰検知。
+    # ここが落ちると新規台帳（bead 0 件）で rebrief が使えなくなる＝過剰 fail-closed の回帰検知。
     export BD_STUB_CLOSED_JSON='[]'
     export BD_STUB_ACTIVE_JSON='[]'
     run_fetch
@@ -514,7 +514,7 @@ EOF
 @test "(FL10) bd が rc=0 + stderr warning を出しても正常に DATA を出す（診断をデータチャネルへ混ぜない）" {
     # bd 1.1.0 は rc=0・正当 JSON のまま stderr へ良性 warning を出す（beads.role 未設定 / .beads perms 0775
     # ＝新規 project の既定状態）。`2>&1` で畳み込むと out が "warning:…\n[{…}]" になり rc gate を素通りして
-    # jq が先頭 warning で落ち、健全な台帳なのに「parse できない＝台帳が壊れている」と誤診して resume が死ぬ。
+    # jq が先頭 warning で落ち、健全な台帳なのに「parse できない＝台帳が壊れている」と誤診して rebrief が死ぬ。
     warnbd="$BATS_TEST_TMPDIR/bd-warn.sh"
     cat > "$warnbd" <<'EOF'
 #!/usr/bin/env bash
@@ -528,12 +528,12 @@ case "$*" in
 esac
 EOF
     chmod +x "$warnbd"
-    run env SCRIBE_RESUME_ANCHOR="$ANCHOR" \
-        SCRIBE_RESUME_WM_DIR="$WMDIR" \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$warnbd" \
-        SCRIBE_RESUME_SESSION_LIB="$CC_LIB" \
-        SCRIBE_RESUME_AUTOCOMPACT_MARKER="$MARKER" \
+    run env SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$warnbd" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
         bash "$SCRIPT" </dev/null
     [ "$status" -eq 0 ]
     [[ "$output" != *"FATAL"* ]]
@@ -559,12 +559,12 @@ EOF
     skew="$BATS_TEST_TMPDIR/skew-lib"; mkdir -p "$skew"
     cp "$CC_LIB/session-env.sh" "$skew/"
     printf '#!/usr/bin/env bash\n# 版ずれ模擬: extract_effort_directives を持たない working-memory.sh\n' > "$skew/working-memory.sh"
-    run env SCRIBE_RESUME_ANCHOR="$ANCHOR" \
-        SCRIBE_RESUME_WM_DIR="$WMDIR" \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$BDSTUB" \
-        SCRIBE_RESUME_SESSION_LIB="$skew" \
-        SCRIBE_RESUME_AUTOCOMPACT_MARKER="$MARKER" \
+    run env SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$skew" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
         bash "$SCRIPT" </dev/null
     [ "$status" -eq 1 ]
     [[ "$output" == *"FATAL"* ]]
@@ -578,12 +578,12 @@ EOF
     parent="$BATS_TEST_TMPDIR/anc-parent"
     make_ledger "$parent" "FOREIGN"
     child="$parent/child"; mkdir -p "$child/.beads"   # .beads は在るが metadata.json 無し
-    run env SCRIBE_RESUME_ANCHOR="$child" \
-        SCRIBE_RESUME_WM_DIR="$WMDIR" \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$BDSTUB" \
-        SCRIBE_RESUME_SESSION_LIB="$CC_LIB" \
-        SCRIBE_RESUME_AUTOCOMPACT_MARKER="$MARKER" \
+    run env SCRIBE_REBRIEF_ANCHOR="$child" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
         bash "$SCRIPT" </dev/null
     [ "$status" -eq 1 ]
     [[ "$output" == *"FATAL"* ]]
@@ -613,7 +613,7 @@ EOF
 }
 
 @test "(R2) respawn: 候補 sid で再 fetch すると実在 DRIFT が surface する（SKILL.md §2-b の回復手順が実効）" {
-    # (R1) の候補 sid を SCRIBE_RESUME_SID に渡す＝skill が案内する回復手順そのもの。
+    # (R1) の候補 sid を SCRIBE_REBRIEF_SID に渡す＝skill が案内する回復手順そのもの。
     # ここが赤いと「候補は出るが突合する術が無い」＝復元 cycle が閉じない。
     CUR="sidCUR"
     run_fetch
@@ -697,7 +697,7 @@ WMEOF
 }
 
 @test "(FL14) WM dir が存在しないのは正当（missing と unreadable を弁別する・過剰 fail-closed の裏 assert）" {
-    # 新規 project / 退避未実施では dir 自体が無い＝ここで死ぬと resume が使えなくなる。
+    # 新規 project / 退避未実施では dir 自体が無い＝ここで死ぬと rebrief が使えなくなる。
     WMDIR="$BATS_TEST_TMPDIR/no-such-wm-dir"
     run_fetch
     [ "$status" -eq 0 ]
@@ -729,12 +729,12 @@ _make_minimal_path() {
     [ ! -e "$minbin/jq" ]
     [ ! -e "$minbin/python3" ]
     run env -i PATH="$minbin" HOME="$HOME" TMPDIR="$BATS_TEST_TMPDIR" \
-        SCRIBE_RESUME_ANCHOR="$ANCHOR" \
-        SCRIBE_RESUME_WM_DIR="$WMDIR" \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$BDSTUB" \
-        SCRIBE_RESUME_SESSION_LIB="$CC_LIB" \
-        SCRIBE_RESUME_AUTOCOMPACT_MARKER="$MARKER" \
+        SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
         BD_STUB_ACTIVE_JSON="$BD_STUB_ACTIVE_JSON" \
         BD_STUB_CLOSED_JSON="$BD_STUB_CLOSED_JSON" \
         bash "$SCRIPT" </dev/null
@@ -753,12 +753,12 @@ _make_minimal_path() {
     ln -sf "$p" "$minbin/python3"
     [ ! -e "$minbin/jq" ]
     run env -i PATH="$minbin" HOME="$HOME" TMPDIR="$BATS_TEST_TMPDIR" \
-        SCRIBE_RESUME_ANCHOR="$ANCHOR" \
-        SCRIBE_RESUME_WM_DIR="$WMDIR" \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$BDSTUB" \
-        SCRIBE_RESUME_SESSION_LIB="$CC_LIB" \
-        SCRIBE_RESUME_AUTOCOMPACT_MARKER="$MARKER" \
+        SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
         BD_STUB_ACTIVE_JSON="$BD_STUB_ACTIVE_JSON" \
         BD_STUB_CLOSED_JSON="$BD_STUB_CLOSED_JSON" \
         bash "$SCRIPT" </dev/null
@@ -784,12 +784,12 @@ _make_minimal_path() {
     printf 'ambient\n' > "$other/working-memory.OTHER.md"
     run env WORKING_MEMORY_FILE="$other/working-memory.OTHER.md" \
         WORKING_MEMORY_CONSUMED_FILE="$other/working-memory.OTHER.consumed.md" \
-        SCRIBE_RESUME_ANCHOR="$ANCHOR" \
-        SCRIBE_RESUME_WM_DIR="$WMDIR" \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$BDSTUB" \
-        SCRIBE_RESUME_SESSION_LIB="$CC_LIB" \
-        SCRIBE_RESUME_AUTOCOMPACT_MARKER="$MARKER" \
+        SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
         bash "$SCRIPT" </dev/null
     [ "$status" -eq 0 ]
     [[ "$output" != *"other-repo"* ]]                                    # foreign を一切指さない
@@ -799,12 +799,12 @@ _make_minimal_path() {
 
 @test "(F7b) lib 解決: CLAUDE_CONFIG_DIR が lib を持たなければ rc1 + FATAL（\$HOME/.claude へ暗黙 fallback しない）" {
     cfg="$BATS_TEST_TMPDIR/emptyconfig"; mkdir -p "$cfg"
-    run env -u SCRIBE_RESUME_SESSION_LIB \
+    run env -u SCRIBE_REBRIEF_SESSION_LIB \
         CLAUDE_CONFIG_DIR="$cfg" \
-        SCRIBE_RESUME_ANCHOR="$ANCHOR" \
-        SCRIBE_RESUME_WM_DIR="$WMDIR" \
-        SCRIBE_RESUME_SID="$CUR" \
-        SCRIBE_RESUME_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
         bash "$SCRIPT" </dev/null
     [ "$status" -eq 1 ]
     [[ "$output" == *"cc-session lib 不在"* ]]
@@ -829,21 +829,21 @@ _make_minimal_path() {
 
 # ────────────────── skill の存在と最小規約 ──────────────────
 
-@test "(skill) skills/resume/SKILL.md が在り frontmatter name=resume を持つ" {
-    [ -f "$REPO/skills/resume/SKILL.md" ]
-    run head -3 "$REPO/skills/resume/SKILL.md"
-    [[ "$output" == *"name: resume"* ]]
+@test "(skill) skills/rebrief/SKILL.md が在り frontmatter name=rebrief を持つ" {
+    [ -f "$REPO/skills/rebrief/SKILL.md" ]
+    run head -3 "$REPO/skills/rebrief/SKILL.md"
+    [[ "$output" == *"name: rebrief"* ]]
 }
 
 @test "(skill) SKILL.md が fetch core を invoke し cc-session の enable 前提を明記する（F7）" {
-    grep -qF "scripts/scribe-resume-fetch.sh" "$REPO/skills/resume/SKILL.md"
-    grep -qF "user-scope" "$REPO/skills/resume/SKILL.md"
+    grep -qF "scripts/scribe-rebrief-fetch.sh" "$REPO/skills/rebrief/SKILL.md"
+    grep -qF "user-scope" "$REPO/skills/rebrief/SKILL.md"
 }
 
 @test "(skill) SKILL.md の fetch 起動は \${CLAUDE_PLUGIN_ROOT} で解決する（人間向け placeholder を弾く）" {
     # scribe は per-project opt-in の user-scope plugin ゆえ、cwd 相対や "<scribe plugin root>" 等の
     # placeholder では他 project で verbatim 実行できず、LLM に path 推測の余地を与える（既存 skill は
     # consult/setup とも ${CLAUDE_PLUGIN_ROOT} で統一）。literal 部分一致だけの assert は placeholder を通すため teeth 化する。
-    grep -qF '${CLAUDE_PLUGIN_ROOT}/scripts/scribe-resume-fetch.sh' "$REPO/skills/resume/SKILL.md"
-    ! grep -qF '<scribe plugin root>' "$REPO/skills/resume/SKILL.md"
+    grep -qF '${CLAUDE_PLUGIN_ROOT}/scripts/scribe-rebrief-fetch.sh' "$REPO/skills/rebrief/SKILL.md"
+    ! grep -qF '<scribe plugin root>' "$REPO/skills/rebrief/SKILL.md"
 }
