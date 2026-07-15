@@ -458,3 +458,102 @@ STATE_EOF
     [ "$status" -eq 4 ]
     [ "$(_enter_count)" -ge 2 ]
 }
+
+# =============================================================================
+# ccs-pwr: TUI ドリフト根治（orch-8rn8 偽陰性 2026-07-15 の実測反映）
+#   - 現行 TUI は turn 実行中に 'esc to interrupt' を表示しない（スピナー行が唯一の turn 証拠）
+#   - 複数行 paste は transcript echo も placeholder 表示＝(B) が構造的に盲目 → (B') で受理
+# =============================================================================
+
+# 現行 TUI の実 turn pane（スピナー行 + Type A 入力欄 + 常時ステータスバー。esc to interrupt 不在）
+CUR_TUI_PANE=$'✽ Boondoggling… (1m 2s · ↓ 3.4k tokens)\n──────────────\n❯ \n──────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+
+@test "read-back: 現行 TUI スピナー行（esc to interrupt 不在）2 連続で受理＝exit 0（A・TUI ドリフト追随）" {
+    export MOCK_STATE=input-waiting
+    export MOCK_BASELINE=""
+    export MOCK_PANE="$CUR_TUI_PANE"
+    run bash "$COMM" inject-file "session:0" "$PROMPT_FILE" --wait 5 --confirm-receipt 3
+    [ "$status" -eq 0 ]
+}
+
+@test "read-back: 折りたたみ paste の transcript placeholder echo（baseline 超過）で受理＝exit 0（B'）" {
+    printf 'line one alpha beta gamma\nline two delta epsilon\n' > "$SANDBOX/prompt-ml.txt"
+    export MOCK_STATE=input-waiting
+    export MOCK_BASELINE=""
+    export MOCK_PANE=$'❯ [Pasted text #1 +2 lines]\n'"$EMPTY_BOX"
+    run bash "$COMM" inject-file "session:0" "$SANDBOX/prompt-ml.txt" --wait 5 --confirm-receipt 3
+    [ "$status" -eq 0 ]
+}
+
+@test "boot-race pin: placeholder が interior 残留のみ（未 submit）では B' 受理しない＝RESIDUAL 経路維持" {
+    printf 'line one alpha beta gamma\nline two delta epsilon\n' > "$SANDBOX/prompt-ml.txt"
+    export MOCK_STATE=input-waiting
+    export MOCK_BASELINE=""
+    export MOCK_PANE=$'╭──────────────╮\n│ ❯ [Pasted text #1 +2 lines] │\n╰──────────────╯'
+    run bash "$COMM" inject-file "session:0" "$SANDBOX/prompt-ml.txt" --wait 5 --confirm-receipt 2
+    [ "$status" -eq 4 ]
+}
+
+@test "boot-race pin: baseline に既にある placeholder では B' 受理しない（行数超過が必須）" {
+    printf 'line one alpha beta gamma\nline two delta epsilon\n' > "$SANDBOX/prompt-ml.txt"
+    export MOCK_STATE=input-waiting
+    export MOCK_BASELINE=$'❯ [Pasted text #1 +9 lines]\n'"$EMPTY_BOX"
+    export MOCK_PANE=$'❯ [Pasted text #1 +9 lines]\n'"$EMPTY_BOX"
+    run bash "$COMM" inject-file "session:0" "$SANDBOX/prompt-ml.txt" --wait 5 --confirm-receipt 2
+    [ "$status" -eq 4 ]
+}
+
+@test "read-back: 複数行 paste の真の消失（placeholder どこにも無し）は早期 fail 維持＝exit 4（boot-race 再送を遅らせない）" {
+    printf 'line one alpha beta gamma\nline two delta epsilon\n' > "$SANDBOX/prompt-ml.txt"
+    export MOCK_STATE=input-waiting
+    export MOCK_BASELINE=""
+    export MOCK_PANE="$EMPTY_BOX"
+    local _t0 _t1
+    _t0=$(date +%s)
+    run bash "$COMM" inject-file "session:0" "$SANDBOX/prompt-ml.txt" --wait 5 --confirm-receipt 10
+    _t1=$(date +%s)
+    [ "$status" -eq 4 ]
+    # vanish 2 連続の早期 fail＝budget(10s) を待たない
+    [ $(( _t1 - _t0 )) -lt 8 ]
+}
+
+@test "SSOT 同期: TURN_SPINNER_PATTERN が _rb_strong_re の fallback リテラルに含まれる（ccs-pwr drift fail-closed）" {
+    local real
+    real=$(bash -c "source '$SCRIPT_DIR/session-state.sh' >/dev/null 2>&1; printf '%s' \"\${TURN_SPINNER_PATTERN:-}\"")
+    [ -n "$real" ]
+    local fb
+    fb=$(grep -E "_rb_strong_re='esc to interrupt" "$SCRIPT_DIR/session-comm.sh" | head -1)
+    [ -n "$fb" ]
+    [[ "$fb" == *"$real"* ]]
+}
+
+@test "read-back: 日本語（multibyte）prompt の sentinel が文字境界で破断しない＝echo で受理（B・cut -c byte 破断回帰）" {
+    printf 'E2E検証用の日本語プロンプト行です marker-alpha\n' > "$SANDBOX/prompt-ja.txt"
+    export MOCK_STATE=input-waiting
+    export MOCK_BASELINE=""
+    # transcript echo は先頭 24 文字を含む（❯ prefix 付き・折りたたみ無し）
+    export MOCK_PANE=$'❯ E2E検証用の日本語プロンプト行です marker-alpha\n'"$EMPTY_BOX"
+    run bash "$COMM" inject-file "session:0" "$SANDBOX/prompt-ja.txt" --wait 5 --confirm-receipt 3
+    [ "$status" -eq 0 ]
+}
+
+@test "read-back: 日本語 prompt の submit 済み echo を vanished と誤診しない（破断 sentinel の不一致回帰）" {
+    printf 'これは日本語だけで構成された複数行プロンプトです\n二行目の内容もすべて日本語です\n' > "$SANDBOX/prompt-ja-ml.txt"
+    export MOCK_STATE=input-waiting
+    export MOCK_BASELINE=""
+    # 折りたたみ無しで echo された transcript（sentinel 24 文字が一致するべき）
+    export MOCK_PANE=$'❯ これは日本語だけで構成された複数行プロンプトです\n  二行目の内容もすべて日本語です\n'"$EMPTY_BOX"
+    run bash "$COMM" inject-file "session:0" "$SANDBOX/prompt-ja-ml.txt" --wait 5 --confirm-receipt 3
+    [ "$status" -eq 0 ]
+}
+
+@test "boot-race pin: タイマー括弧付き boot 語彙スピナー形でも interior 不特定なら受理しない（(A) の box 前提・live boot 標本反映）" {
+    # live boot 標本（100 frames・2026-07-15）で boot はタイマー括弧スピナーを出さないことを verified 済み。
+    # 本テストは万一 TUI が将来 boot でこの形状を出しても、入力欄 box 未描画（boot splash 典型）の間は
+    # (A) が受理しないこと（interior 特定が前提）を pin する defense-in-depth。
+    export MOCK_STATE=input-waiting
+    export MOCK_BASELINE=""
+    export MOCK_PANE=$'✽ Loading… (2s)\n✽ Connecting… (3s)'
+    run bash "$COMM" inject-file "session:0" "$PROMPT_FILE" --wait 5 --confirm-receipt 2
+    [ "$status" -eq 4 ]
+}
