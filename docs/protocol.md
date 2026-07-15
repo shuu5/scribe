@@ -467,6 +467,18 @@ scribe admin が複数 project の台帳が併存する環境（orchestrator 配
 
 ---
 
+## 9. セッション寿命規律（意図的 cycle・fleet 共通核）
+
+admin session の寿命は「無限に伸ばして compaction で凌ぐ」でなく**意図的な context cycle** を既定とする。本節は cycle 規律の **fleet 共通核の正本**（content SSOT = orch-6gsv〔grill orch-thgx 2026-07-13〕・right-layer authoring の authorize = orch-6srt facet⑥・転写 courier = orch-1rmu）。**scriptorium top-spec §1.1 は orchestrator 固有強度**（respawn trigger ①∧②・probe GREEN 機械前提・foreign admin の毎 bundle kill→fresh respawn・context 40% 早期切り上げ・配送観測 surface・能力仮定型タグ + sunset 条件）**の SSOT として残り、共通核は本節を pointer 参照する**（bdw canonical/shim と同型・top-spec 側の追随 PR は orchestrator 側の leg＝scribe から触らない）。
+
+- **適用 scope = admin session**。worker は対象外（1 issue = 1 cell で元々 bundle 寿命）。consult は role-context-spec §2.3 の un-sl9 caveat が残る間 compaction 系スキル（ready-compaction 等）の使用を控える＝blanket 適用しない。**§6 の「respawn」（env 劣化 worker の salvage・degraded worker の破棄→再起動）とは別概念**。§8 の「cycle 境界 heartbeat」（SessionStart/SessionEnd stamp）は本節の cycle と**同一の境界**を指す（別の cycle を再定義しない）。
+- **意図的 cycle の 2 経路（respawn/clear 統一・手動 /compact 廃止）**: 意図的な context cycle は **`/clear`**（軽量・普段＝plugin 変更が無いとき。同一プロセスで文脈のみ捨て、SessionStart(clear) の Working-Memory pointer から手動 Read で復帰、または **`/scribe:rebrief`**〔sc-8eyw / PR#93 land 済み・resume→rebrief 改名 = orch-9ke8 user 裁定 / sc-6b0o＝機械層 fetch `scripts/scribe-rebrief-fetch.sh` が bd 現在値 + WM 主張 + diff を DATA として emit し、skill `skills/rebrief/SKILL.md` が突合して定型 brief を出す。startup/clear/respawn の 3 経路は単一 entry へ収束〕で復帰）と **respawn**（新プロセス必須のとき＝plugin 変更後・長寿命切替）の **2 経路のみ**とし、**手動 `/compact` を廃止**する。廃止対象は手動 compact コマンドの運用であって **`/session:ready-compaction` skill**（cc-session plugin・user-scope enable 前提・WM 退避 + carry-forward）**ではない**＝WM 外部化（退避）は `/clear` 経路でも同じく使う。根拠: compact summary は**検証不能な第三 narrative**（要約器の語り）であり、pane-not-truth（§6 監視「bd が truth・pane は補助」）と同じ理由で truth 面に置けない＝語り面は検証済み WM + beads へ一本化する。
+- **auto-compact = 非常用パラシュート・発火は incident**: auto-compact の発火は cycle 規律破れ（respawn 判断の遅れ）の **incident** として扱う — ① 発火 marker を自台帳 bead へ焼く（loud 記録）、③ **強制回復モード** = bd の全 open / in_progress / gate-pending を一次 truth とする再ブリーフを実行する（compact summary の語りを現状認識に使わない）。②（配送観測面への surface）は orchestrator 固有 leg ゆえ fleet 共通核に含めない（SSOT = top-spec §1.1・orch-4js9。①②③の番号は転写元の 3-leg と照合可能に保つための欠番）。機械面: `scripts/scribe-rebrief-fetch.sh` は marker（既定 `<WM_DIR>/.auto-compacted`）の存在で `[REBRIEF-MODE] force-recovery` へ切替わり ③ の再ブリーフを駆動する（判定側は land 済み。**marker を焼く producer は未実装**＝現状は発火に気づいた admin が手動で marker/bead へ loud 記録する。producer 機械化〔PostCompact hook での marker write〕は別便＝sc-8eyw 申し送り）。
+
+> 一次出典: orchestrator `orch-6gsv`（grill `orch-thgx`・cycle 規律の content SSOT）/ `orch-6srt` facet⑥（right-layer authoring の authorize）/ `orch-1rmu`（本転写 courier・mandate-verify `wf_b11f2149` の F1-F12 + 裁定 3 件）/ bd `sc-hxxq`（本反映 cell）。転写元 = scriptorium top-spec §1.1「寿命規律」の bullet 2 本（決定文の逐語照合・resume 系識別子のみ scribe 層の実体へ置換〔置換対応表 = bd sc-hxxq notes〕・orchestrator 固有強度は転写しない）。
+
+---
+
 ## 一次出典（まとめ）
 
 | 出典 | 内容 |
