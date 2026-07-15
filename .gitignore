@@ -12,6 +12,10 @@
 # root .gitignore で除外しているのと同型。
 /.beads/scribe-heartbeat
 
+# universal sync Layer2 の throttle marker(scripts/scribe-sync-push.sh・sc-fz5i)
+# 最終 push 時刻(mtime が本体)の runtime 生成物ゆえ commit しない。scribe-heartbeat と同型。
+/.beads/scribe-push-throttle
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
