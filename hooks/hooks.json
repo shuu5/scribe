@@ -65,7 +65,7 @@
           {
             "type": "command",
             "command": "SCRIPT=\"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/session-stop-push.sh\"; [ -x \"$SCRIPT\" ] && \"$SCRIPT\" || true",
-            "timeout": 10000
+            "timeout": 30000
           }
         ]
       }

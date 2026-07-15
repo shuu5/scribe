@@ -42,7 +42,7 @@ set -uo pipefail 2>/dev/null || true
 # --- 設定（env 上書き可＝テスト seam）---
 THROTTLE_MIN="${SCRIBE_PUSH_THROTTLE_MIN:-10}"                       # 閾値 N 分（既定 10・値は非 pin）
 MARKER_FILENAME="${SCRIBE_PUSH_THROTTLE_FILENAME:-scribe-push-throttle}"
-PUSH_TIMEOUT="${SCRIBE_PUSH_TIMEOUT:-8}"                             # push subprocess の上限秒（hook timeout 手前）
+PUSH_TIMEOUT="${SCRIBE_PUSH_TIMEOUT:-20}"                            # push subprocess の上限秒（hook 外枠 30s の手前。gate live 実射で典型 2.85s・cold 時 >8s を実測＝8 は変動幅に薄い・sc-fz5i gate）
 REMOTE_TIMEOUT="${SCRIBE_PUSH_REMOTE_TIMEOUT:-5}"                    # remote 確認 subprocess の上限秒
 
 # --- helpers ---------------------------------------------------------------
