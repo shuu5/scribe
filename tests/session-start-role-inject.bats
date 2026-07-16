@@ -486,7 +486,7 @@ _link_bin_without_awk() {
     # consult は grill 専任(原義回帰)・grill-consult は admin が brief を渡して立てる第 2 対話相手。
     [[ "$output" == *"grill 専任"* ]]
     [[ "$output" == *"grill-consult"* ]]
-    # read-only 限定緩和: 自 grill-issue の --claim/--append-notes だけ bdw 経由で可(worker B/hybrid と一致)。
+    # read-only 限定緩和: 自 grill-issue の --claim(着手時 1 回限り・orch-3ej3)/--append-notes だけ bdw 経由で可(worker B/hybrid と一致)。
     [[ "$output" == *"限定緩和"* ]]
     [[ "$output" == *"--append-notes"* ]]
     [[ "$output" == *"bdw"* ]]
