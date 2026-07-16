@@ -6,6 +6,8 @@ description: |
   正しく入っていれば何もせず、間違って入っていれば（bd 既定の汚染・二重発火・旧役割入り PRIME）修正し、未導入なら正しく入れる。
   bd 既定の init は CLAUDE.md/AGENTS.md を方針と正反対のポリシー（bd remember 推奨・git push 必須）で汚染し、
   project-local settings.json を生成してグローバル hook と二重発火する。本スキルはそれを検出・是正する。
+  新規導入時は scriptorium DEFAULT_PROJECTS（orchestrator の federation-read 集合）への編入判断を一問挟む
+  （intent 路・自動 add はしない・編入の実 write は orchestrator 側 PR）。
 
   Use when user wants to: このプロジェクトで scribe を使い始める / beads を入れる・直す / bd を初期化 / issue 追跡を始める,
   says 「scribe をこのリポに入れる」「beads入れて」「bd init して」「beads のセットアップを直して」「このリポで scribe/bd 使いたい」。
@@ -129,6 +131,51 @@ git rm --cached --ignore-unmatch .beads/issues.jsonl .beads/interactions.jsonl
 - **役割を帯びた規約（誰が create/dep/close/dolt push するか・終了プロトコル）の SSOT は scribe plugin の role 別 SessionStart 注入**（admin / worker / consult）。PRIME は role 中立な基礎のみを持つ。
 ```
 
+### scriptorium DEFAULT_PROJECTS 編入判断（intake 一問・新規導入時のみ）
+
+> **出自と対の設計**: orch-rafl grill 裁定[論点6(3)]（user 裁定 2026-07-16）の **intent 路**。orchestrator 側には
+> disk-scan reconciliation（disk 上の `.beads/metadata.json` 走査 vs DEFAULT_PROJECTS の差分 loud surface・自動 add
+> しない）が **backstop** として別途在る＝本 step を飛ばしても最終的には backstop が拾う（fail-safe）。
+
+**発火条件**: この run で `.beads/` を**新規に作成した**とき（Step 0 が BEADS:no → #2 で init した新規導入）だけ
+一問挟む。既導入 project への冪等再実行では**発火しない**（既存 stock の編入判断は orch 側 backstop の担当＝
+再実行のたびに聞き直すノイズを出さない）。ユーザーが明示的に編入判断を求めたときはこの限りでない。
+
+**問い（一問）**: 「この project を scriptorium orchestrator の **DEFAULT_PROJECTS**（= orchestrator が横断 read する
+federation-read 対象の project 集合。sweep の SSOT ではない）へ編入しますか?」
+判断材料を添えて人間に問う: 継続的に作業が走る active な project か（dormant な project は編入しない先例）、
+orchestrator の観測・cross-project 調整の対象にする意思があるか。**無人実行では勝手に決めず「保留」**として
+Step 末の報告に残す（backstop が後日 surface する）。
+
+**yes → needs-orch 上り intake を起票**（**自動 add はしない**。DEFAULT_PROJECTS への実 write = scriptorium
+`scripts/lib/orch-projects.sh` の編集は **orchestrator 側 PR**。本 skill が scriptorium repo に触れることは無い）:
+```bash
+proj=$(basename "$(git rev-parse --show-toplevel)")
+# 冪等ガード: 既に同旨の依頼 bead が在れば再作成しない（SKIP が出たら以降の notes/label も行わない）
+bd search "DEFAULT_PROJECTS" 2>/dev/null | grep -q "編入依頼" \
+  && echo "SKIP: 既存の編入依頼 bead あり（冪等・再作成しない）" \
+  || bd create --title="scriptorium DEFAULT_PROJECTS へ ${proj} を編入依頼" --type=task --priority=2 \
+       --description="scribe:setup の編入判断 step（intent 路）発の上り依頼。人間 yes 裁定済み。"
+# ↑の出力 id で notes（必須 3 節 front-load）→ label の順に付ける（label だけ先行させない）
+bd update <id> --append-notes "## 依頼
+scriptorium DEFAULT_PROJECTS へ entry「${proj}=$(git rev-parse --show-toplevel)」を追加する orchestrator 側 PR を依頼（entry 形式は name=絶対パス・trailing slash 無し）。
+## scope
+編入 entry の追加のみ（実 write は orchestrator 側。関連 channel の override 要否も orchestrator 判断）。
+## acceptance
+DEFAULT_PROJECTS に本 project の entry が入り、orchestrator の federation-read が本台帳へ届く。
+## provenance
+scribe:setup 新規導入 run・編入判断 step（orch-rafl 裁定 論点6(3) intent 路）・人間 yes 裁定。"
+bd update <id> --add-label needs-orch
+```
+冪等ガード（ブロック先頭の `bd search`）が SKIP を出したら notes/label へ進まない。orchestrator は `needs-orch`
+ラベル（完全一致）を pull で拾う——新規台帳はまだ federation-read の対象外だが、backstop の disk-scan が台帳自体を
+surface するため取りこぼさない（intent 路と backstop の対）。並列 worker が稼働する環境では bd write を bdw 経由に
+する（PRIME §並列 spawn）——新規導入直後は通常 solo ゆえ素の bd で可。
+
+**no → 起票しない**。判断根拠（dormant・個人実験・観測不要等）を Step 末の要約報告へ 1 行残す（orch 側 backstop が
+差分を surface した際の一次資料になる）。恒久除外の管理は orchestrator 側の「確認済み除外 list」が担う＝本 skill は
+書かない。
+
 ## Step 末: 同期＋検証＋コミット
 ```bash
 bd dolt push          # remote 設定済みなら
@@ -142,7 +189,7 @@ _pv=$(grep -oE 'beads-init-template v:[0-9]+' .beads/PRIME.md 2>/dev/null | head
 test -d .beads && test -f .beads/PRIME.md && { if [ -n "$_pv" ]; then [ "$_pv" -ge 1 ]; else grep -q '本 PRIME は role 中立' .beads/PRIME.md; fi; } && echo "scribe opt-in: role 中立 PRIME ✅" || echo "⚠ PRIME 未同期（marker 旧/無し）"
 git status --short
 ```
-変更を**標準 git ワークフロー**でコミット（`main` 直 push 禁止のプロジェクトは feature branch → PR）。最後に「何を skip し何を修正/追加したか」を要約報告。
+変更を**標準 git ワークフロー**でコミット（`main` 直 push 禁止のプロジェクトは feature branch → PR）。最後に「何を skip し何を修正/追加したか」を要約報告。新規導入 run では **DEFAULT_PROJECTS 編入判断の結果**（依頼起票 `<id>` / 見送り+根拠 / 保留）も 1 行含める。
 
 ## 禁止事項（MUST NOT）
 - `--skip-agents` 省略の `bd init`（汚染・二重発火）。
