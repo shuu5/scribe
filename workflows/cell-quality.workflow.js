@@ -695,6 +695,7 @@ ${refinedAcceptance ? `\n精緻化された受入基準:\n${refinedAcceptance}\n
 - 既存コードの規約(命名・コメント密度・イディオム)に合わせる。
 - ${commitNote}
 - 破壊的操作・anchor の main 離脱は禁止。秘密情報を混入しない。
+- **\`git push\`(plain/force とも)・remote への write 操作は一切しない**——PR/push は呼出元 admin の gate 後責務(sc-8eyw 実発の worker mandate 違反の恒久封鎖)。
 完了したら何を実装したか簡潔に返せ。`
 }
 
@@ -790,7 +791,7 @@ ${roundDiff || '(worktree の現状を確認して修正)'}
 2. self-test を実行する: \`${selfTestCmd}\`
    - ${stageStep}
    - FAIL したら **amend せず停止**し、selfTestPassed=false で報告する(回避策を打たない=fail-closed)。
-3. 破壊的操作・force push・anchor の main 離脱は禁止。
+3. 破壊的操作・anchor の main 離脱は禁止。**\`git push\`(plain/force とも)・remote への write は一切しない**——PR/push は呼出元 admin が gate 後に行う(sc-8eyw 実発の worker mandate 違反の恒久封鎖)。
 
 JSON で {applied, selfTestRan, selfTestPassed, amended, summary, newDiff?} を返せ。`
 }
