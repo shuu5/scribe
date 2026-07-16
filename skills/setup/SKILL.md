@@ -32,7 +32,7 @@ SessionStart 注入が opt-in で発火する状態**にする。各次元を独
 5. `.beads/PRIME.md` が**我々の役割中立版**（役割分担・bd remember 禁止・役割規約は scribe role 注入へ委譲）
 6. CLAUDE.md/AGENTS.md に **bd 既定の汚染ブロックが無い**（`bd remember` 推奨/`git push` MANDATORY 等）
 7. project-local `.claude/settings.json` に **bd の `bd prime` hook が無い**（グローバル hook と二重発火しない）
-8. `.gitignore` が `issues.jsonl`/`interactions.jsonl`/`embeddeddolt/` を除外（Dolt が SSOT）
+8. `.gitignore` が `issues.jsonl`/`interactions.jsonl`/`embeddeddolt/` と scribe runtime marker 2 種（`/.beads/scribe-heartbeat`・`/.beads/scribe-push-throttle`）を除外（Dolt が SSOT・marker は hook 生成物）
 9. プロジェクト CLAUDE.md に**矯正済みポインタ節**（bd マーカー無し・役割規約は scribe role 注入が SSOT）
 10. **scribe role 注入が opt-in 成立**: `.beads/` が在り（= scribe で管理する意思表示）、PRIME が role 中立版で
     scribe role 別 SessionStart 注入（admin/worker/consult）と矛盾しない。scribe plugin 登録済みなら、これで
@@ -65,7 +65,8 @@ for f in CLAUDE.md AGENTS.md; do grep -qE 'Use `bd remember`|do NOT use MEMORY\.
 # `command -v bd >/dev/null 2>&1 && bd prime || true`（引用符で囲まれない）なので、リテラル `"bd prime"` を
 # 探すと NO MATCH で fail-open する。引用符を外した部分一致 `bd prime` で検出する。
 test -f .claude/settings.json && grep -q 'bd prime' .claude/settings.json && echo "DOUBLEFIRE:yes" || echo "DOUBLEFIRE:no"
-grep -q 'issues.jsonl' .gitignore 2>/dev/null && echo "GITIGNORE:yes" || echo "GITIGNORE:no"
+# gitignore は必要行の全充足で yes（issues.jsonl のみの粗判定だと runtime marker 未収束でも yes になり #8 が skip される）
+{ grep -q 'issues.jsonl' .gitignore && grep -q 'scribe-heartbeat' .gitignore && grep -q 'scribe-push-throttle' .gitignore; } 2>/dev/null && echo "GITIGNORE:yes" || echo "GITIGNORE:no"
 ```
 結果を「✅正しい / ⚠️要修正 / ➕要追加」で表にして報告してから収束に進む。**変更が一切不要なら「既に正しい構成」と報告して終了**。
 
@@ -113,9 +114,13 @@ jq empty .claude/settings.json   # JSON 妥当性確認
 グローバル `~/.claude/settings.json` の hook が SSOT。
 
 ### gitignore（#8）
-`.gitignore` に冪等追記（無い行だけ）: `.beads/issues.jsonl` / `.beads/interactions.jsonl` / `embeddeddolt/`。bd init は `interactions.jsonl` を git 追跡するため**必ず** untrack する。ただし `issues.jsonl` は init 直後は未生成のことが多く、pathspec 不一致で `git rm` が **atomic 失敗**（present 側の `interactions.jsonl` も untrack されない）するため **`--ignore-unmatch` 必須**:
+`.gitignore` に冪等追記（無い行だけ）: `.beads/issues.jsonl` / `.beads/interactions.jsonl` / `embeddeddolt/` に加え、
+scribe hook が焼く **runtime marker 2 種**を root-anchored で除外する: `/.beads/scribe-heartbeat`（SessionStart/End
+heartbeat）・`/.beads/scribe-push-throttle`（Stop hook 即 push の throttle）。いずれも mtime が本体の hook 生成物で
+commit しない（scribe plugin が有効な project では anchor session が自動生成するため、除外しないと untracked 表示・
+`git add -A` 誤 commit の芽になる）。bd init は `interactions.jsonl` を git 追跡するため**必ず** untrack する。ただし `issues.jsonl` は init 直後は未生成のことが多く、pathspec 不一致で `git rm` が **atomic 失敗**（present 側の `interactions.jsonl` も untrack されない）するため **`--ignore-unmatch` 必須**（marker 2 種も誤 commit 済みの可能性に備え同列で untrack）:
 ```bash
-git rm --cached --ignore-unmatch .beads/issues.jsonl .beads/interactions.jsonl
+git rm --cached --ignore-unmatch .beads/issues.jsonl .beads/interactions.jsonl .beads/scribe-heartbeat .beads/scribe-push-throttle
 ```
 
 ### CLAUDE.md ポインタ（#9）— 無いときだけ追加（bd マーカー無し）
