@@ -1342,7 +1342,7 @@ _make_noop_cld_spawn() {
   [[ "$output" == *"grill-consult"* ]]
   [[ "$output" == *"対話 grill"* ]]
   [[ "$output" == *"grill-issue=un-consult"* ]]
-  # 決定 handoff = own grill-issue の bd notes(bdw 経由 --claim/--append-notes のみ)。
+  # 決定 handoff = own grill-issue の bd notes(bdw 経由 --append-notes のみ・claim は着手時 1 回限り・orch-3ej3)。
   [[ "$output" == *"bdw"* ]]
   # sc-5wu: consult の bdw 参照も絶対パス($SCRIPT_DIR 補間)で anchor=downstream でも解決する。
   [[ "$output" == *"$BDW"* ]]

@@ -41,7 +41,7 @@
 #   --consult       consult role セッションを anchor で起動（worktree/worker prompt なし・SCRIBE_ROLE=consult を --env-file 注入）
 #   --context FILE  consult 専用。admin 集約 brief（FILE 内容）を grill 材料として焼き込み grill-consult モードへ。
 #                   §7 needs-user regime: grill-issue id 必須。grill-consult は brief を出発点にユーザーと対話 grill し、
-#                   決定を own grill-issue の bd notes へ書く（bdw 経由 --claim/--append-notes のみ・read-only 限定緩和）。
+#                   決定を own grill-issue の bd notes へ書く（決定 handoff は bdw 経由 --append-notes のみ・claim は着手時 1 回限り・read-only 限定緩和）。
 #                   （pre-bake 自体は admin が回す dynamic Workflow = workflows/needs-user-prebake.workflow.js へ移管。）
 #   --model MODEL   cld-spawn のモデル（既定: worker=opus / consult=fable）。worker は fable 厳禁＝コスト爆発。
 #                   consult は既定 fable・利用不可時のみ opus へ loud fallback（sc-9q6・role-context-spec §2.3）
@@ -573,13 +573,13 @@ GRILL
 --- admin 集約 brief ここまで ---
 
 ## handoff（scribe 連携・これだけ）
-- 着手: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $TOPIC --claim\`
+- 着手: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $TOPIC --claim\`（起動直後の 1 回だけ・以降の決定 handoff で --claim は再度打たない）
 - **決定が固まる度に逐次**（バッチ厳禁＝中断時の損失を1論点に抑える）: \`cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update $TOPIC --append-notes "決定: …（理由・却下案・残論点）"\`（admin が \`bd show $TOPIC\` で監視）
 - **STATUS 行（admin が完了・中断を感知する唯一の合図）**: 進捗の節目で \`--append-notes\` に \`STATUS:\` 行を必ず混ぜる（admin はこれを見て close を判断する。STATUS は「読みにきて」の合図で、close は admin の notes 目視＝STATUS を書き忘れても取りこぼさない）:
   - grill 中（facet が1つ決まる度）: \`STATUS: grilling (n/N facet 確定)\`
   - 全 facet 確定で grill 完了: \`STATUS: done — 全 facet 確定\`
   - admin の情報・判断待ちで詰まったら: \`STATUS: blocked — 要admin: <理由>\`
-- read-only（例外は自 grill-issue $TOPIC の claim/append-notes のみ・bdw 経由）: tracked コード/ファイル編集・bd create/dep/close/dolt push・spawn・push はしない（admin の領分）。
+- read-only（例外は自 grill-issue $TOPIC の claim〔着手時の 1 回のみ・上記〕/append-notes のみ・bdw 経由）: tracked コード/ファイル編集・bd create/dep/close/dolt push・spawn・push はしない（admin の領分）。
 GRILL
     else
       # === plain consult モード（設計議論・grill 専用）: 現状維持 ===
@@ -634,7 +634,7 @@ PROMPT
     if [[ -n "$CONTEXT_FILE" ]]; then
       echo "[plan] scribe-spawn(consult): anchor=$ANCHOR grill-issue=$TOPIC（grill-consult モード）"
       echo "[plan] grill-consult モード（§7）: brief=$CONTEXT_FILE を grill 材料として焼き込み・grill-issue=$TOPIC"
-      echo "[plan]   handoff 規約 → 決定は grill-issue $TOPIC の bd notes（bdw 経由 --claim/--append-notes のみ・read-only 限定緩和）。admin は bd show $TOPIC で監視"
+      echo "[plan]   handoff 規約 → 決定は grill-issue $TOPIC の bd notes（決定 handoff は bdw 経由 --append-notes のみ・claim は着手時 1 回限り・read-only 限定緩和）。admin は bd show $TOPIC で監視"
     else
       echo "[plan] scribe-spawn(consult): anchor=$ANCHOR${TOPIC:+ 議題参照=$TOPIC（read-only）}"
     fi
