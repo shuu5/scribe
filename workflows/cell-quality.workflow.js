@@ -3,7 +3,7 @@ export const meta = {
   description:
     '1 issue = 1 実装セルの品質WF: task-type routing → [Plan] → [Implement] → perspective-diverse な Opus review → 各 finding を独立 Opus が adversarial refute-verify → gated autoFix(confirmed のみ+self-test fail-closed+amend) → loop-until-dry 収束。返り値を呼出元(worker/admin)が一次監査する薄 gate 設計。固有物は args で差し込む(骨格は再利用)。',
   whenToUse:
-    'worker worktree で substantive な per-issue 実装の品質を担保したいとき。固有物(taskTitle/worktree/goal/acceptance/diff/selfTestCmd/dimensions/model/maxRounds/autoFix/doPlan/doImplement/taskType/target/context/probe/roAgentType)は args で渡す。autoFix は既定 off(共有 fail-safe)、worker cell 文脈は autoFix:true を渡す。roAgentType は read-only 段の agentType 上書き escape hatch(既定 scribe:explore・"none" で agentType 無し強制)。',
+    'worker worktree で substantive な per-issue 実装の品質を担保したいとき。固有物(taskTitle/worktree/goal/acceptance/diff/baseRef/contextFile/selfTestCmd/dimensions/model/maxRounds/autoFix/doPlan/doImplement/taskType/target/context/probe/roAgentType)は args で渡す。★args は Workflow tool 経路で【全体約 4KB】に切り詰められる実測がある(un-cw0z)ため inline を小さく保つこと: 大きい diff は baseRef(commit 済差分を snapshot 合成が worktree で直接取得=インライン転記不要)、大きい文脈は contextFile(readable な path を渡し各段 agent が Read)で渡す。autoFix は既定 off(共有 fail-safe)、worker cell 文脈は autoFix:true を渡す。roAgentType は read-only 段の agentType 上書き escape hatch(既定 scribe:explore・"none" で agentType 無し強制)。',
   // phases は phase() 呼び出し / opts.phase と同名で対応させる(タイトル完全一致でグループ化)。
   // substantive な全 agent は model:'opus'(args.model 既定)= read-only agent(scribe:explore)の frontmatter 弱モデル退化を根治。
   phases: [
@@ -86,6 +86,17 @@ export const meta = {
 //      sc-dc9 の EFFORT_ALLOWED(sc-ax4 SSOT mirror)を resolveEffort 経由で再利用し新検証路を作らない。
 //      返り値 effort は per-stage 要約 object{cell,review,verify,fix,classify,selfTest,snapshot}=呼出元が
 //      「guard 段が high に留まったか」を一次監査できる(receivedArgs/schemaHealth と対称の audit 面)。
+// (12) args 約 4KB 上限とファイル渡し(sc-mbcm・orch-v7pf=un-cw0z 中継の吸収): Workflow tool へ渡す args は
+//      【全体で約 4KB】に切り詰められる実測がある(uns un-cw0z)。切り詰めは骨格からは検知できない
+//      (途中で切れた JSON は (8) の parse 失敗 escalate になるのが唯一の観測面で、有効 JSON のまま
+//      フィールドが欠ける形は silent)。よって呼出元が inline args を小さく保つのが一次対策で、大きな
+//      供給物は参照渡しにする: 大きい diff → baseRef((9) の snapshot 合成が worktree で直接取得)/
+//      大きい文脈(goal・acceptance の詳細・review 前提資料) → contextFile(readable な path)。
+//      contextFile は ctxBlock 経由で classify/plan/implement/review/fix の各 prompt へ「まず Read せよ」
+//      指示として注入する(WF script は fs 非アクセスゆえ prompt-level indirection が正しい形。agent が
+//      実バイトを Read するため模型経由の再転記で内容が劣化しない)。verify prompt へは注入しない
+//      (独立反証者は finding + diff だけを見る独立性設計を維持)。path は baseRef と同じ安全文字クラスのみ
+//      許可し不正値は '' へ倒す(空白入り path は非対応=呼出元が安全な path を選ぶ)。
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── (8) defensive args parse(un-2yy): string で届いたら JSON.parse、object はそのまま ──────────
@@ -300,6 +311,11 @@ const _rawBaseRef = (typeof A.baseRef === 'string' && A.baseRef.trim()) || ''
 // HEAD@{1} 等の正当 ref を含む)だけ許可し、それ以外を含む不正値は空扱い→merge-base フォールバックへ倒す
 // (trust boundary 内ゆえ RCE でないが、malformed ref の self-inflicted な壊れた bash / false EMPTY_DIFF を防ぐ)。
 const baseRef = /^[A-Za-z0-9._/~^@{}-]+$/.test(_rawBaseRef) ? _rawBaseRef : ''
+// (12) contextFile: 大文脈のファイル渡し経路(sc-mbcm・args 全体約 4KB 切り詰めの回避路)。prompt へ path として
+// 埋め込むため baseRef と同じ安全文字クラスのみ許可し、不正値(空白/引用符/バッククォート等)は '' へ倒す=
+// 未供給と同義(graceful・呼出元は returnedArgs のキー一覧と prompt 注入の有無で一次監査できる)。
+const _rawContextFile = (typeof A.contextFile === 'string' && A.contextFile.trim()) || ''
+const contextFile = /^[A-Za-z0-9._/~^@{}-]+$/.test(_rawContextFile) ? _rawContextFile : ''
 // scribeAddPath(sc-u4u): gated autoFix が confirmed を修正後コミットする際、Fix/implement agent が stage に
 // 使う道具パス。CC sandbox は cwd の既知 dotfile/.claude を /dev/null character device 化し `git add -A` を
 // rc=128 で落とす(sc-yqa)。供給時は Fix/implement の stage を `git add -A` でなく scribe-add(非通常ファイルを型で
@@ -658,6 +674,10 @@ function ctxBlock() {
     goal ? `goal:\n${goal}` : '',
     refinedAcceptance ? `acceptance(受入基準):\n${refinedAcceptance}` : '',
     context ? `context:\n${context}` : '',
+    // (12) contextFile: 大文脈のファイル渡し。agent が実バイトを Read する(script は fs 非アクセス)。
+    contextFile
+      ? `context file: ${contextFile}\n(まずこのファイルを Read し、全文を本セルの文脈として扱うこと。Workflow args は全体約 4KB で切り詰められるため、大きな文脈はこのファイルで供給されている)`
+      : '',
   ]
     .filter(Boolean)
     .join('\n\n')
