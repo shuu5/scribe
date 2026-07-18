@@ -68,6 +68,7 @@ Options:
   --review-effort LVL   review 段 effort の opt-in（既定: 未指定=WF 既定 high）。allowlist 完全一致・high 以上のみ（下げ不可・sc-2wv）
   --verify-effort LVL   verify 段 effort の opt-in（既定: 未指定=WF 既定 high）。allowlist 完全一致・high 以上のみ（下げ不可・sc-2wv）
   --add-dimension K:F   追加観点 key:focus（複数指定可・必須4へ WF がマージ）
+  --context-file PATH   大文脈ファイルを WF contextFile へ配線（絶対 path 推奨・args 約4KB 切り詰めの回避路・sc-mbcm）
   --dry-run             bd show を省きプレースホルダで JSON を組む（実 bd 不要・構造検証用）
   -h | --help
 EOF
@@ -81,6 +82,7 @@ ANCHOR="$(pwd)"
 MODEL="opus"
 MAX_CONCURRENCY="4"
 TASK_TYPE=""
+CTX_FILE="" # (sc-eqvv) WF contextFile への配線（未指定=載せない）
 REVIEW_EFFORT="" # (sc-94z) review 段 per-stage effort の opt-in（未指定=WF 既定 high）
 VERIFY_EFFORT="" # (sc-94z) verify 段 per-stage effort の opt-in（未指定=WF 既定 high）
 DIMS_RAW=""
@@ -102,6 +104,7 @@ while [[ $# -gt 0 ]]; do
     --task-type)      scribe_need_val "${2:-}" --task-type; TASK_TYPE="$2"; shift 2 ;;
     --review-effort)  scribe_need_val "${2:-}" --review-effort; REVIEW_EFFORT="$2"; shift 2 ;;
     --verify-effort)  scribe_need_val "${2:-}" --verify-effort; VERIFY_EFFORT="$2"; shift 2 ;;
+    --context-file)   scribe_need_val "${2:-}" --context-file; CTX_FILE="$2"; shift 2 ;;
     --add-dimension)
       scribe_need_val "${2:-}" --add-dimension
       # focus/key に改行・タブが混ざると DIMS_RAW(タブ区切り・改行終端)が壊れ別観点へ silent に化ける。上流で弾く。
@@ -148,6 +151,16 @@ if [[ -n "$VERIFY_EFFORT" ]]; then
   scribe_effort_is_valid "$VERIFY_EFFORT" || scribe_die "--verify-effort は allowlist（$(scribe_effort_allowlist_join '|')）のいずれか完全一致: '$VERIFY_EFFORT'"
   scribe_effort_meets_guard_floor "$VERIFY_EFFORT" || scribe_die "--verify-effort は guard 段の下限フロア（$SCRIBE_GUARD_EFFORT_FLOOR）未満へ下げられません（gate 側を下げない・methodology §1.1 但し書き(1)/sc-2wv）: '$VERIFY_EFFORT'。guard 段は既定 high 固定で、xhigh 等へ上げる方向のみ opt-in できます。"
 fi
+# --context-file（sc-eqvv）: cell-quality WF の contextFile（大文脈のファイル渡し・args 約4KB 切り詰めの
+# 回避路＝sc-mbcm）へ配線する。WF 側 sanitizer と同じ安全文字クラスで builder は fail-loud に検証する
+# （WF は不正値を silent に '' へ倒す graceful ゆえ、ここで die しないと大文脈が黙って欠落する）。
+# 読める通常ファイルであることも早期検証する（typo を WF 起動前に捕捉・agent の Read 失敗を待たない）。
+if [[ -n "$CTX_FILE" ]]; then
+  [[ "$CTX_FILE" =~ ^[A-Za-z0-9._/~^@{}-]+$ ]] \
+    || scribe_die "--context-file が安全文字クラス外です（空白/引用符等は不可・WF 側で silent 破棄される）: '$CTX_FILE'"
+  [[ -f "$CTX_FILE" && -r "$CTX_FILE" ]] \
+    || scribe_die "--context-file が読める通常ファイルではありません: '$CTX_FILE'"
+fi
 
 # --- effort 伝播（sc-7ac・sc-dc9 申し送り）---
 # worker の実効 effort（CC 正規名 CLAUDE_CODE_EFFORT_LEVEL・spawn が worker env へ後勝ち注入済み）を読んで
@@ -183,7 +196,7 @@ DESC="$DESC" TITLE="$TITLE" WORKTREE="$WORKTREE" BASE="$BASE" GOAL="$GOAL" \
 ACCEPTANCE="$ACCEPTANCE" MODEL="$MODEL" SELFTEST="$SELFTEST" \
 MAX_CONCURRENCY="$MAX_CONCURRENCY" TASK_TYPE="$TASK_TYPE" DIMS_RAW="$DIMS_RAW" \
 EFFORT_LEVEL="$EFFORT_LEVEL" REVIEW_EFFORT="$REVIEW_EFFORT" VERIFY_EFFORT="$VERIFY_EFFORT" \
-SCRIBE_ADD="$SCRIPT_DIR/scribe-add" python3 - <<'PY'
+CTX_FILE="$CTX_FILE" SCRIBE_ADD="$SCRIPT_DIR/scribe-add" python3 - <<'PY'
 import json, os
 desc = os.environ["DESC"]
 ctx = ("scribe worker 自己点検（protocol.md §2: cell-quality WF を worker が直接呼び出す）。"
@@ -233,6 +246,11 @@ if ver_eff:
 tt = os.environ.get("TASK_TYPE", "")
 if tt:
     args["taskType"] = tt
+
+# contextFile（sc-eqvv）: 指定時のみ載せる（WF が prompt へ「まず Read せよ」指示として注入・sc-mbcm）。
+ctx_file = os.environ.get("CTX_FILE", "")
+if ctx_file:
+    args["contextFile"] = ctx_file
 
 # 追加観点（D3）: 指定時のみ dimensions を載せる（WF が必須4へマージ）。未指定なら WF が DEFAULT4 を補完。
 dims_raw = os.environ.get("DIMS_RAW", "")
