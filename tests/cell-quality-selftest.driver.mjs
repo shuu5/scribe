@@ -111,7 +111,8 @@ async function runWorkflow() {
     effortCalls.push({ label, effort: opts && opts.effort }) // (sc-dc9) opts.effort を記録(roAgent/runAgent は opts を透過ゆえ届く)
     // (sc-xyw errata) roAgent fallback は降格後 `prompt + RO_DISCIPLINE` を渡し agentType 構造強制を prompt 規律で代替する。
     // この前置マーカー(agentType 構造強制の代替)が付いた呼出しを記録し、消失(=完全 fail-open 退行)を behavioral に検出する。
-    promptCalls.push({ label, hasDiscipline: /agentType 構造強制の代替/.test(String(prompt == null ? '' : prompt)) })
+    // (sc-mbcm) prompt 全文も保持する=CQ_PROMPT_GREP 軸(contextFile 注入等 prompt-level 配線の behavioral 検証)が読む。
+    promptCalls.push({ label, hasDiscipline: /agentType 構造強制の代替/.test(String(prompt == null ? '' : prompt)), prompt: String(prompt == null ? '' : prompt) })
     // (sc-xyw) fallback シナリオ: agentType 付き呼出しは probe verified の "not found" 形状で reject する。
     // roAgent は isAgentTypeNotFound を検知 → [RO-FALLBACK] を log → 降格 flag を立て → agentType 無しで再呼出しする
     // (=再呼出しは agentType 無しゆえここを通らず resolve)。降格が後続へ伝播していれば以降の read-only 段も最初から
@@ -217,6 +218,15 @@ function printResult(result, calls, logs, agentTypeCalls, promptCalls, effortCal
   // この前置が消えても従来の log/agentType 系 assert は全 green ゆえ、silent fail-open 退行を捕える専用軸。
   const roDisciplineCallCount = (promptCalls || []).filter((p) => p && p.hasDiscipline).length
   K('roDisciplineCallCount', roDisciplineCallCount)
+  // (sc-mbcm) prompt 内容の汎用 grep 軸: env CQ_PROMPT_GREP を含む prompt を持った呼出しの数と label prefix。
+  // contextFile の ctxBlock 注入(classify/plan/implement/review/fix に付き verify/snapshot に付かない)等、
+  // prompt-level の配線を behavioral に assert する(未設定時は何も出さない=既存 assert に影響ゼロ)。
+  const pg = process.env.CQ_PROMPT_GREP || ''
+  if (pg) {
+    const hits = (promptCalls || []).filter((p) => p && typeof p.prompt === 'string' && p.prompt.includes(pg))
+    K('promptGrepCount', hits.length)
+    K('promptGrepLabels', Array.from(new Set(hits.map((h) => String(h.label).split(' ')[0]))).sort().join(','))
+  }
   const rvCalls = calls.filter((c) => c.startsWith('review:') || c.startsWith('verify:')).length
   K('reviewVerifyCalls', rvCalls)
   // (sc-dc9) effort pin の behavioral 検証: 全 agent 呼出しに opts.effort が届いたか + その distinct 値。
