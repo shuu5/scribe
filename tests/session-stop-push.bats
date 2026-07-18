@@ -4,7 +4,7 @@
 # universal sync Layer2 — throttle 付き admin-only Stop hook 即 push（sc-fz5i / orch-ptaq relay /
 # orch-klca 論点5）の **e2e（Stop stdin JSON → bdw funnel push）** と **hooks.json wire 検査** の hermetic bats。
 #
-# hook wrapper = scripts/hooks/session-stop-push.sh（policy: role gate / 自台帳解決 / orch skip）
+# hook wrapper = scripts/hooks/session-stop-push.sh（policy: role gate / 自台帳解決。旧 orch skip は sc-i4xc で解除済）
 # 実体 script  = scripts/scribe-sync-push.sh（throttle / write-signal / remote / bdw funnel push / marker stamp）
 #
 # 検証する契約不変条件（mandate 検証リスト①-⑤ + scope-fence）:
@@ -152,12 +152,15 @@ run_stop() { # $1=cwd  rest=env
     [ ! -f "$BDW_CALL_LOG" ]
 }
 
-@test "(o) 自台帳 == orch 台帳（orchestrator 自身）→ skip（write あっても no-push）" {
+@test "(o) 自台帳 == orch 台帳（orchestrator 自身）→ 解除後は通常どおり push（旧 rollout gate 解除・sc-i4xc/orch-t4oo）" {
+    # 旧 pin（skip）の反転: un-10h5 実層 Seq-2/5 GREEN 充足で orch-skip は解除された。
+    # orch 台帳を他台帳と同扱いで push する（skip を復活させた実装は本テストが RED にする）。
     mknow "$ORCH_SELF/.beads/issues.jsonl"   # write 有（非空虚）
     run run_stop "$ORCH_SELF/.beads/.." SCRIBE_PUSH_THROTTLE_MIN=0
     [ "$status" -eq 0 ]
-    [ ! -f "$BDW_CALL_LOG" ]
-    [ ! -f "$ORCH_SELF/.beads/scribe-push-throttle" ]
+    [ -f "$BDW_CALL_LOG" ]
+    run grep -q 'dolt push' "$BDW_CALL_LOG"; [ "$status" -eq 0 ]
+    [ -f "$ORCH_SELF/.beads/scribe-push-throttle" ]
 }
 
 # ============================ ② throttle ============================
