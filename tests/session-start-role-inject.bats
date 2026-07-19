@@ -10,6 +10,8 @@
 #   - role 別注入内容の必須キーワード存在(spec §2.1-2.3)
 #   - fail-safe: doc 不在で exit 0 degrade(全 role)・stderr 警告・stdout 無注入
 #   - cwd ソース: stdin JSON 優先 / 無ければ $PWD フォールバック
+#   - ultracode リマインダ source 分岐(sc-o7fz): startup/resume/欠落/未知=打鍵案内・clear=保持 1 行・
+#     compact=suppress・sed フォールバック片系統・worker/consult 非混入
 #   - hooks.json: valid JSON / script 参照 / 安全形の dynamic assertion(ガード支配)
 
 bats_require_minimum_version 1.5.0
@@ -142,6 +144,75 @@ inject_tmux() {
     run --separate-stderr inject consult "$REPO" "$ANCHOR_JSON"
     [ "$status" -eq 0 ]
     [[ "$output" != *"/effort ultracode"* ]]
+}
+
+# ---- ultracode リマインダ source 分岐(sc-o7fz/orch-cn7s): §9『/clear は保持・respawn でのみ喪失』 ----
+# startup=打鍵案内 / clear=保持 1 行へ差し替え(再打鍵誘導を焼かない) / compact=suppress /
+# resume・source 欠落・未知値=打鍵案内(fail-safe: 出し損ね=silent 喪失 > 余分な 1 行 noise)。
+@test "ultracode source 分岐: startup → 打鍵案内を出す(新規 process=確実に off)" {
+    run --separate-stderr inject admin "$REPO" "{\"cwd\":\"$ANCHOR_DIR\",\"source\":\"startup\"}"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/effort ultracode"* ]]
+}
+
+@test "ultracode source 分岐: clear → 打鍵案内を出さず『/clear は保持』1 行に差し替え(§9 整合)" {
+    run --separate-stderr inject admin "$REPO" "{\"cwd\":\"$ANCHOR_DIR\",\"source\":\"clear\"}"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"/effort ultracode"* ]]
+    [[ "$output" != *"打鍵してください"* ]]
+    [[ "$output" == *"/clear は ultracode を保持"* ]]
+    [[ "$output" == *"protocol §9"* ]]
+}
+
+@test "ultracode source 分岐: compact → リマインダ・保持行とも出さない(suppress・本文注入は不変)" {
+    run --separate-stderr inject admin "$REPO" "{\"cwd\":\"$ANCHOR_DIR\",\"source\":\"compact\"}"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"/effort ultracode"* ]]
+    [[ "$output" != *"ultracode を保持"* ]]
+    [[ "$output" == *"role=admin"* ]]
+    [[ "$output" == *"あなたは scribe admin"* ]]
+}
+
+@test "ultracode source 分岐: resume → 打鍵案内を出す(新規 process=喪失濃厚側の fail-safe)" {
+    run --separate-stderr inject admin "$REPO" "{\"cwd\":\"$ANCHOR_DIR\",\"source\":\"resume\"}"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/effort ultracode"* ]]
+}
+
+@test "ultracode source 分岐: source 欠落/未知値 → 打鍵案内を出す(抽出不能の fail-safe)" {
+    # ANCHOR_JSON は source キー無し(source を持たない旧 CC 相当)
+    run --separate-stderr inject admin "$REPO" "$ANCHOR_JSON"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/effort ultracode"* ]]
+    # 未知の将来値も同じ側(出す)へ倒す
+    run --separate-stderr inject admin "$REPO" "{\"cwd\":\"$ANCHOR_DIR\",\"source\":\"future-mode\"}"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/effort ultracode"* ]]
+}
+
+@test "ultracode source 分岐: clear の保持行は worker/consult に混入しない" {
+    run --separate-stderr inject worker "$REPO" "{\"cwd\":\"$ANCHOR_DIR\",\"source\":\"clear\"}"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"ultracode を保持"* ]]
+    run --separate-stderr inject consult "$REPO" "{\"cwd\":\"$ANCHOR_DIR\",\"source\":\"clear\"}"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"ultracode を保持"* ]]
+}
+
+@test "ultracode source 分岐: jq 不在(sed フォールバック)でも source=clear を認識する" {
+    # cwd と同じ汎用抽出器(_scribe_extract_json_string)の sed 分岐が source でも機能する片系統回帰検知。
+    local bindir="$BATS_TEST_TMPDIR/nojq-bin-src"
+    mkdir -p "$bindir"
+    local b
+    for b in bash env dirname cat sed head awk; do
+        ln -sf "$(command -v "$b")" "$bindir/$b"
+    done
+    local j="{\"cwd\":\"$ANCHOR_DIR\",\"source\":\"clear\"}"
+    run --separate-stderr env -i PATH="$bindir" SCRIBE_ROLE= CLAUDE_PLUGIN_ROOT="$REPO" \
+        bash -c "printf '%s' '$j' | '$SCRIPT'"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"/effort ultracode"* ]]
+    [[ "$output" == *"/clear は ultracode を保持"* ]]
 }
 
 @test "優先順: env(consult) > cwd(.worktrees) — worktree cwd でも consult が勝つ" {
@@ -368,7 +439,7 @@ inject_tmux() {
 
 # ---- cwd 抽出: jq 不在環境で sed フォールバック分岐を強制(回帰ネット) ----
 @test "cwd 抽出: jq 不在(restricted PATH)→ sed フォールバックで cwd 解決(worktree→worker)" {
-    # jq を PATH から外し _scribe_extract_cwd の sed 分岐(else)を強制実行する。
+    # jq を PATH から外し _scribe_extract_json_string の sed 分岐(else)を強制実行する。
     # script が sed 分岐でも cwd を正しく抽出し role=worker を出すことを assert(片系統の回帰検知)。
     local bindir="$BATS_TEST_TMPDIR/nojq-bin"
     mkdir -p "$bindir"
