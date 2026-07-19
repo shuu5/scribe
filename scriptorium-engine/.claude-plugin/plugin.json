@@ -1,0 +1,5 @@
+{
+  "name": "scriptorium-engine",
+  "version": "0.1.0",
+  "description": "cross-project orchestration の汎用 engine（hydrate / dispatch / spawn-admin / 監視 scan 群 / guard hooks）。mechanism=public / value=private の分離: 連結先 project registry・anchor 実 path・prefix map 等の値は private 配備層が env/config seam（ORCH_ANCHOR / ORCH_ANCHOR_CONFIG / ORCH_*_PROJECTS / ORCH_NUDGE_PREFIX_MAP / ORCH_DISPATCH_SPAWN 等）で供給し、本 plugin は機構のみを持つ（値の hardcode fallback を持たず未供給は fail-loud）。suite 親 plugin（scribe）と root+subdir 同居で独立稼働する 2nd plugin subdir。"
+}
