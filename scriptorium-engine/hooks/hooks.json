@@ -1,0 +1,54 @@
+{
+  "_comment": "scriptorium-engine hook wire（PreToolUse=guard 3 本 / SessionStart=spec-inject + guard-health + workinprogress）。実体 script の設計 SSOT は各 script の header コメント。Bash matcher は 2 guard を順に起動する: bd-write-guard.py（bd write）と bash-file-write-guard.py（非 bd Bash file 変異）。両者は独立で、いずれかが exit2 すれば Bash は block される。SessionStart 3 本は self-scope（自台帳 session のみ発火）で context 注入する。",
+  "_comment_safety": "guard を無効化しないこと: 各 PreToolUse wire は `if [ -x ]; then python3; else exit 0; fi`（script 不在のみ exit0・存在時は guard の exit2 を伝播）。`|| true` 付与は guard 無効化ゆえ禁止。SessionStart wire は逆に fail-open（`|| true`）＝context 注入は cosmetic ゆえ script 不在でも session を止めない。",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SCRIPT=\"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/session-start-spec-inject.sh\"; [ -x \"$SCRIPT\" ] && \"$SCRIPT\" || true",
+            "timeout": 10000
+          },
+          {
+            "type": "command",
+            "command": "SCRIPT=\"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/session-start-guard-health.py\"; [ -x \"$SCRIPT\" ] && python3 \"$SCRIPT\" || true",
+            "timeout": 10000
+          },
+          {
+            "type": "command",
+            "command": "SCRIPT=\"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/session-start-workinprogress.sh\"; [ -x \"$SCRIPT\" ] && \"$SCRIPT\" || true",
+            "timeout": 15000
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SCRIPT=\"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/bd-write-guard.py\"; if [ -x \"$SCRIPT\" ]; then python3 \"$SCRIPT\"; else exit 0; fi",
+            "timeout": 10000
+          },
+          {
+            "type": "command",
+            "command": "SCRIPT=\"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/bash-file-write-guard.py\"; if [ -x \"$SCRIPT\" ]; then python3 \"$SCRIPT\"; else exit 0; fi",
+            "timeout": 10000
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SCRIPT=\"${CLAUDE_PLUGIN_ROOT}/scripts/hooks/file-write-guard.py\"; if [ -x \"$SCRIPT\" ]; then python3 \"$SCRIPT\"; else exit 0; fi",
+            "timeout": 10000
+          }
+        ]
+      }
+    ]
+  }
+}
