@@ -34,9 +34,11 @@
 #   SCRIBE_ENVPROBE_TOKEN plant の token を固定（テスト用・既定は uuid/乱数生成）
 #
 # Usage:
-#   scribe-env-probe.sh plant  --worktree W
-#   scribe-env-probe.sh verify --token T --worktree W [--base B] [--also-tmp]
+#   scribe-env-probe.sh plant    --worktree W
+#   scribe-env-probe.sh verify   --token T --worktree W [--base B] [--also-tmp]
+#   scribe-env-probe.sh classify   # 失敗 Bash 呼出しの stderr を stdin から分類（症状 A=bwrap launch-race 判定・un-9c8d）
 # 終了コード: 0=ENV_OK / 1=usage・die（scribe_die・fail-loud） / 3=cross-call 非永続 / 4=0 commit / 5=.git 書込劣化（sc-owj）。
+#   （classify は分類 advisory ゆえ常に exit0＝劣化コードを持たない。TRANSIENT_LAUNCH_RACE/PASS_THROUGH を stdout に出す。）
 # 意味論の単一 SSOT = docs/protocol.md §6「env 劣化 exit code catalog」（sc-sbb 案B で実体移設。
 # 本ヘッダは実装注記＝drift したら §6 の表が勝つ）。
 set -euo pipefail
@@ -48,10 +50,12 @@ source "$SCRIPT_DIR/lib/scribe-lib.sh"
 usage() {
   cat <<'EOF'
 Usage:
-  scribe-env-probe.sh plant  --worktree W
-  scribe-env-probe.sh verify --token T --worktree W [--base B] [--also-tmp]
+  scribe-env-probe.sh plant    --worktree W
+  scribe-env-probe.sh verify   --token T --worktree W [--base B] [--also-tmp]
+  scribe-env-probe.sh classify           # 失敗 Bash 呼出しの stderr を stdin から分類（症状 A=bwrap launch-race か否か）
 ENV_DEGRADED:<理由> + 非0 = 環境劣化（Bash 非永続 / 0 commit / .git 書込不能）。worker は done を申告せず
 `STATUS: blocked — env degraded …` を bdw で書いて停止する。
+classify は TRANSIENT_LAUNCH_RACE（症状 A・再実行）/ PASS_THROUGH（本表の exit code 判定へ）を stdout に出す（un-9c8d）。
 EOF
   exit "${1:-0}"
 }
@@ -59,10 +63,44 @@ EOF
 [[ $# -gt 0 ]] || usage 1
 MODE="$1"; shift
 case "$MODE" in
-  plant|verify) ;;
+  plant|verify|classify) ;;
   -h|--help) usage 0 ;;
-  *) scribe_die "未知のモード: '$MODE'（plant|verify を指定）" ;;
+  *) scribe_die "未知のモード: '$MODE'（plant|verify|classify を指定）" ;;
 esac
+
+# ---- classify: 失敗した Bash 呼出しの stderr を分類する（症状 A=bwrap launch-race か否か・un-9c8d）----
+# 症状 A（bwrap launch-race）: worker の Bash 呼出しが **launch 時**に
+#   `bwrap: Can't get type of source …/.git/*.lock: No such file or directory` で exit1 する事象。
+#   locus = **CC 組込み sandbox**（共有 `.git` を writable〔config/hooks は拒否〕にするため `.git` 直下を
+#   per-entry bind 列挙する層）が、共有 common-dir への並行 git atomic config write（config.lock を
+#   create→rename→unlink）と race し、bind source が bwrap の stat() 到達前に消えて起きる。scribe は `.git` を
+#   一切 bind 列挙しない（`grep config.lock`=0 / gen-sandbox allowWrite は `.beads` runtime+lock 鍵のみ / 本
+#   env-probe は自前 bwrap 非起動＝launch 失敗時は script 本体が走る前）ゆえ **repo からは launch を retry でき
+#   ない**（race の恒久除去は CC 側 escalation）。再実行で必ず消える transient なので worker は同一コマンドを
+#   1 回だけ再実行し、ENV_DEGRADED/STATUS: blocked と記録しない（症状 B＝env-probe が機械判定した真の劣化＝
+#   exit 3/4/5 とは別物）。意味論 SSOT = docs/protocol.md §6「env 劣化 exit code catalog」症状 A 注記。
+# 判定は署名一致のみ（stderr を stdin から読む・exit code に依存しない）。認識できない失敗は PASS_THROUGH＝
+# 通常の exit code 判定へ委ねる（真の劣化を transient と誤って握りつぶさない＝**マスキング回帰の番人**）。
+if [[ "$MODE" == classify ]]; then
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help) usage 0 ;;
+      --) shift; break ;;
+      *) scribe_die "classify は引数を取りません（stderr は stdin から渡す）: $1" ;;
+    esac
+  done
+  _cls_err="$(cat)"
+  # bwrap の bind-source 消失（共有 `.git` 直下の transient lockfile が stat 前に消える）signature。
+  # case/apostrophe に寛容（-i・`can.?t`）。`.git/*.lock` に限定して genuine な非 lock source 欠落を
+  # 誤って transient と判定しない（config.lock/index.lock/packed-refs.lock 等 git atomic-write 鍵は共通機序）。
+  if printf '%s' "$_cls_err" \
+       | grep -Eiq "bwrap:.*can.?t get type of source .*/\.git/[^ ]*\.lock: no such file or directory"; then
+    printf 'TRANSIENT_LAUNCH_RACE\n'
+    exit 0
+  fi
+  printf 'PASS_THROUGH\n'
+  exit 0
+fi
 
 WORKTREE=""; TOKEN=""; BASE=""; ALSO_TMP=0
 while [[ $# -gt 0 ]]; do
