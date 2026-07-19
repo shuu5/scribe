@@ -10,6 +10,9 @@
 #   - foreign 台帳 → no-op(self-scope・従来)。
 #   - 非vacuity(mutation): anchor→注入が valid doc で PASS する = no-op 群が常時空でない証明。
 #     さらに sentinel 破壊 fixture で anchor すら no-op = doc 依存(fail-open)を pin。
+#   - TOP_SPEC env seam(sc-300x/orch-ocbx): ORCH_SPEC_INJECT_TOP_SPEC 設定時は指定 doc から注入
+#     (default 不使用・default 破壊でも注入=engine 単独稼働 modality の非vacuous teeth)。seam 経路でも
+#     path 不在/sentinel 欠落/重複/空区間の fail-open が同一に効く。未設定は byte 不変(既存 test 群)。
 #   - 本体 `--self-test` が green。bash -n が通る。
 #
 # 方式: temp に fixture plugin root(sentinel 付き top-spec)と台帳 fixture を作り、hook payload の
@@ -27,6 +30,12 @@ setup() {
     mkdir -p "$PLUGIN/docs"
     printf '# fixture\n<!-- spec-inject:begin -->\nPRIMER-FIXTURE-CONTENT\n<!-- spec-inject:end -->\n' \
         > "$PLUGIN/docs/scriptorium-top-spec.md"
+
+    # TOP_SPEC seam 用 alt fixture(sc-300x): private 配備層が供給する別 path の spec doc を模す。
+    ALT="$TEST_TMPDIR/private"
+    mkdir -p "$ALT"
+    printf '# alt\n<!-- spec-inject:begin -->\nSEAM-FIXTURE-CONTENT\n<!-- spec-inject:end -->\n' \
+        > "$ALT/top-spec.md"
 
     # 台帳 fixture(walk-up で .beads/metadata.json の dolt_database を解決)。
     ANCHOR="$TEST_TMPDIR/anchor"
@@ -72,14 +81,32 @@ run_inject() {  # $1=cwd
     export CLAUDE_PLUGIN_ROOT="$PLUGIN"
     # TMUX を剥がす: bats を実 tmux window 内で回したときに consult gate(第3軸)が実 tmux を呼ばないよう遮断し、
     # 非 consult 経路(既存 modality)を hermetic に固定する(実窓名依存の flake を排除)。
-    run env -u TMUX -u TMUX_PANE bash "$SCRIPT" < "$TEST_TMPDIR/payload.json"
+    # ORCH_SPEC_INJECT_TOP_SPEC も剥がす(sc-300x): 外来 env の seam 供給(orch-supply 済み環境で bats を
+    # 回す等)が default 経路の pin を汚さない hermetic 化。
+    run env -u TMUX -u TMUX_PANE -u ORCH_SPEC_INJECT_TOP_SPEC bash "$SCRIPT" < "$TEST_TMPDIR/payload.json"
+}
+
+# TOP_SPEC seam 経路(sc-300x): ORCH_SPEC_INJECT_TOP_SPEC を supply して起動する。$2=seam が指す path。
+run_inject_seam() {  # $1=cwd $2=spec doc path
+    printf '{"cwd":"%s"}' "$1" > "$TEST_TMPDIR/payload.json"
+    export CLAUDE_PLUGIN_ROOT="$PLUGIN"
+    run env -u TMUX -u TMUX_PANE ORCH_SPEC_INJECT_TOP_SPEC="$2" bash "$SCRIPT" < "$TEST_TMPDIR/payload.json"
+}
+
+# consult 窓 + seam 併用(sc-300x gate 追補・3 軸目の非迂回 pin): seam を供給しても consult gate が先に効く
+# (TOP_SPEC 読取りは consult gate より後)ことを、将来の gate 順序変更への回帰網として pin する。
+run_inject_consult_seam() {  # $1=cwd $2=window-name $3=spec doc path
+    printf '{"cwd":"%s"}' "$1" > "$TEST_TMPDIR/payload.json"
+    export CLAUDE_PLUGIN_ROOT="$PLUGIN"
+    run env ORCH_SPEC_INJECT_TOP_SPEC="$3" PATH="$STUBBIN:$PATH" TMUX="/tmp/fake,1,0" TMUX_PANE="%9" STUB_WNAME="$2" \
+        bash "$SCRIPT" < "$TEST_TMPDIR/payload.json"
 }
 
 # consult 経路(orch-qcqz 第3軸): TMUX + stub tmux を付けて起動する。$2=window 名(空→tmux 失敗を模す)。
 run_inject_consult() {  # $1=cwd $2=window-name
     printf '{"cwd":"%s"}' "$1" > "$TEST_TMPDIR/payload.json"
     export CLAUDE_PLUGIN_ROOT="$PLUGIN"
-    run env PATH="$STUBBIN:$PATH" TMUX="/tmp/fake,1,0" TMUX_PANE="%9" STUB_WNAME="$2" \
+    run env -u ORCH_SPEC_INJECT_TOP_SPEC PATH="$STUBBIN:$PATH" TMUX="/tmp/fake,1,0" TMUX_PANE="%9" STUB_WNAME="$2" \
         bash "$SCRIPT" < "$TEST_TMPDIR/payload.json"
 }
 
@@ -138,6 +165,75 @@ run_inject_consult() {  # $1=cwd $2=window-name
     run_inject_consult "$FOREIGN" "consult-abc"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+}
+
+# ---- TOP_SPEC env seam(sc-300x/orch-ocbx): private 配備層が spec doc path を供給する override ----
+@test "seam: ORCH_SPEC_INJECT_TOP_SPEC 設定 → 指定 doc の sentinel 区間を注入(default doc は使わない)" {
+    run_inject_seam "$ANCHOR" "$ALT/top-spec.md"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SEAM-FIXTURE-CONTENT"* ]]
+    [[ "$output" != *"PRIMER-FIXTURE-CONTENT"* ]]
+}
+
+@test "seam 非vacuity: default doc 不在でも seam の doc から注入(engine 単独稼働 modality=G4 gap 解消)" {
+    # engine tree に規約 doc が同梱されない carve-out 後を模す: default path を除去。
+    # seam 解決を no-op 化する mutation はここが fail-open no-op に落ちて RED になる(teeth)。
+    rm -f "$PLUGIN/docs/scriptorium-top-spec.md"
+    run_inject_seam "$ANCHOR" "$ALT/top-spec.md"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SEAM-FIXTURE-CONTENT"* ]]
+}
+
+@test "seam fail-open: 指す path 不在 → 注入なし(既存 [ ! -r ] 分岐が seam 経路でも効く)" {
+    run_inject_seam "$ANCHOR" "$TEST_TMPDIR/nonexistent.md"
+    [ "$status" -eq 0 ]
+    # fail-open 警告(stderr)が $output に混ざるため「注入内容を含まない」で判定(既存 mutation test と同形)。
+    [[ "$output" != *"FIXTURE-CONTENT"* ]]
+    [[ "$output" != *"=== [orchestrator/SessionStart] role 文脈注入"* ]]
+}
+
+@test "seam fail-open: sentinel 欠落 doc → 注入なし" {
+    printf '# broken\n(no sentinels here)\n' > "$ALT/top-spec.md"
+    run_inject_seam "$ANCHOR" "$ALT/top-spec.md"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"FIXTURE-CONTENT"* ]]
+    [[ "$output" != *"=== [orchestrator/SessionStart] role 文脈注入"* ]]
+}
+
+@test "seam fail-open: sentinel 重複(2 組) doc → 注入なし(over-inject 防止が seam 経路でも効く)" {
+    printf '<!-- spec-inject:begin -->\nDUP-A\n<!-- spec-inject:end -->\n<!-- spec-inject:begin -->\nDUP-B\n<!-- spec-inject:end -->\n' \
+        > "$ALT/top-spec.md"
+    run_inject_seam "$ANCHOR" "$ALT/top-spec.md"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"DUP-A"* ]]
+    [[ "$output" != *"DUP-B"* ]]
+}
+
+@test "seam fail-open: 空 sentinel 区間 doc → 注入なし" {
+    printf '<!-- spec-inject:begin -->\n<!-- spec-inject:end -->\n' > "$ALT/top-spec.md"
+    run_inject_seam "$ANCHOR" "$ALT/top-spec.md"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"=== [orchestrator/SessionStart] role 文脈注入"* ]]
+}
+
+@test "seam は self-scope/cwd 軸を迂回しない: seam 設定でも foreign 台帳・worktree cwd は no-op" {
+    run_inject_seam "$FOREIGN" "$ALT/top-spec.md"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run_inject_seam "$ANCHOR/.worktrees/spawn/wt" "$ALT/top-spec.md"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "seam は consult 第3軸も迂回しない: seam 設定 + consult 窓 → no-op(alt doc を注入しない)" {
+    run_inject_consult_seam "$ANCHOR" "consult-abc" "$ALT/top-spec.md"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    # 対の陽性 pin(非vacuity): 同じ seam 供給でも非 consult 窓なら alt doc から注入される
+    # = 上の no-op が「seam が常に死んでいる」せいではないことの teeth。
+    run_inject_consult_seam "$ANCHOR" "orchestrator" "$ALT/top-spec.md"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SEAM-FIXTURE-CONTENT"* ]]
 }
 
 @test "本体 --self-test が green(fail-closed)" {

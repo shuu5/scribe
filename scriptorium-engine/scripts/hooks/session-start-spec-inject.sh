@@ -50,7 +50,9 @@
 #   .claude/worktrees) / foreign)を作り、各 cwd を stdin JSON で与えて本 script を subprocess 起動し、
 #   anchor→注入 / worktree→no-op / foreign→no-op を assert する。非vacuity: anchor→注入が valid doc で
 #   PASS することが「no-op 群が常時空でない」証明(cwd 軸が識別している)。加えて sentinel 破壊 fixture で
-#   anchor すら no-op になる mutation で doc 依存(fail-open)も pin。assert が 1 つでも落ちれば非 0。
+#   anchor すら no-op になる mutation で doc 依存(fail-open)も pin。TOP_SPEC seam(sc-300x)も同型で
+#   pin する: seam の alt doc から注入(非vacuous)・壊れた alt doc は fail-open。assert が 1 つでも
+#   落ちれば非 0。hermetic 化のため subprocess 起動は外来 ORCH_SPEC_INJECT_TOP_SPEC を unset する。
 #
 # fail-safe(全セッション破壊の防止): 判定不能・SSOT doc 不在・sentinel 欠落でもセッションを
 #   壊さない。set -e は使わず常に exit 0(degrade)、警告は stderr。docs 不在/抽出空は stderr
@@ -69,7 +71,13 @@ if [ -z "$PLUGIN_ROOT" ] || [ ! -d "$PLUGIN_ROOT" ]; then
     # scripts/hooks/ の 2 つ上 = plugin root
     PLUGIN_ROOT="$(cd "$_SCRIPT_DIR/../.." 2>/dev/null && pwd)"
 fi
-TOP_SPEC="$PLUGIN_ROOT/docs/scriptorium-top-spec.md"
+# TOP_SPEC env seam(ORCH_SPEC_INJECT_TOP_SPEC・sc-300x/orch-ocbx・orch-w9we.9 Leg-C): 既定は従来どおり
+# plugin root 相対＝seam 未供給なら byte 不変の挙動(additive)。engine 単独稼働(subdir carve-out)では
+# 規約 doc が engine tree に同梱されない(private 配備層に残る)ため、private 層(orch-supply.sh)が spec doc の
+# 絶対 path を供給する override seam を置く(mechanism=public / value=private・他 engine seam と同じ ORCH_
+# 接頭辞 per-consumer 形)。fail-open 契約は不変: seam が指す path の不在/壊れも従来どおり下の
+# [ ! -r ] / sentinel gate が warning + skip continue へ落とす(path 解決だけを seam 化・検査ロジック不変)。
+TOP_SPEC="${ORCH_SPEC_INJECT_TOP_SPEC:-$PLUGIN_ROOT/docs/scriptorium-top-spec.md}"
 
 # --- 共有 self-scope lib を source（bd orch-t9z で 3 consumer から dedup・SSOT = scripts/hooks/lib/orch_session.sh） ---
 # _extract_cwd / _json_is_valid / _ledger_dolt_database / _is_orch_session / _is_worktree_cwd を提供する。
@@ -126,10 +134,10 @@ TMUXEOF
 
     _st_run() {  # $1=cwd → fixture plugin root で本 script を fresh 起動し stdout を返す(TMUX 無し=非 consult 経路)
         # env -u TMUX: self-test を実 tmux window 内で回したときに consult gate が実 tmux を呼ばないよう遮断(hermetic)。
-        printf '{"cwd":"%s"}' "$1" | env -u TMUX -u TMUX_PANE CLAUDE_PLUGIN_ROOT="$st_tmp/plugin" bash "$0" 2>/dev/null
+        printf '{"cwd":"%s"}' "$1" | env -u TMUX -u TMUX_PANE -u ORCH_SPEC_INJECT_TOP_SPEC CLAUDE_PLUGIN_ROOT="$st_tmp/plugin" bash "$0" 2>/dev/null
     }
     _st_run_consult() {  # $1=cwd $2=window-name(空→tmux 失敗を模す) : TMUX + stub tmux 付きで起動(consult 経路)
-        printf '{"cwd":"%s"}' "$1" | env CLAUDE_PLUGIN_ROOT="$st_tmp/plugin" \
+        printf '{"cwd":"%s"}' "$1" | env -u ORCH_SPEC_INJECT_TOP_SPEC CLAUDE_PLUGIN_ROOT="$st_tmp/plugin" \
             PATH="$st_tmp/bin:$PATH" TMUX="/tmp/fake,1,0" TMUX_PANE="%9" STUB_WNAME="$2" \
             bash "$0" 2>/dev/null
     }
@@ -168,6 +176,26 @@ TMUXEOF
     # 非vacuity(mutation): sentinel を壊すと anchor でも no-op(fail-open)＝gate が本当に doc に依存。
     printf '# broken\n(no sentinels here)\n' > "$st_tmp/plugin/docs/scriptorium-top-spec.md"
     _st_noop   "mutation: sentinel 破壊 → anchor でも no-op(fail-open・非vacuous)" "$st_tmp/anchor"
+
+    # TOP_SPEC seam(sc-300x/orch-ocbx): default doc は直前の mutation で破壊済み → seam の alt doc から
+    # 注入されれば seam 解決が効いている非vacuous 証明(seam を no-op 化すると default 破壊経路へ落ち RED)。
+    mkdir -p "$st_tmp/alt"
+    printf '# alt\n<!-- spec-inject:begin -->\nSEAM-FIXTURE-CONTENT\n<!-- spec-inject:end -->\n' \
+        > "$st_tmp/alt/spec.md"
+    _st_seam_run() {  # $1=cwd : seam を alt doc へ向けて fresh 起動
+        printf '{"cwd":"%s"}' "$1" | env -u TMUX -u TMUX_PANE \
+            ORCH_SPEC_INJECT_TOP_SPEC="$st_tmp/alt/spec.md" CLAUDE_PLUGIN_ROOT="$st_tmp/plugin" \
+            bash "$0" 2>/dev/null
+    }
+    out="$(_st_seam_run "$st_tmp/anchor")"
+    if printf '%s' "$out" | grep -q 'SEAM-FIXTURE-CONTENT'; then
+        echo "ok: seam: ORCH_SPEC_INJECT_TOP_SPEC → alt doc から注入(非vacuous)"
+    else echo "FAIL: seam — alt doc からの注入を期待したが空/不一致: [$out]" >&2; st_fail=1; fi
+    # seam 経路の fail-open: seam の指す doc の sentinel が壊れていれば従来どおり no-op(検査ロジック共有)。
+    printf '# broken alt\n(no sentinels here)\n' > "$st_tmp/alt/spec.md"
+    out="$(_st_seam_run "$st_tmp/anchor")"
+    if [ -z "$out" ]; then echo "ok: seam: 壊れた alt doc → no-op(fail-open が seam 経路でも同一)"
+    else echo "FAIL: seam fail-open — no-op を期待したが出力あり: [$out]" >&2; st_fail=1; fi
 
     if [ "$st_fail" -eq 0 ]; then echo "spec-inject --self-test: PASS"; exit 0
     else echo "spec-inject --self-test: FAIL" >&2; exit 1; fi
