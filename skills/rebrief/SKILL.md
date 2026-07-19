@@ -136,9 +136,17 @@ mv "<CONSUME-TARGET の左辺>" "<右辺（.consumed.md）>"
 - **orphan は自動で consume しない**——orphan は別 session の文脈ゆえ、内容を読んで引き継ぐか捨てるかは人間の判断。
   brief で surface するに留め、指示があったときだけ触る。
 - **`[WM-CANDIDATE]` の Read は「触る」に当たらない**（read-only ゆえ §2-b は常に実行してよい）。
-  ただし候補の **consume（mv）は既定でしない**——「自分の respawn 前の退避物だと確認でき、その内容を
-  brief に反映し終えた」ときに限り、人間へ mv 先を提示して指示を仰ぐ。候補は `[ORPHAN-WM]` にも同じ file が
-  出るが、それは fetch が両者を区別できないため（役割が違うだけで矛盾ではない）。
+  候補の **consume（mv）は「正規ケースは確認せず自動 consume・正規外のみ人間へ確認」**（user 裁定 2026-07-19・RULE-1）:
+  - **正規ケース（＝確認せず自動 consume）**: `[WM-CANDIDATE]` が**単一** ∧ その内容（「計画弧」「命令・制約」節）が
+    自 session の直前作業と整合する（＝§2-b で読んで採用し brief に反映し終えた、自分の respawn / `/clear` 前の退避物）／
+    または current-sid の WM そのもの（`[CONSUME-TARGET]`）。この 2 つは **reversible な mv**（消えても次サイクルの
+    `/session:ready-compaction` が consumed から carry-forward で拾う）ゆえ routine な確認往復を省く。
+  - **正規外（＝surface して人間へ確認・ask 維持）**: 候補内容が直前作業と**不一致** / 曖昧な候補が**複数** /
+    所有 session **不明** / 別 session の orphan が**混在** / `[DIFF-UNKNOWN]` のまま**未突合**。この時は consume せず
+    brief に loud surface し、人間へ mv 先を提示して指示を仰ぐ。
+  - **不変の安全弁**: `[ORPHAN-WM]`（別 session の残置・sid≠current）は**自動 consume しない**（上記 orphan バレットを維持）。
+    候補は `[ORPHAN-WM]` にも同じ file が出るが fetch は両者を区別できない（役割が違うだけで矛盾ではない）
+    ＝正規ケースの自動 consume は「自 session の退避物と確認できた単一候補」に限る。
 
 ## この skill がしないこと（層の fence）
 
