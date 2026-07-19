@@ -47,22 +47,29 @@ fi
 PROTOCOL_DOC="$PLUGIN_ROOT/docs/protocol.md"
 SPEC_DOC="$PLUGIN_ROOT/docs/role-context-spec.md"
 
-# --- stdin の hook JSON から cwd を抽出（jq → sed フォールバック）。tty なら読まない(block 回避) ---
-# 全 hook の stdin JSON 共通フィールドに cwd が含まれる（session_id/transcript_path/cwd/...）。
-# 抽出不能なら無出力 → 呼び出し側で $PWD へフォールバック。
-_scribe_extract_cwd() {
-    [ -t 0 ] && return 0
-    local input cwd
-    input="$(cat 2>/dev/null)"
-    [ -z "$input" ] && return 0
+# --- stdin の hook JSON から cwd / source を抽出（jq → sed フォールバック）。tty なら読まない(block 回避) ---
+# 全 hook の stdin JSON 共通フィールドに cwd が含まれ（session_id/transcript_path/cwd/...）、
+# SessionStart は加えて source（startup|resume|clear|compact）を持つ（公式 hooks 仕様）。
+# stdin は一度しか読めないため起動時に 1 回だけ読んで保持し、フィールドは汎用抽出器で個別に取り出す
+# （sc-o7fz: cwd 専用 _scribe_extract_cwd を置換・jq→sed fallback の二系統は不変）。
+# 抽出不能なら無出力 → 呼び出し側でフォールバック（cwd は $PWD へ・source は空=未知扱い）。
+_SCRIBE_HOOK_STDIN=""
+if [ ! -t 0 ]; then
+    _SCRIBE_HOOK_STDIN="$(cat 2>/dev/null)"
+fi
+
+_scribe_extract_json_string() {
+    # $1 = top-level キー名（英数字のみ想定・sed パターンへ連結するため regex メタは渡さない）
+    local key="$1" val
+    [ -z "$_SCRIBE_HOOK_STDIN" ] && return 0
     if command -v jq >/dev/null 2>&1; then
-        cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
+        val="$(printf '%s' "$_SCRIBE_HOOK_STDIN" | jq -r --arg k "$key" '.[$k] // empty' 2>/dev/null)"
     else
-        cwd="$(printf '%s' "$input" \
-            | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        val="$(printf '%s' "$_SCRIBE_HOOK_STDIN" \
+            | sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
             | head -n1)"
     fi
-    [ -n "$cwd" ] && printf '%s' "$cwd"
+    [ -n "$val" ] && printf '%s' "$val"
     return 0
 }
 
@@ -137,8 +144,11 @@ _scribe_is_consult_window() {
 }
 
 # === role 判定 ===
-hook_cwd="$(_scribe_extract_cwd)"
+hook_cwd="$(_scribe_extract_json_string cwd)"
 [ -z "$hook_cwd" ] && hook_cwd="$PWD"
+# SessionStart source（startup|resume|clear|compact）。ultracode リマインダの分岐（admin 注入）にのみ
+# 使い、role 判定には使わない。抽出不能は空＝未知として fail-safe 側（リマインダを出す）へ倒す。
+hook_source="$(_scribe_extract_json_string source)"
 
 # === .beads opt-in guard（scribe 管轄外セッションには何も注入しない・bd un-7hx） ===
 # cwd（または git toplevel）に .beads/ が無ければ scribe を使っていないプロジェクトと
@@ -230,11 +240,31 @@ case "$role" in
         _scribe_header
         echo "あなたは scribe admin(anchor)です。graph の所有者・gate funnel の実行者・唯一の bd dolt push 同期点です。以下のプロトコル全文が役割規約の SSOT です。"
         echo ""
-        # ultracode 打鍵リマインダ(sc-icb): ultracode は CC 仕様上 session-only(settings/env/flag で
-        # 永続化不可・公式 docs verified=sc-ex2 裁定)。hook からも /effort を起動できないため、
-        # 人間の打鍵を促す 1 行を admin にだけ出す(worker/consult は effort 統制=sc-dc9 の管轄)。
-        echo "(リマインダ) ultracode 運用を意図する session では、人間が「/effort ultracode」を打鍵してください(session-only 設定のため自動化・永続化は不可)。"
-        echo ""
+        # ultracode 打鍵リマインダ(sc-icb・source 分岐=sc-o7fz/orch-cn7s): ultracode は CC 仕様上
+        # session-only(settings/env/flag で永続化不可・公式 docs verified=sc-ex2 裁定)で hook からも
+        # /effort を起動できないため、人間の打鍵を促す行を admin にだけ出す(worker/consult は
+        # effort 統制=sc-dc9 の管轄)。ただし「session-only」の実測境界は protocol §9 が単一 SSOT＝
+        # 『/clear は ultracode を保持・respawn でのみ失われる』。source 無条件の打鍵誘導は /clear 後に
+        # §9 と矛盾する誤誘導 noise になる(orch-cn7s)ため、SessionStart source で分岐する:
+        #   startup        = 新規 process＝確実に off → 打鍵リマインダを出す
+        #   clear          = 保持実測済(§9) → 再打鍵誘導を焼かず「保持＝再打鍵不要」の 1 行に差し替え
+        #   compact        = 未実測だが同一 process 継続(clear と同型)＝保持が濃厚(deduced) → suppress
+        #                    (on/off の authoritative は毎ターンの system-reminder＝§9。状態を主張しない)
+        #   resume/空/未知 = resume は新規 process かつ transcript に ultracode 値が無い(§9)＝喪失濃厚
+        #                    (deduced)。source 抽出不能(旧 CC・jq/sed 不発)・未知値も含め fail-safe は
+        #                    「出す」側(出し損ね＝意図した ultracode の silent 喪失 > 余分な 1 行 noise)
+        case "$hook_source" in
+            clear)
+                echo "(リマインダ) /clear は ultracode を保持します(respawn でのみ失われる・protocol §9)＝/clear を理由とする再打鍵は不要です。現在の on/off は毎ターンの system-reminder が authoritative です。"
+                echo ""
+                ;;
+            compact)
+                : ;;
+            *)
+                echo "(リマインダ) ultracode 運用を意図する session では、人間が「/effort ultracode」を打鍵してください(session-only 設定のため自動化・永続化は不可)。"
+                echo ""
+                ;;
+        esac
         cat "$PROTOCOL_DOC"
         ;;
     worker)
