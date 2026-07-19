@@ -34,6 +34,12 @@ redirect
 export-state/
 export-state.json
 
+# bd v1.1.0 runtime files (bd auto-appends these when missing; tracked here so
+# clones never go permanently dirty and repos-sync ff never stalls — un-2w5u)
+last_pull
+proxieddb/
+proxied_server_client_info.json
+
 # Ephemeral store (SQLite - wisps/molecules, intentionally not versioned)
 ephemeral.sqlite3
 ephemeral.sqlite3-journal
