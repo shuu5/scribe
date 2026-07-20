@@ -1,0 +1,312 @@
+#!/usr/bin/env bats
+# session-state-input-waiting.bats - detect_state() input-waiting 判定テスト
+# Issue #486: approval UI / AskUserQuestion パターンの input-waiting 検出
+# tmux 依存なし（モックアプローチ）
+
+SCRIPT_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/../scripts" && pwd)"
+SESSION_STATE_SCRIPT="$SCRIPT_DIR/session-state.sh"
+
+setup() {
+    TMPFILE="$(mktemp)"
+}
+
+teardown() {
+    [[ -n "$TMPFILE" && -f "$TMPFILE" ]] && rm -f "$TMPFILE"
+}
+
+# ---------------------------------------------------------------------------
+# ヘルパー: capture-pane 内容をモックして detect_state を実行
+# ---------------------------------------------------------------------------
+# tmux list-panes → claude プロセス模倣（has_claude=true パスを使用）
+# tmux capture-pane → TMPFILE の内容を返す
+run_detect_state_with_capture() {
+    local capture_content="$1"
+    printf '%s\n' "$capture_content" > "$TMPFILE"
+
+    run bash <<EOF
+tmux() {
+    case "\$1" in
+        list-panes)
+            # pane_cmd=claude, pane_dead=0, pane_id=%0, pane_path=/home/test
+            printf 'claude\t0\t%%0\t/home/test\n'
+            ;;
+        capture-pane)
+            cat "$TMPFILE"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+export -f tmux
+source "$SESSION_STATE_SCRIPT"
+detect_state 'test-session:0'
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Scenario: Claude Code 選択 UI (approval UI)
+# Enter to select · ↑/↓ to navigate · Esc to cancel が末尾にある場合
+# ---------------------------------------------------------------------------
+@test "detect_state: Claude Code 選択 UI (Enter to select) → input-waiting" {
+    run_detect_state_with_capture \
+"❯ 1. 承認して実行
+     Phase 1 を開始。3 Worker を並列起動し orchestrator に委譲
+  2. キャンセル
+
+Enter to select · ↑/↓ to navigate · Esc to cancel"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "input-waiting" ]]
+}
+
+@test "detect_state: approval UI の選択肢行 (❯) が tail-5 の中間にある → input-waiting" {
+    run_detect_state_with_capture \
+"❯ 1. 承認して実行
+  2. キャンセル
+Enter to select · ↑/↓ to navigate"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "input-waiting" ]]
+}
+
+# ---------------------------------------------------------------------------
+# Scenario: 日本語 AskUserQuestion
+# ---------------------------------------------------------------------------
+@test "detect_state: 日本語 承認しますか prompt → input-waiting" {
+    run_detect_state_with_capture \
+"この操作を実行します。
+承認しますか？ [y/N]"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "input-waiting" ]]
+}
+
+@test "detect_state: 日本語 確認しますか prompt → input-waiting" {
+    run_detect_state_with_capture \
+"変更を適用します。
+確認しますか？"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "input-waiting" ]]
+}
+
+# ---------------------------------------------------------------------------
+# Scenario: 英語 y/N / Do you want to
+# ---------------------------------------------------------------------------
+@test "detect_state: [y/N] prompt → input-waiting" {
+    run_detect_state_with_capture \
+"Do you want to proceed?
+[y/N]"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "input-waiting" ]]
+}
+
+@test "detect_state: Do you want to prompt → input-waiting" {
+    run_detect_state_with_capture \
+"Do you want to apply these changes?"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "input-waiting" ]]
+}
+
+@test "detect_state: Waiting for user input → input-waiting" {
+    run_detect_state_with_capture \
+"Waiting for user input..."
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "input-waiting" ]]
+}
+
+# ---------------------------------------------------------------------------
+# Scenario: 従来の ❯ 末尾パターン（既存挙動の維持）
+# ---------------------------------------------------------------------------
+@test "detect_state: 従来の ❯ 末尾プロンプト → input-waiting (後方互換)" {
+    run_detect_state_with_capture \
+"Completed previous task.
+❯ "
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "input-waiting" ]]
+}
+
+# ---------------------------------------------------------------------------
+# Scenario: processing 中（誤検知なし）
+# ---------------------------------------------------------------------------
+@test "detect_state: Thinking... のみ → processing (誤検知なし)" {
+    run_detect_state_with_capture \
+"Thinking...
+⠋ Processing request"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "processing" ]]
+}
+
+@test "detect_state: Working... のみ → processing" {
+    run_detect_state_with_capture \
+"Working on the task...
+  Analyzing code"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "processing" ]]
+}
+
+@test "detect_state: 空の出力 → processing" {
+    run_detect_state_with_capture ""
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "processing" ]]
+}
+
+# ---------------------------------------------------------------------------
+# Scenario: [Y/n] バリアント
+# ---------------------------------------------------------------------------
+@test "detect_state: [Y/n] prompt → input-waiting" {
+    run_detect_state_with_capture \
+"Install the package? [Y/n]"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "input-waiting" ]]
+}
+
+# ---------------------------------------------------------------------------
+# Issue #708: "esc to interrupt" / "bypass permissions" の誤検知・検出テスト
+# ---------------------------------------------------------------------------
+@test "detect_state: esc to interrupt のみ表示 → processing (false positive 再現)" {
+    run_detect_state_with_capture \
+"esc to interrupt"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "processing" ]]
+}
+
+@test "detect_state: bypass permissions のみ表示 → input-waiting" {
+    run_detect_state_with_capture \
+"bypass permissions"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "input-waiting" ]]
+}
+
+@test "detect_state: esc to interrupt + Thinking 表示 → processing" {
+    run_detect_state_with_capture \
+"Thinking...
+esc to interrupt"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "processing" ]]
+}
+
+# ccs-pwr で expectation を反転: 旧テストは「bypass 優先 → input-waiting」を pin していたが、
+# 'bypass permissions' は --dangerously-skip-permissions の**常時表示ステータスバー**であり
+# ダイアログ識別子ではない（session-comm.sh の modality ガード注記で既に是正済みの誤解）。
+# 'esc to interrupt' は turn 実行中にのみ表示される積極証拠のため、両方可視なら processing が正しい。
+# 旧 expectation のままだと turn 走行中の bypass セッションを input-waiting と誤報し、
+# read-back 偽陰性→再送重複（orch-8rn8 実測 2026-07-15）の一因になる。
+@test "detect_state: bypass permissions + esc to interrupt 同時表示 → processing (ccs-pwr 是正: esc は turn 証拠・bypass は常時表示)" {
+    run_detect_state_with_capture \
+"bypass permissions · esc to interrupt"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "processing" ]]
+}
+
+@test "detect_state: ダイアログ (Do you want to) + esc to interrupt 同時 → input-waiting (ダイアログ優先は維持)" {
+    run_detect_state_with_capture \
+"Do you want to proceed?
+esc to interrupt"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "input-waiting" ]]
+}
+
+# ---------------------------------------------------------------------------
+# Issue #708 拡張: thinking 進行形が ❯ / bypass と共存しても processing
+# Opus 4.7 は thinking 中に「動名詞インジケータ + ❯ 入力欄 + bypass ステータスバー」を
+# 同時表示する。進行形インジケータは入力ボックスの上に出るため tail -8 で捕捉する。
+# (実セッションの fork 検証で観測した false positive の回帰テスト)
+# ---------------------------------------------------------------------------
+@test "detect_state: thinking 進行形 (Incubating…) + ❯ + bypass 同時 → processing (#708 誤検出回帰)" {
+    run_detect_state_with_capture \
+"✶ Incubating… (6m 12s · ↓ 25.5k tokens · almost done thinking with max effort)
+──────────────────────────────
+❯
+──────────────────────────────
+  shuu5@host 10% 100k/1M Opus 4.7 [max]
+  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "processing" ]]
+}
+
+@test "detect_state: completion 表示 (Baked for 8m) + ❯ → input-waiting (過去形は thinking 扱いしない)" {
+    run_detect_state_with_capture \
+"✻ Baked for 8m 25s
+──────────────────────────────
+❯
+──────────────────────────────
+  shuu5@host 0% 0/1M Opus 4.7 [max]
+  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "input-waiting" ]]
+}
+
+@test "detect_state: compaction 中 (Compacting) + ❯ → processing" {
+    run_detect_state_with_capture \
+"✽ Compacting conversation… (51s)
+──────────────────────────────
+❯
+──────────────────────────────
+  shuu5@host 0% 0/1M Opus 4.7 [max]
+  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "processing" ]]
+}
+
+# ---------------------------------------------------------------------------
+# ccs-pwr: 現行 TUI (2026-07 系) の turn 走行中誤分類の根治
+# 実測標本 (2026-07-15・orch-8rn8 偽陰性の機序): 現行 TUI は 'esc to interrupt' を
+# 表示せず、スピナー行が Tip 行の折返し等で tail -8 の外へ押し出されると、
+# ❯/bypass 判定が「turn 走行中なのに input-waiting」を返していた。
+# ---------------------------------------------------------------------------
+@test "detect_state: 現行 TUI スピナーが tail -8 の外（Tip 折返し）でも → processing (ccs-pwr 実測回帰)" {
+    run_detect_state_with_capture \
+"✽ Boondoggling… (6m 16s · ↓ 23.2k tokens)
+  ⎿ · Tip: Use /btw to ask a quick side question without interrupting
+     Claude's current work
+──────────────────────────────
+❯
+──────────────────────────────
+  shuu5@ipatho-server-2 (user@example.com)  cc-session  main*
+  17% 170k/1M Fable 5 [xhigh] 5h:6%(3h18m) 7d:22%(1d6h)
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "processing" ]]
+}
+
+@test "detect_state: 現行 TUI スピナー行のみ（esc to interrupt 不在）→ processing (TUI ドリフト追随)" {
+    run_detect_state_with_capture \
+"✢ Simmering… (8m 0s · ↓ 24.9k tokens)"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "processing" ]]
+}
+
+# agent 一覧行はインデントされ（行頭 glyph アンカー不成立）タイマーも '(' に包まれない
+# ＝スピナーと誤認しない（orchestrator pane の live 標本 2026-07-15 で検証した誤爆封鎖）
+@test "detect_state: agent 一覧行（◯ name … Ns · ↓ tokens）はスピナー扱いしない → input-waiting" {
+    run_detect_state_with_capture \
+"  ● main
+  ◯ claude-code-guide  Claude Code 予測機能の無…  1m 54s · ↓ 63.8k tokens
+──────────────────────────────
+❯
+──────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "input-waiting" ]]
+}
+
+# 過去形完了表示は現行 TUI 形式でも input-waiting のまま（タイマー '(' 無し・ellipsis 無し）
+@test "detect_state: 現行 TUI 完了表示 (● Boondoggled for 8m) + 入力欄 → input-waiting" {
+    run_detect_state_with_capture \
+"● Boondoggled for 8m 25s
+──────────────────────────────
+❯
+──────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "input-waiting" ]]
+}
+
+# 評価順是正の pin: ❯（trailing space 付き＝PROMPT_PATTERN 一致形）より esc が先に評価される
+@test "detect_state: esc to interrupt + ❯（空入力欄）→ processing (評価順: turn 証拠 > ❯・ccs-pwr)" {
+    run_detect_state_with_capture \
+"──────────────────────────────
+❯ 
+──────────────────────────────
+esc to interrupt"
+    [[ "$status" -eq 0 ]]
+    [[ "$output" == "processing" ]]
+}

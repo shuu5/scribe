@@ -1,0 +1,80 @@
+#!/bin/bash
+# cld - Claude Code launcher with auto plugin discovery
+#
+# ~/.claude/plugins/ 配下の plugin を自動検出して claude に渡し起動する汎用ランチャー。
+# systemd-run が利用可能ならメモリ制限付き user scope で、なければ直接起動する。
+# 特定 plugin を検出から外すには env CLD_PLUGIN_EXCLUDE（カンマ/空白区切り）または
+# ~/.claude/plugins/.cld-exclude ファイル（1 行 1 名・# コメント可）を使う。
+set -euo pipefail
+
+if ! command -v claude &>/dev/null; then
+    echo "Error: claude が見つかりません（npm install -g @anthropic-ai/claude-code）" >&2
+    exit 1
+fi
+
+PASS_ARGS=("$@")
+
+# ~/.claude/plugins/*/ を自動検出して --plugin-dir で渡す
+PLUGINS_BASE="$HOME/.claude/plugins"
+
+# 除外 denylist: env CLD_PLUGIN_EXCLUDE（カンマ/空白区切り）と $PLUGINS_BASE/.cld-exclude
+# （1 行 1 プラグインディレクトリ名・'#' 以降はコメント・空行可）の合算。basename 完全一致で skip する。
+# 用途: 重量 dev plugin（例: folio の agents ~33KB）を無関係プロジェクトのセッションへ注入しない（un-4v6j）。
+PLUGIN_EXCLUDES=" "
+# -f かつ -r で判定する（-f のみだと「正規ファイルだが読取り不可」でリダイレクト失敗により
+# launcher 全体が abort、-r のみだと「読取り可能なディレクトリ」で EISDIR abort・FIFO で hang）。
+# 正規ファイルで読める場合のみ読み、それ以外の存在物は警告して除外なしで続行する
+# （不変条件: .cld-exclude が何であれ claude の起動は妨げない）。
+if [[ -f "$PLUGINS_BASE/.cld-exclude" && -r "$PLUGINS_BASE/.cld-exclude" ]]; then
+    while IFS= read -r _ex_line || [[ -n "$_ex_line" ]]; do
+        _ex_line="${_ex_line%%#*}"
+        _ex_line="${_ex_line//[[:space:]]/}"
+        [[ -n "$_ex_line" ]] && PLUGIN_EXCLUDES+="${_ex_line} "
+    done < "$PLUGINS_BASE/.cld-exclude"
+elif [[ -e "$PLUGINS_BASE/.cld-exclude" ]]; then
+    echo "Warning: $PLUGINS_BASE/.cld-exclude が読取り可能な正規ファイルでないため無視します（plugin 除外は無効のまま起動します）" >&2
+fi
+# env は read -a で配列化する（unquoted 展開だと glob 文字入りの値が cwd のファイル名へ
+# pathname 展開され denylist が汚染される）。IFS でカンマ/空白の両区切りを受ける。
+_ex_arr=()
+IFS=', ' read -r -a _ex_arr <<< "${CLD_PLUGIN_EXCLUDE:-}"
+for _ex_tok in ${_ex_arr[@]+"${_ex_arr[@]}"}; do
+    [[ -n "$_ex_tok" ]] && PLUGIN_EXCLUDES+="${_ex_tok} "
+done
+
+PLUGIN_ARGS=()
+if [[ -d "$PLUGINS_BASE" ]]; then
+    for dir in "$PLUGINS_BASE"/*/; do
+        _plug_name="${dir%/}"
+        _plug_name="${_plug_name##*/}"
+        if [[ "$PLUGIN_EXCLUDES" == *" ${_plug_name} "* ]]; then
+            continue
+        fi
+        if [[ -f "${dir}.claude-plugin/plugin.json" ]]; then
+            PLUGIN_ARGS+=(--plugin-dir "$dir")
+        fi
+    done
+fi
+
+# CLD_ENV_PASS_PREFIX で指定した prefix の環境変数を systemd scope へ伝播（デフォルト: なし）
+ENV_ARGS=()
+if [[ -n "${CLD_ENV_PASS_PREFIX:-}" ]]; then
+    while IFS= read -r line; do
+        key="${line%%=*}"
+        val="${line#*=}"
+        ENV_ARGS+=(--setenv="${key}=${val}")
+    done < <(env | grep "^${CLD_ENV_PASS_PREFIX}" || true)
+fi
+
+# systemd-run があればメモリ制限付き scope で、なければ直接起動（環境変数は exec で継承）
+if command -v systemd-run &>/dev/null; then
+    exec systemd-run --user --scope -p "MemoryMax=${CLD_MEMORY_MAX:-12G}" \
+        "${ENV_ARGS[@]+"${ENV_ARGS[@]}"}" \
+        claude --dangerously-skip-permissions \
+        "${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"}" \
+        "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
+else
+    exec claude --dangerously-skip-permissions \
+        "${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"}" \
+        "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
+fi
