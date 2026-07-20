@@ -257,6 +257,18 @@ PY
 }
 
 @test "(gi) root .gitignore が stamp を除外(runtime 生成物を commit しない・last-sync 同型)" {
-    run grep -Fq '/.beads/scribe-heartbeat' "$REPO/.gitignore"
+    run grep -Fxq '/.beads/scribe-heartbeat' "$REPO/.gitignore"
     [ "$status" -eq 0 ]
+    # cc-session subtree ledger 側の同型 marker も root .gitignore で除外する(sc-c4fr)
+    run grep -Fxq '/cc-session/.beads/scribe-heartbeat' "$REPO/.gitignore"
+    [ "$status" -eq 0 ]
+}
+
+@test "(gi) cc-session/.beads/.gitignore が bd 必須パターンを持つ(sc-c4fr)" {
+    local gi="$REPO/cc-session/.beads/.gitignore"
+    [ -f "$gi" ]
+    for pat in 'last_pull' 'proxieddb/' 'proxied_server_client_info.json'; do
+        run grep -Fxq "$pat" "$gi"
+        [ "$status" -eq 0 ]
+    done
 }
