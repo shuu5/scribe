@@ -2929,30 +2929,10 @@ _mk_repo_with_origin() {
   [ "${BASH_REMATCH[2]}" -ge 5 ]
 }
 
-# bd-write-guard(sc-wdr)は 3 兄弟中最大の self-test（token 判定 / session self-scope(D1) / preamble の
-# 3 battery）を持つが、他 guard（rm/git/cmdtokens）と違い回帰網へ未配線だった＝core rule と D1 no-op
-# 安全性が『self-test 緑のまま壊れうる』状態だった。他 guard と同形に bats から --self-test を呼び、
-# status0 + 各 battery の "OK" + case 数下限を pin する。下限は cases[] を空にして 0/0+exit0 を出す
-# mutation（(a)(b)(c)/J1-J7/dep/link/repo/HIGH_DANGER_WRITE の token 判定・D1 no-op 安全 session cases
-# の消去）を捕捉する（現数 token=111 / session=20 / preamble=3）。
-@test "guard self-test: bd-write-guard --self-test が exit 0 + 3 battery 全 OK + case 数下限（sc-wdr）" {
-  run python3 "$HOOKS/bd-write-guard.py" --self-test
-  [ "$status" -eq 0 ]
-  # (1) token 判定 battery: guard 中核ルール（(a)(b)(c)/J1-J7/dep/link/repo/HIGH_DANGER_WRITE 分類）。
-  [[ "$output" =~ "bd-guard self-test: "([0-9]+)/([0-9]+)" OK" ]]
-  [ "${BASH_REMATCH[2]}" -ge 100 ]
-  # (2) session self-scope battery: D1 の『非 sc session→exit0 no-op』安全保証（integ_cases i/i'/iv）。
-  [[ "$output" =~ "session self-test: "([0-9]+)/([0-9]+)" OK" ]]
-  [ "${BASH_REMATCH[2]}" -ge 15 ]
-  # (3) preamble battery: cmdtokens consume cutover の (a)/(override)/(c)。
-  [[ "$output" =~ "preamble self-test: "([0-9]+)/([0-9]+)" OK" ]]
-  [ "${BASH_REMATCH[2]}" -ge 3 ]
-}
-
 # ---------- PreToolUse guard WIRE の e2e 回帰（sc-4ix）----------
 # 上の self-test は guard 単体の判定を pin するが、hooks.json の *配線*（command 文字列・matcher・
 # 起動行・guard の存在）は別物。fail-open suffix(`|| true`)混入・matcher typo・起動行破損・guard 削除が
-# 起きると 3 guard の self-test が緑のまま本番で破壊コマンドが素通りしうる（exit2→exit0 化は実機再現済）。
+# 起きると各 guard の self-test が緑のまま本番で破壊コマンドが素通りしうる（exit2→exit0 化は実機再現済）。
 # そこで hooks.json から *実際の command 文字列を抽出して起動* し end-to-end で block/fail-open を pin する
 # （session-start-role-inject.bats の SessionStart wire テストと対称）。guard 名で select するので配列順や
 # 一方の guard 削除にも耐える（jq が空を返し [ -n ] で fail-loud）。
@@ -2960,69 +2940,26 @@ _pre_cmd() {  # <guard-script-basename> → 該当 PreToolUse[Bash] hook の com
   jq -r --arg s "$1" '.hooks.PreToolUse[] | select(.matcher=="Bash") | .hooks[].command | select(contains($s))' "$HOOKS_JSON"
 }
 
-# bd-write-guard(sc-wdr)は git/rm guard と違い session-gate 付き（cwd の .beads/metadata.json の
-# dolt_database=='sc' の session でのみ発火する＝D1）。wire/preamble の e2e 検証で「sc 台帳 session」を
-# hermetic に与えるため、dolt_database=sc の .beads/metadata.json を持つ temp 台帳 dir を作り path を echo
-# する（JSON payload の cwd に据えて session-gate を通す）。$BATS_TEST_TMPDIR 配下ゆえ bats が per-test で
-# 自動掃除する（.beads を含むため明示 rm はしない＝beads-destructive-guard に触れない）。
-_mk_sc_ledger() {
-  local d; d="$(mktemp -d "$BATS_TEST_TMPDIR/scled.XXXXXX")"
-  mkdir -p "$d/.beads"
-  printf '{"database":"dolt","dolt_database":"sc"}\n' > "$d/.beads/metadata.json"
-  printf '%s\n' "$d"
-}
-
-@test "PreToolUse wire(sc-4ix): hooks.json の command 経由で破壊 git/rm/bd を exit2 block（end-to-end）" {
-  local gcmd rcmd bcmd
+@test "PreToolUse wire(sc-4ix): hooks.json の command 経由で破壊 git/rm を exit2 block（end-to-end）" {
+  local gcmd rcmd
   gcmd="$(_pre_cmd git-destructive-guard.py)"
   rcmd="$(_pre_cmd rm-destructive-guard.py)"
-  bcmd="$(_pre_cmd bd-write-guard.py)"
   [ -n "$gcmd" ]   # git-guard が PreToolUse[Bash] 下に配線されている（削除/matcher typo を捕捉）
   [ -n "$rcmd" ]   # rm-guard が配線されている
-  [ -n "$bcmd" ]   # bd-write-guard(sc-wdr)が3本目として配線されている（削除/matcher typo/|| true 混入を捕捉）
+  # 撤去完全性の pin（un-2uap Leg-R-sc）: bespoke bd-write-guard の wire が hooks.json に残らない。
+  # .py 削除と hooks.json entry 除去の片方忘れ＝runtime fail-open silent を捕捉する negative assert。
+  [ -z "$(_pre_cmd bd-write-guard.py)" ]
   # 実 command を起動（${CLAUDE_PLUGIN_ROOT}→repo root に解決）。fail-open suffix 混入なら exit0 化し fail。
   run env CLAUDE_PLUGIN_ROOT="$REPO_ROOT" bash -c "$gcmd" <<< '{"tool_name":"Bash","tool_input":{"command":"git push --force"},"cwd":"/tmp"}'
   [ "$status" -eq 2 ]
   run env CLAUDE_PLUGIN_ROOT="$REPO_ROOT" bash -c "$rcmd" <<< '{"tool_name":"Bash","tool_input":{"command":"rm -rf /etc"},"cwd":"/tmp"}'
   [ "$status" -eq 2 ]
-  # bd-write-guard は session-gate 付きゆえ wire 経路に固有の失敗面を持つ: sc cwd でも foreign write の
-  # exit2 が hooks.json command 経由で伝播するか（criterion 5＝`|| true` 無し=block 伝播）を pin する。
-  # temp sc .beads/metadata.json(dolt_database=sc)を JSON payload の cwd に据え、foreign write(bd update un-1)を block。
-  local scled bpayload; scled="$(_mk_sc_ledger)"
-  bpayload="$(printf '{"tool_name":"Bash","tool_input":{"command":"bd update un-1"},"cwd":"%s"}' "$scled")"
-  run env CLAUDE_PLUGIN_ROOT="$REPO_ROOT" bash -c "$bcmd" <<< "$bpayload"
-  [ "$status" -eq 2 ]
-}
-
-@test "PreToolUse wire(sc-wdr / D1 allow 方向): healthy guard + foreign 台帳(un/orch) session の foreign write は exit0 no-op" {
-  # 既存 e2e/preamble は全て sc 台帳 cwd の block(exit2)方向のみ叩く。D1 の核心＝『非 sc session では guard が
-  # 一切判定せず exit0 no-op する』allow 方向を実 subprocess で automate する（_is_scribe_guard_session を常時
-  # True へ反転させ globally-enable された guard が無関係 project の bd write を brick する回帰は、この allow
-  # 方向テストが無いと bats 全緑のまま通る）。foreign 台帳=un/orch を両方叩く（.beads を含む temp dir は
-  # $BATS_TEST_TMPDIR 配下で bats が per-test 自動掃除する＝明示 rm しない=beads-destructive-guard に触れない）。
-  local fled payload db
-  for db in un orch; do
-    fled="$(mktemp -d "$BATS_TEST_TMPDIR/fled.XXXXXX")"
-    mkdir -p "$fled/.beads"
-    printf '{"database":"dolt","dolt_database":"%s"}\n' "$db" > "$fled/.beads/metadata.json"
-    # sc 台帳なら kind b で deny(2) になる foreign write を foreign session cwd では no-op(0) にする。
-    payload="$(printf '{"tool_name":"Bash","tool_input":{"command":"bd update un-1 --notes x"},"cwd":"%s"}' "$fled")"
-    run --separate-stderr python3 "$HOOKS/bd-write-guard.py" <<< "$payload"
-    [ "$status" -eq 0 ]     # 非 sc session → guard 無判定 no-op（D1）
-    [ -z "$stderr" ]        # no-op ゆえ DENIED 案内も loud 警告も出ない
-  done
-  # 弁別力の pin: 同一 foreign write を sc 台帳 cwd で叩くと deny(2)＝上の exit0 は session-gate による
-  # no-op であって『guard が壊れて全部 exit0』の vacuous pass ではない（cmdtokens fail-open 等と弁別）。
-  local scled; scled="$(_mk_sc_ledger)"
-  payload="$(printf '{"tool_name":"Bash","tool_input":{"command":"bd update un-1 --notes x"},"cwd":"%s"}' "$scled")"
-  run python3 "$HOOKS/bd-write-guard.py" <<< "$payload"
-  [ "$status" -eq 2 ]
 }
 
 @test "PreToolUse wire(sc-4ix): script 不在（CLAUDE_PLUGIN_ROOT 異常）で exit0・副作用ゼロ（fail-open）" {
   local cmd
-  # bd-write-guard も同形 if/else wire ゆえ script 不在で exit0 fail-open（起動行は 3 guard 共通・sc-wdr）。
-  for cmd in "$(_pre_cmd git-destructive-guard.py)" "$(_pre_cmd rm-destructive-guard.py)" "$(_pre_cmd bd-write-guard.py)"; do
+  # 起動行は残る guard 共通の同形 if/else wire ゆえ script 不在で exit0 fail-open。
+  for cmd in "$(_pre_cmd git-destructive-guard.py)" "$(_pre_cmd rm-destructive-guard.py)"; do
     run --separate-stderr env CLAUDE_PLUGIN_ROOT="$BATS_TEST_TMPDIR/nonexistent" bash -c "$cmd" <<< '{"tool_name":"Bash","tool_input":{"command":"git push --force"},"cwd":"/tmp"}'
     [ "$status" -eq 0 ]
     [ -z "$output" ]
@@ -3033,7 +2970,7 @@ _mk_sc_ledger() {
 @test "guard: 非UTF-8 stdin で fail-open exit0（sc-a7t: UnicodeDecodeError を exit1 化させない）" {
   # 非UTF-8 raw バイトの stdin.read() を try 外に置くと未捕捉 UnicodeDecodeError で exit1 化し、
   # 整形 fail-open(exit0)経路と不整合になる。両 guard が exit0(=non-blocking fail-open)へ倒すことを pin。
-  for g in git-destructive-guard.py rm-destructive-guard.py bd-write-guard.py; do
+  for g in git-destructive-guard.py rm-destructive-guard.py; do
     run bash -c "printf '\\xff\\xfe\\xff' | python3 '$HOOKS/$g'"
     [ "$status" -eq 0 ]
   done
@@ -3068,11 +3005,6 @@ _run_guard_env() {  # <guard-basename> <cmd> <json_cwd> <envassign|""> <proc_cwd
     [ "$status" -eq 2 ]
     [[ "$stderr" != *"$_PREAMBLE_FAILOPEN_MSG"* ]]
   done
-  # bd-write-guard は自 preamble copy を持つ（drift 独立）+ session-gate ゆえ sc cwd + foreign write で同分岐を pin。
-  local scled; scled="$(_mk_sc_ledger)"
-  _run_guard_env "bd-write-guard.py" "bd update un-1" "$scled" "CMDTOKENS_LIB=some/rel/path" ""
-  [ "$status" -eq 2 ]
-  [[ "$stderr" != *"$_PREAMBLE_FAILOPEN_MSG"* ]]
 }
 
 @test "preamble(sc-ehv / orch-a9y 修正の核心): CMDTOKENS_LIB='.' を poison cmdtokens.py 入り cwd で叩いても poison を import せず block" {
@@ -3085,12 +3017,6 @@ _run_guard_env() {  # <guard-basename> <cmd> <json_cwd> <envassign|""> <proc_cwd
     [[ "$stderr" != *"POISONED"* ]]
     [[ "$stderr" != *"$_PREAMBLE_FAILOPEN_MSG"* ]]
   done
-  # bd-write-guard も poison cwd から自 preamble を通す（JSON cwd=sc 台帳で session-gate 通過・proc cwd=poison）。
-  local scled; scled="$(_mk_sc_ledger)"
-  _run_guard_env "bd-write-guard.py" "bd update un-1" "$scled" "CMDTOKENS_LIB=." "$poison"
-  [ "$status" -eq 2 ]
-  [[ "$stderr" != *"POISONED"* ]]
-  [[ "$stderr" != *"$_PREAMBLE_FAILOPEN_MSG"* ]]
   rm -rf "$poison"
 }
 
@@ -3101,10 +3027,6 @@ _run_guard_env() {  # <guard-basename> <cmd> <json_cwd> <envassign|""> <proc_cwd
     [ "$status" -eq 2 ]
     [[ "$stderr" != *"$_PREAMBLE_FAILOPEN_MSG"* ]]
   done
-  local scled; scled="$(_mk_sc_ledger)"
-  _run_guard_env "bd-write-guard.py" "bd update un-1" "$scled" "CMDTOKENS_LIB=" ""
-  [ "$status" -eq 2 ]
-  [[ "$stderr" != *"$_PREAMBLE_FAILOPEN_MSG"* ]]
 }
 
 @test "preamble(sc-ehv): CMDTOKENS_LIB=<repo lib 絶対パス> override が効き block（isabs=真 分岐）" {
@@ -3115,13 +3037,9 @@ _run_guard_env() {  # <guard-basename> <cmd> <json_cwd> <envassign|""> <proc_cwd
     [ "$status" -eq 2 ]
     [[ "$stderr" != *"$_PREAMBLE_FAILOPEN_MSG"* ]]
   done
-  local scled; scled="$(_mk_sc_ledger)"
-  _run_guard_env "bd-write-guard.py" "bd update un-1" "$scled" "CMDTOKENS_LIB=$repo_lib_dir" ""
-  [ "$status" -eq 2 ]
-  [[ "$stderr" != *"$_PREAMBLE_FAILOPEN_MSG"* ]]
 }
 
-@test "preamble(sc-ehv): CMDTOKENS_LIB=<cmdtokens.py 不在の絶対 dir> → fail-open exit0 + [git-guard]/[rm-guard]/[bd-guard] loud stderr" {
+@test "preamble(sc-ehv): CMDTOKENS_LIB=<cmdtokens.py 不在の絶対 dir> → fail-open exit0 + [git-guard]/[rm-guard] loud stderr" {
   local badabs="$BATS_TEST_TMPDIR/nonexistent-cmdtokens-scehv"
   _run_guard_env "git-destructive-guard.py" "git push -f" /tmp "CMDTOKENS_LIB=$badabs" ""
   [ "$status" -eq 0 ]
@@ -3130,12 +3048,6 @@ _run_guard_env() {  # <guard-basename> <cmd> <json_cwd> <envassign|""> <proc_cwd
   _run_guard_env "rm-destructive-guard.py" "rm -rf /" /tmp "CMDTOKENS_LIB=$badabs" ""
   [ "$status" -eq 0 ]
   [[ "$stderr" == *"[rm-guard]"* ]]
-  [[ "$stderr" == *"$_PREAMBLE_FAILOPEN_MSG"* ]]
-  # bd-write-guard は cmdtokens load 失敗時 session-gate 前に fail-open exit0（[bd-guard] loud）。cwd は
-  # 任意で可（session 判定へ到達しない）。preamble copy の fail-open 分岐 + [bd-guard] タグを pin する。
-  _run_guard_env "bd-write-guard.py" "bd update un-1" /tmp "CMDTOKENS_LIB=$badabs" ""
-  [ "$status" -eq 0 ]
-  [[ "$stderr" == *"[bd-guard]"* ]]
   [[ "$stderr" == *"$_PREAMBLE_FAILOPEN_MSG"* ]]
 }
 

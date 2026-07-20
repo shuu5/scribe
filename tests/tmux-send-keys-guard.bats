@@ -35,6 +35,33 @@ setup() {
     SCRIBE_CWD="$SCRIBE_LEDGER/sub"
     FOREIGN_CWD="$FOREIGN/sub"
 
+    # present-but-unreadable 台帳 fixture（`.beads/metadata.json` は在るが JSON parse 不能）。
+    # guard 側 _is_scribe_guard_session の **fail-closed**（self とみなし発火）を pin するための唯一の
+    # 自動 coverage（bd-write-guard 撤去=un-2uap Leg-R-sc により、この非対称を叩く他テストが消えた）。
+    BROKEN="$TEST_TMPDIR/broken"
+    mkdir -p "$BROKEN/.beads" "$BROKEN/sub"
+    printf '{invalid' > "$BROKEN/.beads/metadata.json"
+    BROKEN_CWD="$BROKEN/sub"
+
+    # ②側（＝『parse 失敗ではない識別不能』）台帳 fixture 群。上の BROKEN(①)と**意図的に非対称**で、
+    # いずれも False=fail-open（他 project を一切 brick しない・②不変厳守＝scribe_session.py:125 docstring）
+    # を要求する。①(d2)の fail-closed を広げすぎて②まで True 化する過剰補正を捕捉する回帰 pin であり、
+    # bd-write-guard 撤去(un-2uap Leg-R-sc)で消えた旧 scope_cases の ② 3 分岐を回復する。
+    #   BARE    : walk-up 上に `.beads/metadata.json` が皆無（無関係 project / git 外）
+    #   NONDICT : parse 成功だが非 dict
+    #   NOKEY   : dict だが dolt_database キー欠落
+    BARE="$TEST_TMPDIR/bare"
+    mkdir -p "$BARE/sub"
+    BARE_CWD="$BARE/sub"
+    NONDICT="$TEST_TMPDIR/nondict"
+    mkdir -p "$NONDICT/.beads" "$NONDICT/sub"
+    printf '[1,2,3]' > "$NONDICT/.beads/metadata.json"
+    NONDICT_CWD="$NONDICT/sub"
+    NOKEY="$TEST_TMPDIR/nokey"
+    mkdir -p "$NOKEY/.beads" "$NOKEY/sub"
+    printf '{"database":"dolt"}' > "$NOKEY/.beads/metadata.json"
+    NOKEY_CWD="$NOKEY/sub"
+
     # stub tmux（到達可）: @3/admin:0→'admin'(管理窓)・@7→'wt-sc-1'(worker 窓)・他→解決失敗(exit1)。
     #   guard が引く display-message の `-t`(target-pane) と `-c`(target-client・load-buffer 用) の両方を解決する。
     TMUX_OK="$TEST_TMPDIR/tmux-reachable"
@@ -104,6 +131,39 @@ _json() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '"%s"' "$s"; }
     run run_guard "$FOREIGN_CWD" "tmux send-keys -t admin:0 hi Enter"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+}
+
+@test "(d2) present-but-unreadable 台帳(壊れた metadata.json)では guard は fail-closed で発火(exit2)" {
+    # scribe_session.py の D2 非対称（guard=_is_scribe_guard_session は fail-closed / banner=
+    # _is_scribe_session は fail-open）の guard 側の端を pin する。(d)/(k6) の foreign no-op（fail-open
+    # 方向）と対になり、両端が揃う。これが無いと `_is_scribe_guard_session` を fail-open 側へ倒す退行が
+    # bats 全緑のまま通る（bd-write-guard 撤去でこの分岐の唯一の coverage が消えたため追加=un-2uap）。
+    run run_guard "$BROKEN_CWD" "tmux send-keys -t admin:0 hi Enter"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"DENIED(tmux)"* ]]
+    # 弁別: 同じ壊れ台帳でも worker 窓(wt-*)は allow＝『壊れ台帳なら何でも deny』の vacuous pass ではない。
+    run run_guard "$BROKEN_CWD" "tmux send-keys -t @7 hi Enter"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "(d3) ②側台帳(bare/非dict/key欠落)では管理窓 send-keys も exit0 no-op＝他 project を brick しない(②不変)" {
+    # (d2) の①(present-but-unreadable→fail-closed True)と**対**になる②側の pin。guard は plugin global
+    # enable で全 project に到達するため、② が True へ反転すると `.beads` を持たない無関係 project 全部で
+    # tmux transport が block され brick する（scribe_session.py:125 docstring の『plugin global enable 時も
+    # 他 project を一切壊さない・②不変厳守』契約）。撤去された bd-write-guard の scope_cases は
+    # bare/nondict/nokey の 3 分岐をこの意図で pin していた＝(d2) 追加後に起きやすい過剰補正
+    # （fail-closed を広げすぎて②まで True 化）を捕捉する唯一の装置なのでここへ回復する（un-2uap Leg-R-sc）。
+    local cwd
+    for cwd in "$BARE_CWD" "$NONDICT_CWD" "$NOKEY_CWD"; do
+        run run_guard "$cwd" "tmux send-keys -t admin:0 hi Enter"
+        [ "$status" -eq 0 ]
+        [ -z "$output" ]
+    done
+    # 弁別: 同一コマンドを sc 台帳 cwd で叩けば block(2)＝上の exit0 は session-gate による no-op であって
+    # 『guard が壊れて全部 exit0』の vacuous pass ではない。
+    run run_guard "$SCRIBE_CWD" "tmux send-keys -t admin:0 hi Enter"
+    [ "$status" -eq 2 ]
 }
 
 @test "(e) scribe-inject.sh 呼出行(basename!=tmux)は通す(exit0)" {
