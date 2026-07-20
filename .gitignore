@@ -16,6 +16,12 @@
 # 最終 push 時刻(mtime が本体)の runtime 生成物ゆえ commit しない。scribe-heartbeat と同型。
 /.beads/scribe-push-throttle
 
+# cc-session subtree ledger 側の同型 runtime marker(sc-c4fr)
+# 上の 2 行は root anchored(先頭 /)ゆえ cc-session/.beads/ には届かないため個別に指定。
+# cc-session/.beads/.gitignore 側には足さない(あちらは bd/ccs 管理テンプレ＝所有混在を避ける)。
+/cc-session/.beads/scribe-heartbeat
+/cc-session/.beads/scribe-push-throttle
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
