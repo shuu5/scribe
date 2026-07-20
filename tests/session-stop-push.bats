@@ -424,6 +424,9 @@ PY
 }
 
 @test "(gi) root .gitignore が marker を除外（runtime 生成物を commit しない・scribe-heartbeat 同型）" {
-    run grep -Fq '/.beads/scribe-push-throttle' "$REPO/.gitignore"
+    run grep -Fxq '/.beads/scribe-push-throttle' "$REPO/.gitignore"
+    [ "$status" -eq 0 ]
+    # cc-session subtree ledger 側の同型 marker も root .gitignore で除外する(sc-c4fr)
+    run grep -Fxq '/cc-session/.beads/scribe-push-throttle' "$REPO/.gitignore"
     [ "$status" -eq 0 ]
 }
