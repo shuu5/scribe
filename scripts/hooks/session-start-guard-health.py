@@ -282,7 +282,9 @@ def _load_json(path):
 
 def _probe_bdw_wire():
     """bd-write moat（PreToolUse[Bash] → canonical bd-write-guard）が実配線されているか probe する。
-    (ok: bool, canonical_path: str, detail: str, sources: list[str]) を返す。read-only・die しない。
+    (ok: bool, canonical_path: str, detail: str, sources: list[str], paths: dict) を返す。read-only・die しない。
+    paths = 経路ごとの解決結果（settings_canon / plugin_root / plugin_canon / config_dir）。banner が
+    「実際に違反しているファイル」を名指すために使う（経路ごとに canonical は別物でありうる）。
 
     ok の条件は「**live な wire が 1 本以上ある**」。wire が live かは経路ごとの実 gate で判定する:
       (a) settings 経路: 起動される shim 本体が isfile+R_OK、かつ canonical が isfile+R_OK（shim の gate と同極性）。
@@ -293,12 +295,17 @@ def _probe_bdw_wire():
     """
     canon = _resolve_bd_write_guard()
     sources = []
+    # paths = banner が **実際に違反しているファイル** を名指すための解決結果（経路ごとに別物でありうるため、
+    # settings 側 canonical 1 つだけを見せると復旧 hint（chmod +x 等）が無関係な path を指す・sc-8e7i review）。
+    # 例外経路でも必ず埋まっているよう先に既定値を置く。
+    paths = {"settings_canon": canon, "plugin_root": "", "plugin_canon": "", "config_dir": ""}
     try:
         canon_readable = os.path.isfile(canon) and os.access(canon, os.R_OK)
         live = []
 
         # (a) settings.json / settings.local.json 経由 shim（CC が実際に読む config dir のみを見る）。
         cfg = _config_dir()
+        paths["config_dir"] = cfg
         for name in ("settings.json", "settings.local.json"):
             path = os.path.join(cfg, name)
             doc = _load_json(path)
@@ -325,6 +332,8 @@ def _probe_bdw_wire():
         plugin_canon_readable = os.path.isfile(plugin_canon) and os.access(plugin_canon, os.R_OK)
         plugin_canon_exec = plugin_canon_readable and os.access(plugin_canon, os.X_OK)
         plugin_hooks = os.path.join(root, "hooks", "hooks.json")
+        paths["plugin_root"] = root
+        paths["plugin_canon"] = plugin_canon
         doc = _load_json(plugin_hooks)
         if doc is not None and _bd_write_wire_commands(doc):
             if _plugin_explicitly_disabled(cfg, os.path.basename(root)):
@@ -342,16 +351,16 @@ def _probe_bdw_wire():
                 live.append("plugin:" + plugin_hooks)
 
         if live:
-            return True, canon, "", live
+            return True, canon, "", live, paths
         if not sources:
             return False, canon, ("PreToolUse[Bash] → bd-write-guard の wire が 1 本も宣言されていない"
-                                  "（plugin root: %s）" % root), sources
+                                  "（plugin root: %s）" % root), sources, paths
         if not canon_readable and not plugin_canon_readable:
-            return False, canon, "canonical bd-write-guard が存在しない/読取不可（shim・plugin hook とも fail-open）", sources
+            return False, canon, "canonical bd-write-guard が存在しない/読取不可（shim・plugin hook とも fail-open）", sources, paths
         return False, canon, ("宣言された wire は全て可用性 gate 不成立（plugin 経路は canonical の実行権限[-x]、"
-                              "settings 経路は起動される shim 本体の実在が要る）"), sources
+                              "settings 経路は起動される shim 本体の実在が要る）"), sources, paths
     except Exception as e:  # 何があっても die しない（fail-safe）
-        return False, canon, "wire 検査で例外: %s" % e, sources
+        return False, canon, "wire 検査で例外: %s" % e, sources, paths
 
 
 def _plugin_explicitly_disabled(cfg_dir, plugin_name):
@@ -427,12 +436,19 @@ def _build_banner(ct, bdw, wire):
             "⚠️    - 自台帳 prefix 外への write が block されない（foreign 台帳を汚染しうる）",
             "⚠️    - bdw funnel を迂回した並列 write が block されない（lost-update が silent 復活）",
             "⚠️  ※ この probe は probe B（bdw lock-dir）とは独立: bdw が実行できても moat は消えうる。",
-            "⚠️  canonical guard: %s" % wire[1],
-            "⚠️  検査結果      : %s" % wire[2],
-            "⚠️  検出した wire : %s" % (", ".join(wire[3]) if wire[3] else "(無し)"),
-            "⚠️  復旧: beads-bdw plugin を配備する（plugin hooks.json が PreToolUse[Bash] を wire）:",
-            "⚠️    ln -sfn ~/projects/local-projects/beads-bdw ~/.claude/plugins/beads-bdw",
-            "⚠️    plugin 経路は canonical を **実行権限** で gate する（[ -x ]）: chmod +x %s" % wire[1],
+            # 復旧 hint は **経路ごとに実際に違反しているファイル** を名指す。canonical は経路ごとに別物
+            # （settings=shim が hardcode する ~/.claude 側 / plugin=config dir 側）ゆえ、片方だけを見せると
+            # 「chmod +x <無関係な path>」のように直らない手順を提示してしまう（sc-8e7i review 指摘）。
+            "⚠️  canonical(settings 経路): %s" % wire[1],
+            "⚠️  canonical(plugin 経路)  : %s" % (wire[4].get("plugin_canon") or "(解決不能)"),
+            "⚠️  config dir            : %s" % (wire[4].get("config_dir") or "(解決不能)"),
+            "⚠️  検査結果              : %s" % wire[2],
+            "⚠️  検出した wire         : %s" % (", ".join(wire[3]) if wire[3] else "(無し)"),
+            "⚠️  復旧: beads-bdw plugin を **この session の config dir 配下へ** 配備する",
+            "⚠️  （plugin hooks.json が PreToolUse[Bash] を wire する。plugin enablement は config dir ごとに独立）:",
+            "⚠️    ln -sfn ~/projects/local-projects/beads-bdw %s" % (wire[4].get("plugin_root") or "<config dir>/plugins/beads-bdw"),
+            "⚠️    plugin 経路は canonical を **実行権限** で gate する（[ -x ]）:",
+            "⚠️      chmod +x %s" % (wire[4].get("plugin_canon") or "<plugin root>/scripts/hooks/bd-write-guard.py"),
             "⚠️    または settings.json の PreToolUse[Bash] へ shim を wire（plugin 非依存の universal net）:",
             '⚠️      test -f "$HOME/.claude/scripts/bd-write-guard.py" && python3 "$HOME/.claude/scripts/bd-write-guard.py"',
             "⚠️    ※ settings 経路は shim 本体（起動対象）が実在しないと `test -f` で短絡し何も起動しない。",
@@ -748,6 +764,10 @@ def run_self_test():
         check(out_noexec != "", "(xv) 非実行 canonical(0644) + plugin wire 単独 → banner 有(X_OK gate)")
         check("bd-write moat" in out_noexec, "(xv) banner に bd-write moat 節を含む")
         check("NOEXEC" in out_noexec, "(xv) banner に NOEXEC な plugin wire を明示")
+        # 復旧 hint は **実際に非実行だったファイル**（plugin 経路 canonical）を名指すこと。経路ごとに
+        # canonical は別物ゆえ settings 側を見せると「chmod +x <無関係 path>」で直らない（sc-8e7i review）。
+        check("chmod +x " + guard_noexec in out_noexec,
+              "(xv) 復旧 hint が plugin 経路の canonical を名指す(settings 側 path ではない)")
         check(os.access(guard_noexec, os.R_OK) and not os.access(guard_noexec, os.X_OK),
               "(xv) fixture 前提: 0644 canonical は R_OK かつ非 X_OK(non-vacuous)")
         # 対偶: 同じ構成で mode だけ 0755 なら silent＝判定しているのは実行権限のみ（他要因ではない）。

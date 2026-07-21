@@ -230,6 +230,9 @@ run_hook() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"bd-write moat"* ]]
     [[ "$output" == *"NOEXEC"* ]]
+    # 復旧 hint は **実際に非実行だったファイル**（plugin 経路の canonical）を名指すこと。settings 側
+    # canonical を見せると「chmod +x <無関係な path>」で直らない手順になる（sc-8e7i review）。
+    [[ "$output" == *"chmod +x $GUARD_NOEXEC"* ]]
     chmod +x "$GUARD_NOEXEC"                      # mode 以外は同一構成
     run run_hook "$SCRIBE_CWD" "$CT_PRESENT" "$BDW_PRESENT" "$GUARD_NOEXEC" "$CFG_EMPTY"
     [ "$status" -eq 0 ]
