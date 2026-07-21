@@ -295,8 +295,10 @@ config_dir_plan_line() {
 # （dry-run は side-effect ゼロ＝fable preflight / sandbox dep-preflight と同じ real-path-only 規律）。unset（既定
 # ~/.claude）は挙動不変ゆえ検査しない（AC1）。理由（c）= hooks は ${CLAUDE_PLUGIN_ROOT}（=アクティブ config dir
 # 配下 plugin）から発火するため、plugin 欠落 dir で worker を起こすと edit-write-guard（SBX-ESC-1 境界）/
-# bd-write-guard / git-destructive-guard / session-start-role-inject が全て黙って無効化される（無防備 worker を
-# 黙って起こさない）。
+# git-destructive-guard / rm-destructive-guard / tmux-send-keys-guard / session-start-role-inject が全て黙って
+# 無効化される（無防備 worker を黙って起こさない）。**bd write の堀は scribe bespoke ではなく universal
+# beads-bdw plugin 側**へ移管済（bespoke bd-write-guard は撤去・un-2uap Leg-R-sc）ゆえ、その無効化は
+# beads-bdw 欠落で起きる＝下の検査ループが scribe / beads-bdw / cmdtokens の 3 者を等しく要求するのはこのため。
 # 単一の config dir が worker/consult を安全に起こせるかを検査する **非致命** probe（sc-1rq で抽出）。
 # 引数 $1=dir $2=source。合格なら 0 を返す（無出力）。不合格なら理由を stdout へ echo し 1 を返す
 # （die しない）。この probe を 2 者が共有する: (1) preflight_config_dir（globals 上で die 版・既存挙動）と
@@ -328,7 +330,7 @@ probe_config_dir() {
   local _p
   for _p in scribe beads-bdw cmdtokens; do
     [[ -e "$_d/plugins/$_p" ]] \
-      || { echo "spawn preflight: plugin '$_p' が config dir で enable されていません（$_d/plugins/$_p 不在・源=$_src）。plugin 欠落 dir で worker を起こすと edit-write-guard/bd-write-guard/git-destructive-guard/session-start-role-inject が黙って無効化されます（無防備 worker を黙って起こさない・sc-rvq）。"; return 1; }
+      || { echo "spawn preflight: plugin '$_p' が config dir で enable されていません（$_d/plugins/$_p 不在・源=$_src）。plugin 欠落 dir で worker を起こすと scribe の edit-write-guard/git-destructive-guard/rm-destructive-guard/tmux-send-keys-guard/session-start-role-inject や beads-bdw の bd write 堀が黙って無効化されます（無防備 worker を黙って起こさない・sc-rvq）。"; return 1; }
   done
   return 0
 }

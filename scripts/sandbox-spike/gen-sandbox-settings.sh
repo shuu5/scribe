@@ -85,7 +85,8 @@ beads_dir="$anchor/.beads"
 #   （bwrap は bind 前に path 存在を要求しうるため bind-safe）。established anchor（spawn の常態）では runtime
 #   エントリは既在。session 中の新規 top-level エントリ生成は稀で、起きれば fail-loud（worker が気付く）。
 # 残存（OG-1 の到達限界）: embeddeddolt を dir grant する以上 worker は dolt DB を raw 書換でき、他 issue 改竄は
-#   OS 層では防げない（tool 層の bd-write-guard=PreToolUse + bdw-write-outside-sandbox 案が別レイヤ・脅威モデル
+#   OS 層では防げない（tool 層の universal beads-bdw guard=PreToolUse + bdw-write-outside-sandbox 案が別レイヤ・
+#   scribe bespoke の bd-write-guard は撤去され堀は beads-bdw plugin へ移管済＝un-2uap Leg-R-sc・脅威モデル
 #   の正直な文書化は sc-451）。lock 鍵の **file 単位** grant（OG-4・sc-mcx）は下記 lock_file で実装済（lock dir
 #   丸ごとを grant しないため同 dir 内の他リポ鍵 file には触れない＝残存 DoS を消す defense-in-depth）。
 _beads_governance=( PRIME.md metadata.json config.yaml README.md .gitignore )

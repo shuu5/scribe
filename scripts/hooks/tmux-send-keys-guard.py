@@ -13,7 +13,9 @@
 #   その必須化の「機械実体」＝生 send-keys を PreToolUse 層で塞ぐ（scribe-inject 内部の send-keys は subprocess
 #   ゆえ PreToolUse は再発火せず自然に通る＝この構造が「scribe-inject 必須化」を成す・下記 J4）。
 #
-# 構造は既存 3 guard（git-destructive-guard.py / rm-destructive-guard.py / bd-write-guard.py）を踏襲する:
+# 構造は既存 guard（git-destructive-guard.py / rm-destructive-guard.py）を踏襲する。本 guard の設計時点では
+#   bespoke な bd-write-guard.py も同構造の 3 本目として在ったが、bd write の堀は universal beads-bdw plugin 側
+#   へ移管され bespoke 版は撤去済（un-2uap Leg-R-sc）＝現行 scribe の PreToolUse[Bash] guard は上記 2 本 + 本 guard:
 #   - トークナイザは publish 済 cmdtokens plugin の canonical lib を consume する（下記 consume preamble）。
 #   - session self-scope（scribe_session._is_scribe_guard_session・fail-closed）で dolt_database=='sc' session
 #     のみ発火し、foreign（orchestrator の 'orch' 等）session では exit0 no-op＝orchestrator 自身の spawn/inject
@@ -21,8 +23,8 @@
 #
 # KNOWN RISK（consume 設計の既知性質・全 guard 共通）: cmdtokens plugin 不在ホストでは lib ロードに失敗し guard が
 #   fail-open（exit 0・loud stderr）で素通しになる（transport 封鎖が silent に無効化）。SessionStart guard-health
-#   banner は cmdtokens 不在を loud 化するが、その列挙は例示的で本 guard 名を含まない（bd-write-guard も同様に
-#   未列挙＝banner は cmdtokens consumer の網羅リストではない・precedent 準拠）。
+#   banner は cmdtokens 不在を loud 化するが、その列挙は例示的で本 guard 名を含まない（かつて同居した bespoke
+#   bd-write-guard も同様に未列挙だった＝banner は cmdtokens consumer の網羅リストではない・precedent 準拠）。
 #
 # 方式（sc-164 admin 裁定 3/7・token 検査は subcommand の位置に依存しない）: コマンド文字列を共有
 #   lib(cmdtokens.iter_commands)で shlex トークン化し、**本物の `tmux` 呼び出しのトークン列にのみ**ルールを
@@ -94,7 +96,7 @@ import os
 import json
 import subprocess
 
-# --- cmdtokens consume preamble（bd-write-guard と同一の薄い解決層）---------------------------------------
+# --- cmdtokens consume preamble（撤去済 bespoke bd-write-guard 由来の薄い解決層・全 guard 共通形）-----------
 #   canonical cmdtokens（standalone cmdtokens plugin の単一 SSOT）を sys.path 解決して import するだけ。
 #   CMDTOKENS_LIB が未設定/空/非絶対なら plugin 標準配置へ fallback（相対値の cwd 相対 poison を os.path.isabs で弾く）。
 _CMDTOKENS_DEFAULT_LIB = os.path.expanduser("~/.claude/plugins/cmdtokens/lib")
@@ -113,7 +115,7 @@ except Exception as e:  # lib ロード不能 → fail-open（guard 無効化を
         sys.stderr.write(f"[tmux-guard] cannot load cmdtokens lib, failing open: {e}\n")
         sys.exit(0)
 
-# --- scribe_session lib（session self-scope・bd-write-guard と同一 SSOT）--------------------------------
+# --- scribe_session lib（session self-scope の共有 SSOT・撤去済 bespoke bd-write-guard 由来）--------------
 _scribe_session_load_error = None
 try:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib"))
