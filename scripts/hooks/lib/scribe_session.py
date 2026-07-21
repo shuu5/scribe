@@ -5,7 +5,7 @@
 # 由来: scriptorium scripts/hooks/lib/orch_session.py（orchestrator の同型機構＝SELF_PREFIX / walk-up 台帳
 #   解決 / session 判定）を scribe 向けに port。**本 module は用途の異なる 2 種の session 判定を提供する**:
 #     - _is_scribe_session       : banner hook（session-start-guard-health.py）用・**fail-open**。
-#     - _is_scribe_guard_session : write guard（bd-write-guard.py・sc-wdr）用・**fail-closed**。
+#     - _is_scribe_guard_session : guard（tmux-send-keys-guard.py・transport 封鎖）用・**fail-closed**。
 #   両者は同一の SELF_PREFIX / walk-up 台帳解決（_resolve_ledger）を共有しつつ、present-but-unreadable
 #   （`.beads/metadata.json` は在るが読取/parse 失敗）の扱いだけが**意図的に逆**である（下記）。
 #   orch は単一 orch_session の _is_orch_session（fail-closed）を banner と guard で共用するが、scribe は
