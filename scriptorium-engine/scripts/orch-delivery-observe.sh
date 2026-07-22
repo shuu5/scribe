@@ -18,16 +18,31 @@
 #   「proxy 近似（foreign 更新鮮度・heartbeat 未 land）」とラベルする。
 #
 # データ源（fence4・hydrated orch DB・read-only・自台帳 write なし）─────────────────────────────────
-#   既 hydrate 済み orch DB（自 orch- bead + `bd repo sync` で hydrate された foreign copy）を `bd list --json` で
-#   read-only に読む。hook 内で `bd repo sync`/hydrate はしない（鮮度は別便 orch-7ute の 30 分 timer へ委譲）。
+#   既 hydrate 済み orch DB（自 orch- bead + `bd repo sync` で hydrate された foreign copy）を
+#   `bd list --all --json --no-pager --limit 0` で read-only に読む。hook 内で `bd repo sync`/hydrate はしない
+#   （鮮度は別便 orch-7ute の 30 分 timer へ委譲）。
 #   `bd -C`/`--foreign-repo` 直読は使わない（worktree の embeddeddolt は gitignore で空＝false-BLOCKED を招く）。
 #   stale hydrate は境界が古く見え over-surface（滞留の過検出＝配送 monitor として安全側・H-5 追認 2026-07-13）。
 #   「自台帳 read のみ」= write-isolation（foreign 台帳へ書かない）の意（3 guards 準拠）。
 #
+#   ★`--all` が load-bearing（bd orch-5j1t・偽滞留 incident 2026-07-21）: cycle 境界 proxy は foreign copy の
+#   max(updated_at) だが、bd list の **既定 filter は closed のみを落とす**（実測 2026-07-21: 既定=open 265 /
+#   in_progress 25 / deferred 9 / blocked 1・`--all` で新規に加わるのは closed 1619 **だけ**＝deferred は既定で
+#   既に入っており `--all` 由来の新規混入ではない。ゆえに下記 gate が `status != "closed"` のみで十分）。
+#   foreign admin の直近活動が close（例 sc-8e7i CLOSED 01:56Z）だと closed row の updated_at が集合から外れ、
+#   境界が **過去へ退行**し（実測 00:00Z → 前日 05:33Z）配送済みの便に偽の滞留＋偽の呼び鈴提案が出る。ゆえに
+#   `--all`（bd 文書化 flag・"overrides default filter"）で closed 込みの全 status を読む。`--status all` は
+#   未文書化の擬似値ゆえ採らない（version fragile）。`--limit 0` は default-30 截断禁止で保持（fence3）。
+#   3 つの consumer で closed の扱いが **意図的に非対称**なので混同しないこと:
+#     - 境界 prefix_max : closed **込み**（status 非依存に全行から max・本 fix の目的）。
+#     - forbeads(滞留)  : closed **除外**（配送済+処理済ゆえ滞留候補にしない・byte 不変）。
+#     - compact_ids     : closed **除外**（`--all` で新規に混入する closed marker を fence6 read から弾く・forbeads と対称）。
+#
 # ★fence3 errata（bd の label prefix 非対応）: 契約 fence3 は `bd list -l for: --json` を指すが、bd の `-l` は
 #   **完全一致**で prefix match しない（`bd list -l for:` は 0 件・`-l for:sc` のみ 5 件＝実測 2026-07-13）。ゆえに
-#   全 bead を `bd list --json --no-pager --limit 0`（default-30 截断禁止・fence3 の趣意「全 for:X 便を取りこぼさない」を
-#   満たす）で取得し、parser 側で label が `for:<X>` に一致する bead を抽出する（宛先 X→session 名 mapping を発明しない
+#   全 bead を `bd list --all --json --no-pager --limit 0`（`--all` の根拠は上の「データ源」節が SSOT・default-30
+#   截断禁止・fence3 の趣意「全 for:X 便を取りこぼさない」を満たす）で取得し、parser 側で label が `for:<X>` に
+#   一致する bead を抽出する（宛先 X→session 名 mapping を発明しない
 #   ＝X は data 由来の label 値そのもの）。この置換は silently-choose でなく本 header に理由を残す（fence2/fence3）。
 #
 # 推論配送 3 値（fence3・unknown≠delivered 不変条件）──────────────────────────────────────────────
@@ -184,8 +199,11 @@ for it in data:
     labels = it.get("labels") or []
     if not isinstance(labels, list):
         labels = []
-    # auto-compact marker（完全一致・fence6・read only）。
-    if compact_label in labels:
+    status = (it.get("status", "") or "")
+    # auto-compact marker（完全一致・fence6・read only）。closed は除外する（orch-5j1t・forbeads と対称）:
+    # bd list が `--all` になり closed row が入るようになったため、gate 無しだと過去 incident の closed marker が
+    # 恒久的に surface され続ける（境界 fix の巻き添え over-surface）。marker は「いま効いている incident」を出す channel。
+    if compact_label in labels and status != "closed":
         compact_ids.append(bid)
     # 宛先 max(updated_at)（foreign copy = id prefix==X）。prefix は id の最初の "-" までの segment。
     pfx = bid.split("-", 1)[0] if "-" in bid else bid
@@ -194,8 +212,7 @@ for it in data:
         cur = prefix_max.get(pfx)
         if cur is None or upd > cur:
             prefix_max[pfx] = upd
-    # for:<X> label を持つ非 closed bead（滞留候補）。closed は配送済み+処理済ゆえ除外。
-    status = (it.get("status", "") or "")
+    # for:<X> label を持つ非 closed bead（滞留候補）。closed は配送済み+処理済ゆえ除外（byte 不変・orch-5j1t）。
     for lab in labels:
         if isinstance(lab, str) and lab.startswith("for:"):
             x = lab[4:]
@@ -248,7 +265,9 @@ run_observe() {
     fi
 
     local json rc
-    json="$("$BD" list --json --no-pager --limit 0 2>/dev/null)"; rc=$?
+    # ★`--all` は load-bearing（orch-5j1t）: 既定 filter は closed を落とし、closed だけ更新された cycle で
+    # 境界 proxy が過去へ退行する（偽滞留・偽呼び鈴）。header「データ源」節が根拠 SSOT。
+    json="$("$BD" list --all --json --no-pager --limit 0 2>/dev/null)"; rc=$?
     if [ "$rc" -ne 0 ]; then
         echo "  ⚠ 配送観測不能: bd list 失敗（$BD・rc=$rc）。bd 台帳/PATH を確認せよ（fail-open skip）。"
         return 0
@@ -354,7 +373,9 @@ if [ "${1:-}" = "--self-test" ]; then
     _fail() { echo "FAIL: $1" >&2; st_fail=1; }
 
     mkdir -p "$st_tmp/bin"
-    # fake bd: list --json で固定 fixture を返す（引数記録も残す＝截断禁止 teeth）。
+    # fake bd: list に **argv 非分岐**で固定 fixture を返す（引数記録も残す＝截断禁止 / --all args teeth）。
+    #   ※argv 非分岐ゆえ `--all` の挙動 teeth にはならない（挙動の非空虚 teeth は bats の
+    #     (regress-closed-boundary) が status-aware stub + revert-mutation で担う・orch-5j1t）。
     #   NOW_EPOCH は 2026-07-13T12:00:00Z=1783944000 相当で固定して age を決定的にする（STL=360m>閾値 / FRS=30m<閾値）。
     #   fixture:
     #     - sc-old   updated 2026-07-13T00:00:00Z（宛先 sc の境界＝max）
@@ -532,6 +553,15 @@ STUB
         _ok "截断禁止(fence3): bd list に --limit 0（default-30 截断禁止）"
     else
         _fail "截断禁止: bd 引数に --limit 0 を期待したが不在: [$(cat "$BD_ARGS_LOG")]"
+    fi
+
+    # closed 込み境界（orch-5j1t・args belt）: bd 呼出しに --all（既定 filter が closed を落とし境界が退行するのを防ぐ）。
+    #   ※本 self-test の stub bd は argv 非分岐ゆえ挙動 teeth にはならない（挙動の非空虚 teeth は bats の
+    #     (regress-closed-boundary) が status-aware stub + revert-mutation で担う）。ここは args の belt のみ。
+    if grep -qF -- "--all" "$BD_ARGS_LOG"; then
+        _ok "closed 込み境界(orch-5j1t): bd list に --all（既定 filter の closed 除外による境界退行を防ぐ）"
+    else
+        _fail "closed 込み境界: bd 引数に --all を期待したが不在: [$(cat "$BD_ARGS_LOG")]"
     fi
 
     # self-scope gate（gate 有効・foreign cwd）→ refuse・非0（誤台帳 scan を fail-closed で弾く）。
