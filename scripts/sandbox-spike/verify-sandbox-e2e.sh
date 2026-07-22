@@ -6,8 +6,11 @@
 # 位置づけ: sc-1gu spike(run-spike.sh・削除済 commit 71bf862)は生ファイル書込みの *境界*
 #   (a1 cwd allow / a2 <ANCHOR>/.beads allow / b1,b2 外壁 block)までを assert した。
 #   本ハーネスはその先 — sandboxed worker の **実操作**(git commit / bd close)が allowWrite
-#   境界(cwd+配下 / linked worktree の共有 .git / <ANCHOR>/.beads / lock_dir)を通って
-#   *永続*するか — を埋める(sc-7n1)。README「未 assert」項の解消。
+#   境界(cwd+配下〔CC 既定〕/ .git commit write-set〔私有 gitdir + 共有 objects/refs/logs・明示 grant・sc-kxec〕/
+#   <ANCHOR>/.beads / lock_dir)を通って *永続*するか — を埋める(sc-7n1)。README「未 assert」項の解消。
+#   注(sc-kxec): 共有 .git は旧「CC 既定 writable・列挙不要」前提だったが、この既定が CC version で不安定に変わり
+#   commit が silent に非永続化した(sc-ghjc・2.1.217)ため、gen が commit write-set を **明示 allowWrite grant** する
+#   ように変更した。本 e2e は gen を直呼びするので、その明示 grant 経由で commit が共有 .git へ永続することを実証する。
 #
 # 方式(spike 踏襲): 自前で bwrap を組まず、**実 Claude Code(`claude -p`)を worktree で起動**し
 #   CC 自身の bwrap sandbox を適用させる(= CC 実体との乖離が無い真の e2e)。一次シグナル =

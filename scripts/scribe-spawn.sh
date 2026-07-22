@@ -1258,18 +1258,50 @@ if [[ "$SANDBOX_ON" == "1" ]]; then
   # （SCRIBE_WORKER=="1" / SCRIBE_WORKTREE==$wt / CLAUDE_CODE_EFFORT_LEVEL==$eff）を **単一 jq -e の複合述語**で assert
   # する（欠落は scribe_die）。★file attestation は carrier loss の**必要条件**（十分でない＝runtime 配送は admin が
   # gate で live 検証する・AC4/AC gate3）。破れたら黙って非 sandbox / carrier 欠落 worker を起動しないため停止する。
+  # sc-kxec: .git commit write-set grant（私有 gitdir + 共有 objects/refs）の存在も launch 前に assert する。
+  # gen（gen-sandbox-settings.sh・D0-A）が私有 gitdir + 共有 objects/refs/logs を明示 emit するようになった（CC 既定
+  # auto-grant 依存を廃止）。gen が（stub 差替え / 手編集 drift で）.git grant を欠く settings を吐くと worker は
+  # 「sandbox 済で commit できる」と信じて起動するが git-dir 書込が非永続化し commit が silent に失われる zombie
+  # （idle 停滞）になる（sc-ghjc の非対称: working-tree 書込は永続・git-dir 書込は非永続）。ここで私有 gitdir +
+  # 共有 objects/refs の存在を検査し欠落なら die して zombie 起動を構造的に断つ（D4-A）。導出は gen と **同一の
+  # rev-parse**（$WORKTREE 起点・同一絶対化）ゆえ gen 出力と byte 一致する（gen-sandbox-settings.sh の .git grant
+  # 計算と平仄を保つこと）。allowWrite が空（＝degenerate な単体 stub 等・実 gen は .beads fail-closed ゆえ空を
+  # 出さない）のときは .git 要求を課さない（実 gen 出力は常に非空ゆえ本番では常に .git grant を強制し、無関係な
+  # transport/env carrier 単体 stub を巻き込まない。silent-zombie は「.beads 有り・.git 欠落」＝非空側で捕捉される）。
+  # sc-kxec finding#1: gen（gen-sandbox-settings.sh）と **同一の物理正規化**（cd && pwd -P）を私有 gitdir/共有
+  # common-dir に適用する。旧実装は `--absolute-git-dir`（symlink 解決）と `--git-common-dir` の logical `pwd` 絶対化
+  # （symlink 保持）が非対称で、symlink 経路の primary worktree が gen の primary 検出 `==` と本 FO-2 fence を同時に
+  # すり抜ける fail-open を生んだ（gen 側の同一 finding と対）。両者を物理化して like-for-like で照合し、かつ gen 出力と
+  # byte 一致させる（gen と本 FO-2 は同一導出＝$WORKTREE 起点・cd && pwd -P でなければならない・平仄を保つこと）。
+  _fo2_gd="$(scribe_git -C "$WORKTREE" rev-parse --absolute-git-dir 2>/dev/null || true)"
+  if [[ -n "$_fo2_gd" ]]; then
+    _fo2_gd="$(cd "$_fo2_gd" 2>/dev/null && pwd -P)" || _fo2_gd=""
+  fi
+  _fo2_common="$(scribe_git -C "$WORKTREE" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [[ -n "$_fo2_common" ]]; then
+    _fo2_common="$(cd "$WORKTREE" 2>/dev/null && cd "$_fo2_common" 2>/dev/null && pwd -P)" || _fo2_common=""
+  fi
+  # jq 述語共通の .git grant 節。2 条から成る:
+  #  (presence) allowWrite 空は免除・非空なら 私有 gitdir + objects + refs 必須（silent-zombie=commit 非永続を弾く）。
+  #  (fence)    allowWrite が 共有 .git **丸ごと**（$cmn）・$cmn/config・$cmn/hooks を含まない（un-1n1 fence の負条項・
+  #             sc-kxec finding#1）。primary worktree を渡した stub/drift は `--absolute-git-dir`=共有 .git 丸ごとを
+  #             emit し config/hooks を writable にして fence を破るが、presence 節は満たしてしまう（.git 丸ごとは
+  #             objects/refs を包含）ため presence だけでは捕まらない。fence 節を AND して backstop を非対称から fence
+  #             防御へ拡張する（gen の primary 検出ガードと二重の壁）。空/不明 $cmn でも "含まない" は trivially 真。
+  _fo2_git_clause='(((.sandbox.filesystem.allowWrite | length) == 0 or ((.sandbox.filesystem.allowWrite | index($gd)) != null and (.sandbox.filesystem.allowWrite | index($obj)) != null and (.sandbox.filesystem.allowWrite | index($ref)) != null)) and (.sandbox.filesystem.allowWrite | index($cmn)) == null and (.sandbox.filesystem.allowWrite | index($cmncfg)) == null and (.sandbox.filesystem.allowWrite | index($cmnhk)) == null)'
   if command -v jq >/dev/null 2>&1; then
     _attest_ok=0
     if [[ "$EFFECTIVE_TRANSPORT" == "bg" ]]; then
-      jq -e --arg wt "$WORKTREE" --arg eff "$EFFORT" \
-         '.sandbox.enabled == true and .sandbox.failIfUnavailable == true and .sandbox.allowUnsandboxedCommands == false and .env.SCRIBE_WORKER == "1" and .env.SCRIBE_WORKTREE == $wt and .env.CLAUDE_CODE_EFFORT_LEVEL == $eff' \
+      jq -e --arg wt "$WORKTREE" --arg eff "$EFFORT" --arg gd "$_fo2_gd" --arg obj "$_fo2_common/objects" --arg ref "$_fo2_common/refs" --arg cmn "$_fo2_common" --arg cmncfg "$_fo2_common/config" --arg cmnhk "$_fo2_common/hooks" \
+         ".sandbox.enabled == true and .sandbox.failIfUnavailable == true and .sandbox.allowUnsandboxedCommands == false and .env.SCRIBE_WORKER == \"1\" and .env.SCRIBE_WORKTREE == \$wt and .env.CLAUDE_CODE_EFFORT_LEVEL == \$eff and $_fo2_git_clause" \
          "$WORKTREE/.claude/settings.local.json" >/dev/null 2>&1 && _attest_ok=1
     else
-      jq -e '.sandbox.enabled == true and .sandbox.failIfUnavailable == true and .sandbox.allowUnsandboxedCommands == false' \
+      jq -e --arg gd "$_fo2_gd" --arg obj "$_fo2_common/objects" --arg ref "$_fo2_common/refs" --arg cmn "$_fo2_common" --arg cmncfg "$_fo2_common/config" --arg cmnhk "$_fo2_common/hooks" \
+         ".sandbox.enabled == true and .sandbox.failIfUnavailable == true and .sandbox.allowUnsandboxedCommands == false and $_fo2_git_clause" \
          "$WORKTREE/.claude/settings.local.json" >/dev/null 2>&1 && _attest_ok=1
     fi
     if [[ "$_attest_ok" != "1" ]]; then
-      scribe_die "sandbox 実行時アテステーション失敗: 生成した settings.local.json が強制不変条件（sandbox 強制3キー enabled=true / failIfUnavailable=true / allowUnsandboxedCommands=false$([[ "$EFFECTIVE_TRANSPORT" == "bg" ]] && echo ' + bg env carrier 3キー SCRIBE_WORKER/SCRIBE_WORKTREE/CLAUDE_CODE_EFFORT_LEVEL')）を満たしません（gen 破損 / stub drift / jq 合成失敗?）。黙って非 sandbox / carrier 欠落 worker を起動しないため停止します。
+      scribe_die "sandbox 実行時アテステーション失敗: 生成した settings.local.json が強制不変条件（sandbox 強制3キー enabled=true / failIfUnavailable=true / allowUnsandboxedCommands=false$([[ "$EFFECTIVE_TRANSPORT" == "bg" ]] && echo ' + bg env carrier 3キー SCRIBE_WORKER/SCRIBE_WORKTREE/CLAUDE_CODE_EFFORT_LEVEL') + .git commit write-set grant（私有 gitdir + 共有 objects/refs）+ un-1n1 fence（共有 .git 丸ごと・config・hooks 非grant）・sc-kxec）を満たしません（gen 破損 / stub drift / primary worktree 入力 / jq 合成失敗?）。黙って非 sandbox / carrier 欠落 / commit 非永続（zombie）/ fence 破れ worker を起動しないため停止します。
   worktree が orphan として残っています（自動削除はしません＝force 禁止・確認必須ポリシー）: $WORKTREE
   掃除するには: $SCRIPT_DIR/scribe-cleanup.sh --repo \"$REPO\" --worktree \"$WORKTREE\" --branch \"$BRANCH\" --window \"$WINDOW\" $ID
   settings: $WORKTREE/.claude/settings.local.json"
