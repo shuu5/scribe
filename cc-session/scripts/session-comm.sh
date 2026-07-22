@@ -906,9 +906,12 @@ cmd_inject_file() {
     # pane 出現も「到着」しか証明せず「submit（turn 開始）」を証明しない——boot 中の promo/TUI 再描画が
     # 初回 Enter を食うと、入力欄残留や一過性フレームの sentinel で偽『受理』を返し、spawn kickoff が
     # silent 消失する（orch-sm6p/sc-8g5 verified・orch-ttqe の根治対象）。受理は submit の積極証拠のみ:
-    #   (A) 強 processing 2 連続: pane 直読で turn 固有マーカー（esc to interrupt / compaction フェーズ名・
-    #       SSOT=session-state.sh）を 2 連続観測＝turn 実行中。state==processing は使わない（detect_state
-    #       の既定 fallthrough が processing のため splash 滞留も processing と読める＝弱い証拠）。
+    #   (A) 強 processing 2 回: pane 直読で turn 固有マーカー（esc to interrupt / compaction フェーズ名・
+    #       SSOT=session-state.sh）を 2 回観測＝turn 実行中。観測の間に「宛先が processing を報告している
+    #       描画過渡フレーム」が挟まっても streak は落とさない（ccs-oq9: 隣接要求だけだと重量宛先で
+    #       構造的に取り逃し、偽 exit 4→呼出側 retry→二重送達になる）。state==processing 自体は
+    #       **受理には使わない**（detect_state の既定 fallthrough が processing のため splash 滞留も
+    #       processing と読める＝弱い証拠。証拠 0/1 回では受理しない）＝下の streak 処理を参照。
     #       thinking 進行形 pattern も使わない（boot スピナー語彙と同形＝e2e で偽受理を実測・下の導出部参照）。
     #   (B) echo-outside-interior: sentinel が入力欄 interior の**外**（transcript）に出現 ∧ baseline に
     #       不在＝submit されて会話履歴に載った証拠。fast-complete / post-submit ダイアログの
@@ -993,9 +996,28 @@ cmd_inject_file() {
                 sleep 0.3
                 continue
             fi
-            _rb_strong_streak=0
-
             _rb_state=$("${_state_script_dir}/session-state.sh" state "$window_name" 2>/dev/null) || _rb_state="unknown"
+            # 強証拠が得られなかった poll の streak 処理（ccs-oq9・orch-55zt 根治の核）。
+            # 旧: 無条件 `_rb_strong_streak=0`＝(A) は「隣接 2 poll」でしか成立しない。実 turn 実行中でも
+            #   ・capture-pane が Ink の repaint 途中を掴む（スピナー行が一瞬欠ける）
+            #   ・重量セッション（大 context / 大量ストリーム出力）で入力欄 box が描画途中＝xrc!=0
+            #   ・poll 間隔（0.3s + subprocess 数本）とスピナー再描画位置の位相ずれ
+            # のいずれかが 1 フレーム挟まるだけで streak が落ち、budget 全域で 2 連続を取り逃す。
+            # これが実測1（「state=processing after 10s / 積極証拠なし」＝偽 exit 4 → cld-spawn の
+            # 内部 retry → turn 完了後 input-waiting へ復帰した宛先へ 2 通目 paste＝二重送達）の機序。
+            # 新: **宛先が processing を報告し続けている間だけ** streak を保持する（gap 許容）。
+            # 不変量（fence F1・pin :149/:225/:233/:314-329/:550 と整合）:
+            #   - 受理条件は不変＝turn 固有の強マーカー（TURN_SPINNER_PATTERN / esc to interrupt /
+            #     compaction フェーズ名）が **baseline 新規行** として **2 回**観測されること。
+            #     state==processing は「受理」には一切使わない（証拠 0 回・1 回では絶対に受理しない）。
+            #     ゆえに boot splash / promo interstitial（timer-spinner を出さない＝100 frames verified）
+            #     は state が processing を返し続けても受理に到達できない（ccs-mxv/ccs-pwr の fail-open 非復活）。
+            #   - processing 以外（input-waiting / idle / unknown / error / exited）は従来どおり即リセット。
+            #     ＝「宛先が入力待ちに見えているのに強マーカーが飛び飛び」という非連続振動（:233 pin）は
+            #     引き続き非受理。gap 許容は「宛先が実際に turn を回している」frame 系列に限定される。
+            if [[ "$_rb_state" != "processing" ]]; then
+                _rb_strong_streak=0
+            fi
             case "$_rb_state" in
                 error|exited)
                     _rb_err_streak=$(( _rb_err_streak + 1 ))
