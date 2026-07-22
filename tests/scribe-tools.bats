@@ -1919,6 +1919,37 @@ STUB
   git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
 }
 
+@test "spawn(sc-kxec/FO-2 fence): 共有 .git/config・.git/hooks の直接 grant（丸ごと $cmn なし）でも launch 前に die（fence 条項の mutation 非空虚化）" {
+  # 前 test は 共有 .git 丸ごと（$cmn）のみを exercise するため、fence 3 conjunct のうち $cmncfg/$cmnhk の
+  # 2 条項は削除 mutation しても GREEN のまま残る（gate 監査 minor）。config / hooks を**直接** grant する
+  # 形状（$cmn 自体は混入しない＝index($cmn) 条項では捕まらない）で die することを pin し、両条項を非空虚化する。
+  local repo wt noop genfence fjson gd obj ref bad hh
+  repo="$SCRIBE_TEST_CWD"
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  obj="$repo/.git/objects"; ref="$repo/.git/refs"
+  # iteration ごとに HHMMSS を変える: 1 周目の branch（worktree remove では消えない）と 2 周目の
+  # `git worktree add -b 同名` が衝突し、FO-2 到達前に別メッセージで死ぬのを防ぐ。
+  for bad in "$repo/.git/config" "$repo/.git/hooks"; do
+    [[ "$bad" == */config ]] && hh=101011 || hh=101012
+    gd="$repo/.git/worktrees/un-4nm-$hh"
+    wt="$repo/.worktrees/spawn/un-4nm-$hh"
+    # 強制3キー OK・presence 節 OK（gd/obj/ref 在り）・$cmn 丸ごと無し。$bad の直接 grant だけが fence 破れ。
+    fjson="$(mktemp)"
+    jq -n --arg b "$bad" --arg gd "$gd" --arg obj "$obj" --arg ref "$ref" \
+       '{sandbox:{enabled:true,failIfUnavailable:true,allowUnsandboxedCommands:false,filesystem:{allowWrite:[$gd,$obj,$ref,$b]}}}' > "$fjson"
+    genfence="$(mktemp)"; printf '#!/usr/bin/env bash\ncat %q\n' "$fjson" > "$genfence"; chmod +x "$genfence"
+    run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_PREFLIGHT="$noop" SCRIBE_SANDBOX_GEN="$genfence" SCRIBE_HHMMSS=$hh \
+        "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+    rm -f "$genfence" "$fjson"
+    [ "$status" -ne 0 ]                                 # config/hooks 直 grant を黙って起動しない
+    [[ "$output" == *"アテステーション失敗"* ]]
+    [[ "$output" == *"fence"* ]]
+    [[ "$output" != *"spawned: issue=un-4nm"* ]]
+    git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+  done
+  rm -f "$noop"
+}
+
 # ---------- sandbox e2e: sandboxed worker の git commit + bd close 永続（sc-7n1）----------
 # 上の sandbox テスト(108-165, 572-624)は dry-run plan / gen JSON / 実 materialization までを pin するが、
 # sandboxed worker の *実操作*（git commit が共有 .git に / bd close が .beads に永続するか）は未 assert
