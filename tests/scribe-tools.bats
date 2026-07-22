@@ -29,6 +29,10 @@ setup() {
   # sc-rvq: config-dir 追随テストを hermetic にする。ホスト/CI 側の CLAUDE_CONFIG_DIR / override 系が漏れると
   # 既定経路テスト（unset 注入）や real-path preflight が汚染されるため、各テスト前に必ず落とす。
   unset CLAUDE_CONFIG_DIR SCRIBE_WORKER_CONFIG_DIR SCRIBE_ACCOUNTS_BASE 2>/dev/null || true
+  # sc-9954: worker 既定が auto へ反転し、素の worker dry-run も selector を通る。実 claude-usage を叩かせず決定論化する:
+  # SCRIBE_USAGE_CMD を不在パスに固定 → selector exit 3（API 故障）→ 主アカ fallback（＝sc-9954 前の既定挙動 mirror/unset と
+  # 同一の config-dir 解決＝config-dir 追随行は不変）。auto の実選択を検証するテストは per-test で SCRIBE_USAGE_JSON を与える。
+  export SCRIBE_USAGE_CMD="$BATS_TEST_TMPDIR/scribe-no-usage-cmd"
   # sc-ovq: spawn は real-exec 冒頭で **無条件に**（ON/OFF 両経路で）canonical bdw 到達性を検査する
   # （zombie worker 防止）。bdw 非依存の spawn テスト（preflight/fallback/orphan/gen 失敗枝）が host の
   # plugin 配備に左右されないよう、`lock-dir` で exit0 する present スタブを 1 つ用意する（テストは
@@ -1006,20 +1010,28 @@ _mk_valid_cfgdir() {
   printf '%s\n' "$d"
 }
 
-@test "spawn(sc-rvq/AC1): 既定(CLAUDE_CONFIG_DIR 未設定)→ env-file に unset CLAUDE_CONFIG_DIR のみ・export しない" {
-  run "$SPAWN" --dry-run un-4nm
+@test "spawn(sc-9954/AC1): worker 既定は auto へ反転／--account mirror で unset 注入へ opt-out（源=unset・export しない）" {
+  # sc-9954: worker 既定は auto（残量 maximin 自動選択）。setup の SCRIBE_USAGE_CMD 不在で API 故障 fallback へ倒れるが
+  # dry-run plan には既定反転（account 既定=auto…maximin）が出る。config-dir 追随の unset 注入機構は opt-out --account mirror で駆動する。
+  run "$SPAWN" --dry-run un-4nm                              # 既定（--account 省略）= auto へ反転（sc-9954）
   [ "$status" -eq 0 ]
-  [[ "$output" == *"unset CLAUDE_CONFIG_DIR"* ]]           # 既定は unset 行を注入
-  [[ "$output" != *"export CLAUDE_CONFIG_DIR="* ]]         # export はしない（挙動不変）
+  [[ "$output" == *maximin* ]]                              # worker 既定 = auto
+  [[ "$output" == *"account 既定=auto（sc-9954"* ]]         # 既定反転の defaulted 表示（D-d）
+  run "$SPAWN" --dry-run --account mirror un-4nm            # opt-out = 旧既定 mirror/unset 挙動（D-c）
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"unset CLAUDE_CONFIG_DIR"* ]]           # admin env 無し → unset を注入
+  [[ "$output" != *"export CLAUDE_CONFIG_DIR="* ]]         # export はしない
   [[ "$output" == *"源=unset"* ]]
+  [[ "$output" != *maximin* ]]                             # opt-out ゆえ auto 化しない
 }
 
-@test "spawn(sc-rvq/AC2): admin CLAUDE_CONFIG_DIR set → env-file に export CLAUDE_CONFIG_DIR=<dir> を mirror" {
-  run env CLAUDE_CONFIG_DIR=/some/admin/dir "$SPAWN" --dry-run un-4nm
+@test "spawn(sc-9954/AC2): --account mirror + admin CLAUDE_CONFIG_DIR set → export mirror（源=mirror・auto 化しない）" {
+  run env CLAUDE_CONFIG_DIR=/some/admin/dir "$SPAWN" --dry-run --account mirror un-4nm
   [ "$status" -eq 0 ]
   [[ "$output" == *"export CLAUDE_CONFIG_DIR=/some/admin/dir"* ]]
   [[ "$output" == *"源=mirror"* ]]
   [[ "$output" != *"unset CLAUDE_CONFIG_DIR"* ]]
+  [[ "$output" != *maximin* ]]
 }
 
 @test "spawn(sc-rvq): --account <label> → <accounts-base>/<label> を注入（admin mirror より優先）" {

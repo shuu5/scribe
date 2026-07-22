@@ -27,8 +27,13 @@ setup() {
   SEL="$SCRIPTS/scribe-account-select"
   SPAWN="$SCRIPTS/scribe-spawn.sh"
   # host 側の usage/config-dir env が漏れてテストを汚さないよう毎回落とす（hermetic）。
-  unset SCRIBE_USAGE_JSON SCRIBE_USAGE_CMD SCRIBE_USAGE_NOW \
+  unset SCRIBE_USAGE_JSON SCRIBE_USAGE_NOW \
         CLAUDE_CONFIG_DIR SCRIBE_WORKER_CONFIG_DIR SCRIBE_ACCOUNTS_BASE 2>/dev/null || true
+  # sc-9954: worker 既定 auto 反転で、素の worker spawn（--account 省略）も selector を通る。実 claude-usage を叩かせず
+  # 決定論化する: SCRIBE_USAGE_CMD を不在パスに固定 → selector exit 3（API 故障）→ 主アカ fallback。usage を検証する
+  # テストは SCRIBE_USAGE_JSON（seam 優先）を per-test で与えるため本既定に勝つ。API 故障を明示注入するテストは同 var を
+  # 別の不在パスへ上書きするが効果は同一。
+  export SCRIBE_USAGE_CMD="$BATS_TEST_TMPDIR/scribe-no-usage-cmd"
 
   # bd 実在検証スタブ（実 graph 不要）。dry-run 統合テストは実在 id が要るので sc-auto-test を ok に。
   export SCRIBE_BD="$FIXTURES/bd-stub.sh"
@@ -344,12 +349,110 @@ mk_cfg() {
   [[ "$output" != *"--account auto（sc-1rq"* ]]
 }
 
-@test "sc-1rq spawn: 素経路（--account 未指定）は unset 注入で不変・auto plan 混入なし" {
+# ============================================================================
+# sc-9954: worker 既定を auto へ反転（consult は mirror 据え置き）。chain 不変・失敗意味論不変・監査弁別。
+# ============================================================================
+
+@test "sc-9954 spawn: worker 既定（--account 省略）は auto 経路へ入る（defaulted 表示・top-by-usage=black4・opt-in 文言でない）" {
   run env -u CLAUDE_CONFIG_DIR -u SCRIBE_WORKER_CONFIG_DIR \
+    SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$GOLDEN")" SCRIBE_ACCOUNTS_BASE="$ABASE" \
     "$SPAWN" --dry-run --repo "$ANCHOR" --anchor "$ANCHOR" sc-auto-test
+  [ "$status" -eq 0 ]
+  [[ "$output" == *maximin* ]]                                    # auto 経路に入った
+  [[ "$output" == *"account 既定=auto（sc-9954"* ]]              # 既定反転の defaulted 表示（D-d）
+  [[ "$output" == *"top-by-usage）=black4"* ]]                    # selector 実測で最も空いているアカを選定
+  [[ "$output" == *"export CLAUDE_CONFIG_DIR=$ABASE/black4"* ]]
+  [[ "$output" != *"--account auto（sc-1rq"* ]]                   # 明示 opt-in 文言ではない（D-d 弁別）
+}
+
+@test "sc-9954 spawn: 明示 --account auto は opt-in 文言（既定 auto と弁別・defaulted=no 側）" {
+  run env -u CLAUDE_CONFIG_DIR -u SCRIBE_WORKER_CONFIG_DIR \
+    SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$GOLDEN")" SCRIBE_ACCOUNTS_BASE="$ABASE" \
+    "$SPAWN" --dry-run --repo "$ANCHOR" --anchor "$ANCHOR" --account auto sc-auto-test
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--account auto（sc-1rq"* ]]                   # 明示 opt-in 文言
+  [[ "$output" != *"account 既定=auto（sc-9954"* ]]              # 既定反転の defaulted 表示ではない
+}
+
+@test "sc-9954 spawn: consult 既定は mirror 据え置き（auto にしない・admin env を mirror）" {
+  run env CLAUDE_CONFIG_DIR=/consult/dir \
+    "$SPAWN" --dry-run --consult --anchor "$ANCHOR" sc-auto-test
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"export CLAUDE_CONFIG_DIR=/consult/dir"* ]]
+  [[ "$output" == *"源=mirror"* ]]
+  [[ "$output" != *maximin* ]]                                    # consult は auto へ反転しない
+}
+
+@test "sc-9954 spawn: consult 既定（admin env 無し）は unset 据え置き（auto にしない）" {
+  run env -u CLAUDE_CONFIG_DIR -u SCRIBE_WORKER_CONFIG_DIR \
+    "$SPAWN" --dry-run --consult --anchor "$ANCHOR" sc-auto-test
   [ "$status" -eq 0 ]
   [[ "$output" == *"unset CLAUDE_CONFIG_DIR"* ]]
   [[ "$output" != *maximin* ]]
+}
+
+@test "sc-9954 spawn: --account mirror = admin env mirror 明示（accounts-base/mirror へ導出しない・auto 化しない）" {
+  run env CLAUDE_CONFIG_DIR=/admin/dir SCRIBE_ACCOUNTS_BASE=/acct/base \
+    "$SPAWN" --dry-run --repo "$ANCHOR" --anchor "$ANCHOR" --account mirror sc-auto-test
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"export CLAUDE_CONFIG_DIR=/admin/dir"* ]]      # admin env を mirror
+  [[ "$output" == *"源=mirror"* ]]
+  [[ "$output" != *"/acct/base/mirror"* ]]                        # <accounts-base>/mirror へは導出しない（D-c）
+  [[ "$output" != *maximin* ]]                                    # opt-out ゆえ auto 化しない
+}
+
+@test "sc-9954 spawn: --account mirror（admin env 無し）は unset・accounts-base/mirror 不在でも die しない" {
+  run env -u CLAUDE_CONFIG_DIR -u SCRIBE_WORKER_CONFIG_DIR SCRIBE_ACCOUNTS_BASE="$ABASE" \
+    "$SPAWN" --dry-run --repo "$ANCHOR" --anchor "$ANCHOR" --account mirror sc-auto-test
+  [ "$status" -eq 0 ]                                             # 不在 dir 導出しない＝die しない
+  [[ "$output" == *"unset CLAUDE_CONFIG_DIR"* ]]
+  [[ "$output" != *maximin* ]]
+}
+
+@test "sc-9954 spawn: chain 不変 — SCRIBE_WORKER_CONFIG_DIR env は既定 auto に優先（源=env・auto 化しない）" {
+  run env -u CLAUDE_CONFIG_DIR SCRIBE_WORKER_CONFIG_DIR=/override/dir \
+    "$SPAWN" --dry-run --repo "$ANCHOR" --anchor "$ANCHOR" sc-auto-test
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"export CLAUDE_CONFIG_DIR=/override/dir"* ]]
+  [[ "$output" == *"源=env"* ]]
+  [[ "$output" != *maximin* ]]                                    # env が既定 auto に勝つ（chain 不変）
+}
+
+@test "sc-9954 spawn: 既定 auto の失敗意味論不変（API 故障→loud fallback）＋監査に defaulted=yes" {
+  # D-b: resolve_account_auto の失敗意味論は明示 auto と同一（API 故障=loud fallback）。D-d: 既定反転由来は
+  # 監査 snapshot で defaulted=yes と弁別できる。zz-default は BD_STUB_OK_IDS 外＝resolve/note 後に bd-check で
+  # 死ぬ（worktree を作らない）が、status は問わず fallback 挙動と note のみを検証する（既存 API故障テストと同姿勢）。
+  : > "$NOTE_LOG"
+  run env -u SCRIBE_USAGE_JSON -u CLAUDE_CONFIG_DIR -u SCRIBE_WORKER_CONFIG_DIR \
+    SCRIBE_USAGE_CMD=/nonexistent-claude-usage-xyz SCRIBE_ACCOUNTS_BASE="$ABASE" \
+    BEADS_BDW="$BDW_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$NOOP" \
+    "$SPAWN" --repo "$ANCHOR" --anchor "$ANCHOR" zz-default
+  [[ "$output" == *"主アカウント（~/.claude・unset 経路）へ fallback"* ]]   # 明示 auto と同一の loud fallback
+  local notes; notes="$(cat "$NOTE_LOG" 2>/dev/null || true)"
+  [[ "$notes" == *"fallback=yes"* ]]
+  [[ "$notes" == *"defaulted=yes"* ]]                             # 既定反転由来の弁別（D-d）
+}
+
+@test "sc-9954 spawn: 既定 auto の正常採用 note に defaulted=yes（明示 auto は defaulted=no）" {
+  : > "$NOTE_LOG"
+  mk_cfg "$ABASE/black4"; mk_cfg "$ABASE/black2"
+  # 既定（--account 省略）: defaulted=yes
+  run env -u CLAUDE_CONFIG_DIR -u SCRIBE_WORKER_CONFIG_DIR \
+    SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$GOLDEN")" SCRIBE_ACCOUNTS_BASE="$ABASE" \
+    BEADS_BDW="$BDW_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$NOOP" \
+    "$SPAWN" --repo "$ANCHOR" --anchor "$ANCHOR" zz-def-note
+  local notes; notes="$(cat "$NOTE_LOG" 2>/dev/null || true)"
+  [[ "$notes" == *"chosen=black4"* ]]
+  [[ "$notes" == *"defaulted=yes"* ]]
+  # 明示 --account auto: defaulted=no
+  : > "$NOTE_LOG"
+  run env -u CLAUDE_CONFIG_DIR -u SCRIBE_WORKER_CONFIG_DIR \
+    SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$GOLDEN")" SCRIBE_ACCOUNTS_BASE="$ABASE" \
+    BEADS_BDW="$BDW_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$NOOP" \
+    "$SPAWN" --repo "$ANCHOR" --anchor "$ANCHOR" --account auto zz-exp-note
+  notes="$(cat "$NOTE_LOG" 2>/dev/null || true)"
+  [[ "$notes" == *"chosen=black4"* ]]
+  [[ "$notes" == *"defaulted=no"* ]]
 }
 
 @test "sc-1rq spawn: lazy walk — 上位 black4(plugin欠落)を skip し black2 を採用（実起動）" {

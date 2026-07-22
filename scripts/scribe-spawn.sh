@@ -36,8 +36,10 @@
 #   --base REF      新 branch の base（worker のみ・既定: HEAD）
 #   --anchor PATH   bd graph の所在（bd show 用・既定: cwd）。consult はここで起動する
 #   --account LABEL worker/consult を起動する Claude アカウント（config dir 追随・sc-rvq）。LABEL → <accounts-base>/<label>
-#                   の規約導出（accounts-base 既定=$HOME/.claude-accounts・un-h289）。省略時は admin の CLAUDE_CONFIG_DIR を
-#                   mirror（未設定なら ~/.claude 既定）。解決優先順位: --account > SCRIBE_WORKER_CONFIG_DIR env > admin env mirror。
+#                   の規約導出（accounts-base 既定=$HOME/.claude-accounts・un-h289）。特別ラベル auto=残量 maximin 自動選択
+#                   （sc-1rq）/ mirror=admin env mirror 明示（sc-9954 D-c）。解決優先順位: --account > SCRIBE_WORKER_CONFIG_DIR
+#                   env > 既定。**sc-9954: worker 既定を auto へ反転**（--account 省略時の worker=auto／consult=admin env
+#                   mirror 据え置き）。mirror へ戻す opt-out は --account mirror（unset=~/.claude 意味論も含む）。
 #   --consult       consult role セッションを anchor で起動（worktree/worker prompt なし・SCRIBE_ROLE=consult を --env-file 注入）
 #   --context FILE  consult 専用。admin 集約 brief（FILE 内容）を grill 材料として焼き込み grill-consult モードへ。
 #                   §7 needs-user regime: grill-issue id 必須。grill-consult は brief を出発点にユーザーと対話 grill し、
@@ -114,12 +116,16 @@ Options:
   --base REF      新 branch の base（worker のみ・既定: HEAD）
   --anchor PATH   bd graph の所在（bd show 用・既定: cwd）。consult はここで起動する
   --account LABEL worker/consult を起動する Claude アカウント（config dir 追随・sc-rvq）。LABEL → <accounts-base>/<label>
-                  の規約導出（既定 accounts-base=$HOME/.claude-accounts）。省略時は admin の CLAUDE_CONFIG_DIR を mirror
-                  （未設定=~/.claude 既定）。優先順位: --account > SCRIBE_WORKER_CONFIG_DIR env > admin env mirror
-  --account auto  claude-usage 残量ベース maximin で最も空いているアカウントを自動選択（sc-1rq・opt-in）。
+                  の規約導出（既定 accounts-base=$HOME/.claude-accounts）。優先順位: --account > SCRIBE_WORKER_CONFIG_DIR
+                  env > 既定。sc-9954: **worker 既定を auto へ反転**（--account 省略時 worker=auto／consult=admin env
+                  mirror 据え置き）。
+  --account auto  claude-usage 残量ベース maximin で最も空いているアカウントを自動選択（sc-1rq）。worker では省略時の既定
+                  （sc-9954・明示 auto と既定 auto は監査で defaulted=yes/no 弁別）。
                   適格=usage(ok∧非stale)+preflight(login/onboarding/plugin) の lazy 交差。API故障=主アカ fallback・
                   適格0件=fail-loud。default が選ばれたら ~/.claude(unset)へ写像。--bd-id ある spawn は選定 snapshot を
                   issue notes へ自動追記（接頭辞 account-select:）。dry-run で選定予定ランキングを可視化。
+  --account mirror  admin env の CLAUDE_CONFIG_DIR を mirror（未設定=~/.claude/unset）を明示指定＝worker 既定 auto の
+                  opt-out（sc-9954 D-c・<accounts-base>/mirror へは導出しない）。
   --consult       consult role セッションを anchor で起動（worktree/worker prompt なし）
   --context FILE  consult 専用。admin 集約 brief（FILE）を grill 材料として焼き込み grill-consult モードへ（§7・grill-issue id 必須）。
                   grill-consult は brief を grill し決定を own grill-issue の bd notes へ書く（bdw 経由・read-only 限定緩和）
@@ -234,24 +240,43 @@ fi
 # env-file へ mirror 注入する。cc-session/cld は systemd-run --user --scope の env 継承で無改修成立するが、env-file は
 # tmux env 剥ぎ後に launcher が source する唯一の確実な伝播口ゆえ、ここで明示注入する（worker/consult 共通）。
 #
-# 解決優先順位（NOTES 2026-07-07）: --account 明示 > SCRIBE_WORKER_CONFIG_DIR env > admin env の mirror > 既定 unset。
+# 解決優先順位（NOTES 2026-07-07 / sc-9954 2026-07-22 改訂）: --account 明示 > SCRIBE_WORKER_CONFIG_DIR env > 既定。
+#   chain は不変で「既定」だけを role 別に反転する（sc-9954・orch-ibyx）。
 #   - --account <label> → <accounts-base>/<label> の規約導出（uns が安定 interface として保証・un-h289。台帳
 #     claude-accounts.txt の読取りは不要）。accounts-base 既定=$HOME/.claude-accounts（テスト seam=SCRIBE_ACCOUNTS_BASE）。
+#   - --account auto → 残量 maximin 自動選択（sc-1rq）／--account mirror → admin env mirror 明示 opt-out（sc-9954 D-c）。
 #   - SCRIBE_WORKER_CONFIG_DIR env（override 口・検証=dir 実在は下記 preflight が担う）。
-#   - どれも無ければ admin env の CLAUDE_CONFIG_DIR を mirror（cla default の「unset=~/.claude」意味論を保つ）。
-#   - 全て無し = CLAUDE_CONFIG_DIR 非設定（=env-file に `unset` を注入）。unset は worker が chain-source する
+#   - 既定（どれも無し）: **worker（非 consult）= auto**（sc-9954 で反転・resolve_account_auto へ）／
+#     **consult = 従来どおり admin env の CLAUDE_CONFIG_DIR を mirror**（cla default の「unset=~/.claude」意味論を保つ・据え置き）。
+#   - consult で admin env も無し = CLAUDE_CONFIG_DIR 非設定（=env-file に `unset` を注入）。unset は worker が chain-source する
 #     ~/.cld-env からの CLAUDE_CONFIG_DIR 混入に対する fail-closed 防御（後勝ちで打ち消す）。
 ACCOUNTS_BASE="${SCRIBE_ACCOUNTS_BASE:-$HOME/.claude-accounts}"
 WCFG_DIR=""       # 注入予定 config dir（空=unset を注入＝既定 ~/.claude）
-WCFG_SOURCE=""    # 解決元（account|env|mirror|unset|auto:<label>|auto-fallback|auto-fallback-mirror）— dry-run 表示・監査用
-# --account auto（sc-1rq・facet①=明示 opt-in）: claude-usage 残量ベース maximin で config dir を自動選択する。
-# 特別ラベル "auto" は <accounts-base>/auto という実在しない dir へ導出してはならないため、通常ラベル分岐より
-# 前に intercept する。実解決（selector 実行 + preflight lazy walk）は probe_config_dir/SCRIPT_DIR が要るため
-# 関数定義後の resolve_account_auto() へ委ねる（ここでは AUTO=1 のマークのみ）。
+WCFG_SOURCE=""    # 解決元（account|env|mirror|unset|auto|auto-default|auto:<label>|auto-fallback|auto-fallback-mirror）— dry-run 表示・監査用
+# --account auto（sc-1rq・facet①）/ --account mirror（sc-9954 D-c）: claude-usage 残量ベース maximin 自動選択、または
+# admin env mirror 明示。特別ラベル "auto"/"mirror" は <accounts-base>/<label> という実在しない dir へ導出しては
+# ならないため、通常ラベル分岐より前に intercept する。auto の実解決（selector 実行 + preflight lazy walk）は
+# probe_config_dir/SCRIPT_DIR が要るため関数定義後の resolve_account_auto() へ委ねる（ここでは AUTO=1 のマークのみ）。
+#
+# sc-9954: worker 既定を auto へ反転（orch-ibyx・user 裁定）。解決優先順位 chain は不変（--account 明示 >
+# SCRIBE_WORKER_CONFIG_DIR env > 既定）で、既定だけを反転する: **worker（非 consult）既定 = auto** /
+# **consult 既定 = 従来どおり admin env mirror 据え置き**。明示 --account auto（opt-in）と既定反転 auto は
+# AUTO_DEFAULTED で監査弁別する（D-d）。mirror へ戻す opt-out は --account mirror（D-c）。
 AUTO=0
+AUTO_DEFAULTED=0   # sc-9954: 既定反転で auto に入ったか（明示 --account auto=0 と区別・D-d 監査弁別・plan/snapshot が読む）
 if [[ "$ACCOUNT" == "auto" ]]; then
   AUTO=1
   WCFG_SOURCE="auto"   # 実解決は下記 resolve_account_auto() で確定（selector + lazy walk）
+elif [[ "$ACCOUNT" == "mirror" ]]; then
+  # sc-9954 D-c: 明示 opt-out ラベル。従来の admin env mirror 挙動を明示指定する（<accounts-base>/mirror へは
+  # 導出しない＝"auto" と同様、通常ラベル分岐より前に特別扱い）。worker 既定が auto へ反転した後も、mirror を
+  # 明示すれば admin と同一アカウント同居（=旧既定）へ opt-out できる。scriptorium の ORCH_DISPATCH_ACCOUNT=mirror
+  # とも整合（callee 側でも直接表現可能）。解決規約は下記 consult 既定と同一（admin env あれば mirror・無ければ unset）。
+  if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+    WCFG_DIR="$CLAUDE_CONFIG_DIR"; WCFG_SOURCE="mirror"
+  else
+    WCFG_SOURCE="unset"
+  fi
 elif [[ -n "$ACCOUNT" ]]; then
   # label は path 導出に使うため sanitize（path traversal を上流で拒否・bd id 検証と同姿勢）。
   case "$ACCOUNT" in
@@ -263,7 +288,15 @@ elif [[ -n "$ACCOUNT" ]]; then
 elif [[ -n "${SCRIBE_WORKER_CONFIG_DIR:-}" ]]; then
   WCFG_DIR="$SCRIBE_WORKER_CONFIG_DIR"
   WCFG_SOURCE="env"
+elif [[ "$CONSULT" -eq 0 ]]; then
+  # sc-9954 D-a: worker 既定を auto へ反転。ACCOUNT 未指定 かつ SCRIBE_WORKER_CONFIG_DIR 未設定 かつ worker
+  # （非 consult）のとき、残量 maximin auto を既定にする。明示 --account auto と同一機構（resolve_account_auto）を
+  # 通すが AUTO_DEFAULTED=1 で監査上は「既定 auto」を弁別する（D-d）。失敗意味論は sc-1rq 契約のまま不変（D-b）。
+  AUTO=1
+  AUTO_DEFAULTED=1
+  WCFG_SOURCE="auto-default"   # 実解決は下記 resolve_account_auto() で確定（selector + lazy walk）
 elif [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+  # consult 既定（sc-9954 D-a: 据え置き）: admin env の CLAUDE_CONFIG_DIR を mirror（anchor 同居の対話相手）。
   WCFG_DIR="$CLAUDE_CONFIG_DIR"
   WCFG_SOURCE="mirror"
 else
@@ -427,8 +460,10 @@ format_account_select_snapshot() {
       _chosen="FALLBACK:default(~/.claude)"
     fi
   fi
-  printf 'account-select: chosen=%s fallback=%s method=maximin(残量%%=100-pct・積極解釈) source=%s\n' \
-    "$_chosen" "$_fb" "$WCFG_SOURCE"
+  # sc-9954 D-d: 既定反転 auto（defaulted=yes）と明示 --account auto（defaulted=no）を監査で弁別する。
+  local _def="no"; [[ "$AUTO_DEFAULTED" -eq 1 ]] && _def="yes"
+  printf 'account-select: chosen=%s fallback=%s defaulted=%s method=maximin(残量%%=100-pct・積極解釈) source=%s\n' \
+    "$_chosen" "$_fb" "$_def" "$WCFG_SOURCE"
   printf 'account-select: cols=label|eligible|score|h5|h7|pct5|pct7|resets5|resets7|reason\n'
   if [[ -n "$AUTO_TSV" ]]; then
     awk -F'\t' '{ for(i=1;i<=10;i++){ f=$i; if(f=="") f="-"; printf "%s%s", (i>1?"|":"account-select:   "), f } print "" }' <<<"$AUTO_TSV"
@@ -452,7 +487,11 @@ emit_account_select_note() {
 
 # facet⑥ 監査（dry-run）: 選定予定を plan 行で可視化する（候補ランキング + 選定結果）。
 account_select_plan() {
-  echo "[plan] --account auto（sc-1rq・facet①=opt-in）: claude-usage 残量 maximin 自動選択（残量%=100-pct・積極解釈・resets_at null/過去=満残量）"
+  if [[ "$AUTO_DEFAULTED" -eq 1 ]]; then
+    echo "[plan] account 既定=auto（sc-9954・worker 既定反転＝--account 省略時に自動選択・mirror へ戻すなら --account mirror）: claude-usage 残量 maximin 自動選択（残量%=100-pct・積極解釈・resets_at null/過去=満残量）"
+  else
+    echo "[plan] --account auto（sc-1rq・facet①=opt-in・明示指定）: claude-usage 残量 maximin 自動選択（残量%=100-pct・積極解釈・resets_at null/過去=満残量）"
+  fi
   if [[ "$AUTO_FALLBACK" -eq 1 ]]; then
     if [[ "$WCFG_SOURCE" == "auto-fallback-mirror" ]]; then
       echo "[plan]   selector=API故障 → 主アカ（admin 稼働 config dir を mirror=$WCFG_DIR）へ fallback（採用 dir を preflight で一様検査・facet⑤①）"
