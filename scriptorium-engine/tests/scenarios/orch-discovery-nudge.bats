@@ -444,6 +444,8 @@ refute() {  # $@ = 成功してはならないコマンド
     # notice 本文は registry 名を捏造しない（未登録と明示する）
     grep -qF 'registry 未登録' "$SC_BODY_FILE"
     ! grep -qF 'testproj' "$SC_BODY_FILE"
+    # 呼びかけ行は who="${project:-$prefix}" の fallback＝短名で描画される（who=$project 退行で空になる）
+    grep -qF 'この zz admin セッション' "$SC_BODY_FILE"
 }
 
 @test "(B12b) map 未登録 prefix で窓も不在なら registry 名を捏造しない fallback notice へ倒れる" {
