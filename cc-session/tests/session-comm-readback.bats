@@ -3,7 +3,9 @@
 #
 # ccs-ldt: tmux 層 paste 成功だけでは成功扱いにしない。
 # ccs-mxv（orch-ttqe）: 受理は submit（turn 開始）の**積極証拠のみ**——
-#   (A) 強 processing マーカー（esc to interrupt / thinking / compaction）の pane 直読 2 連続
+#   (A) 強 processing マーカー（esc to interrupt / TURN_SPINNER / compaction）の pane 直読 2 回
+#       （ccs-oq9: 隣接 2 poll 要求はやめ、宛先が processing を報告し続けている間だけ非隣接も許容。
+#        それ以外の state が挟まれば streak は即リセット＝:233 pin が守る不変量）
 #   (B) echo-outside-interior（sentinel が入力欄 interior の外＝transcript に出現 ∧ baseline 不在）
 # sentinel-presence 単独（到着の証拠）と state==processing（detect_state の既定 fallthrough＝splash も
 # processing と読める弱い証拠）では受理しない。boot-race（promo/再描画が Enter を食う）の偽陽性を pin する。
@@ -233,6 +235,8 @@ STATE_EOF
 @test "read-back: 強 processing の非連続振動は受理しない（streak リセット固定＝fail-open 回帰防護）" {
     # 強マーカーが交互にしか見えない（strong→noise→strong→…）場合、非連続の lone 観測を
     # 「2 連続」と誤計上して受理する fail-open を封じる（streak リセットの mutation 検出）。
+    # ★ccs-oq9 以降の成立条件: MOCK_STATE=input-waiting＝gap 許容の入場条件（processing）を満たさない
+    #   ので streak は毎回リセットされる。processing 版（受理する正例）は末尾 ccs-oq9 セクション参照。
     export MOCK_STATE=input-waiting
     export MOCK_PANE="$STRONG_PANE"
     export MOCK_PANE_ALT="noise"

@@ -966,7 +966,9 @@ cmd_inject_file() {
                 _rb_scan=$(printf '%s\n' "$_rb_pane" | _rb_extract_input_box --outside) || _rb_scan=""
             fi
 
-            # (A) 強 processing マーカー 2 連続＝turn 実行中の積極証拠（受理）。
+            # (A) 強 processing マーカー 2 回＝turn 実行中の積極証拠（受理）。隣接 2 poll である必要は
+            # なく、観測の間に「宛先が processing を報告している」フレームが挟まるのは許容する
+            # （ccs-oq9 の gap 許容。それ以外の state が挟まれば下の streak 処理で即リセット）。
             # interior を特定できないフレーム（boot splash・描画途中）は評価しない（積極証拠にしない。
             # 実 turn は入力欄を常に描画する〔実 TUI 検証済み〕ため正当受理は outside view で成立する）。
             # baseline 行差分要件（round-3 review wf_d526dfaa）: マッチ行が baseline（paste 前の pane）にも
@@ -1069,7 +1071,8 @@ cmd_inject_file() {
                                 #   (1) cls 0（interior 空＝DELIVERED）: paste が入力欄に残らず queue へ抜けた状態。
                                 #       vanished と同じ interior 相のみを対象にし、cls 2（ダイアログ占有）を除外。
                                 #   (2) _rb_saw_live_turn: live running turn を観測済み（timer-spinner。boot splash は
-                                #       出さない＝boot-race を構造除外）。(A) が 2 連続を得られず flicker でこぼれた
+                                #       出さない＝boot-race を構造除外）。(A) が（input-waiting 相の flicker で
+                                #       streak を落とし）2 回を得られずこぼれた
                                 #       turn を queued として救う。
                                 #   (3) queued 固有 pane マーカーが **outside view(_rb_scan) に新規 echo** で可視
                                 #       （_rb_queued_new。表示形態は live 未確認＝env 上書き可・空文字なら本分岐は
