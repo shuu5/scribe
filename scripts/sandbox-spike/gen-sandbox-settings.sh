@@ -3,8 +3,13 @@
 # (Claude Code 組込み bwrap sandbox 設定) を stdout へ出力する（scribe-spawn.sh が既定で生成・SCRIBE_SANDBOX=0 で opt-out）。
 #
 # scribe worker(cwd=worktree) の Bash subprocess を OS レベルで封じ、書込みを次へ限定する:
-#   - cwd(worktree) + 配下           … sandbox 既定で writable(列挙不要)
-#   - linked worktree の共有 .git     … sandbox 既定で writable(hooks/ と config は拒否のまま)
+#   - cwd(worktree) + 配下           … sandbox 既定で writable(列挙不要・CC 既定・sc-kxec D2)
+#   - worker の git commit write-set … **明示 grant**（私有 gitdir + 共有 objects/refs/logs の 4 集合・sc-kxec）。
+#       旧: 共有 .git は「CC 既定で writable(列挙不要)」に依存していたが、この既定は CC version で不安定に変わり
+#       (2.1.217 下で git-dir 書込が非永続化＝worker commit が silent に失われた incident・sc-ghjc)。恒久 fix と
+#       して commit write-set を明示 allowWrite 列挙し CC 挙動から決定論化する。**`.git` 直下・`.git/config`・
+#       `.git/hooks` は列挙しない**＝denylist なしに un-1n1 fence(共有 config の remotes / hooks の mutate 禁止)を
+#       構造保証する(allowlist 設計)。導出は rev-parse 動的導出＝下記本体参照。
 #   - <ANCHOR>/.beads の runtime サブパスのみ … 明示(bd/bdw の台帳書込み = B/hybrid。worktree subtree 外ゆえ絶対パス
 #       必須)。**丸ごとでなく** governance denylist(PRIME.md/metadata.json/config.yaml/README.md/.gitignore)を除いた
 #       present 直下エントリ(embeddeddolt/ 等 dolt runtime)だけを grant し tracked 統治ファイルを read-only に守る(OG-1・sc-nd6。下記本体参照)
@@ -106,7 +111,70 @@ if [[ "${#_beads_grants[@]}" -eq 0 ]]; then
   exit 2
 fi
 
-# allowWrite = [<.beads runtime サブパス...>, <lock_file>]。--args で positional 配列化（空白/メタ文字パス安全・verified）。
+# --- sc-kxec: worker の git commit write-set(.git 系)を明示 allowWrite する（CC 既定 auto-grant 依存を廃止） ---
+# 従来 linked worktree の共有 .git への書込みは CC 組込み sandbox の「暗黙 default writable」に依存していた（旧
+# ヘッダ前提）。この default は CC version で不安定に変わり（2.1.217 下で git-dir 書込が非永続化＝worker commit が
+# silent に失われる incident・sc-ghjc: working-tree 書込は永続・git-dir 書込は非永続の非対称）。よって commit
+# write-set を **明示 grant** して CC 挙動から決定論化する。grant は 4 集合のみ:
+#   ① 私有 gitdir（per-worktree・index/HEAD/logs/ORIG_HEAD の所在＝commit の index/HEAD 更新先）
+#   ② 共有 objects（loose/pack object の書込先） ③ 共有 refs（branch ref 前進の書込先） ④ 共有 logs（reflog）
+# **`.git` 直下・`.git/config`・`.git/hooks` を grant する経路は作らない**＝denylist なしに un-1n1 fence（共有
+# config の remotes / hooks を worker が mutate すると anchor+全 worktree の origin/hook が壊れる・un-v5x 実害）を
+# **構造保証** する（objects/refs/logs と私有 gitdir だけを allowlist・config/hooks はそもそも列挙しないので到達不能）。
+# ★fence の唯一の穴＝primary(非linked) worktree: そこでは `--absolute-git-dir` が共有 `.git` を**丸ごと**返す
+#   （私有 gitdir==共有 common-dir）ため、私有 gitdir grant が `.git` 直下（config/hooks 含む）を writable にして
+#   fence を破る。よって下記本体で primary worktree を検出したら fail-loud で弾く（`.git` 丸ごとを絶対 emit しない）。
+# 導出は rev-parse 動的導出（D1a）: `$anchor` 由来の `.git/worktrees/<name>` 文字列組立は cross-repo cell
+#   （worktree=repo X・anchor=Y・X≠Y）で誤 path を指すため禁止。worker は worktree の実 repo（X）の .git に commit
+#   するゆえ .git grant は **$wt から** 導出する（.beads grant は anchor=Y 由来だが .git grant は wt=X 由来＝分離が正）。
+# refs/logs は dir 丸ごと grant（per-branch 狭化しない・D1b）。残存 blast radius（worker が他 branch の loose ref/
+#   reflog も書ける）は脅威モデル A（うっかり前提）で許容する（worker は既に objects を書けるため ref 単独狭化の
+#   実利は限定的）。present-only emission（実在サブパスのみ・D1c）＝bwrap の bind-before-exist / failIfUnavailable=
+#   true と整合（不在 path で worker 起動不能を防ぐ・.beads の present-only glob と同契約）。scribe-spawn.sh の FO-2
+#   attestation は本 grant（私有 gitdir + 共有 objects/refs）の存在を launch 前に fail-loud 検査する（**同一 rev-parse
+#   導出** で byte 一致・欠落なら die＝gen drift/stub の backstop。両者は同じ導出で書かれているので改変時は平仄を保つ）。
+_git_grants=()
+# ★物理正規化（cd && pwd -P）を私有 gitdir/共有 common-dir の**両方**に適用する（sc-kxec finding#1）: 旧実装は
+#   _priv_gitdir=`--absolute-git-dir`（symlink 解決）と _common_dir=`--git-common-dir` の logical `pwd` 絶対化
+#   （symlink 保持）が非対称で、symlink 経路の primary worktree（例 /link → /repo）を渡すと `--absolute-git-dir`=
+#   `/repo/.git`・絶対化 common=`/link/.git` と食い違い、下の primary 検出 `==` が FALSE になって primary を検出できず
+#   共有 `.git` 丸ごと（config/hooks 含む）を私有 gitdir として emit＝un-1n1 fence が破れた（FO-2 も同じ非対称で
+#   backstop にならず）。両者を **同一の物理正規化** に通し `==` 比較・allowWrite emit・FO-2 index 照合を like-for-like
+#   の物理パスで行う（`--absolute-git-dir` の symlink 解決が git version 依存で揺れても物理化で吸収）。scribe-spawn.sh
+#   の _fo2_gd/_fo2_common も同一正規化を共有し byte 一致を保つ（両者は必ず平仄を保つこと）。
+# 私有 gitdir（git が canonical 絶対で返す）。継承 GIT_DIR/GIT_WORK_TREE は scribe_git（env -u）で隔離する。
+_priv_gitdir="$(scribe_git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null || true)"
+if [[ -n "$_priv_gitdir" ]]; then
+  _priv_gitdir="$(cd "$_priv_gitdir" 2>/dev/null && pwd -P)" || _priv_gitdir=""
+fi
+# 共有 common-dir。`--git-common-dir` は cwd 相対で返りうる（main worktree で `.git`）ため $wt 起点で絶対化しつつ
+# 物理正規化する（絶対 path でも symlink component を含みうる＝例 /link/.git ゆえ cd → pwd -P で一律に物理化する。
+# FO-2 attestation と同一導出＝byte 一致の前提）。
+_common_dir="$(scribe_git -C "$wt" rev-parse --git-common-dir 2>/dev/null || true)"
+if [[ -n "$_common_dir" ]]; then
+  _common_dir="$(cd "$wt" 2>/dev/null && cd "$_common_dir" 2>/dev/null && pwd -P)" || _common_dir=""
+fi
+# un-1n1 fence の構造保証: primary(非linked) worktree 入力を fail-loud で弾く（**私有 gitdir grant の追加より前**）。
+# primary worktree / repo root では `--absolute-git-dir` が共有 `.git` を**丸ごと**返す（私有 gitdir==共有 common-dir・
+# 実測 verified）。それを allowWrite に足すと `.git` 直下（config/hooks/info 等すべて）が writable になり un-1n1 fence
+# （共有 config の remotes / hooks を worker が mutate すると anchor+全 worktree の origin/hook が壊れる・un-v5x 実害）が
+# 破れる。しかも primary では index/HEAD が `.git` 直下に在るため、`.git` 丸ごとを grant せずに commit を通す術が無い＝
+# fence を保ったまま安全に sandbox する解が存在しない。scribe worker は常に linked worktree で走る契約ゆえ primary 入力は
+# 契約違反。ここで検出して停止する（`.git` 丸ごとを構造的に絶対 emit しない＝fence の唯一の穴を塞ぐ）。
+if [[ -n "$_priv_gitdir" && -n "$_common_dir" && "$_priv_gitdir" == "$_common_dir" ]]; then
+  echo "gen-sandbox: worktree が primary(非linked)です（私有 gitdir == 共有 .git）。.git 丸ごと grant は un-1n1 fence を破るため拒否します。scribe worker は linked worktree でのみ走ります: $wt" >&2
+  exit 2
+fi
+# present-only emission（実在サブパスのみ・D1c）＝bwrap の bind-before-exist / failIfUnavailable=true と整合。
+[[ -n "$_priv_gitdir" && -e "$_priv_gitdir" ]] && _git_grants+=( "$_priv_gitdir" )
+if [[ -n "$_common_dir" ]]; then
+  for _sub in objects refs logs; do
+    [[ -e "$_common_dir/$_sub" ]] && _git_grants+=( "$_common_dir/$_sub" )
+  done
+fi
+
+# allowWrite = [<.beads runtime サブパス...>, <lock_file>, <.git commit write-set...>]。--args で positional
+# 配列化（空白/メタ文字パス安全・verified）。空配列 `"${_git_grants[@]}"` は set -u 下でも安全（bash の空配列展開）。
 jq -n --args '{
     sandbox: {
       enabled: true,
@@ -116,4 +184,4 @@ jq -n --args '{
         allowWrite: $ARGS.positional
       }
     }
-  }' "${_beads_grants[@]}" "$lock_file"
+  }' "${_beads_grants[@]}" "$lock_file" "${_git_grants[@]}"

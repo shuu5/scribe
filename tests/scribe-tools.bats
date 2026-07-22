@@ -190,7 +190,11 @@ _mk_beads() {
 
 @test "spawn(sandbox): gen-sandbox-settings.sh は failIfUnavailable + .beads runtime サブパス allowWrite の valid JSON を出す（sc-nd6: 統治ファイルを除外）" {
   _mk_beads "$SCRIBE_TEST_CWD"
-  run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$SCRIBE_TEST_CWD"
+  # gen は linked worktree を前提とする（primary/repo root 入力は un-1n1 fence を破るため契約違反として弾く・sc-kxec
+  # finding#1）。real 使用に合わせ linked worktree を作って渡す。anchor は逆算で $SCRIBE_TEST_CWD に解決される。
+  local wt="$SCRIBE_TEST_CWD/.worktrees/spawn/g-101010"
+  git -C "$SCRIBE_TEST_CWD" worktree add -q -b g-101010 "$wt" >/dev/null
+  run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$wt"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.sandbox.enabled==true and .sandbox.failIfUnavailable==true and .sandbox.allowUnsandboxedCommands==false' >/dev/null
   # sc-nd6/sc-mcx: allowWrite は .beads を丸ごとでなく runtime サブパス + lock **鍵 file**。embeddeddolt は grant・wholesale .beads は非 grant。
@@ -200,7 +204,11 @@ _mk_beads() {
 
 @test "gen-sandbox(sc-nd6・OG-1): tracked 統治ファイル(PRIME.md/metadata.json/config.yaml/README.md/.gitignore)は allowWrite に入らない＝worker Bash から read-only" {
   _mk_beads "$SCRIBE_TEST_CWD"
-  run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$SCRIBE_TEST_CWD" "$SCRIBE_TEST_CWD"
+  # gen は linked worktree を前提とする（primary 入力は契約違反で弾く・sc-kxec finding#1）。linked worktree を渡し、
+  # anchor は第2引数で明示する（.beads は $SCRIBE_TEST_CWD 側＝assertion 対象は不変）。
+  local wt="$SCRIBE_TEST_CWD/.worktrees/spawn/g-101010"
+  git -C "$SCRIBE_TEST_CWD" worktree add -q -b g-101010 "$wt" >/dev/null
+  run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$wt" "$SCRIBE_TEST_CWD"
   [ "$status" -eq 0 ]
   local b="$SCRIBE_TEST_CWD/.beads"
   # 統治ファイル5種がどれも allowWrite に無い（差集合=5＝全除外）＝OG-1 の核心 assertion。
@@ -255,12 +263,17 @@ _mk_beads() {
   # が anchor(Y)の repo_id 鍵であって worktree(X)の鍵でないことを動的に pin する（repo_id は cwd 依存＝gen の subshell
   # `cd "$anchor"` 落とし回帰を捕捉。worker は `cd Y && bdw` で書くため Y 鍵でなければ flock がずれ bd write が壊れる）。
   _need_canonical_bdw
-  local X Y XLD gen_lf key_x key_y
+  local X Y XLD gen_lf key_x key_y wtX
   X="$(cd "$(mktemp -d)" && pwd -P)"; Y="$(cd "$(mktemp -d)" && pwd -P)"
   git -C "$X" -c init.defaultBranch=main init -q; git -C "$Y" -c init.defaultBranch=main init -q
+  git -C "$X" config user.email t@e; git -C "$X" config user.name t; git -C "$X" commit -q --allow-empty -m init
   _mk_beads "$Y"                                    # anchor(Y)側に realistic .beads（gen が grant する側）
+  # gen は linked worktree を前提とする（primary 入力は契約違反で弾く・sc-kxec finding#1）。repo X の linked worktree
+  # を渡す（.git grant は wt の実 repo=X 由来・lock-file grant は anchor=Y 由来＝本テストの検証軸は不変）。
+  wtX="$X/.worktrees/cell"
+  git -C "$X" worktree add -q -b cell "$wtX" >/dev/null
   XLD="$BATS_TEST_TMPDIR/xrlocks"; mkdir -p "$XLD"
-  run env BDW_LOCK_DIR="$XLD" "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$X" "$Y"
+  run env BDW_LOCK_DIR="$XLD" "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$wtX" "$Y"
   [ "$status" -eq 0 ]
   gen_lf="$(echo "$output" | jq -r '.sandbox.filesystem.allowWrite[] | select(endswith(".lock"))')"
   key_y="$( (cd "$Y" && BDW_LOCK_DIR="$XLD" "$SCRIPTS/bdw" lock-file) )"   # worker/spawn 経路（cd "$ANCHOR"=Y）
@@ -275,6 +288,70 @@ _mk_beads() {
   run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$SCRIBE_TEST_CWD" "/nonexistent/anchor/path"
   [ "$status" -eq 2 ]
   [[ "$output" == *"ディレクトリではありません"* ]]
+}
+
+# ---------- gen-sandbox(sc-kxec): .git commit write-set の明示 grant + un-1n1 fence の負 assert ----------
+# 恒久 fix（sc-kxec）: worker の git commit write-set（私有 gitdir + 共有 objects/refs/logs）を CC 既定 auto-grant
+# 依存でなく明示 allowWrite 列挙する（2.1.217 下で git-dir 書込が非永続化し worker commit が silent に失われた
+# incident・sc-ghjc の恒久対処）。正 assert=4 集合が入る / 負 assert=config/hooks/.git 直下 が入らない（fence）。
+@test "gen-sandbox(sc-kxec): 生成 settings に .git commit write-set 4 集合（私有 gitdir + 共有 objects/refs/logs）が present-only で入る" {
+  local main linked gd obj ref log
+  IFS=$'\t' read -r main linked < <(_mk_main_and_linked)
+  _mk_beads "$main"
+  run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$linked" "$main"
+  [ "$status" -eq 0 ]
+  gd="$(git -C "$linked" rev-parse --absolute-git-dir)"
+  obj="$main/.git/objects"; ref="$main/.git/refs"; log="$main/.git/logs"
+  # ① 私有 gitdir（index/HEAD/reflog の所在＝commit の index/HEAD 更新先）。D1a: rev-parse 動的導出＝.git/worktrees/<id>。
+  echo "$output" | jq -e --arg g "$gd" '.sandbox.filesystem.allowWrite | index($g)!=null' >/dev/null
+  [[ "$gd" == "$main/.git/worktrees/"* ]]
+  # ②③④ 共有 objects/refs/logs（dir 丸ごと・D1b）。
+  echo "$output" | jq -e --arg o "$obj" '.sandbox.filesystem.allowWrite | index($o)!=null' >/dev/null
+  echo "$output" | jq -e --arg r "$ref" '.sandbox.filesystem.allowWrite | index($r)!=null' >/dev/null
+  echo "$output" | jq -e --arg l "$log" '.sandbox.filesystem.allowWrite | index($l)!=null' >/dev/null
+  rm -rf "$main"
+}
+
+@test "gen-sandbox(sc-kxec/un-1n1 fence): .git 直下・.git/config・.git/hooks を grant する経路が無い（負 assert＝denylist なしの構造保証）" {
+  # un-1n1: 共有 .git/config(remotes) / .git/hooks を worker Bash が mutate すると anchor+全 worktree の origin/hook が
+  # 壊れる（un-v5x 実害）。gen は objects/refs/logs + 私有 gitdir だけを allowlist し config/hooks/.git 直下を一切
+  # 列挙しない＝denylist なしに fence を構造保証する。この負 assert がその機械番人（mutation で config を grant すれば RED）。
+  local main linked common
+  IFS=$'\t' read -r main linked < <(_mk_main_and_linked)
+  _mk_beads "$main"
+  common="$main/.git"
+  run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$linked" "$main"
+  [ "$status" -eq 0 ]
+  # .git 直下（wholesale）・config・hooks はどれも入らない。
+  echo "$output" | jq -e --arg c "$common"         '.sandbox.filesystem.allowWrite | index($c)==null' >/dev/null
+  echo "$output" | jq -e --arg c "$common/config"  '.sandbox.filesystem.allowWrite | index($c)==null' >/dev/null
+  echo "$output" | jq -e --arg c "$common/hooks"   '.sandbox.filesystem.allowWrite | index($c)==null' >/dev/null
+  # 構造保証（保険）: 共有 .git 直下（$common/<name>）を指す grant は objects/refs/logs と .git/worktrees/ 配下(私有
+  # gitdir)のみ＝それ以外（config/hooks/info/description/FETCH_HEAD 等）を指す entry が 1 件も無いことを assert する。
+  echo "$output" | jq -e --arg c "$common" '
+    .sandbox.filesystem.allowWrite
+    | map(select(startswith($c+"/")))
+    | map(select((.==$c+"/objects" or .==$c+"/refs" or .==$c+"/logs" or startswith($c+"/worktrees/")) | not))
+    | length==0' >/dev/null
+  rm -rf "$main"
+}
+
+@test "gen-sandbox(sc-kxec/un-1n1 fence): primary(非linked) worktree 入力は fail-loud で止まり settings を一切 emit しない（.git 丸ごと grant の構造排除・finding#1）" {
+  # finding#1: primary worktree / repo root では `rev-parse --absolute-git-dir` が共有 .git を**丸ごと**返し
+  # （私有 gitdir==共有 common-dir・実測 verified）、それを allowWrite に足すと .git 直下（config/hooks）が writable に
+  # なって un-1n1 fence が破れる。linked のみを exercise していた既存 fence 負 assert はこの穴を捕捉できなかった。
+  # gen は primary 入力を契約違反として fail-loud で弾く（`.git` 丸ごとを構造的に絶対 emit しない）ことを pin する。
+  local main linked
+  IFS=$'\t' read -r main linked < <(_mk_main_and_linked)
+  _mk_beads "$main"   # .beads fail-closed(exit2)より先へ進ませ .git ロジックの primary guard を駆動する
+  # $wt = primary worktree($main)を渡す（worktree 引数に repo root を与えるのが finding の failing 入力）。
+  run "$SCRIPTS/sandbox-spike/gen-sandbox-settings.sh" "$main" "$main"
+  [ "$status" -ne 0 ]                                   # 契約違反を黙って通さず fail-loud
+  [[ "$output" == *"primary"* ]]                        # 真因を名指す（.beads fail-closed(exit2)と区別）
+  # settings JSON を一切吐かない＝allowWrite に .git 丸ごと/config/hooks が入る余地が構造的に無い
+  #（gen は jq emit 到達前に exit するため stdout は非 JSON＝jq が parse 失敗し `!` で真になる）。
+  ! echo "$output" | jq -e '.sandbox.filesystem.allowWrite' >/dev/null 2>&1
+  rm -rf "$main"
 }
 
 @test "spawn(sandbox): SCRIBE_SANDBOX=1 の worker dry-run は settings.local.json 生成を plan に出す（spawn 行は不変）" {
@@ -1717,14 +1794,18 @@ _make_noop_cld_spawn() {
   # gen を stub し allowWrite に *不在* path を1件注入して実 pre-create ループを駆動する。新ループは種別不明の leaf を
   # 作らず不在 warn を出すのみ。旧 `mkdir -p "$_sb_aw"` は不在 path 位置に dir を生やす（本来 file の runtime パスなら
   # .beads 破損＝sc-0nb (a)）ため [ ! -e ] が落ちて RED。
-  local repo wt noop genstub absjson absent
+  local repo wt noop genstub absjson absent gd obj ref
   repo="$SCRIBE_TEST_CWD"
   wt="$repo/.worktrees/spawn/un-4nm-101010"
   absent="$repo/.beads/sc-0nb-absent-leaf.jsonl"   # 不在 leaf（本来 file 相当・dir 化されてはならない）
   [ ! -e "$absent" ]
-  # gen を stub: FO-2 attestation(enabled/failIfUnavailable/allowUnsandboxedCommands)を満たしつつ allowWrite に不在 path のみ注入。
+  # gen を stub: FO-2 attestation(enabled/failIfUnavailable/allowUnsandboxedCommands + sc-kxec の .git grant)を満たしつつ
+  # allowWrite に不在 path を1件混ぜて pre-create ループの不在枝を駆動する。.git write-set(私有 gitdir + objects/refs)は
+  # 実在させて FO-2 を通す（worktree は spawn が add するため path は rev-parse 導出と byte 一致する決定論値で組む・sc-kxec）。
+  gd="$repo/.git/worktrees/un-4nm-101010"; obj="$repo/.git/objects"; ref="$repo/.git/refs"
   absjson="$(mktemp)"
-  jq -n --arg a "$absent" '{sandbox:{enabled:true,failIfUnavailable:true,allowUnsandboxedCommands:false,filesystem:{allowWrite:[$a]}}}' > "$absjson"
+  jq -n --arg a "$absent" --arg gd "$gd" --arg obj "$obj" --arg ref "$ref" \
+     '{sandbox:{enabled:true,failIfUnavailable:true,allowUnsandboxedCommands:false,filesystem:{allowWrite:[$a,$gd,$obj,$ref]}}}' > "$absjson"
   genstub="$(mktemp)"; printf '#!/usr/bin/env bash\ncat %q\n' "$absjson" > "$genstub"; chmod +x "$genstub"
   noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
   run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_PREFLIGHT="$noop" \
@@ -1783,6 +1864,57 @@ STUB
   [ "$status" -ne 0 ]                                   # 黙って非 sandbox worker を起動せず fail-loud
   [[ "$output" == *"アテステーション失敗"* ]]          # 真因
   [[ "$output" == *"enabled=true"* ]]                   # どの不変条件が破れたかを名指す（sc-5rl: 複合 attestation で die message を「sandbox 強制3キー」へ改稿したため旧 *"強制キー"* は「強制3キー」に割れ不成立＝破れた不変条件名 enabled=true へ追随）
+  [[ "$output" != *"spawned: issue=un-4nm"* ]]          # cld-spawn（happy-path）へは到達しない
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+}
+
+@test "spawn(sc-kxec/FO-2): gen が .beads grant はあるが .git commit write-set を欠く settings を吐いたら launch 前に die（silent-zombie 防止）" {
+  # sc-ghjc の silent-zombie: settings が .beads grant を持ち「sandbox 済」に見えるが .git grant を欠くと worker は
+  # commit が非永続化する（git-dir 書込が silent に失われ HEAD 不動・idle 停滞）。FO-2 拡張が私有 gitdir + objects/refs
+  # の欠落を launch 前に検知し die することを pin する（mutation＝.git 条項削除で status!=0 が崩れ RED 化）。stub は
+  # 非空 allowWrite（.beads 相当）+ 強制3キーを満たすが .git grant 皆無＝zombie 形状（空 allowWrite の免除枝は通らない）。
+  local repo wt noop genzombie zjson beads
+  repo="$SCRIBE_TEST_CWD"
+  _mk_beads "$repo"
+  beads="$repo/.beads/embeddeddolt"
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  # 強制3キー OK・allowWrite 非空(.beads)だが .git grant 皆無。gen は exit0 ゆえ mv 成功→FO-2 が捕える。
+  zjson="$(mktemp)"
+  jq -n --arg b "$beads" '{sandbox:{enabled:true,failIfUnavailable:true,allowUnsandboxedCommands:false,filesystem:{allowWrite:[$b]}}}' > "$zjson"
+  genzombie="$(mktemp)"; printf '#!/usr/bin/env bash\ncat %q\n' "$zjson" > "$genzombie"; chmod +x "$genzombie"
+  wt="$repo/.worktrees/spawn/un-4nm-101010"
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_PREFLIGHT="$noop" SCRIBE_SANDBOX_GEN="$genzombie" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop" "$genzombie" "$zjson"
+  [ "$status" -ne 0 ]                                   # commit 非永続（zombie）worker を黙って起動せず fail-loud
+  [[ "$output" == *"アテステーション失敗"* ]]          # 真因
+  [[ "$output" == *".git commit write-set"* ]]         # .git grant 欠落を名指す（sc-kxec の新条項）
+  [[ "$output" != *"spawned: issue=un-4nm"* ]]          # cld-spawn（happy-path）へは到達しない
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+}
+
+@test "spawn(sc-kxec/FO-2 fence): gen が 共有 .git を丸ごと grant する settings を吐いたら launch 前に die（un-1n1 fence 破れ防止・finding#1）" {
+  # finding#1 backstop: primary worktree 入力 / stub drift が `--absolute-git-dir`=共有 .git 丸ごとを allowWrite に
+  # 足すと config/hooks が writable になり un-1n1 fence が破れる。.git 丸ごとは objects/refs を包含するため presence 節
+  # （私有 gitdir+objects+refs 必須）は満たしてしまい presence だけでは捕まらない。FO-2 の fence 負条項が 共有 .git
+  # 丸ごと（$cmn）の混入を launch 前に検知し die することを pin する（mutation＝fence 条項削除で status!=0 が崩れ RED）。
+  local repo wt noop genfence fjson cmn gd obj ref
+  repo="$SCRIBE_TEST_CWD"
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  # worktree は spawn が add するため path は rev-parse 導出（$repo/.git ...）と byte 一致する決定論値で組む。
+  cmn="$repo/.git"; gd="$repo/.git/worktrees/un-4nm-101010"; obj="$repo/.git/objects"; ref="$repo/.git/refs"
+  # 強制3キー OK・presence 節 OK（gd/obj/ref 在り）だが 共有 .git 丸ごと（$cmn）を混入＝fence 破れ形状。
+  fjson="$(mktemp)"
+  jq -n --arg c "$cmn" --arg gd "$gd" --arg obj "$obj" --arg ref "$ref" \
+     '{sandbox:{enabled:true,failIfUnavailable:true,allowUnsandboxedCommands:false,filesystem:{allowWrite:[$gd,$obj,$ref,$c]}}}' > "$fjson"
+  genfence="$(mktemp)"; printf '#!/usr/bin/env bash\ncat %q\n' "$fjson" > "$genfence"; chmod +x "$genfence"
+  wt="$repo/.worktrees/spawn/un-4nm-101010"
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_PREFLIGHT="$noop" SCRIBE_SANDBOX_GEN="$genfence" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop" "$genfence" "$fjson"
+  [ "$status" -ne 0 ]                                   # fence 破れ worker を黙って起動せず fail-loud
+  [[ "$output" == *"アテステーション失敗"* ]]          # 真因
+  [[ "$output" == *"fence"* ]]                          # fence 破れを名指す（sc-kxec finding#1 の新条項）
   [[ "$output" != *"spawned: issue=un-4nm"* ]]          # cld-spawn（happy-path）へは到達しない
   git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
 }
