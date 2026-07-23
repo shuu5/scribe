@@ -1657,7 +1657,24 @@ run_spawn() {
     # は未知オプションで die し spawn を壊すため、渡してはならない。
     local cmd=("$SPAWN" --anchor "$ANCHOR" --repo "$REPO" --base "$BASE" --model "$MODEL")
     [ "$DRY_RUN" -eq 1 ] && cmd+=(--dry-run)
+    # account 既定（orch-vzmf・orch-r8w9 で mirror 意味論を反転）: worker は orchestrator/admin と account を揃える必要が
+    #   なく、空き account の自動選択を既定にする（selector maximin は scribe-spawn 側 --account auto が担う）。意味論 3 値:
+    #     ORCH_DISPATCH_ACCOUNT 未設定/空 → --account auto（scribe-spawn の残量ベース selector へ委任・:-auto で担保）
+    #     =mirror                        → --account mirror を明示 forward（scribe PR#124/sc-9954 で scribe-spawn の
+    #                                       --account 省略時既定が auto へ反転したため、従来の admin env-mirror 挙動を
+    #                                       得るには明示 mirror ラベルが必須。scribe-spawn.sh:270-278 の mirror intercept が
+    #                                       accounts-base/mirror へ導出せず admin env mirror/unset へ解決するため、無条件
+    #                                       付与でも preflight die しない＝旧「flag 不付与で intercept」から無条件 forward へ）
+    #     =<label>                       → --account <label>（明示 account を透過 forward）
+    #   scope-fence（orch-vzmf）: CLI --account flag は生やさない（env seam のみ）。実 account 解決/claude-usage 呼出は
+    #   scribe-spawn の責務ゆえ orch-dispatch へ複製しない。
+    local _acct="${ORCH_DISPATCH_ACCOUNT:-auto}"
+    cmd+=(--account "$_acct")
     cmd+=("$BD_ID")
+
+    # dry-run/plan 表示用の account 行文言（実 argv と乖離させない・acceptance 5）: mirror も明示 forward される。
+    local _acct_plan
+    _acct_plan="$_acct（--account $_acct を forward）"
 
     local mode_label; mode_label="$([ "$DRY_RUN" -eq 1 ] && echo 'DRY-RUN' || echo 'EXEC')"
     {
@@ -1667,6 +1684,7 @@ run_spawn() {
         echo "  repo    : $REPO   (worktree host・既定=自己開発)"
         echo "  base    : $BASE"
         echo "  model   : $MODEL"
+        echo "  account : $_acct_plan"
         echo "  spawn   : $SPAWN"
         echo "  gate    : acceptance/verification 入口 check=pass（G1+G7・fail-closed）"
         echo "  snapshot: $snap_action（G2 tamper-evident・gate が現 acceptance と sha256 照合）"
