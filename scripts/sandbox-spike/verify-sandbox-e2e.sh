@@ -11,6 +11,10 @@
 #   注(sc-kxec): 共有 .git は旧「CC 既定 writable・列挙不要」前提だったが、この既定が CC version で不安定に変わり
 #   commit が silent に非永続化した(sc-ghjc・2.1.217)ため、gen が commit write-set を **明示 allowWrite grant** する
 #   ように変更した。本 e2e は gen を直呼びするので、その明示 grant 経由で commit が共有 .git へ永続することを実証する。
+#   注(sc-1d95): 上記「明示 grant *経由で* 永続」の裏返しとして、counterfactual 負 control(.git grant 4 集合を strip した
+#   変種 settings で 2nd commit を試み HEAD 不変を assert)を加え、grant が load-bearing(無ければ非永続)であることを実証し
+#   boundary-vacuous を閉じる。永続してしまったら「CC default auto-grant 復活の疑い(CC version drift)」で loud FAIL に倒す
+#   (両向き drift を fail-closed)。加えて出力ヘッダに `claude --version` を in-band 自己捕捉し drift 調査の attribution を独立化する。
 #
 # 方式(spike 踏襲): 自前で bwrap を組まず、**実 Claude Code(`claude -p`)を worktree で起動**し
 #   CC 自身の bwrap sandbox を適用させる(= CC 実体との乖離が無い真の e2e)。一次シグナル =
@@ -82,6 +86,10 @@ trap cleanup EXIT
 die() { echo "setup エラー: $1" >&2; exit 2; }
 
 echo "=== sc-7n1 sandbox e2e: git commit + bd close 永続 assert ==="
+# CC version 自己捕捉(sentinel・sc-1d95): PASS/FAIL どちらの記録にも実測 version を in-band で残し、将来の drift
+# 調査で attribution(どの CC で観測されたか)を out-of-band 情報に頼らず独立に成立させる。head -1 で余分行を落とす。
+CC_VERSION="$(claude --version 2>/dev/null | head -1 || true)"; [[ -n "$CC_VERSION" ]] || CC_VERSION="unknown"
+echo "--- CC version: $CC_VERSION ---"
 echo "temp anchor = $ANCHOR"
 echo "worktree    = $WT"
 
@@ -166,7 +174,74 @@ block_result="$(cat "$INBOUND" 2>/dev/null || true)"
 # negative control の実行証跡 = worker が NEGCTL に書いた 素の git add -A の rc(空=未実行)。
 negctl_rc="$(cat "$NEGCTL" 2>/dev/null || true)"
 
-pass=0; fail=0; verdict() { [[ "$1" == PASS ]] && pass=$((pass+1)) || fail=$((fail+1)); printf '  [%s] %s\n' "$1" "$2"; }
+# 5) counterfactual 負 control(sc-1d95): 上の正 control 群(commit が明示 grant *経由で* 永続すること)の裏返し —
+#    gen の生成 settings から **.git grant 4 集合(私有 gitdir + 共有 objects/refs/logs)だけを strip** した変種で
+#    第2の sandboxed CC commit を試み、共有 .git の HEAD が **不変(before==after)** であることを assert する。これで
+#    「.git grant は load-bearing(無ければ commit は永続しない)」を counterfactual 実証し boundary-vacuous を閉じる。
+#    判定は **rc でなく HEAD 比較**: CC 2.1.217 の silent rc=0 消失(commit が黙って非永続)にも 2.1.211 系の loud EROFS
+#    にも同じ判定式が成立する(rc 非依存)。もし strip しても commit が永続してしまったら FAIL とし、文言で「CC default
+#    auto-grant 復活の疑い(CC version drift)」を名指す — 明示 grant の load-bearing 性が崩れた合図。どちら向きの drift
+#    (grant が効かず正 control が落ちる / grant 無しでも通り負 control が落ちる)も loud fail-closed で倒す(silent 化の
+#    再演防止=本 bead の趣意)。strip は jq で allowWrite から共有 .git 配下 path のみ除去し **.beads/lock grant は残す**
+#    (負 control が「sandbox 全体の故障」でなく「.git grant の欠如」だけを isolate する)。
+TOK_CF="SC1D95_CF_RAN"
+CF_MARKER="sc1d95-cf-marker.txt"
+CF_MSG="sc1d95-cf-commit-$$"
+# 共有 .git common-dir を物理正規化(pwd -P)で取る。gen の .git grant(私有 gitdir + objects/refs/logs)は全て この
+# common-dir 配下の物理 path として emit される(gen 本体と同一導出)ため、この prefix startswith で 4 集合を漏れなく
+# 特定できる(.beads は $ANCHOR/.beads・lock 鍵は $HOME/.cache 配下ゆえ prefix 外=strip されない=isolate 成立)。
+cf_git_common="$(gitc -C "$WT" rev-parse --git-common-dir 2>/dev/null || true)"
+[[ -n "$cf_git_common" ]] && cf_git_common="$(cd "$WT" && cd "$cf_git_common" 2>/dev/null && pwd -P || true)"
+[[ -n "$cf_git_common" ]] || die "counterfactual: 共有 .git common-dir の解決に失敗"
+_cf_settings="$WT/.claude/settings.local.json"
+# 正 control で使った settings から共有 .git 配下 grant だけを strip(.beads/lock は保持)。同 dir 内 temp→mv で atomic。
+jq --arg gd "$cf_git_common/" '.sandbox.filesystem.allowWrite |= map(select(startswith($gd)|not))' \
+   "$_cf_settings" > "$_cf_settings.cf" || die "counterfactual: settings strip(jq)失敗"
+mv "$_cf_settings.cf" "$_cf_settings"
+# isolate の検証(fail-closed): strip 後 allowWrite に .git 配下は 0 件・.beads grant は 1 件以上残ることを確認する。
+# これが崩れると負 control が「.git grant 欠如」でなく別要因を測る恐れがあるため die する(strip が空振り/過剰の検出)。
+cf_n_git="$(jq --arg gd "$cf_git_common/" '[.sandbox.filesystem.allowWrite[]|select(startswith($gd))]|length' "$_cf_settings")"
+cf_n_beads="$(jq '[.sandbox.filesystem.allowWrite[]|select(contains("/.beads/"))]|length' "$_cf_settings")"
+[[ "$cf_n_git" -eq 0 && "$cf_n_beads" -ge 1 ]] \
+  || die "counterfactual: strip の isolate 不成立(.git 残=$cf_n_git .beads 残=$cf_n_beads)＝.git 4 集合のみ除去の前提が崩れた"
+echo "--- counterfactual settings(.git grant 4 集合を strip 済・.beads/lock grant は保持) ---"; cat "$_cf_settings"
+# HEAD before を **2nd CC 直前に再取得**する(1回目の成功 commit が baseline を汚染しないよう before を取り直す)。
+cf_before="$(gitc -C "$WT" rev-parse HEAD)"
+# 2nd sandboxed worker: 新規 marker を作り scribe-add→commit を試みる(1回目と同型・commit 試行のみ・bd close は不要=
+# isolate 対象は git 永続だけ)。`;` 区切りで TOK_CF は commit 成否に依らず必ず echo する(CC boot 失敗の vacuous-PASS
+# guard)。.git grant を strip したので index/objects/refs 書込は外壁で拒否され commit は非永続化するのが期待値。
+# ★2nd run にも block-side witness を同梱する(sc-1d95): counterfactual の一次シグナル「HEAD 不変/変化」は、2nd sandbox が
+# genuine に効いた前提でのみ「.git grant の load-bearing 性」を測る。もし 2nd run の sandbox が silent に無効化していれば
+# HEAD 変化は「.git auto-grant」でなく「sandbox off」を意味しうる(偽 drift alarm)。よって 1st run と同じ anchor 直下への
+# 書込みを試み CF_INBOUND(cwd 内・narration 非依存の実ファイル)に blocked/wrote を残させ、2nd run でも外壁が genuine
+# (anchor 直下 blocked)であることを独立に witness する。これで「sandbox genuine かつ .git commit 永続」= 真の CC
+# auto-grant drift、「sandbox off」= 判定不能、を分離し FAIL の attribution を airtight にする。
+CF_OUTSIDE="$ANCHOR/sc1d95-cf-OUTSIDE.txt"    # 2nd-run block-side: allowWrite 外(anchor 直下)。外壁 genuine なら書けない。
+CF_INBOUND="$WT/sc1d95-cf-blockresult.txt"    # 2nd-run block witness: worker が自己判定した blocked/wrote(cwd 内実ファイル)。
+CF_WORKER_CMD="cd '$WT' && printf 'cf\n' > '$CF_MARKER'; '$SADD' >/dev/null 2>&1; git commit -q -m '$CF_MSG' >/dev/null 2>&1; printf x > '$CF_OUTSIDE' 2>/dev/null; [ -e '$CF_OUTSIDE' ] && printf wrote > '$CF_INBOUND' || printf blocked > '$CF_INBOUND'; echo $TOK_CF"
+echo "--- 実 CC を sandbox で起動(counterfactual: .git grant 無しで commit 試行 + 2nd-run block witness)---"
+CF_OUT="$( cd "$WT" && claude -p --permission-mode bypassPermissions \
+  "あなたはテストハーネス。次の bash コマンドを Bash ツールで 1 回だけ厳密に実行し、stdout/stderr をそのまま報告せよ。説明や追加コマンドは不要。コマンド: $CF_WORKER_CMD" \
+  2>&1 )" || true
+cf_after="$(gitc -C "$WT" rev-parse HEAD)"
+cf_ran=no; grep -q "$TOK_CF" <<<"$CF_OUT" && cf_ran=yes
+# 2nd-run の外壁 genuine witness: worker が cwd 内 CF_INBOUND に残した実ファイル(narration では作られない)+ 外側から見た
+# CF_OUTSIDE の不在。両者が「blocked かつ OUTSIDE 不在」なら 2nd sandbox は genuine に効いている。
+cf_block_result="$(cat "$CF_INBOUND" 2>/dev/null || true)"
+
+pass=0; fail=0; drift=0
+# sc-1d95 裁定改訂(2026-07-23): DRIFT = CC 側 auto-grant 復活の検出。FAIL でなく loud 表示のみ(rc 非影響)。
+# 根拠: 有害方向(grant 有りで非永続)は正 control が FAIL で守る/auto-grant 復活時は明示 grant が冗長になるだけで無害/
+# CC は 8 日で 4 回 flip しており(2.1.211 EROFS→215/216 persist→217 silent loss→218 persist)、上流都合で配布 lane を
+# 長期 RED にすると RED 慣れを生む。DRIFT は毎 run in-band で surface し人間 review を促す(黙殺はしない)。
+verdict() {
+  case "$1" in
+    PASS)  pass=$((pass+1)) ;;
+    DRIFT) drift=$((drift+1)) ;;
+    *)     fail=$((fail+1)) ;;
+  esac
+  printf '  [%s] %s\n' "$1" "$2"
+}
 
 echo "--- asserts ---"
 # git commit: token が出て(=実行)・HEAD が前進し・新 HEAD のメッセージが一致 → 共有 .git に永続。
@@ -208,16 +283,43 @@ else
   verdict FAIL "negative control: rc 記録なし=未実行の疑い(vacuous-PASS 防止)"
 fi
 
+# counterfactual 負 control(sc-1d95): .git grant 4 集合を strip したら 2nd commit が **非永続**(HEAD 不変)=明示 grant は
+# load-bearing。判定は rc 非依存の HEAD before==after だが、2nd sandbox が genuine に効いている前提でのみ意味を持つゆえ
+# block-side witness(cf_block_result==blocked かつ CF_OUTSIDE 不在)を connective として要求し attribution を airtight にする:
+#   - cf_ran!=yes            → 2nd CC boot 失敗(HEAD 不変が未実行か genuine block か判別不能)= fail-closed
+#   - 2nd sandbox not genuine → CF_INBOUND!=blocked か CF_OUTSIDE 実在 = sandbox off の疑いで HEAD 判定不能 = fail-closed
+#   - genuine かつ HEAD 不変  → 明示 grant は load-bearing(strip で非永続)= PASS
+#   - genuine かつ HEAD 変化  → sandbox は genuine なのに .git commit が永続 = CC default auto-grant 復活(CC version drift)
+#                               の **確定**。裁定改訂(2026-07-23): FAIL でなく loud **DRIFT**(rc 非影響)。明示 grant は
+#                               現 CC では冗長(無害・belt-and-suspenders 維持)で、有害方向は正 control が FAIL で検知する。
+if [[ "$cf_ran" != yes ]]; then
+  verdict FAIL "counterfactual: 2nd CC が走った証跡(token)なし=boot 失敗の疑い(vacuous-PASS 防止・HEAD 不変が genuine block か未実行か判別不能)"
+elif [[ "$cf_block_result" != blocked || -e "$CF_OUTSIDE" ]]; then
+  verdict FAIL "counterfactual: 2nd run の sandbox が genuine に効いていない(block witness='$cf_block_result' outside_exists=$([[ -e "$CF_OUTSIDE" ]] && echo yes || echo no))=HEAD 判定が sandbox-off で汚染される疑い(判定不能・fail-closed)"
+elif [[ "$cf_before" == "$cf_after" ]]; then
+  verdict PASS "counterfactual: 2nd sandbox genuine(anchor 直下 blocked)下で .git grant 4 集合を strip すると commit 非永続(HEAD 不変 $cf_before)=明示 grant は load-bearing(無ければ永続しない)"
+else
+  verdict DRIFT "counterfactual: 2nd sandbox genuine(anchor 直下 blocked)下で .git grant を strip しても commit が永続($cf_before -> $cf_after)=CC default auto-grant の復活を検出(CC version drift・CC $CC_VERSION)。明示 grant は現 CC では非 load-bearing(冗長だが無害)。有害方向(grant 有りで非永続)は正 control が FAIL で検知する(sc-1d95 裁定改訂)"
+fi
+
 if [[ "$fail" -ne 0 ]]; then
-  echo "--- 診断: CC 出力(sandbox 内の実行ログ) ---"
+  echo "--- 診断: CC 出力(正 control・sandbox 内の実行ログ) ---"
   printf '%s\n' "$CC_OUT" | sed 's/^/  | /'
-  echo "  (flags: git_ran=$git_ran bd_ran=$bd_ran block_result='$block_result' negctl_rc='$negctl_rc' outside_exists=$([[ -e "$OUTSIDE" ]] && echo yes || echo no))"
+  echo "--- 診断: CC 出力(counterfactual・.git grant strip 済) ---"
+  printf '%s\n' "$CF_OUT" | sed 's/^/  | /'
+  echo "  (flags: git_ran=$git_ran bd_ran=$bd_ran block_result='$block_result' negctl_rc='$negctl_rc' outside_exists=$([[ -e "$OUTSIDE" ]] && echo yes || echo no) cf_ran=$cf_ran cf_block_result='$cf_block_result' cf_outside_exists=$([[ -e "$CF_OUTSIDE" ]] && echo yes || echo no) cf_before=$cf_before cf_after=$cf_after CC=$CC_VERSION)"
 fi
 
 echo "--- result ---"
-echo "PASS=$pass FAIL=$fail"
+echo "PASS=$pass FAIL=$fail DRIFT=$drift"
 if [[ "$fail" -eq 0 ]]; then
   echo "✅ sandbox 外壁 genuine(block-side PASS)かつ sandboxed worker は git commit(共有 .git) + bd close(.beads) を境界を通って永続できる"
+  if [[ "$drift" -eq 0 ]]; then
+    echo "   .git grant 4 集合を strip すると commit は非永続(counterfactual PASS)＝明示 grant は load-bearing(CC $CC_VERSION)"
+  else
+    echo "⚠ DRIFT: CC default auto-grant の復活を検出(CC $CC_VERSION)＝明示 grant は現 CC では冗長(無害・belt-and-suspenders として維持)。"
+    echo "   CC が再び auto-grant を外せば counterfactual は PASS へ戻る。grant 破損(有害方向)は正 control が FAIL で検知する(sc-1d95 裁定改訂)。"
+  fi
   exit 0
 else
   echo "❌ sandbox 内の実操作が永続していない(上の FAIL / CC 出力を確認)"
