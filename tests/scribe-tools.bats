@@ -1688,6 +1688,80 @@ _make_noop_cld_spawn() {
   git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
 }
 
+# ---------- spawn(sandbox-allowwrite durable log): FO-2 通過後の allowWrite 集合を issue notes へ焼く（sc-2bq2）----------
+# 生成 settings.local.json は worktree 削除で消失し incident 再構成を阻む（sc-kxec で 4 cell の settings byte 実物が
+# 復元不能だった直接原因）。sandbox spawn の実経路で FO-2 attestation 通過後、最終 settings の allowWrite 集合を安定
+# 接頭辞 sandbox-allowwrite: の単一行 note として issue bd notes へ bdw 経由 emit する（account-select: snapshot と同型）。
+# ここでは実 gen を scribe-spawn 経由で走らせ、note の n/sha256/entries が実 settings の指紋と byte 一致することを pin する。
+_bdw_capture_stub() {  # $1=note log path・lock-file/lock-dir を返しつつ update --append-notes を捕捉する present+capture bdw stub
+  local _log="$1" _stub="$BATS_TEST_TMPDIR/bdw-capture-stub"
+  cat > "$_stub" <<STUB
+#!/usr/bin/env bash
+[ "\$1" = lock-dir ] && { echo "$BATS_TEST_TMPDIR/locks"; exit 0; }
+[ "\$1" = lock-file ] && { echo "$BATS_TEST_TMPDIR/locks/bd-write-stub.lock"; exit 0; }
+if [ "\$1" = update ]; then
+  prev=""
+  for a in "\$@"; do
+    [ "\$prev" = "--append-notes" ] && printf '%s\n' "\$a" >> "$_log"
+    prev="\$a"
+  done
+fi
+exit 0
+STUB
+  chmod +x "$_stub"
+  printf '%s' "$_stub"
+}
+
+@test "spawn(sandbox/sc-2bq2): 実経路で FO-2 通過後 sandbox-allowwrite: note が bdw 経由 emit され n/sha256/entries が実 settings と byte 一致" {
+  local repo wt noop bdwcap notelog note exp_entries exp_n exp_sha
+  repo="$SCRIBE_TEST_CWD"
+  _mk_beads "$repo"                 # 実 gen が runtime サブパスを列挙するため realistic .beads が要る
+  noop="$(mktemp)"; printf '#!/usr/bin/env bash\nexit 0\n' > "$noop"; chmod +x "$noop"
+  wt="$repo/.worktrees/spawn/un-4nm-101010"
+  notelog="$BATS_TEST_TMPDIR/allowwrite-note.log"; : > "$notelog"
+  bdwcap="$(_bdw_capture_stub "$notelog")"
+  # 実 gen を走らせる（preflight/cld-spawn は noop・bdw は capture stub で host 非依存＝canonical plugin 不在でも skip 不要）。
+  run env BEADS_BDW="$bdwcap" SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN="$noop" SCRIBE_SANDBOX_PREFLIGHT="$noop" \
+      BDW_LOCK_DIR="$BATS_TEST_TMPDIR/rt" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  rm -f "$noop"
+  [ "$status" -eq 0 ]
+  [ -f "$wt/.claude/settings.local.json" ]
+  # 核心: sandbox-allowwrite: 接頭辞の note がちょうど 1 回 emit されている（account-select: note とは別行＝接頭辞で弁別）。
+  run bash -c "grep -c '^sandbox-allowwrite:' '$notelog'"
+  [ "$output" = "1" ]
+  note="$(grep '^sandbox-allowwrite:' "$notelog" | head -1)"
+  # 実 settings から期待値を導出（テスト側で導出規則を再実装せず jq/sha256sum で実測＝実装が形式を変えたら追随）。
+  exp_entries="$(jq -r '[.sandbox.filesystem.allowWrite[]?] | join("|")' "$wt/.claude/settings.local.json")"
+  exp_n="$(jq -r '[.sandbox.filesystem.allowWrite[]?] | length' "$wt/.claude/settings.local.json")"
+  exp_sha="$(sha256sum "$wt/.claude/settings.local.json" | cut -c1-12)"
+  # 指紋 byte 一致（n=entry数 / sha256=settings指紋12桁 / entries=| 区切り列挙）。
+  [ "$note" = "sandbox-allowwrite: n=$exp_n sha256=$exp_sha entries=$exp_entries" ]
+  # 非 vacuous: 実 gen の grant（.beads/embeddeddolt runtime）が entries に列挙され n>0（空 note を緑にしない）。
+  [ "$exp_n" -gt 0 ]
+  [[ "$note" == *"/.beads/embeddeddolt"* ]]
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true
+}
+
+@test "spawn(sandbox/sc-2bq2): dry-run は bd write せず sandbox-allowwrite: emit 予定を plan 行で可視化する" {
+  local repo bdwcap notelog
+  repo="$SCRIBE_TEST_CWD"
+  _mk_beads "$repo"
+  notelog="$BATS_TEST_TMPDIR/allowwrite-note.log"; : > "$notelog"
+  bdwcap="$(_bdw_capture_stub "$notelog")"
+  # dry-run は emit_plan で exit 0＝実 gen/FO-2/bdw update に到達しない。plan 行のみで bd write ゼロ。
+  run env BEADS_BDW="$bdwcap" SCRIBE_SANDBOX=1 SCRIBE_CLD_SPAWN=cld-spawn SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  # plan 行が sandbox-allowwrite: emit 予定を可視化する（安定接頭辞・durable log 意図）。
+  [[ "$output" == *"sandbox-allowwrite:"* ]]
+  [[ "$output" == *"durable log"* ]]
+  # dry-run は bd write を一切しない（capture stub の note log に sandbox-allowwrite: が landed していない）。
+  # grep -c は no-match で "0" を print し exit 1（run が status/output を捕捉）＝emit ゼロを実測する。
+  run grep -c '^sandbox-allowwrite:' "$notelog"
+  [ "$output" = "0" ]
+}
+
 @test "spawn(sandbox/sc-lkg): cross-repo 実経路で settings.local.json の allowWrite が真の --anchor の .beads を指す（scribe-spawn の forwarding regress を integration 層で捕捉）" {
   # sc-lkg の欠陥本体は scribe-spawn が真の --anchor を gen へ渡さないこと。gen 単体テスト(上)は
   # gen の挙動を pin するが、scribe-spawn:555 が旧 `"$SANDBOX_GEN" "$WORKTREE"` へ regress しても
