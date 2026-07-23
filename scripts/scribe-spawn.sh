@@ -485,6 +485,41 @@ emit_account_select_note() {
     || echo "scribe: warn: account-select 監査 note の追記に失敗（bdw・best-effort・spawn は継続）: $_nid" >&2
 }
 
+# sc-2bq2: FO-2 通過後の最終 settings（worker が実際に読む enforcing 形）の allowWrite 集合を安定接頭辞
+# sandbox-allowwrite: の単一行 note へ整形する（account-select: snapshot と同型の durable log）。生成
+# settings.local.json は worktree 削除で消失し incident 再構成を阻む（sc-kxec 調査で 2026-07-21 の 4 cell の
+# settings byte 実物が復元不能だった直接原因）。bd notes は worktree 削除に生残し横断 grep 可能ゆえ、allowWrite
+# の実体を issue notes へ焼く。形式:
+#   sandbox-allowwrite: n=<entry数> sha256=<settings file の sha256 先頭12桁> entries=<path1|path2|...>
+# sha256 は settings 全体の指紋（完全復元の担保）・n/entries は allowWrite 集合の再構成が一次目的。allowWrite は
+# bwrap 用の絶対パスで空白/`|` を含まない前提ゆえ `|` 区切りで安全に列挙する。jq/sha256sum 不在は空/`-` へ縮退
+# （FO-2 経路は jq 実在が保証されるが防御的に扱う）。
+format_sandbox_allowwrite_snapshot() {
+  local _settings="$1"
+  local _entries _n _sha
+  _entries="$(jq -r '[.sandbox.filesystem.allowWrite[]?] | join("|")' "$_settings" 2>/dev/null || true)"
+  _n="$(jq -r '[.sandbox.filesystem.allowWrite[]?] | length' "$_settings" 2>/dev/null || true)"
+  [[ -n "$_n" ]] || _n=0
+  _sha="$(sha256sum "$_settings" 2>/dev/null | cut -c1-12)"
+  [[ -n "$_sha" ]] || _sha="-"
+  printf 'sandbox-allowwrite: n=%s sha256=%s entries=%s\n' "$_n" "$_sha" "$_entries"
+}
+
+# sc-2bq2（実起動時・sandbox 経路の FO-2 通過後）: 最終 settings の allowWrite snapshot を該当 issue notes へ
+# append（bdw 経由・best-effort）。失敗は loud warn + spawn 続行（audit miss で健全 spawn を殺さない＝
+# account-select 監査と同じ fail-soft を warn で可視化）。ID は worker 経路で必ず解決済みだが、防御的に空なら
+# 表示のみへ縮退する。dry-run はこの関数を呼ばず emit_plan が plan 行で可視化する（bd write ゼロ）。
+emit_sandbox_allowwrite_note() {
+  local _settings="$1"
+  local _snap; _snap="$(format_sandbox_allowwrite_snapshot "$_settings")"
+  if [[ -z "${ID:-}" ]]; then
+    { echo "scribe: sandbox-allowwrite 監査（bd-id 無し→ notes 書き先なし・表示のみ）:"; echo "$_snap"; } >&2
+    return 0
+  fi
+  ( cd "$ANCHOR" && "$SCRIPT_DIR/bdw" update "$ID" --append-notes "$_snap" ) >/dev/null 2>&1 \
+    || echo "scribe: warn: sandbox-allowwrite 監査 note の追記に失敗（bdw・best-effort・spawn は継続）: $ID" >&2
+}
+
 # facet⑥ 監査（dry-run）: 選定予定を plan 行で可視化する（候補ランキング + 選定結果）。
 account_select_plan() {
   if [[ "$AUTO_DEFAULTED" -eq 1 ]]; then
@@ -969,6 +1004,10 @@ emit_plan() {
   echo "[plan] scribe-spawn: issue=$ID（実在検証 OK）"
   echo "[plan] git -C $REPO worktree add -b $BRANCH $WORKTREE $BASE"
   [[ "$SANDBOX_ON" == "1" ]] && echo "[plan] sandbox: $WORKTREE/.claude/settings.local.json を生成（SCRIBE_SANDBOX 既定 on・opt-out は SCRIBE_SANDBOX=0。bwrap 外壁。CLD_PATH/launcher は不変＝spawn 行 byte 同一）。実 spawn 時に dep-preflight（deps 欠如→SCRIBE_SANDBOX_FALLBACK=1 で警告付き非 sandbox / 無ければ fail-loud・sc-u53）"
+  # sc-2bq2: FO-2 通過後に最終 settings の allowWrite 集合を issue notes へ durable log として emit する予定を可視化する
+  # （worktree 削除で settings.local.json が消えても incident 再構成できる指紋・account-select 監査と同型）。dry-run は
+  # bd write を一切せず本 plan 行のみ（実 write は実起動時・失敗は loud warn 非致命）。
+  [[ "$SANDBOX_ON" == "1" ]] && echo "[plan] sandbox-allowwrite: FO-2 通過後、最終 settings の allowWrite 集合を安定接頭辞 'sandbox-allowwrite:' の単一行（n=entry数 sha256=settings指紋12桁 entries=path|...）で issue $ID の bd notes へ bdw 経由 emit（worktree 削除に生残る durable log・失敗は loud warn 非致命・sc-2bq2）"
   # FO-4(sc-7oj): 縮退経路（明示 opt-out）を dry-run でも可視化する。旧 emit_plan は opt-out 時に sandbox 行を
   # 一切出さず「無防備で走る」ことが --dry-run 監査で不可視だった（監査ギャップ）。opt-out は env 継承で sticky
   # 化する点まで明示する。sandbox 設定は生成しない旨は書くが literal 'settings.local.json' は出さない（opt-out で
@@ -1346,6 +1385,11 @@ if [[ "$SANDBOX_ON" == "1" ]]; then
   settings: $WORKTREE/.claude/settings.local.json"
     fi
   fi
+  # sc-2bq2: FO-2 attestation を通過した**後**に、worker が実際に読む最終 settings の allowWrite 集合を issue notes へ
+  # durable log として emit する（worktree 削除で settings.local.json が消えても allowWrite 集合を再構成できる指紋）。
+  # attestation 前でなくここに置く＝die した settings でなく enforcing が確認された最終形を記録する（紛らわしさ回避）。
+  # best-effort（失敗は loud warn 非致命・spawn 続行）。dry-run はこの経路に来ない（emit_plan で exit 0 済み）。
+  emit_sandbox_allowwrite_note "$WORKTREE/.claude/settings.local.json"
   # 生成した settings.local.json を ephemeral に保つ（worker の stage に巻き込まない・sc-1gu）。info/exclude は
   # 共有 common-dir へ冪等追記する（scribe-lib の単一実装＝本番と test で drift しない）。CC sandbox が cwd の
   # 既知 dotfile/.claude 設定を /dev/null device 化する件（sc-yqa）は info/exclude でなく scribe-add（型で弾く
