@@ -384,6 +384,64 @@ run_dispatch() {
 }
 
 # ==============================================================================
+# (1c-account) spawn: account 既定 --account auto / mirror 明示 forward / label 透過（orch-vzmf・orch-r8w9 で mirror 反転）
+#   ★teeth: forwarded SPAWN-ARGS 行を grep してから assert（plan >&2 行では assert しない＝空虚 green 防止）。
+#     (a) 既定=--account auto 存在 ∧ SPAWN-ARGS 到達 ∧ status 0 ／ (b) mirror=--account mirror 存在 ∧ SPAWN-ARGS 到達 ∧
+#     status 0（(a) と必ず対＝単独は vacuous・die を flag 無しと誤認しない・orch-r8w9 で「不付与」から反転）／
+#     (c) label=--account <label> 存在 ／ (empty) orch-6eao=空文字列→--account auto（:- 退行 guard）。
+# ==============================================================================
+
+@test "spawn account (a): ORCH_DISPATCH_ACCOUNT 未設定で SPAWN-ARGS に --account auto が現れる" {
+    run_dispatch orch-test
+    [ "$status" -eq 0 ]
+    local line; line=$(printf '%s\n' "$output" | grep 'SPAWN-ARGS:')   # forwarded argv のみを見る（plan >&2 行を排除）
+    [[ -n "$line" ]]                                                     # SPAWN-ARGS 到達（spawn 実行＝die でない）
+    [[ "$line" == *"--account auto"* ]]
+}
+
+@test "spawn account (b): ORCH_DISPATCH_ACCOUNT=mirror で SPAWN-ARGS に --account mirror が明示 forward される（orch-r8w9）" {
+    ORCH_DISPATCH_ACCOUNT=mirror run_dispatch orch-test
+    [ "$status" -eq 0 ]
+    local line; line=$(printf '%s\n' "$output" | grep 'SPAWN-ARGS:')
+    [[ -n "$line" ]]                                                     # SPAWN-ARGS 到達（(a) と対＝die を flag 無しと誤認しない）
+    [[ "$line" == *"--account mirror"* ]]                                # orch-r8w9 反転＝旧「flag 不付与」から明示 forward へ
+}
+
+@test "spawn account (empty・orch-6eao): ORCH_DISPATCH_ACCOUNT='' 空文字列で SPAWN-ARGS に --account auto が現れる（:- 退行 guard）" {
+    # rider orch-6eao: ${ORCH_DISPATCH_ACCOUNT:-auto} の :-（空も default 化）が保持されている teeth。
+    # mutation :-→-（空を default 化しない）にすると本 case は --account '' へ落ちて赤反転する。
+    ORCH_DISPATCH_ACCOUNT='' run_dispatch orch-test
+    [ "$status" -eq 0 ]
+    local line; line=$(printf '%s\n' "$output" | grep 'SPAWN-ARGS:')
+    [[ -n "$line" ]]
+    [[ "$line" == *"--account auto"* ]]
+}
+
+@test "spawn account (c): ORCH_DISPATCH_ACCOUNT=<label> で --account <label> が透過 forward される" {
+    ORCH_DISPATCH_ACCOUNT=black3 run_dispatch orch-test
+    [ "$status" -eq 0 ]
+    local line; line=$(printf '%s\n' "$output" | grep 'SPAWN-ARGS:')
+    [[ -n "$line" ]]
+    [[ "$line" == *"--account black3"* ]]
+}
+
+@test "spawn account plan (acceptance 5): dry-run 情報ブロックの account 行が forward 値を忠実表示する" {
+    # 既定（auto）: plan は auto を表示 ∧ 実 argv も --account auto
+    run_dispatch --dry-run orch-test
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"account : auto"* ]]                               # plan 行（>&2）
+    local aline; aline=$(printf '%s\n' "$output" | grep 'SPAWN-ARGS:')
+    [[ "$aline" == *"--account auto"* ]]                                # plan と実 argv が乖離しない
+    # mirror: plan は「--account mirror を forward」を明示 ∧ 実 argv に --account mirror present（orch-r8w9 反転）
+    ORCH_DISPATCH_ACCOUNT=mirror run_dispatch --dry-run orch-test
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"account : mirror"* ]]
+    [[ "$output" == *"--account mirror を forward"* ]]
+    local mline; mline=$(printf '%s\n' "$output" | grep 'SPAWN-ARGS:')
+    [[ "$mline" == *"--account mirror"* ]]
+}
+
+# ==============================================================================
 # (1d) spawn: worker 対話 tool 封鎖は scribe-spawn hardcode が担う＝orch-dispatch は forward しない（orch-ce6 errata）
 # ==============================================================================
 
