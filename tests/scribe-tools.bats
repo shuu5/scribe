@@ -2183,7 +2183,9 @@ STUB
   # bd/jq 欠落で rc=77→FAIL になった。dep set を二重化せず rc=77 を一次の skip 源にする）。
   [ "$status" -eq 77 ] && skip "ハーネスが前提未満で skip(rc=77)"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"PASS=4 FAIL=0"* ]]   # allow-side 2 + block-side 1 + negative control 1
+  # FAIL=0 のみを pin（sc-1d95 裁定改訂: counterfactual は CC の auto-grant 有無で PASS/DRIFT に揺れるため
+  # PASS 数リテラルは pin しない。green の定義 = rc 0 かつ FAIL=0。DRIFT は loud 表示のみで rc 非影響）。
+  [[ "$output" == *" FAIL=0"* ]]
 }
 
 # ---------- spawn: worker prompt に anchor 絶対パスを焼き込む（un-gjr）----------
