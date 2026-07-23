@@ -500,7 +500,7 @@ format_sandbox_allowwrite_snapshot() {
   _entries="$(jq -r '[.sandbox.filesystem.allowWrite[]?] | join("|")' "$_settings" 2>/dev/null || true)"
   _n="$(jq -r '[.sandbox.filesystem.allowWrite[]?] | length' "$_settings" 2>/dev/null || true)"
   [[ -n "$_n" ]] || _n=0
-  _sha="$(sha256sum "$_settings" 2>/dev/null | cut -c1-12)"
+  _sha="$(sha256sum "$_settings" 2>/dev/null | cut -c1-12 || true)"
   [[ -n "$_sha" ]] || _sha="-"
   printf 'sandbox-allowwrite: n=%s sha256=%s entries=%s\n' "$_n" "$_sha" "$_entries"
 }
