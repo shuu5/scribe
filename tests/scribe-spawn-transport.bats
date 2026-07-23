@@ -26,6 +26,10 @@ setup() {
   export SCRIBE_CLD_SPAWN="cld-spawn"     # dry-run では起動されない
   # hermetic 化: ホスト env の漏れを落とす。
   unset CLAUDE_CONFIG_DIR SCRIBE_WORKER_CONFIG_DIR SCRIBE_ACCOUNTS_BASE SCRIBE_TRANSPORT SCRIBE_BG_PREFLIGHT SCRIBE_CLAUDE_BIN SCRIBE_PLUGIN_DIR 2>/dev/null || true
+  # sc-9954: worker 既定が auto へ反転し、素の worker spawn も selector を通る。実 claude-usage を叩かせず決定論化する:
+  # SCRIBE_USAGE_CMD を不在パスに固定 → selector exit 3（API 故障）→ 主アカ fallback（＝sc-9954 前の既定挙動と同一解決）。
+  # transport 分岐が主題ゆえ account 選択は fallback で十分（--account auto 明示テストは per-test で usage を与える）。
+  export SCRIBE_USAGE_CMD="$BATS_TEST_TMPDIR/scribe-no-usage-cmd"
   # canonical bdw present スタブ（spawn の無条件 bdw preflight を host 非依存で通す）。
   BDW_PRESENT_STUB="$BATS_TEST_TMPDIR/bdw-present-stub"
   printf '#!/usr/bin/env bash\n[ "$1" = lock-dir ] && { echo "%s/locks"; exit 0; }\n[ "$1" = lock-file ] && { echo "%s/locks/x.lock"; exit 0; }\nexit 0\n' "$BATS_TEST_TMPDIR" "$BATS_TEST_TMPDIR" > "$BDW_PRESENT_STUB"

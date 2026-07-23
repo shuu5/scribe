@@ -67,9 +67,12 @@ BDEOF
   id="sc-smoke"
 
   # 共通 env: bd stub / 決定論 HHMMSS / cld-spawn は dry-run では起動されない（feature-detect の --help 到達だけ）。
+  # SCRIBE_USAGE_CMD は不在パスへ固定（bats setup 群と同流儀・sc-9954 gate）: worker 既定 auto 化後、これが無いと
+  # claude-usage 導入済みホストで default dry-run が実 selector を叩き plan 出力がホストごとに揺れる（hermetic 破れ）。
+  # 不在パス → selector exit 3（API 故障）→ 主アカ fallback ＝全ホスト決定論。
   local -a envc=(env
     "SCRIBE_BD=$bd" "SCRIBE_HHMMSS=101010" "SCRIBE_CLD_SPAWN=cld-spawn"
-    "SCRIBE_CLAUDE_BIN=claude")
+    "SCRIBE_CLAUDE_BIN=claude" "SCRIBE_USAGE_CMD=$tmp/scribe-no-usage-cmd")
 
   # --- (1) transport=tmux（既定）dry-run plan 健全性 ---
   local out_tmux out_default

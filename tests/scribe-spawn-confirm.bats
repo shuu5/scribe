@@ -25,6 +25,10 @@ setup() {
   export SCRIBE_SANDBOX=0            # sandbox 生成は本層と無関係（deps 依存を持ち込まない）
   export SCRIBE_HHMMSS=101010        # branch/worktree 名を決定論化
   unset CLAUDE_CONFIG_DIR SCRIBE_WORKER_CONFIG_DIR SCRIBE_ACCOUNTS_BASE 2>/dev/null || true
+  # sc-9954: worker 既定が auto へ反転し、素の worker spawn も selector（scribe-account-select）を通る。実 claude-usage を
+  # 叩かせず決定論化する: SCRIBE_USAGE_CMD を不在パスに固定 → selector exit 3（API 故障）→ 主アカ fallback（＝sc-9954 前の
+  # 既定挙動 mirror/unset と同一解決）。本層は account 選択でなく submit 検証が主題ゆえ fallback で十分。
+  export SCRIBE_USAGE_CMD="$BATS_TEST_TMPDIR/scribe-no-usage-cmd"
 
   # canonical bdw 到達性 preflight（sc-ovq・無条件）を host 非依存にする present スタブ。
   BDW_PRESENT_STUB="$BATS_TEST_TMPDIR/bdw-present-stub"
