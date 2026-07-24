@@ -308,3 +308,67 @@ run_admin_gate() {
     run bash -n "$SCRIPT_DISPATCH"; [ "$status" -eq 0 ]
     run bash -n "$SCRIPT_ADMIN"; [ "$status" -eq 0 ]
 }
+
+# ==============================================================================
+# (G) --surface read-only mode（bd orch-cqf4 Leg-A・open slate 列挙）
+# ==============================================================================
+
+# 実 orch_slate.sh を --surface（standalone read-only）で走らせる。bd/anchor は env seam で hermetic 注入。
+run_surface() {
+    PATH="$BIN:$PATH" \
+    ORCH_SLATE_BD="$BIN/bd" \
+    ORCH_SLATE_ANCHOR="$ANCHOR" \
+        run bash "$SLATE_LIB" --surface
+}
+
+@test "(G-present) --surface: open slate と members を列挙し tripwire 集計（members を実読＝非空虚）" {
+    run_surface
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[SLATE] orch-slate1"* ]]
+    [[ "$output" == *"members: orch-test, tb"* ]]                # members を実読（読まなければ union:0 に落ちる）
+    [[ "$output" == *"[SLATE-TRIPWIRE] open slate:1 members(union):2"* ]]
+}
+
+@test "(G-none) --surface: open slate 無し → [SLATE-NONE]・tripwire open slate:0" {
+    export SLATE_LIST_JSON='[]'
+    run_surface
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[SLATE-NONE]"* ]]
+    [[ "$output" == *"[SLATE-TRIPWIRE] open slate:0 members(union):0"* ]]
+}
+
+@test "(G-readfail) --surface: bd read 失敗 → [SLATE-UNKNOWN]・fail-open exit 0（brick しない）" {
+    export BD_FAIL=1
+    run_surface
+    [ "$status" -eq 0 ]                              # read-only surfacing は brick しない（fail-open）
+    [[ "$output" == *"[SLATE-UNKNOWN]"* ]]
+}
+
+@test "(G-foreign) --surface: foreign copy（非 orch-）は open slate 列挙から排除（schema SSOT 再利用）" {
+    export SLATE_LIST_JSON='[{"id":"un-slate9"},{"id":"orch-slate1"}]'
+    run_surface
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[SLATE] orch-slate1"* ]]
+    [[ "$output" != *"un-slate9"* ]]                # foreign filter（_orch_slate_open_ids の SELF_PREFIX）
+    [[ "$output" == *"[SLATE-TRIPWIRE] open slate:1 "* ]]
+}
+
+@test "(G-readonly) --surface: bd 呼出は list/show のみ（write verb 非出現＝surfacing 専任）" {
+    run_surface
+    [ -f "$BD_ARGS_FILE" ]
+    ! grep -qE '(^| )(update|create|close|dep|assign|delete|import|dolt) ' "$BD_ARGS_FILE" || false
+    ! grep -qE -- '--add-label|--append-notes' "$BD_ARGS_FILE"
+}
+
+@test "(G-anchor-fallback) --surface: ORCH_SLATE_ANCHOR 未指定→engine は fail-loud で [SLATE-UNKNOWN]・exit0（hardcode fallback 無し）" {
+    # 人間/hook が env seam 無しで叩く standalone --surface。engine は deploy-layout hardcode fallback を持たず、
+    #   同 dir の orch_anchor.sh を lazy source して _resolve_scriptorium を試みる（E2 検証付き）。engine hermetic
+    #   環境（scriptorium deploy-layout 非在）では anchor 解決不能ゆえ [SLATE-UNKNOWN] fail-loud を stderr へ出し
+    #   exit 0（read-only surfacing は brick しないが、誤った hardcode anchor を黙って使わない＝F2b scrub の帰結）。
+    #   ※ scriptorium 本体では _resolve_scriptorium が解決し SLATE header へ到達するが、engine copy は fail-loud 構造。
+    PATH="$BIN:$PATH" ORCH_SLATE_BD="$BIN/bd" \
+        run bash "$SLATE_LIB" --surface
+    [ "$status" -eq 0 ]                              # fail-loud でも brick しない（read-only surfacing・exit0）
+    [[ "$output" == *"[SLATE-UNKNOWN]"* ]]           # anchor 解決不能を fail-loud で surface（hardcode しない）
+    [[ "$output" == *"anchor 解決不能"* ]]
+}

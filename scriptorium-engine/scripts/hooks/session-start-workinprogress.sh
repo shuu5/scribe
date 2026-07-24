@@ -76,6 +76,8 @@ DISPATCH="$PLUGIN_ROOT/scripts/orch-dispatch.sh"
 DEGRADED="$PLUGIN_ROOT/scripts/orch-degraded-watch.sh"
 HANDOFF="$PLUGIN_ROOT/scripts/orch-handoff-scan.sh"
 DELIVERY="$PLUGIN_ROOT/scripts/orch-delivery-observe.sh"   # 第4節 配送観測（bd orch-4js9・read-only）
+RERATIFY="$PLUGIN_ROOT/scripts/orch-stale-scan.sh"         # 第5節 re-ratify sweep（bd orch-cqf4 Leg-A・PR#147 engine 反映・read-only）
+SLATE_SURFACE="$PLUGIN_ROOT/scripts/lib/orch_slate.sh"     # 第5節 open slate surface（bd orch-cqf4 Leg-A・read-only）
 
 # --- 共有 self-scope lib を source（bd orch-t9z で 3 consumer から dedup・SSOT = scripts/hooks/lib/orch_session.sh） ---
 # _extract_cwd / _json_is_valid / _ledger_dolt_database / _is_orch_session / _is_worktree_cwd を提供する。
@@ -141,6 +143,26 @@ _emit_workinprogress() {
     else
         echo "  （orch-delivery-observe.sh 不在/非実行可能: $DELIVERY・skip＝fail-open）"
     fi
+    echo ""
+
+    # (5) re-ratify sweep + open slate surface（bd orch-cqf4 Leg-A・PR#147 engine 反映・第5節）。
+    #     死角クラスの re-ratify 候補 sweep（orch-stale-scan --re-ratify）と open 計画 slate の薄い read-only surface
+    #     （orch_slate --surface）を各 [ -x ] fail-open guard で守る（両者 read-only・bd/foreign 台帳を mutate しない）。
+    #     独立 sentinel（RERATIFY-SWEEP / SLATE-SURFACE）を割当てる（既存 4 sentinel と別の 5th/6th）。
+    #     ★needs-user 呼び鈴（裁定(3)）: re-ratify 出力中の 🔔 行（needs-user 併存への呼び鈴マーク）はそのまま stdout へ
+    #       流す＝surface のみで push しない（本 hook は wake を発火しない・top-spec §5.4「配送観測 ≠ wake」と同方針）。
+    echo "── (5) re-ratify sweep + open slate surface（死角クラス re-ratify 候補 / open slate・read-only） ──"
+    if [ -x "$RERATIFY" ]; then
+        "$RERATIFY" --re-ratify 2>/dev/null || echo "  （orch-stale-scan.sh --re-ratify が非0終了・skip＝fail-open）"
+    else
+        echo "  （orch-stale-scan.sh 不在/非実行可能: $RERATIFY・skip＝fail-open）"
+    fi
+    echo ""
+    if [ -x "$SLATE_SURFACE" ]; then
+        "$SLATE_SURFACE" --surface 2>/dev/null || echo "  （orch_slate.sh --surface が非0終了・skip＝fail-open）"
+    else
+        echo "  （orch_slate.sh 不在/非実行可能: $SLATE_SURFACE・skip＝fail-open）"
+    fi
 }
 
 # === --self-test: hermetic 自己完結テスト（fail-closed・orch-7py） ===
@@ -157,8 +179,13 @@ if [ "${1:-}" = "--self-test" ]; then
     printf '#!/usr/bin/env bash\necho "DEGRADED-WATCH-SENTINEL pwd=$PWD args=[$*]"\n' > "$st_tmp/plugin/scripts/orch-degraded-watch.sh"
     printf '#!/usr/bin/env bash\necho "HANDOFF-SCAN-SENTINEL pwd=$PWD args=[$*]"\n'   > "$st_tmp/plugin/scripts/orch-handoff-scan.sh"
     printf '#!/usr/bin/env bash\necho "DELIVERY-OBSERVE-SENTINEL pwd=$PWD args=[$*]"\n' > "$st_tmp/plugin/scripts/orch-delivery-observe.sh"
+    # 第5節 stub（orch-cqf4 Leg-A）: re-ratify sweep（scripts/）と slate surface（scripts/lib/）。独立 sentinel を echo。
+    mkdir -p "$st_tmp/plugin/scripts/lib"
+    printf '#!/usr/bin/env bash\necho "RERATIFY-SWEEP-SENTINEL pwd=$PWD args=[$*]"\n' > "$st_tmp/plugin/scripts/orch-stale-scan.sh"
+    printf '#!/usr/bin/env bash\necho "SLATE-SURFACE-SENTINEL pwd=$PWD args=[$*]"\n'  > "$st_tmp/plugin/scripts/lib/orch_slate.sh"
     chmod +x "$st_tmp/plugin/scripts/orch-dispatch.sh" "$st_tmp/plugin/scripts/orch-degraded-watch.sh" \
-             "$st_tmp/plugin/scripts/orch-handoff-scan.sh" "$st_tmp/plugin/scripts/orch-delivery-observe.sh"
+             "$st_tmp/plugin/scripts/orch-handoff-scan.sh" "$st_tmp/plugin/scripts/orch-delivery-observe.sh" \
+             "$st_tmp/plugin/scripts/orch-stale-scan.sh" "$st_tmp/plugin/scripts/lib/orch_slate.sh"
 
     # 台帳 fixture。
     mkdir -p "$st_tmp/anchor/.beads";  printf '{"dolt_database":"orch"}' > "$st_tmp/anchor/.beads/metadata.json"
@@ -198,16 +225,20 @@ TMUXEOF
         printf '{"cwd":"%s"}' "$1" | env CLAUDE_PLUGIN_ROOT="$st_tmp/plugin" \
             PATH="$st_tmp/bin:$PATH" TMUX="/tmp/fake,1,0" TMUX_PANE="%9" STUB_WNAME="$2" bash "$0"
     }
-    _st_both() {  # $1=label $2=cwd : 4 sentinel + cd anchor + degraded 無引数 + handoff --no-freshness + exit0 を期待
+    _st_both() {  # $1=label $2=cwd : 6 sentinel + cd anchor + degraded 無引数 + handoff --no-freshness + 第5節 re-ratify/surface + exit0 を期待
         local out rc expect; out="$(_st_run "$2")"; rc=$?; expect="$(cd "$2" 2>/dev/null && pwd)"
         # cd "$anchor_cwd"（load-bearing）を pin: stub の起動時 PWD が anchor と一致。degraded/delivery は無引数(scan)。
         # handoff は --no-freshness（鮮度を第1セクションへ委譲・orch-jmu p3）で呼ばれることを pin。
+        # ★第5節（orch-cqf4 Leg-A）: re-ratify は --re-ratify / slate surface は --surface で呼ばれる独立 sentinel を
+        #   5th/6th として明示 assert（既存 4-sentinel の流用では 5th/6th 破損を検知しない＝vacuous を塞ぐ・F7）。
         if printf '%s' "$out" | grep -qF "GATE-PENDING-SENTINEL pwd=$expect args=[--gate-pending]" \
             && printf '%s' "$out" | grep -qF "DEGRADED-WATCH-SENTINEL pwd=$expect args=[]" \
             && printf '%s' "$out" | grep -qF "HANDOFF-SCAN-SENTINEL pwd=$expect args=[--no-freshness]" \
             && printf '%s' "$out" | grep -qF "DELIVERY-OBSERVE-SENTINEL pwd=$expect args=[]" \
+            && printf '%s' "$out" | grep -qF "RERATIFY-SWEEP-SENTINEL pwd=$expect args=[--re-ratify]" \
+            && printf '%s' "$out" | grep -qF "SLATE-SURFACE-SENTINEL pwd=$expect args=[--surface]" \
             && [ "$rc" -eq 0 ]; then echo "ok: $1"
-        else echo "FAIL: $1 — cd anchor + degraded/delivery 無引数 + handoff --no-freshness + 4 sentinel + exit0 を期待したが不一致（rc=$rc・expect_pwd=$expect）: [$out]" >&2; st_fail=1; fi
+        else echo "FAIL: $1 — cd anchor + degraded/delivery 無引数 + handoff --no-freshness + 第5節 re-ratify/surface + 6 sentinel + exit0 を期待したが不一致（rc=$rc・expect_pwd=$expect）: [$out]" >&2; st_fail=1; fi
     }
     _st_noop() {  # $1=label $2=cwd : no-op（無出力）+ exit0 を期待（非 consult 経路）
         local out rc; out="$(_st_run "$2")"; rc=$?
@@ -226,7 +257,7 @@ TMUXEOF
         else echo "FAIL: $1 — consult no-op を期待したが出力あり: [$out]" >&2; st_fail=1; fi
     }
 
-    _st_both "orch anchor cwd → 4 sentinel 表示（gate-pending / degraded / handoff / delivery）"  "$st_tmp/anchor"
+    _st_both "orch anchor cwd → 6 sentinel 表示（gate-pending / degraded / handoff / delivery / re-ratify / slate-surface）"  "$st_tmp/anchor"
     _st_noop "orch worktree(.worktrees/) → no-op"                 "$st_tmp/anchor/.worktrees/spawn/wt"
     _st_noop "orch worktree(.claude/worktrees/) → no-op"          "$st_tmp/anchor/.claude/worktrees/wt2"
     _st_noop "foreign 台帳 → no-op（self-scope）"                  "$st_tmp/foreign"
@@ -237,20 +268,57 @@ TMUXEOF
     _st_noop_c "foreign 台帳 + consult 窓 → no-op（self-scope 先勝ち）"                                       "$st_tmp/foreign" "consult-abc"
     # TMUX 未設定 → 非 consult 扱い（fail-safe・emit 継続）は _st_both（env -u TMUX）が既に pin 済み（anchor→4 sentinel）。
 
-    # 非vacuity(mutation): stub を消すと anchor でも 全 sentinel が消え skip note + exit0（fail-open・非vacuous）。
+    # 非vacuity(mutation): stub を消すと anchor でも 全 6 sentinel が消え skip note + exit0（fail-open・非vacuous）。
+    # ★第5節 stub（orch-stale-scan.sh / lib/orch_slate.sh）も削除対象へ含め、5th/6th の消失も独立に見る（F7・vacuous 回避）。
     rm -f "$st_tmp/plugin/scripts/orch-dispatch.sh" "$st_tmp/plugin/scripts/orch-degraded-watch.sh" \
-          "$st_tmp/plugin/scripts/orch-handoff-scan.sh" "$st_tmp/plugin/scripts/orch-delivery-observe.sh"
+          "$st_tmp/plugin/scripts/orch-handoff-scan.sh" "$st_tmp/plugin/scripts/orch-delivery-observe.sh" \
+          "$st_tmp/plugin/scripts/orch-stale-scan.sh" "$st_tmp/plugin/scripts/lib/orch_slate.sh"
     _st_mut_out="$(_st_run "$st_tmp/anchor")"; _st_mut_rc=$?
     if [ "$_st_mut_rc" -eq 0 ] \
         && ! printf '%s' "$_st_mut_out" | grep -q 'GATE-PENDING-SENTINEL' \
         && ! printf '%s' "$_st_mut_out" | grep -q 'DEGRADED-WATCH-SENTINEL' \
         && ! printf '%s' "$_st_mut_out" | grep -q 'HANDOFF-SCAN-SENTINEL' \
         && ! printf '%s' "$_st_mut_out" | grep -q 'DELIVERY-OBSERVE-SENTINEL' \
+        && ! printf '%s' "$_st_mut_out" | grep -q 'RERATIFY-SWEEP-SENTINEL' \
+        && ! printf '%s' "$_st_mut_out" | grep -q 'SLATE-SURFACE-SENTINEL' \
         && printf '%s' "$_st_mut_out" | grep -q 'fail-open'; then
-        echo "ok: mutation: stub 不在 → anchor でも 4 sentinel 消失 + skip note + exit0（fail-open・非vacuous）"
+        echo "ok: mutation: stub 不在 → anchor でも 6 sentinel 消失 + skip note + exit0（fail-open・非vacuous）"
     else
         echo "FAIL: mutation: stub 不在 fail-open を期待したが不一致（rc=$_st_mut_rc）: [$_st_mut_out]" >&2; st_fail=1
     fi
+
+    # ── leak battery（F3・orch-cqf4 Leg-A public-safe hardening）────────────────────────
+    # engine は PUBLIC 配布物ゆえ、本 diff で追加した第5節（_emit_workinprogress のソースを declare -f で live 抽出
+    # ＝hermetic・base 非依存）に deploy 主体名 / 内部短名 codename / 絶対 deploy-path を混入していないことを 4 系統
+    # fail-closed で assert する。実 leak は 0（admin 実測）＝battery は保険。緑=歯無しの取り違えを各系統 1 mutation
+    # （positive fixture を added-content へ注入→必ず RED 化）で塞ぐ。
+    #   (2) 短名は bare codename のみ検出しハイフン付き ledger-ID（foreign fixture un-xxx / pk-xxx）は非該当
+    #       （ハイフンを token 文字に含める＝short-name leak の本来意味・pre-existing foreign fixture を誤爆しない）。
+    _leak_scan() {  # $1=text : leak 検出→系統名を echo し rc=1 / clean→rc=0
+        local _t="$1"
+        # ★自己参照回避（realname 系統）: 兄弟 literal も char class で分断し、公開 source へ verbatim 識別子を残さない
+        #   （`black[0-9]`/deploy-path 分断と一貫。分断後も real leak（実 codename/実ホスト名/email 断片の実出現）は
+        #   依然マッチ＝検出器の歯は不変・acceptance-6 の literal grep=0 を realname 兄弟にも及ぼす）。
+        grep -qwE 'shu[u]5|black[0-9]|phit[o]|ipath[o]|doobido[o]|blackco[w]|gmai[l]' <<<"$_t" && { echo realname; return 1; }
+        grep -qE '(^|[^-A-Za-z0-9_])(pk|scp|un|scm|cs)([^-A-Za-z0-9_]|$)' <<<"$_t" && { echo shortname; return 1; }
+        # ★自己参照回避: 検出器パターン自身が acceptance-6 の deploy-path grep に自己ヒットしないよう、対象 literal を
+        #   正規表現 character class で分断する（`scriptoriu[m]` は real leak を変わらず検出・grader の literal grep には非マッチ）。
+        grep -qE 'local-projects/scriptoriu[m]|/home/[a-z]' <<<"$_t" && { echo deploypath; return 1; }
+        return 0
+    }
+    _lk_sample="$(declare -f _emit_workinprogress)"
+    # 系統1-2-4 green（追加した第5節ソースは 3 系統とも clean）
+    if _leak_scan "$_lk_sample" >/dev/null; then echo "ok: leak-battery: 第5節ソースは realname/shortname/deploypath clean"
+    else echo "FAIL: leak-battery: 第5節ソースに leak（系統=$(_leak_scan "$_lk_sample")）" >&2; st_fail=1; fi
+    # 系統1-2-4 teeth（各系統 1 mutation・注入した positive fixture を必ず検出）
+    _inj="shu""u5"; if _leak_scan "$_lk_sample"$'\nleaked by '"$_inj"$' here\n'  >/dev/null; then echo "FAIL: leak-battery realname 系統に歯が無い（${_inj} を見逃した）" >&2; st_fail=1; else echo "ok: leak-battery realname 系統に歯あり（${_inj} mutation を RED 化）"; fi
+    if _leak_scan "$_lk_sample"$'\nthe un project note\n'   >/dev/null; then echo "FAIL: leak-battery shortname 系統に歯が無い（bare un を見逃した）" >&2; st_fail=1; else echo "ok: leak-battery shortname 系統に歯あり（bare un mutation を RED 化）"; fi
+    if _leak_scan "$_lk_sample"$'\nfallback=/home/someone/x\n' >/dev/null; then echo "FAIL: leak-battery deploypath 系統に歯が無い（/home/ を見逃した）" >&2; st_fail=1; else echo "ok: leak-battery deploypath 系統に歯あり（/home/ mutation を RED 化）"; fi
+    # 系統3 dangling-lib: 本 hook が source する共有 lib（orch_session.sh）の実在検証 + 非実在 mutation。
+    _leak_libcheck() { [ -r "$1" ]; }  # 実在 rc=0 / 非実在 rc=1
+    if _leak_libcheck "$_ORCH_SESSION_LIB"; then echo "ok: leak-battery dangling-lib: source 先 orch_session.sh は実在"
+    else echo "FAIL: leak-battery dangling-lib: source 先 lib が dangling（$_ORCH_SESSION_LIB 不在）" >&2; st_fail=1; fi
+    if _leak_libcheck "$st_tmp/nonexistent-lib-$$.sh"; then echo "FAIL: leak-battery dangling-lib 系統に歯が無い（非実在 lib を実在と判定）" >&2; st_fail=1; else echo "ok: leak-battery dangling-lib 系統に歯あり（非実在 lib mutation を RED 化）"; fi
 
     if [ "$st_fail" -eq 0 ]; then echo "workinprogress --self-test: PASS"; exit 0
     else echo "workinprogress --self-test: FAIL" >&2; exit 1; fi

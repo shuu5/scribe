@@ -68,8 +68,14 @@ setup() {
     # 第4節 配送観測（orch-4js9）: 本 bats は wire（出る/fail-open/consult で消える）のみ sentinel stub で見る。
     #   推論・呼び鈴の実ロジックは orch-delivery-observe.bats が担う（sentinel echo に代替させない・fence2）。
     printf '#!/usr/bin/env bash\necho "DELIVERY-OBSERVE-SENTINEL pwd=$PWD args=[$*]"\n' > "$PLUGIN/scripts/orch-delivery-observe.sh"
+    # 第5節 stub（orch-cqf4 Leg-A・PR#147 engine 反映）: re-ratify sweep（scripts/）と slate surface（scripts/lib/）が
+    #   各々独立 sentinel（RERATIFY-SWEEP / SLATE-SURFACE）を起動時 PWD + 受領 args 付きで echo する（load-bearing pin）。
+    mkdir -p "$PLUGIN/scripts/lib"
+    printf '#!/usr/bin/env bash\necho "RERATIFY-SWEEP-SENTINEL pwd=$PWD args=[$*]"\n' > "$PLUGIN/scripts/orch-stale-scan.sh"
+    printf '#!/usr/bin/env bash\necho "SLATE-SURFACE-SENTINEL pwd=$PWD args=[$*]"\n'  > "$PLUGIN/scripts/lib/orch_slate.sh"
     chmod +x "$PLUGIN/scripts/orch-dispatch.sh" "$PLUGIN/scripts/orch-degraded-watch.sh" \
-             "$PLUGIN/scripts/orch-handoff-scan.sh" "$PLUGIN/scripts/orch-delivery-observe.sh"
+             "$PLUGIN/scripts/orch-handoff-scan.sh" "$PLUGIN/scripts/orch-delivery-observe.sh" \
+             "$PLUGIN/scripts/orch-stale-scan.sh" "$PLUGIN/scripts/lib/orch_slate.sh"
 
     # consult 経路（orch-z4z7 / fence7 b）用 hazard-faithful stub tmux（spec-inject M2 teeth と同型）。
     BIN="$TEST_TMPDIR/bin"; mkdir -p "$BIN"
@@ -269,6 +275,32 @@ run_hook_consult() {  # $1=cwd $2=window-name
     run_hook_consult "$FOREIGN" "consult-abc"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+}
+
+@test "(xvii) 第5節: orch anchor → RERATIFY-SWEEP / SLATE-SURFACE 両 sentinel 表示・exit0（orch-cqf4 Leg-A・cd anchor + --re-ratify/--surface を pin）" {
+    # 第5節 wire（re-ratify sweep + open slate surface）の存在を独立に pin する。sections 1-4 の 4-sentinel assert
+    # は 5th/6th 破損を検知しない（vacuous）ため、両 sentinel を pwd + 受領 args 付きで明示 assert する（F7 b）。
+    EXPECTED_ANCHOR="$(cd "$ANCHOR" && pwd)"
+    run_hook "$ANCHOR"
+    [ "$status" -eq 0 ]
+    # re-ratify: cd anchor 済み + --re-ratify で呼ばれる（pwd と args を同時に pin）。
+    [[ "$output" == *"RERATIFY-SWEEP-SENTINEL pwd=$EXPECTED_ANCHOR args=[--re-ratify]"* ]]
+    # slate surface: cd anchor 済み + --surface で呼ばれる（pwd と args を同時に pin）。
+    [[ "$output" == *"SLATE-SURFACE-SENTINEL pwd=$EXPECTED_ANCHOR args=[--surface]"* ]]
+}
+
+@test "(xviii) 第5節 fail-open mutation: re-ratify/slate stub 不在 → 両 sentinel 消失 + skip note + exit0（5th/6th 独立・既存 4-sentinel の流用不可・F7 c）" {
+    # 第5節 stub 2 本だけを削除する（sections 1-4 stub は温存）。両 sentinel が消え skip note を出し、
+    # 他 4 節は継続発火する（部分縮退せず fail-open）ことを見る＝5th/6th の teeth を独立に立証する。
+    rm -f "$PLUGIN/scripts/orch-stale-scan.sh" "$PLUGIN/scripts/lib/orch_slate.sh"
+    run_hook "$ANCHOR"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"RERATIFY-SWEEP-SENTINEL"* ]]         # re-ratify 不在 → sentinel 出ない
+    [[ "$output" != *"SLATE-SURFACE-SENTINEL"* ]]          # slate surface 不在 → sentinel 出ない
+    [[ "$output" == *"orch-stale-scan.sh 不在"* ]]          # re-ratify skip note（fail-open）
+    [[ "$output" == *"orch_slate.sh 不在"* ]]               # slate surface skip note（fail-open）
+    [[ "$output" == *"GATE-PENDING-SENTINEL"* ]]           # 第1-4節は温存 → 継続発火（部分縮退しない）
+    [[ "$output" == *"DELIVERY-OBSERVE-SENTINEL"* ]]
 }
 
 @test "(wire) hooks.json が workinprogress を spec-inject/guard-health と同形 fail-safe で SessionStart へ wire" {

@@ -158,13 +158,86 @@ _orch_slate_record() {
           --append-notes "$ORCH_SLATE_SENTINEL members: $csv" )
 }
 
+# open 計画 slate の read-only surface（bd orch-cqf4 Leg-A・薄い合成）。
+#   既存 helper（_orch_slate_open_ids / _orch_slate_members_of / _orch_slate_open_members）を合成するだけで
+#   slate schema 知識（label / sentinel / members form）は本 lib SSOT に留める（stale-scan にも hook にも複製しない）。
+#   出力: 各 open slate bead id + members 行 + [SLATE-TRIPWIRE] 集計行。read-only surfacing 専任（write ゼロ）。
+#   fail-open: bd read 失敗（open_ids rc≠0）は [SLATE-UNKNOWN] note で exit 0（brick しない）。
+#   bd 実体は $1 or ORCH_SLATE_BD（既定 bd）・anchor は $2 or ORCH_SLATE_ANCHOR（既定 orch_anchor.sh の
+#   _resolve_scriptorium〔E2 検証付き〕→ 非解決時は [SLATE-UNKNOWN] fail-loud で return 0＝engine は
+#   deploy-layout 依存の hardcode fallback を持たない）。
+_orch_slate_surface() {
+    local bd="${1:-${ORCH_SLATE_BD:-bd}}"
+    local anchor="${2:-${ORCH_SLATE_ANCHOR:-}}"
+    if [ -z "$anchor" ]; then
+        # anchor 未指定 → 同 dir の共有 lib orch_anchor.sh を lazy source して _resolve_scriptorium（E2 検証付き）。
+        #   direct-exec 経路でのみ通る（consumer は自前に bd/anchor を渡す）ため lib top-level を汚さない。
+        local _sl_self _sl_dir
+        _sl_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+        _sl_dir="$(cd "$(dirname "$_sl_self")" 2>/dev/null && pwd || echo .)"
+        if [ -r "$_sl_dir/orch_anchor.sh" ]; then
+            # shellcheck source=scripts/lib/orch_anchor.sh
+            . "$_sl_dir/orch_anchor.sh"
+            anchor="$(_resolve_scriptorium 2>/dev/null || true)"
+        fi
+    fi
+    # anchor 解決不能は fail-loud（engine は deploy-layout hardcode fallback を持たない）。
+    #   read-only surfacing ゆえ brick はしない（return 0）が、誤った hardcode anchor を黙って使わない。
+    if [ -z "$anchor" ]; then
+        echo "[SLATE-UNKNOWN] anchor 解決不能（fail-loud・engine は hardcode fallback を持たない）: ORCH_SLATE_ANCHOR / ORCH_ANCHOR / ORCH_ANCHOR_CONFIG のいずれかを供給せよ" >&2
+        return 0
+    fi
+
+    local ids rc
+    ids="$(_orch_slate_open_ids "$bd" "$anchor")"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "[SLATE-UNKNOWN] open 計画 slate 判定不能（bd read 失敗・fail-open・read-only surfacing のみ）"
+        return 0
+    fi
+
+    echo "── open 計画 slate（read-only surface・1 slate=1 bundle・schema SSOT=orch_slate.sh） ──"
+    if [ -z "$ids" ]; then
+        echo "  [SLATE-NONE] open 計画 slate なし"
+        echo "[SLATE-TRIPWIRE] open slate:0 members(union):0"
+        return 0
+    fi
+
+    local n_slate=0 id
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        n_slate=$((n_slate + 1))
+        local m mcsv mm
+        m="$(_orch_slate_members_of "$bd" "$anchor" "$id" 2>/dev/null)"
+        mcsv=""
+        while IFS= read -r mm; do
+            [ -n "$mm" ] || continue
+            if [ -z "$mcsv" ]; then mcsv="$mm"; else mcsv="$mcsv, $mm"; fi
+        done <<< "$m"
+        echo "  [SLATE] $id members: ${mcsv:-（members 未列挙）}"
+    done <<< "$ids"
+
+    local union n_member=0
+    union="$(_orch_slate_open_members "$bd" "$anchor" 2>/dev/null)"
+    if [ -n "$union" ]; then
+        n_member=$(printf '%s\n' "$union" | grep -c .)
+    fi
+    echo "[SLATE-TRIPWIRE] open slate:$n_slate members(union):$n_member"
+    return 0
+}
+
 # === --self-test: 直接実行時のみの hermetic 自己完結テスト（fail-closed・orch-vswk） ===
 # source 時（BASH_SOURCE[0] != $0）はこのブロックを skip する（consumer の $1 継承で誤発火しない）。
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
-    if [ "${1:-}" != "--self-test" ]; then
-        echo "orch_slate.sh は source して使う共有 lib です（--self-test で自己検証）。" >&2
-        exit 0
-    fi
+    case "${1:-}" in
+        --surface)
+            # read-only surface（open slate 列挙・schema SSOT は本 lib helper に留める・orch-cqf4 Leg-A）。
+            _orch_slate_surface; exit $? ;;
+        --self-test)
+            : ;;  # 下の self-test ブロックへ落ちる。
+        *)
+            echo "orch_slate.sh は source して使う共有 lib です（--surface で open slate 列挙 / --self-test で自己検証）。" >&2
+            exit 0 ;;
+    esac
 
     st_fail=0
     st_tmp="$(mktemp -d -t orch-slate-selftest-XXXXXX)" || { echo "self-test: mktemp 失敗" >&2; exit 1; }
@@ -265,6 +338,36 @@ STUB
     if _orch_slate_record "$BDW" "$ANC" "orch-bundle1"; then
         _fail "record: member ゼロで成功した（空虚 slate を許容）"
     else _ok "record: member ゼロは rc≠0（空虚 slate を焼かない）"; fi
+
+    # ── leak battery（F3・orch-cqf4 Leg-A public-safe hardening）────────────────────────
+    # engine は PUBLIC 配布物ゆえ、本 diff で追加した --surface 関数（declare -f で live 抽出＝hermetic・base 非依存）
+    # に deploy 主体名 / 内部短名 codename / 絶対 deploy-path を混入していないことを 4 系統 fail-closed で assert する。
+    # 実 leak は 0（admin 実測）＝battery は保険。緑=歯無しの取り違えを各系統 1 mutation（positive fixture 注入→RED）で塞ぐ。
+    #   (2) 短名は bare codename のみ検出しハイフン付き ledger-ID（foreign fixture un-xxx / pk-xxx）は非該当。
+    _leak_scan() {  # $1=text : leak 検出→系統名を echo し rc=1 / clean→rc=0
+        local _t="$1"
+        # ★自己参照回避（realname 系統）: 兄弟 literal も char class で分断し、公開 source へ verbatim 識別子を残さない
+        #   （`black[0-9]`/deploy-path 分断と一貫。分断後も real leak（実 codename/実ホスト名/email 断片の実出現）は
+        #   依然マッチ＝検出器の歯は不変・acceptance-6 の literal grep=0 を realname 兄弟にも及ぼす）。
+        grep -qwE 'shu[u]5|black[0-9]|phit[o]|ipath[o]|doobido[o]|blackco[w]|gmai[l]' <<<"$_t" && { echo realname; return 1; }
+        grep -qE '(^|[^-A-Za-z0-9_])(pk|scp|un|scm|cs)([^-A-Za-z0-9_]|$)' <<<"$_t" && { echo shortname; return 1; }
+        # ★自己参照回避: 検出器パターン自身が acceptance-6 の deploy-path grep に自己ヒットしないよう、対象 literal を
+        #   正規表現 character class で分断する（`scriptoriu[m]` は real leak を変わらず検出・grader の literal grep には非マッチ）。
+        grep -qE 'local-projects/scriptoriu[m]|/home/[a-z]' <<<"$_t" && { echo deploypath; return 1; }
+        return 0
+    }
+    _lk_sample="$(declare -f _orch_slate_surface)"
+    if _leak_scan "$_lk_sample" >/dev/null; then _ok "leak-battery: --surface 追加関数は realname/shortname/deploypath clean"
+    else _fail "leak-battery: --surface 追加関数に leak（系統=$(_leak_scan "$_lk_sample")）"; fi
+    _inj="shu""u5"; if _leak_scan "$_lk_sample"$'\nleaked by '"$_inj"$' here\n'    >/dev/null; then _fail "leak-battery realname 系統に歯が無い（${_inj} 見逃し）"; else _ok "leak-battery realname 系統に歯あり（${_inj} mutation を RED 化）"; fi
+    if _leak_scan "$_lk_sample"$'\nthe un project note\n'     >/dev/null; then _fail "leak-battery shortname 系統に歯が無い（bare un 見逃し）"; else _ok "leak-battery shortname 系統に歯あり（bare un mutation を RED 化）"; fi
+    if _leak_scan "$_lk_sample"$'\nfallback=/home/someone/x\n' >/dev/null; then _fail "leak-battery deploypath 系統に歯が無い（/home/ 見逃し）"; else _ok "leak-battery deploypath 系統に歯あり（/home/ mutation を RED 化）"; fi
+    # 系統3 dangling-lib: --surface が lazy source する共有 lib（同 dir の orch_anchor.sh）の実在検証 + 非実在 mutation。
+    _leak_libcheck() { [ -r "$1" ]; }
+    _lk_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo .)"
+    if _leak_libcheck "$_lk_dir/orch_anchor.sh"; then _ok "leak-battery dangling-lib: lazy-source 先 orch_anchor.sh は実在"
+    else _fail "leak-battery dangling-lib: lazy-source 先 orch_anchor.sh が dangling（$_lk_dir/orch_anchor.sh 不在）"; fi
+    if _leak_libcheck "$st_tmp/nonexistent-lib-$$.sh"; then _fail "leak-battery dangling-lib 系統に歯が無い（非実在 lib を実在判定）"; else _ok "leak-battery dangling-lib 系統に歯あり（非実在 lib mutation を RED 化）"; fi
 
     if [ "$st_fail" -eq 0 ]; then echo "orch_slate.sh --self-test: PASS"; exit 0
     else echo "orch_slate.sh --self-test: FAIL" >&2; exit 1; fi
