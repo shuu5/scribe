@@ -290,7 +290,7 @@ SPAWN_SMOKE="${ORCH_DISPATCH_SPAWN_SMOKE:-1}"
 #   『長 running build プロセス生存 ∧ 監視 fs への書込が N 分ゼロ』を silent hang 疑いとして surface する。
 #   既存 2 軸（decision-point 停滞 / window×bead）はいずれも bead updated_at を基点にするため、背景 build が
 #   bead を更新しないまま network stall で固着する silent hang を構造的に検知できなかった（incident orch-1kk
-#   cm 便 task2・1h22m・doobidoo bd3908ed）。手動ホスト観測（pgrep + find -newermt）で実測した『プロセス生存 ∧
+#   の build task・1h22m・doobidoo bd3908ed）。手動ホスト観測（pgrep + find -newermt）で実測した『プロセス生存 ∧
 #   fs 書込停止』を第3軸として一般化する。read-only（pgrep/ps/find のみ・mutate しない）。閾値は
 #   LIVENESS_STALE_MIN を共用（プロセス年齢・fs 書込齢の両方）。build プロセス不在なら probe を skip（安価＝
 #   build 中のみ find コストを払う）。
@@ -1444,7 +1444,7 @@ run_liveness() {
 
     # ── ④ host-progress 停滞（長 running build 生存 × fs 書込停止＝silent hang・orch-ayj）─────────────
     #   ①②が bead updated_at 基点で盲目な silent hang（背景 build の network stall 等）を fs 書込停止で埋める
-    #   第3軸（incident orch-1kk cm task2・1h22m）。read-only（pgrep/ps/find）。build 不在なら find コストを払わない。
+    #   第3軸（incident orch-1kk の build task・1h22m）。read-only（pgrep/ps/find）。build 不在なら find コストを払わない。
     echo "⚠ host-progress（長 running build 生存 × fs 書込 ${LIVENESS_STALE_MIN} 分ゼロ）:"
     if ! command -v "$PGREP_BIN" >/dev/null 2>&1 || ! command -v "$FIND_BIN" >/dev/null 2>&1; then
         # probe 不能を『停滞なし』と偽 clean にしない（silent hang backstop ゆえ fail-loud・②の bd 失敗と同型）。

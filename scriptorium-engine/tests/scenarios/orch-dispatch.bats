@@ -1612,7 +1612,7 @@ run_dispatch() {
 
 # ==============================================================================
 # (3b-m3r) watch admin 発火軸B（orch-m3r）: status=open の NEEDS-USER park 検知漏れを塞ぐ。
-#   実測 incident（2026-07-05 soap 第2バンドル・scp-bou）: foreign admin が NEEDS-USER park を
+#   実測 incident（2026-07-05 の第2バンドル・scp-bou）: foreign admin が NEEDS-USER park を
 #   needs-user ラベル+notes append で宣言したが status を open のまま残したため、旧 admin watch
 #   （success=status∈{closed,blocked}＝軸A のみ）が 30 分 timeout まで無発火＝park 検知漏れ。
 #   defense-in-depth として、status が done-set 外でも needs-user ラベル park が baseline から変化
