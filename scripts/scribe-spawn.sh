@@ -912,6 +912,7 @@ build_prompt() {
 ## 規律（docs/protocol.md §2/§3）
 - **test-first**: 実装に対する self-test を自分で用意し worktree 直下に置く
   （\`selftest-$ID.local.sh\`・untracked・コミットしない・**fail-closed**＝assert 1 つでも落ちたら非 0）。
+  - **selftest 内で pipefail 下の大出力 \`producer | grep -q\` を書かない**（grep -q が早期 exit すると producer が SIGPIPE 死し pipeline rc=141 の偽 RED になる・31KB body で 5 回中 3 回 flaky を実測）。\`grep -q PAT <<< "\$out"\` の herestring か file-arg grep（\`grep -q PAT "\$file"\`）を使う。\`grep -c\`/\`grep -n\` は herestring 末尾改行で count/行番号がずれるため機械変換しない（規約本文 SSOT=protocol §2 test-first 節）。
 - **cell-quality WF を直接呼出**（named-WF 明示・scriptPath 直指定）で gate review/verify を 1 回回す。
   自己点検 args は \`"$SCRIPT_DIR/scribe-selftest-args.sh" --worktree "$WORKTREE" --anchor "$ANCHOR" --self-test <selfTestCmd> $ID\` で 1 コマンド化済み
   （\`doImplement\`/\`doPlan\`=false・\`autoFix\`=true・\`selfTestCmd\` 必須を固定。手作業で args を組まない。**\`--anchor\` は必須**＝bd graph 所在は worktree cwd では解決しないため省くと die）。
@@ -987,7 +988,7 @@ monitor_cmd_for_bg() {  # $1 = short-id（空可＝その場合 native/logs は 
 # 検出結果は emit_plan（dry-run 可視化）と実 spawn 行の両方が参照する（片方だけの契約ドリフトを防ぐため一度だけ計算）。
 CLD_EFFORT_ARG=()
 CLD_EFFORT_DETECTED=0
-if "$CLD_SPAWN" --help 2>/dev/null | grep -q -- '--effort'; then
+if grep -q -- '--effort' <<< "$("$CLD_SPAWN" --help 2>/dev/null)"; then
   CLD_EFFORT_ARG=(--effort "$EFFORT")
   CLD_EFFORT_DETECTED=1
 fi
@@ -1148,8 +1149,8 @@ bg_preflight() {
   fi
   local _cb; _cb="$(command -v "$CLAUDE_BIN" 2>/dev/null || true)"
   [[ -n "$_cb" ]] || { echo "claude バイナリ '$CLAUDE_BIN' が PATH に見つかりません（--bg 不可）"; return 1; }
-  if "$_cb" --help 2>/dev/null | grep -qE -- '--bg|--background' \
-     || "$_cb" agents --help 2>/dev/null | grep -qE -- '--bg|--background'; then
+  if grep -qE -- '--bg|--background' <<< "$("$_cb" --help 2>/dev/null)" \
+     || grep -qE -- '--bg|--background' <<< "$("$_cb" agents --help 2>/dev/null)"; then
     return 0
   fi
   echo "'$CLAUDE_BIN' の --help / agents --help に --bg|--background フラグが見当たりません（native background agent 非対応バイナリの可能性・十分寄りの probe が不成立）"
@@ -1210,7 +1211,7 @@ BG_MODEL_ARG=()
 BG_MODEL_DETECTED=0
 if [[ "$EFFECTIVE_TRANSPORT" == "bg" ]]; then
   # --effort（bg では process env / CLAUDE_CODE_EFFORT_LEVEL が daemon fixation で無効ゆえ非対応時は effort 指定不能＝sc-47l REFUTED）。
-  if "$CLAUDE_BIN" --help 2>/dev/null | grep -q -- '--effort'; then
+  if grep -q -- '--effort' <<< "$("$CLAUDE_BIN" --help 2>/dev/null)"; then
     BG_EFFORT_ARG=(--effort "$EFFORT")
     BG_EFFORT_DETECTED=1
   else
@@ -1219,7 +1220,7 @@ if [[ "$EFFECTIVE_TRANSPORT" == "bg" ]]; then
   # --model（worker=opus 不変条件を bg にも運ぶ・finding#1）: tmux 経路は cld-spawn へ **必ず** --model "$MODEL" を渡し
   # worker=opus を強制する（:680 で *fable* を die＝コスト爆発防止）。bg は claude を直呼びするため model を argv で明示
   # しないと起動セッション/アカウント既定モデル（admin main-loop=ユーザー規約上 fable）へ帰着し、当のコスト爆発を再導入する。
-  if "$CLAUDE_BIN" --help 2>/dev/null | grep -q -- '--model'; then
+  if grep -q -- '--model' <<< "$("$CLAUDE_BIN" --help 2>/dev/null)"; then
     BG_MODEL_ARG=(--model "$MODEL")
     BG_MODEL_DETECTED=1
   else
