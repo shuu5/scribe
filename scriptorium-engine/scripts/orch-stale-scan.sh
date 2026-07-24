@@ -60,6 +60,9 @@
 # 使い方─────────────────────────────────────────────────────────────────────────────────────────────
 #   scripts/orch-stale-scan.sh              # 全 open を分類し停滞疑いを surface（人間可読レポート・常に exit 0）
 #   scripts/orch-stale-scan.sh --emit-count # 停滞疑い M（actionable ∩ created_at>閾値）の整数のみを stdout へ（seam 用）
+#   scripts/orch-stale-scan.sh --re-ratify  # 死角クラス（courier/coord/held/seam/follow-up∨deferred）の re-ratify sweep
+#                                           #   ＝別軸・別閾値（既定 7d）・別表示（週次再裁定・stateless read-only・write ゼロ）
+#   scripts/orch-stale-scan.sh --emit-reratify-count # re-ratify 候補の整数のみ（--emit-count と別 seam・fail-open で無出力）
 #   scripts/orch-stale-scan.sh --dry-run    # 叩く read-only コマンドを列挙（実行しない）
 #   scripts/orch-stale-scan.sh --self-test  # hermetic 自己検証（fail-closed・bats 非依存）
 #   scripts/orch-stale-scan.sh --help
@@ -74,6 +77,7 @@
 #   ORCH_STALE_BD                bd 実体（既定: PATH 上の bd）。read-only（list --json のみ）。
 #   ORCH_STALE_NOW               「現在」を表す date 文字列（既定: now）。created_at 年齢の基準（hermetic 決定論用）。
 #   ORCH_STALE_THRESHOLD_DAYS    停滞 gate の閾値日数（既定: 14）。actionable クラスのみに適用。
+#   ORCH_STALE_RERATIFY_THRESHOLD_DAYS  re-ratify sweep の閾値日数（既定: 7）。死角クラスのみに適用（THRESHOLD_DAYS と別）。
 #   ORCH_STALE_SKIP_SESSION_GATE=1  self-scope gate を skip（hermetic self-test / bats 用）。
 #
 # 検証: tests/scenarios/orch-stale-scan.bats（hermetic: bd を PATH/env スタブで差替・3 クラス分類 / foreign 非検出 /
@@ -119,21 +123,35 @@ THRESHOLD_DAYS="${ORCH_STALE_THRESHOLD_DAYS:-14}"
 # 共通 read-only ヘルパ
 # ─────────────────────────────────────────────────────────────────────────────
 
-# 自台帳 orch- の open+deferred bead を "id|status|labels_csv|created_at" 行（| 区切り）で emit（read-only・jq 必須）。
+# 自台帳 orch- の open+deferred bead を "id|status|labels_csv|created_at|title" 行（| 区切り）で emit（read-only・jq 必須）。
 #   母集団は `--status open,deferred`＝bd-native に defer された bead も held-defer クラスとして surface する（deferred
 #   は held-defer へ分類され actionable にはならない＝停滞 gate 対象外ゆえ M は不変・re-ratify 起点にだけ載る）。
 #   連結 substrate hydrate で foreign copy も返るため SELF_PREFIX で filter。labels:null は空 CSV へ潰す。
 #   bd read は anchor へ cd してから叩く（worktree の `.beads/embeddeddolt` 不在で空/foreign を返す罠を回避・
 #   orch-rebrief-fetch と同型の cwd 非依存原則）。
 #   フィールド区切りは `|`（パイプ）＝**非空白**を使う（tab は空白ゆえ read の IFS 畳み込みで空 labels フィールドが
-#   消え created_at が labels 列へ滑り込む off-by-one bug を招く）。`|` は bd データ（id=orch-[a-z0-9]/status=語/
-#   label=[a-z:-]/created_at=RFC3339）に出現しないため衝突しない・labels 内の複数値は "," 連結ゆえ | と非干渉。
+#   消え created_at が labels 列へ滑り込む off-by-one bug を招く）。id=orch-[a-z0-9]/status=語/label=[a-z:-]/
+#   created_at=RFC3339 は `|` を含まないため衝突しない・labels 内の複数値は "," 連結ゆえ | と非干渉。
+#   ★title は **最終列**に置く（title は人間文＝`|` を含みうるが、reader は `read -r ... created title` の trailing var
+#     が残余を丸ごと吸収するため embedded `|` があっても created_at 列へ滑らない。title の embedded 改行のみ非対応＝
+#     bd title は単一行ゆえ実害なし）。title 非使用の既存モード（report/count）は trailing var を捨てるだけで byte 不変。
+#   ★bd 呼出（_stale_bd_json）と jq filter（_rows_from_json）を分離するのは、re-ratify モードが bd の rc を検知して
+#     「bd 失敗＝判定不能」と「空台帳＝候補なし」を弁別するため（acceptance(7) が bd 失敗を明示列挙）。既存モード用
+#     _open_rows は rc を無視する従来 pipe 形を保つ（byte 不変＝bd 失敗→空 rows→0/NONE は run_scan の既存挙動）。
+_stale_bd_json() {
+    # 自台帳 open+deferred の生 JSON（rc 保存＝subshell rc = bd/anchor 失敗を呼出側が検知可能）。
+    ( cd "$SCRIPTORIUM" 2>/dev/null && "$BD" list --status open,deferred --json --no-pager --limit 0 2>/dev/null )
+}
+_rows_from_json() {
+    # 生 JSON（stdin）→ "id|status|labels|created|title" 行（SELF_PREFIX filter・jq 必須）。
+    jq -r --arg p "$SELF_PREFIX" '
+        .[]? | select(.id | startswith($p + "-"))
+        | [ .id, (.status // ""), ((.labels // []) | join(",")), (.created_at // ""), (.title // "") ]
+        | join("|")' 2>/dev/null
+}
 _open_rows() {
-    ( cd "$SCRIPTORIUM" 2>/dev/null && "$BD" list --status open,deferred --json --no-pager --limit 0 2>/dev/null ) \
-        | jq -r --arg p "$SELF_PREFIX" '
-            .[]? | select(.id | startswith($p + "-"))
-            | [ .id, (.status // ""), ((.labels // []) | join(",")), (.created_at // "") ]
-            | join("|")' 2>/dev/null
+    # 既存モード（run_scan）用の従来形＝bd rc を無視（byte 不変・bd 失敗→空 rows）。
+    _stale_bd_json | _rows_from_json
 }
 
 # now を epoch 秒で（ORCH_STALE_NOW 既定 now・hermetic 決定論用）。解決不能は空。
@@ -181,6 +199,45 @@ _classify() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# re-ratify sweep 分類（bd orch-cqf4 Leg-A・_classify とは別軸＝死角クラスの再裁定 sweep）
+#   由来（orch-6srt 裁定-backlog(2)(3)）: 日常は既存 event 駆動検知線に任せ、年齢 gate 死角クラス
+#   （courier/coord/held/seam/follow-up ∨ deferred＝courier 22d silent 滞留の実測穴）だけを **別閾値・別表示** で
+#   週次 re-ratify sweep する。actionable stale（_classify）とは対象集合が真逆（_classify では courier/coord は
+#   tracker-delegated で actionable stale から除外されるが、本 sweep はそれら死角クラスこそ対象にする）。
+#   ★_classify を一切変えない（既存 tripwire/emit-count は byte 不変）。本関数は curated allowlist・完全一致・
+#     first-match で単一 key へ確定する（worker が母集団を発明/拡張しない）。
+#   labels_csv + status → "target<TAB>key" | "excluded<TAB>reason"
+#     除外優先（first-match）: needs-grill/needs-orch/needs-orch-ack/federate-publish/reconcile-published を
+#       持てば対象外（bead 自体を毎 session surface する live 検知線あり＝二重 surface 禁止）。
+#     死角クラス: {held, seam, follow-up, courier, coord} のいずれか ∨ status==deferred → target（key=matched）。
+#     それ以外（actionable 域・for:* 単独含む）→ excluded。for:* は除外条件にしない（mandate-verify override ii：
+#       courier∩for:* は courier で target 化＝配送後長期 open こそ courier 22d 穴の実体）。
+# ─────────────────────────────────────────────────────────────────────────────
+_reratify_target() {
+    local labels_csv="$1" status="$2" lab
+    local IFS=','
+    local -a arr
+    read -ra arr <<< "$labels_csv"
+    IFS=$' \t\n'
+    # 除外優先: live 検知線が既に毎 session surface する委譲物（二重 surface 禁止）。
+    for lab in "${arr[@]}"; do
+        case "$lab" in
+            needs-grill|needs-orch|needs-orch-ack|federate-publish|reconcile-published)
+                printf 'excluded\t%s（live 検知線あり）' "$lab"; return ;;
+        esac
+    done
+    # 死角クラス（re-ratify 対象）: 完全一致・first-match で単一 key 化。
+    for lab in "${arr[@]}"; do
+        case "$lab" in
+            held|seam|follow-up|courier|coord) printf 'target\t%s' "$lab"; return ;;
+        esac
+    done
+    [ "$status" = "deferred" ] && { printf 'target\tdeferred'; return; }
+    # それ以外（actionable 域・for:* 単独含む）は re-ratify 対象外。
+    printf 'excluded\tactionable域（re-ratify 対象外・for:* 単独含む）'
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # scan 本体: 全 open を分類し、actionable のみに created_at 年齢 gate を適用して M を算出。
 #   $1="report"（人間可読・stdout 全出力）| "count"（M の整数のみ）。副作用ゼロ。
 #   戻り値経由で M を返せないため、report は stdout へ・count は M のみ stdout へ。
@@ -195,8 +252,8 @@ run_scan() {
     local action_ids="" held_ids="" tracker_ids=""
     local -a class_lines=() stale_lines=() unknown_lines=()
 
-    local id status labels created cls reason
-    while IFS='|' read -r id status labels created; do
+    local id status labels created title cls reason
+    while IFS='|' read -r id status labels created title; do
         [ -n "$id" ] || continue
         total=$((total + 1))
         IFS=$'\t' read -r cls reason < <(_classify "$labels" "$status")
@@ -264,6 +321,99 @@ run_scan() {
     return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# re-ratify sweep 本体（bd orch-cqf4 Leg-A・stateless read-only・write ゼロ・fail-open）
+#   死角クラス（_reratify_target=target）∩ created_at 年齢 > ORCH_STALE_RERATIFY_THRESHOLD_DAYS（既定 7）を
+#   label 束ね・age 降順で surface。$1="report"（人間可読）| "count"（整数のみ・--emit-reratify-count seam）。
+#   ★停滞（actionable/14d）とは別閾値・別表示・別 tripwire＝既存出力を一切 perturbate しない。
+#   ★fail-open（acceptance(7)＝bd/jq/date 失敗でも exit 0）: bd read 失敗（_stale_bd_json rc≠0＝anchor/bd 障害）or
+#     now 解決不能（date 失敗）→ report は「判定不能」note・count は無出力。jq 不在は上流の mode-aware gate で処理済み。
+#     ★bd 失敗（rc≠0）と空台帳（rc=0・rows 空）を弁別する（bd outage を『再裁定すべき仕事なし』と silent に隠さない＝
+#       re-ratify sweep の目的＝silent 滞留検出と自己矛盾させない・slate --surface の rc 伝播と対称）。
+#   ★write ゼロ: timer/cron/marker/per-item stamp なし（「週次」は cadence でなく再 ratify 頻度の目安＝毎 session
+#     無条件 print）。needs-user 併存 bead には呼び鈴対象マーク（push は一切しない＝surfacing 専任）。
+# ─────────────────────────────────────────────────────────────────────────────
+run_reratify() {
+    local mode="$1"
+    local json rc rows now_epoch threshold
+    json="$(_stale_bd_json)"; rc=$?
+    now_epoch="$(_now_epoch)"
+    threshold="${ORCH_STALE_RERATIFY_THRESHOLD_DAYS:-7}"
+
+    # fail-open: bd/anchor 失敗（rc≠0）or now 解決不能（date 障害）→「判定不能」で exit 0（count は無出力＝整数不能時契約）。
+    #   ★bd 失敗を空台帳（rc=0・rows 空→後段で RERATIFY-NONE）と弁別＝bd outage を『候補なし』へ silent に畳まない。
+    if [ "$rc" -ne 0 ] || [ -z "$now_epoch" ]; then
+        [ "$mode" = "count" ] && return 0
+        local why
+        if [ "$rc" -ne 0 ]; then why="bd read 失敗（rc=$rc・anchor/bd 障害）"; else why="now 解決不能（date 失敗）"; fi
+        echo "orch-stale-scan --re-ratify: 判定不能（$why）— read-only surfacing のみ（write ゼロ・exit 0）"
+        return 0
+    fi
+    rows="$(printf '%s' "$json" | _rows_from_json)"
+
+    local n_target=0 n_unknown=0
+    local -a surfaced=() unknown_lines=()
+
+    local id status labels created title decision key
+    while IFS='|' read -r id status labels created title; do
+        [ -n "$id" ] || continue
+        IFS=$'\t' read -r decision key < <(_reratify_target "$labels" "$status")
+        [ "$decision" = "target" ] || continue
+        # 死角クラス ∩ created_at 年齢 > threshold。created_at 解析不能は force-fit せず別枠 surface。
+        local cepoch age_d
+        cepoch="$(_epoch_of "$created")"
+        if [ -z "$cepoch" ]; then
+            n_unknown=$((n_unknown + 1))
+            unknown_lines+=("[RERATIFY-UNKNOWN] $id ($key) created_at='$created' 解析不能＝年齢判定不能（force-fit せず surface）")
+            continue
+        fi
+        age_d=$(( (now_epoch - cepoch) / 86400 ))
+        [ "$age_d" -gt "$threshold" ] || continue
+        n_target=$((n_target + 1))
+        # needs-user 併存 → 呼び鈴対象マーク（push はしない・§1.2 ③ Tier2 push=人間 go）。
+        local bell=""
+        case ",$labels," in *,needs-user,*) bell="  🔔呼び鈴対象(needs-user・push はしない)" ;; esac
+        local titlehead="${title:0:60}"
+        # 束ね/整列用に "age<TAB>key<TAB>表示行" で溜める（key 別 grouping・age 降順 sort に使う）。
+        surfaced+=("$(printf '%d\t%s\t[RERATIFY] %-12s age=%dd (%s) %s%s' "$age_d" "$key" "$id" "$age_d" "$key" "$titlehead" "$bell")")
+    done <<< "$rows"
+
+    if [ "$mode" = "count" ]; then
+        printf '%s\n' "$n_target"
+        return 0
+    fi
+
+    echo "orch-stale-scan --re-ratify: re-ratify sweep（死角クラス）（read-only・write ゼロ・bd orch-cqf4 Leg-A）"
+    echo "  anchor=$SCRIPTORIUM reratify-threshold=${threshold}d now=${ORCH_STALE_NOW:-now}"
+    echo "  死角クラス={held,seam,follow-up,courier,coord}∨deferred status / 除外=needs-grill,needs-orch,needs-orch-ack,federate-publish,reconcile-published（live 検知線あり）・for:* 単独も対象外"
+    echo
+    echo "── re-ratify 候補（label 束ね・age 降順・created_at>${threshold}d・push なし） ──"
+    if [ "$n_target" -eq 0 ] && [ "$n_unknown" -eq 0 ]; then
+        echo "  [RERATIFY-NONE] 死角クラスに created_at>${threshold}d の re-ratify 候補なし"
+    else
+        if [ "$n_target" -gt 0 ]; then
+            # canonical key 順（first-match と同順）で束ね、各 group を age 降順で print（silent cap 禁止＝全件）。
+            local gkey group
+            for gkey in held seam follow-up courier coord deferred; do
+                group="$(printf '%s\n' "${surfaced[@]}" | awk -F'\t' -v k="$gkey" '$2==k')"
+                [ -n "$group" ] || continue
+                local gcnt
+                gcnt="$(printf '%s\n' "$group" | grep -c .)"
+                echo "  ── ${gkey} (${gcnt}) ──"
+                printf '%s\n' "$group" | sort -t"$(printf '\t')" -k1,1nr | cut -f3- | while IFS= read -r l; do
+                    [ -n "$l" ] && echo "    $l"
+                done
+            done
+        fi
+        if [ "$n_unknown" -ne 0 ]; then
+            local u; for u in "${unknown_lines[@]}"; do echo "  $u"; done
+        fi
+    fi
+    echo
+    echo "[RERATIFY-TRIPWIRE] 死角クラス re-ratify 候補:$n_target$([ "$n_unknown" -ne 0 ] && printf ' age不明:%s' "$n_unknown")（threshold=${threshold}d・push なし・write ゼロ）"
+    return 0
+}
+
 run_dry_run() {
     echo "[plan] orch-stale-scan 単発 read-only scan（mutate しない・close/dispatch/label もしない）:"
     echo "[plan]   母集団: ( cd $SCRIPTORIUM && $BD list --status open,deferred --json --limit 0 ) を jq で ${SELF_PREFIX}- filter"
@@ -298,9 +448,12 @@ run_self_test() {
     cat > "$bindir/bd" <<'STUB'
 #!/usr/bin/env bash
 # read-only bd スタブ（list --json のみ）。STUB_ROWS の各行を JSON object へ。labels_csv 空→[] / "null"→labels 欠落。
+#   行形式は "id|status|labels_csv|created_at[|title]"（title は任意 5 列目＝re-ratify 表示用・省略時空）。
+#   ★BD_FAIL=1 で非0 exit（bd/anchor outage を模す＝re-ratify の bd 失敗弁別を exercise）。
 # --status <csv> を尊重して実 bd の相互排他 status 挙動を模す（指定 status の行のみ emit・未指定は全件）。
 #   ★deferred 行は query が open,deferred を要求したときだけ返る＝deferred は deferred-scan 由来で返る（母集団が
 #   --status open のみだと deferred は返らない＝deferred branch を vacuous に green にしない現実的 stub）。
+[ -n "${BD_FAIL:-}" ] && exit 1
 _statuses=""; _prev=""
 for _a in "$@"; do
     [ "$_prev" = "--status" ] && { _statuses="$_a"; break; }
@@ -314,28 +467,33 @@ _in_status() { # $1=行 status（未指定 --status は全 status 許可）
 }
 printf '['
 first=1
-while IFS='|' read -r id status labels created; do
+while IFS='|' read -r id status labels created title; do
     [ -n "$id" ] || continue
     _in_status "$status" || continue
     [ $first -eq 1 ] || printf ','
     first=0
     if [ "$labels" = "null" ]; then
-        printf '{"id":"%s","status":"%s","labels":null,"created_at":"%s"}' "$id" "$status" "$created"
+        printf '{"id":"%s","status":"%s","labels":null,"created_at":"%s","title":"%s"}' "$id" "$status" "$created" "$title"
     else
         lj=""; IFS=',' read -ra la <<< "$labels"
         lfirst=1
         for x in "${la[@]}"; do [ -n "$x" ] || continue; [ $lfirst -eq 1 ] || lj="$lj,"; lj="$lj\"$x\""; lfirst=0; done
-        printf '{"id":"%s","status":"%s","labels":[%s],"created_at":"%s"}' "$id" "$status" "$lj" "$created"
+        printf '{"id":"%s","status":"%s","labels":[%s],"created_at":"%s","title":"%s"}' "$id" "$status" "$lj" "$created" "$title"
     fi
 done <<< "$STUB_ROWS"
 printf ']'
 STUB
     chmod +x "$bindir/bd"
 
-    _run() { # $1=mode(report/count/dry) 追加 env は呼出側 export。
+    _run() { # $1=mode(report/count/dry/reratify/reratify-count) 追加 env は呼出側 export。
         local m="$1"; shift
         local flag=""
-        case "$m" in count) flag="--emit-count" ;; dry) flag="--dry-run" ;; esac
+        case "$m" in
+            count)          flag="--emit-count" ;;
+            dry)            flag="--dry-run" ;;
+            reratify)       flag="--re-ratify" ;;
+            reratify-count) flag="--emit-reratify-count" ;;
+        esac
         ORCH_STALE_SKIP_SESSION_GATE=1 \
         ORCH_STALE_SCRIPTORIUM="$anchor" \
         ORCH_STALE_BD="$bindir/bd" \
@@ -430,11 +588,129 @@ pk-foreign|open||2026-06-01T00:00:00Z"
     _assert_grep "$out_bad" '\[STALE-UNKNOWN\] orch-bad' "解析不能 created_at→STALE-UNKNOWN(force-fit せず)"
     _assert_ngrep "$out_bad" '\[STALE\] orch-bad ' "解析不能→停滞にも非計上"
 
+    # ── re-ratify sweep（死角クラス・別軸・別閾値 7d・orch-cqf4 Leg-A） ──
+    # now=2026-07-20・reratify threshold=7d。死角クラス ∩ age>7d のみ surface。
+    #   orch-rr-cour  : courier 2026-07-01(19d)                → target(courier)
+    #   orch-rr-held  : held 2026-07-01                        → target(held)
+    #   orch-rr-seam  : seam 2026-07-01                        → target(seam)
+    #   orch-rr-fu    : follow-up 2026-07-01                   → target(follow-up)
+    #   orch-rr-coord : coord 2026-07-01                       → target(coord)
+    #   orch-rr-defst : deferred status 2026-07-01            → target(deferred)
+    #   orch-rr-courfor: courier,for:sc 2026-07-01            → target(courier)【override ii: courier∩for:*】
+    #   orch-rr-bell  : held,needs-user 2026-07-01            → target(held)+🔔呼び鈴対象
+    #   orch-rr-ng    : needs-grill,held 2026-07-01           → excluded（live 検知線・除外優先）
+    #   orch-rr-fed   : federate-publish,courier 2026-07-01   → excluded（live 検知線）
+    #   orch-rr-act   : label 無し 2026-07-01                 → excluded（actionable 域）
+    #   orch-rr-foronly: for:sc 単独 2026-07-01               → excluded（for:* 単独は対象外）
+    #   orch-rr-fresh : courier 2026-07-18(2d)                → age gate で非 surface
+    #   pk-rr         : courier 2026-07-01                    → foreign 非検出
+    local rr="orch-rr-cour|open|courier|2026-07-01T00:00:00Z|配送後に長期 open な courier bead
+orch-rr-held|open|held|2026-07-01T00:00:00Z
+orch-rr-seam|open|seam|2026-07-01T00:00:00Z
+orch-rr-fu|open|follow-up|2026-07-01T00:00:00Z
+orch-rr-coord|open|coord|2026-07-01T00:00:00Z
+orch-rr-defst|deferred||2026-07-01T00:00:00Z
+orch-rr-courfor|open|courier,for:sc|2026-07-01T00:00:00Z
+orch-rr-bell|open|held,needs-user|2026-07-01T00:00:00Z
+orch-rr-ng|open|needs-grill,held|2026-07-01T00:00:00Z
+orch-rr-fed|open|federate-publish,courier|2026-07-01T00:00:00Z
+orch-rr-act|open||2026-07-01T00:00:00Z
+orch-rr-foronly|open|for:sc|2026-07-01T00:00:00Z
+orch-rr-fresh|open|courier|2026-07-18T00:00:00Z
+pk-rr|open|courier|2026-07-01T00:00:00Z"
+
+    local out_rr
+    out_rr="$(STUB_ROWS="$rr" ORCH_STALE_NOW="2026-07-20T00:00:00Z" _run reratify)"
+    _assert_grep "$out_rr" 're-ratify sweep（死角クラス）' "re-ratify header"
+    _assert_grep "$out_rr" '\[RERATIFY\] orch-rr-cour +age=19d \(courier\)' "courier 死角→target"
+    _assert_grep "$out_rr" '\[RERATIFY\] orch-rr-courfor +age=19d \(courier\)' "courier∩for:*→target(override ii)"
+    _assert_grep "$out_rr" '\[RERATIFY\] orch-rr-defst +age=19d \(deferred\)' "deferred status→target"
+    _assert_grep "$out_rr" '\[RERATIFY\] orch-rr-bell .*🔔呼び鈴対象' "needs-user 併存→呼び鈴対象マーク"
+    _assert_grep "$out_rr" '配送後に長期 open な courier bead' "title 冒頭を表示"
+    _assert_ngrep "$out_rr" 'orch-rr-ng' "needs-grill 併存→除外(live 検知線・二重 surface 禁止)"
+    _assert_ngrep "$out_rr" 'orch-rr-fed' "federate-publish 併存→除外(live 検知線)"
+    _assert_ngrep "$out_rr" 'orch-rr-act' "actionable 域→re-ratify 対象外"
+    _assert_ngrep "$out_rr" 'orch-rr-foronly' "for:* 単独→re-ratify 対象外"
+    _assert_ngrep "$out_rr" 'orch-rr-fresh' "死角クラスでも age<7d は非 surface(閾値内)"
+    _assert_ngrep "$out_rr" 'pk-rr' "foreign 非検出(SELF_PREFIX filter)"
+    _assert_grep "$out_rr" '\[RERATIFY-TRIPWIRE\] 死角クラス re-ratify 候補:8' "re-ratify tripwire=8"
+
+    # --emit-reratify-count は整数のみ（--emit-count と別 seam）
+    local rrc
+    rrc="$(STUB_ROWS="$rr" ORCH_STALE_NOW="2026-07-20T00:00:00Z" _run reratify-count)"
+    _assert_eq "8" "$rrc" "--emit-reratify-count は 8 の整数のみ"
+
+    # 既存 --emit-count 意味論の byte 不変（re-ratify fixture でも actionable stale=1=orch-rr-act のみ・14d gate）
+    local rrc_stale
+    rrc_stale="$(STUB_ROWS="$rr" ORCH_STALE_NOW="2026-07-20T00:00:00Z" _run count)"
+    _assert_eq "1" "$rrc_stale" "--emit-count は actionable stale=1(orch-rr-act・14d gate)＝re-ratify と別軸"
+
+    # mutation 非空虚: reratify 閾値巨大化 → 候補 0（死角 gate が実効）
+    local rrc_hi
+    rrc_hi="$(STUB_ROWS="$rr" ORCH_STALE_NOW="2026-07-20T00:00:00Z" ORCH_STALE_RERATIFY_THRESHOLD_DAYS=9999 _run reratify-count)"
+    _assert_eq "0" "$rrc_hi" "reratify 閾値9999→候補0(死角 gate 実効・非空虚)"
+
+    # re-ratify created_at 解析不能な死角クラスは [RERATIFY-UNKNOWN]（force-fit しない）
+    local out_rrbad
+    out_rrbad="$(STUB_ROWS="orch-rrbad|open|courier|not-a-date" ORCH_STALE_NOW="2026-07-20T00:00:00Z" _run reratify)"
+    _assert_grep "$out_rrbad" '\[RERATIFY-UNKNOWN\] orch-rrbad' "re-ratify 解析不能→RERATIFY-UNKNOWN"
+    _assert_ngrep "$out_rrbad" '\[RERATIFY\] orch-rrbad ' "re-ratify 解析不能→候補にも非計上"
+
+    # 空 graceful（死角クラス 0 件）→ RERATIFY-NONE・tripwire 候補:0
+    local out_rrnone
+    out_rrnone="$(STUB_ROWS="orch-rr-act|open||2026-07-01T00:00:00Z" ORCH_STALE_NOW="2026-07-20T00:00:00Z" _run reratify)"
+    _assert_grep "$out_rrnone" '\[RERATIFY-NONE\]' "死角クラス 0→RERATIFY-NONE"
+    _assert_grep "$out_rrnone" '\[RERATIFY-TRIPWIRE\] 死角クラス re-ratify 候補:0' "re-ratify tripwire=0(空 graceful)"
+
+    # ── fail-open: bd 失敗（BD_FAIL）は空台帳（RERATIFY-NONE）と弁別して「判定不能」note（acceptance(7) の bd 明示） ──
+    local out_rrbd
+    out_rrbd="$(STUB_ROWS="$rr" ORCH_STALE_NOW="2026-07-20T00:00:00Z" BD_FAIL=1 _run reratify)"
+    _assert_grep "$out_rrbd" '判定不能（bd read 失敗' "bd 失敗→判定不能(空台帳と弁別)"
+    _assert_ngrep "$out_rrbd" '\[RERATIFY-NONE\]' "bd 失敗→RERATIFY-NONE へ silent 畳み込みしない"
+    local rrbd_cnt
+    rrbd_cnt="$(STUB_ROWS="$rr" ORCH_STALE_NOW="2026-07-20T00:00:00Z" BD_FAIL=1 _run reratify-count)"
+    _assert_eq "" "$rrbd_cnt" "bd 失敗の --emit-reratify-count は無出力(整数不能時契約)"
+
+    # ── fail-open: now 解決不能の count も無出力（date 障害 × count 分岐・整数 seam 契約の残る一角） ──
+    local rrnow_cnt
+    rrnow_cnt="$(STUB_ROWS="$rr" ORCH_STALE_NOW="not-a-valid-date" _run reratify-count)"
+    _assert_eq "" "$rrnow_cnt" "now 解決不能の --emit-reratify-count は無出力(date 障害 × count)"
+
     # ── self-scope reject（skip せず・cwd 台帳が orch でない）──
     local foreign="$tmp/foreign"; mkdir -p "$foreign/.beads"
     printf '{"dolt_database":"un"}\n' > "$foreign/.beads/metadata.json"
     ( cd "$foreign" && ORCH_STALE_SCRIPTORIUM="$anchor" ORCH_STALE_BD="$bindir/bd" bash "$self" >/dev/null 2>&1 )
     _assert_eq "1" "$?" "self-scope reject(foreign cwd)→exit1"
+
+    # ── leak battery（F3・orch-cqf4 Leg-A public-safe hardening）────────────────────────
+    # engine は PUBLIC 配布物ゆえ、本 diff で追加した re-ratify 関数群（declare -f で live 抽出＝hermetic・base 非依存）
+    # に deploy 主体名 / 内部短名 codename / 絶対 deploy-path を混入していないことを 4 系統 fail-closed で assert する。
+    # 実 leak は 0（admin 実測）＝battery は保険。緑=歯無しの取り違えを各系統 1 mutation（positive fixture 注入→RED）で塞ぐ。
+    #   (2) 短名は bare codename のみ検出しハイフン付き ledger-ID（foreign fixture pk-xxx / un-xxx）は非該当
+    #       （ハイフンを token 文字に含める＝short-name leak の本来意味・pre-existing foreign fixture を誤爆しない）。
+    _leak_scan() {  # $1=text : leak 検出→系統名を echo し rc=1 / clean→rc=0
+        local _t="$1"
+        # ★自己参照回避（realname 系統）: 兄弟 literal も char class で分断し、公開 source へ verbatim 識別子を残さない
+        #   （`black[0-9]`/deploy-path 分断と一貫。分断後も real leak（実 codename/実ホスト名/email 断片の実出現）は
+        #   依然マッチ＝検出器の歯は不変・acceptance-6 の literal grep=0 を realname 兄弟にも及ぼす）。
+        grep -qwE 'shu[u]5|black[0-9]|phit[o]|ipath[o]|doobido[o]|blackco[w]|gmai[l]' <<<"$_t" && { echo realname; return 1; }
+        grep -qE '(^|[^-A-Za-z0-9_])(pk|scp|un|scm|cs)([^-A-Za-z0-9_]|$)' <<<"$_t" && { echo shortname; return 1; }
+        # ★自己参照回避: 検出器パターン自身が acceptance-6 の deploy-path grep に自己ヒットしないよう、対象 literal を
+        #   正規表現 character class で分断する（`scriptoriu[m]` は real leak を変わらず検出・grader の literal grep には非マッチ）。
+        grep -qE 'local-projects/scriptoriu[m]|/home/[a-z]' <<<"$_t" && { echo deploypath; return 1; }
+        return 0
+    }
+    local _lk_sample; _lk_sample="$(declare -f _stale_bd_json _rows_from_json _reratify_target run_reratify)"
+    if _leak_scan "$_lk_sample" >/dev/null; then echo "ok: leak-battery: re-ratify 追加関数は realname/shortname/deploypath clean"
+    else echo "FAIL: leak-battery: re-ratify 追加関数に leak（系統=$(_leak_scan "$_lk_sample")）" >&2; fails=$((fails+1)); fi
+    _inj="shu""u5"; if _leak_scan "$_lk_sample"$'\nleaked by '"$_inj"$' here\n'    >/dev/null; then echo "FAIL: leak-battery realname 系統に歯が無い（${_inj} 見逃し）" >&2; fails=$((fails+1)); else echo "ok: leak-battery realname 系統に歯あり（${_inj} mutation を RED 化）"; fi
+    if _leak_scan "$_lk_sample"$'\nthe un project note\n'     >/dev/null; then echo "FAIL: leak-battery shortname 系統に歯が無い（bare un 見逃し）" >&2; fails=$((fails+1)); else echo "ok: leak-battery shortname 系統に歯あり（bare un mutation を RED 化）"; fi
+    if _leak_scan "$_lk_sample"$'\nfallback=/home/someone/x\n' >/dev/null; then echo "FAIL: leak-battery deploypath 系統に歯が無い（/home/ 見逃し）" >&2; fails=$((fails+1)); else echo "ok: leak-battery deploypath 系統に歯あり（/home/ mutation を RED 化）"; fi
+    # 系統3 dangling-lib: 本 script が source する共有 lib（orch_anchor.sh / orch_session.sh）の実在検証 + 非実在 mutation。
+    _leak_libcheck() { [ -r "$1" ]; }
+    if _leak_libcheck "$_ORCH_ANCHOR_LIB" && _leak_libcheck "$_ORCH_SESSION_LIB"; then echo "ok: leak-battery dangling-lib: source 先 orch_anchor.sh / orch_session.sh は実在"
+    else echo "FAIL: leak-battery dangling-lib: source 先 lib が dangling（$_ORCH_ANCHOR_LIB / $_ORCH_SESSION_LIB）" >&2; fails=$((fails+1)); fi
+    if _leak_libcheck "$tmp/nonexistent-lib-$$.sh"; then echo "FAIL: leak-battery dangling-lib 系統に歯が無い（非実在 lib を実在判定）" >&2; fails=$((fails+1)); else echo "ok: leak-battery dangling-lib 系統に歯あり（非実在 lib mutation を RED 化）"; fi
 
     if [ "$fails" -eq 0 ]; then
         echo "orch-stale-scan --self-test: PASS（全シナリオ green）"
@@ -448,12 +724,14 @@ pk-foreign|open||2026-06-01T00:00:00Z"
 MODE="report"
 while [ $# -gt 0 ]; do
     case "$1" in
-        --emit-count) MODE="count"; shift ;;
-        --dry-run)    MODE="dry"; shift ;;
-        --self-test)  MODE="selftest"; shift ;;
-        -h|--help)    usage 0 ;;
-        --*)          echo "orch-stale-scan: 不明なオプション: $1（--emit-count / --dry-run / --self-test / --help）" >&2; usage 1 ;;
-        *)            echo "orch-stale-scan: 位置引数は取りません: $1" >&2; usage 1 ;;
+        --emit-count)          MODE="count"; shift ;;
+        --re-ratify)           MODE="reratify"; shift ;;
+        --emit-reratify-count) MODE="reratify-count"; shift ;;
+        --dry-run)             MODE="dry"; shift ;;
+        --self-test)           MODE="selftest"; shift ;;
+        -h|--help)             usage 0 ;;
+        --*)                   echo "orch-stale-scan: 不明なオプション: $1（--emit-count / --re-ratify / --emit-reratify-count / --dry-run / --self-test / --help）" >&2; usage 1 ;;
+        *)                     echo "orch-stale-scan: 位置引数は取りません: $1" >&2; usage 1 ;;
     esac
 done
 
@@ -472,10 +750,19 @@ if [ "${ORCH_STALE_SKIP_SESSION_GATE:-}" != "1" ]; then
     fi
 fi
 
-# jq は hard requirement（分類・filter に必須・clean-state-probe と同型 F1）。
+# jq は既存モード（report/count/dry）では hard requirement（fail-closed・byte 不変・clean-state-probe と同型 F1）。
+#   re-ratify 新モードは fail-open（jq 失敗でも exit 0 +「判定不能」note・count は無出力＝orch-cqf4 acceptance(7)）。
 if ! command -v jq >/dev/null 2>&1; then
-    echo "orch-stale-scan: jq が PATH に無い＝bd JSON を解析できず分類不能（fail-closed）" >&2
-    exit 1
+    case "$MODE" in
+        reratify)
+            echo "orch-stale-scan --re-ratify: 判定不能（jq が PATH に無く bd JSON 解析不能・fail-open）— read-only surfacing のみ（exit 0）"
+            exit 0 ;;
+        reratify-count)
+            exit 0 ;;  # 整数不能時 無出力（count seam 契約）
+        *)
+            echo "orch-stale-scan: jq が PATH に無い＝bd JSON を解析できず分類不能（fail-closed）" >&2
+            exit 1 ;;
+    esac
 fi
 
 # anchor 解決（engine 版・scan/dry/report path 専用）: env override > 共有 lib _resolve_scriptorium（ORCH_ANCHOR /
@@ -488,7 +775,9 @@ if [ -z "$SCRIPTORIUM" ]; then
 fi
 
 case "$MODE" in
-    dry)    run_dry_run ;;
-    count)  run_scan count ;;
-    report) run_scan report ;;
+    dry)            run_dry_run ;;
+    count)          run_scan count ;;
+    report)         run_scan report ;;
+    reratify)       run_reratify report ;;
+    reratify-count) run_reratify count ;;
 esac

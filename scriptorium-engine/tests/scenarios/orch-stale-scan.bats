@@ -41,14 +41,15 @@ setup() {
 
     # ── stub: bd（list --status open,deferred --json のみを想定）──
     #   全 argv を bd-invocations.log へ記録（RO discipline が list 以外の verb を RED 化）。
-    #   STUB_ROWS（1 行 = id|status|labels_csv|created_at）を JSON 配列へ変換して emit。
-    #   labels_csv="null" → labels:null（null 吸収を exercise）。
+    #   STUB_ROWS（1 行 = id|status|labels_csv|created_at[|title]）を JSON 配列へ変換して emit。
+    #   title は任意 5 列目（re-ratify 表示用・省略時空）。labels_csv="null" → labels:null（null 吸収を exercise）。
     #   ★--status <csv> を尊重して実 bd の相互排他 status 挙動を模す（指定 status の行のみ emit）。
     #     deferred 行は query が open,deferred を要求したときだけ返る＝deferred は deferred-scan 由来（母集団が
     #     --status open のみだと deferred は返らず、CLASS5(deferred status→held-defer) は現実の入力形で検証される）。
     cat > "$BIN/bd" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FIX_DIR/bd-invocations.log"
+[ -n "${BD_FAIL:-}" ] && exit 1
 _statuses=""; _prev=""
 for _a in "$@"; do
     [ "$_prev" = "--status" ] && { _statuses="$_a"; break; }
@@ -62,17 +63,17 @@ _in_status() { # $1=行 status（未指定 --status は全 status 許可）
 }
 printf '['
 first=1
-while IFS='|' read -r id status labels created; do
+while IFS='|' read -r id status labels created title; do
     [ -n "$id" ] || continue
     _in_status "$status" || continue
     [ $first -eq 1 ] || printf ','
     first=0
     if [ "$labels" = "null" ]; then
-        printf '{"id":"%s","status":"%s","labels":null,"created_at":"%s"}' "$id" "$status" "$created"
+        printf '{"id":"%s","status":"%s","labels":null,"created_at":"%s","title":"%s"}' "$id" "$status" "$created" "$title"
     else
         lj=""; IFS=',' read -ra la <<< "$labels"; lfirst=1
         for x in "${la[@]}"; do [ -n "$x" ] || continue; [ $lfirst -eq 1 ] || lj="$lj,"; lj="$lj\"$x\""; lfirst=0; done
-        printf '{"id":"%s","status":"%s","labels":[%s],"created_at":"%s"}' "$id" "$status" "$lj" "$created"
+        printf '{"id":"%s","status":"%s","labels":[%s],"created_at":"%s","title":"%s"}' "$id" "$status" "$lj" "$created" "$title"
     fi
 done <<< "${STUB_ROWS:-}"
 printf ']'
@@ -96,6 +97,25 @@ orch-multiact|open|foo,bar|2026-07-01T00:00:00Z
 pk-foreign|open||2026-06-01T00:00:00Z
 un-foreign|open|held|2026-06-01T00:00:00Z"
     NOW="2026-07-20T00:00:00Z"
+
+    # re-ratify 死角クラス fixture（now=2026-07-20・reratify threshold=7d・title 付き行あり）。
+    #   target（死角クラス ∩ age>7d）: cour/held/seam/fu/coord/defst/courfor/bell = 8
+    #   excluded: ng(needs-grill 併存)/fed(federate-publish 併存)/act(actionable)/foronly(for:* 単独)
+    #   age gate 落ち: fresh(courier だが 2d<7)  / foreign: pk-rr
+    RR_ROWS="orch-rr-cour|open|courier|2026-07-01T00:00:00Z|配送後に長期 open な courier bead
+orch-rr-held|open|held|2026-07-01T00:00:00Z|人間 re-ratify 待ち held
+orch-rr-seam|open|seam|2026-07-01T00:00:00Z
+orch-rr-fu|open|follow-up|2026-07-01T00:00:00Z
+orch-rr-coord|open|coord|2026-07-01T00:00:00Z
+orch-rr-defst|deferred||2026-07-01T00:00:00Z
+orch-rr-courfor|open|courier,for:sc|2026-07-01T00:00:00Z
+orch-rr-bell|open|held,needs-user|2026-07-01T00:00:00Z|人間判断が要る held
+orch-rr-ng|open|needs-grill,held|2026-07-01T00:00:00Z
+orch-rr-fed|open|federate-publish,courier|2026-07-01T00:00:00Z
+orch-rr-act|open||2026-07-01T00:00:00Z
+orch-rr-foronly|open|for:sc|2026-07-01T00:00:00Z
+orch-rr-fresh|open|courier|2026-07-18T00:00:00Z
+pk-rr|open|courier|2026-07-01T00:00:00Z"
 }
 
 teardown() { rm -rf "$TEST_TMPDIR"; }
@@ -339,6 +359,229 @@ run_scan() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"[plan]"* ]]
     [ ! -f "$FIX_DIR/bd-invocations.log" ]
+}
+
+# ==============================================================================
+# [RE-RATIFY] 死角クラス re-ratify sweep（bd orch-cqf4 Leg-A・別軸・別閾値 7d・別表示）
+# ==============================================================================
+
+# re-ratify モード runner（RR_ROWS/NOW を使う・追加 env は呼出側で export）。
+run_reratify() {
+    ORCH_STALE_SKIP_SESSION_GATE=1 \
+    ORCH_STALE_SCRIPTORIUM="$ANCHOR" \
+    ORCH_STALE_BD="$BIN/bd" \
+    ORCH_STALE_NOW="${NOW}" \
+    STUB_ROWS="$RR_ROWS" \
+    run bash "$SCRIPT" "$@"
+}
+
+@test "(RR-HEADER) --re-ratify は「re-ratify sweep（死角クラス）」header を出す（stale 用語と非衝突）" {
+    run_reratify --re-ratify
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"re-ratify sweep（死角クラス）"* ]]
+}
+
+@test "(RR-TARGET) 死角クラス（courier/held/seam/follow-up/coord∨deferred）∩ age>7d を surface" {
+    run_reratify --re-ratify
+    [[ "$output" == *"[RERATIFY] orch-rr-cour"*"(courier)"* ]]
+    [[ "$output" == *"[RERATIFY] orch-rr-held"*"(held)"* ]]
+    [[ "$output" == *"[RERATIFY] orch-rr-seam"*"(seam)"* ]]
+    [[ "$output" == *"[RERATIFY] orch-rr-fu"*"(follow-up)"* ]]
+    [[ "$output" == *"[RERATIFY] orch-rr-coord"*"(coord)"* ]]
+    [[ "$output" == *"[RERATIFY] orch-rr-defst"*"(deferred)"* ]]
+}
+
+@test "(RR-COURFOR) courier∩for:* は re-ratify に含める（override ii・配送後長期 open こそ穴の実体）" {
+    run_reratify --re-ratify
+    [[ "$output" == *"[RERATIFY] orch-rr-courfor"*"(courier)"* ]]
+}
+
+@test "(RR-BELL) needs-user 併存 bead に呼び鈴対象マーク（push はしない）" {
+    run_reratify --re-ratify
+    local line
+    line=$(printf '%s\n' "$output" | grep 'orch-rr-bell')
+    [[ "$line" == *"🔔呼び鈴対象"* ]]
+    [[ "$line" == *"push はしない"* ]]
+}
+
+@test "(RR-TITLE) title 冒頭を per-bead 行へ表示" {
+    run_reratify --re-ratify
+    [[ "$output" == *"配送後に長期 open な courier bead"* ]]
+}
+
+@test "(RR-EXCL-LIVE) needs-grill/needs-orch/federate-publish/reconcile-published 併存は除外（二重 surface 禁止）" {
+    run_reratify --re-ratify
+    [[ "$output" != *"orch-rr-ng"* ]]                 # needs-grill 併存 → 除外優先 first-match
+    [[ "$output" != *"orch-rr-fed"* ]]                # federate-publish 併存 → 除外
+}
+
+@test "(RR-EXCL-ACT) actionable 域 / for:* 単独は re-ratify 対象外（for:* は除外条件にしない側の裏）" {
+    run_reratify --re-ratify
+    [[ "$output" != *"orch-rr-act"* ]]                # label 無し actionable → 対象外
+    [[ "$output" != *"orch-rr-foronly"* ]]            # for:* 単独 → 対象外
+}
+
+@test "(RR-AGEGATE) 死角クラスでも age<7d は非 surface（reratify 閾値 gate 実効）" {
+    run_reratify --re-ratify
+    [[ "$output" != *"orch-rr-fresh"* ]]              # courier だが 2d<7d
+}
+
+@test "(RR-SCOPE) foreign（pk-）は SELF_PREFIX filter で非検出" {
+    run_reratify --re-ratify
+    [[ "$output" != *"pk-rr"* ]]
+}
+
+@test "(RR-TRIP) re-ratify tripwire 候補数が母集団と一致（8）" {
+    run_reratify --re-ratify
+    [[ "$output" == *"[RERATIFY-TRIPWIRE] 死角クラス re-ratify 候補:8"* ]]
+}
+
+@test "(RR-COUNT) --emit-reratify-count は候補の整数のみ（--emit-count と別 seam）" {
+    run_reratify --emit-reratify-count
+    [ "$status" -eq 0 ]
+    [ "$output" = "8" ]
+}
+
+@test "(RR-SEAM-SEPARATION) 同一母集団で --emit-count(actionable stale) と --emit-reratify-count(死角) は別軸" {
+    # RR_ROWS の actionable stale は orch-rr-act(07-01,19d>14) の 1 件のみ＝emit-count=1（re-ratify 8 と別）。
+    run_reratify --emit-count
+    [ "$output" = "1" ]
+}
+
+@test "(RR-MUT-THRESHOLD) reratify 閾値巨大化 → 候補 0（死角 gate が実効・mutation 非空虚）" {
+    ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
+        ORCH_STALE_NOW="$NOW" ORCH_STALE_RERATIFY_THRESHOLD_DAYS=9999 STUB_ROWS="$RR_ROWS" \
+        run bash "$SCRIPT" --emit-reratify-count
+    [ "$output" = "0" ]
+}
+
+@test "(RR-THRESHOLD-INDEP) reratify 閾値は STALE_THRESHOLD_DAYS を流用しない（別 env・独立）" {
+    # STALE_THRESHOLD_DAYS を 9999 にしても re-ratify 候補は不変（8）＝閾値が独立している teeth。
+    ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
+        ORCH_STALE_NOW="$NOW" ORCH_STALE_THRESHOLD_DAYS=9999 STUB_ROWS="$RR_ROWS" \
+        run bash "$SCRIPT" --emit-reratify-count
+    [ "$output" = "8" ]
+}
+
+@test "(RR-UNKNOWN) created_at 解析不能な死角クラス → RERATIFY-UNKNOWN・候補に非計上" {
+    ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
+        ORCH_STALE_NOW="$NOW" STUB_ROWS="orch-rrbad|open|courier|not-a-date" \
+        run bash "$SCRIPT" --re-ratify
+    [[ "$output" == *"[RERATIFY-UNKNOWN] orch-rrbad"* ]]
+    [[ "$output" != *"[RERATIFY] orch-rrbad "* ]]
+    [[ "$output" == *"re-ratify 候補:0"* ]]
+    [[ "$output" == *"age不明:1"* ]]
+}
+
+@test "(RR-NONE) 死角クラス 0 件 → RERATIFY-NONE・tripwire 候補:0（空 graceful）" {
+    ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
+        ORCH_STALE_NOW="$NOW" STUB_ROWS="orch-onlyact|open||2026-07-01T00:00:00Z" \
+        run bash "$SCRIPT" --re-ratify
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[RERATIFY-NONE]"* ]]
+    [[ "$output" == *"[RERATIFY-TRIPWIRE] 死角クラス re-ratify 候補:0"* ]]
+}
+
+# jq だけを不在にした PATH（symlink farm）を $TEST_TMPDIR/nojq へ組む（bash 等の実 tool は温存し jq のみ除外）。
+#   PATH=$BIN だけだと bash/readlink/dirname 等が見つからず exit127 になるため、必要 tool を実体へ symlink する。
+_build_nojq_path() {
+    local nojq="$TEST_TMPDIR/nojq"; mkdir -p "$nojq"
+    local t p
+    for t in bash env date sort cut grep awk sed mktemp readlink dirname cat head tail tr basename printf; do
+        p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$nojq/$t"
+    done
+    printf '%s' "$BIN:$nojq"   # bd stub は $BIN・実 tool は nojq・jq はどちらにも無い
+}
+
+@test "(RR-FAILOPEN-JQ) jq 不在でも --re-ratify は fail-open（exit 0・判定不能 note）" {
+    local p; p="$(_build_nojq_path)"
+    run env PATH="$p" ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" \
+        ORCH_STALE_BD="$BIN/bd" ORCH_STALE_NOW="$NOW" STUB_ROWS="$RR_ROWS" \
+        bash "$SCRIPT" --re-ratify
+    [ "$status" -eq 0 ]                               # 既存モードは fail-closed(exit1)・re-ratify は fail-open
+    [[ "$output" == *"判定不能"* ]]
+}
+
+@test "(RR-FAILOPEN-JQ-COUNT) jq 不在の --emit-reratify-count は無出力（整数不能時契約）・exit 0" {
+    local p; p="$(_build_nojq_path)"
+    run env PATH="$p" ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" \
+        ORCH_STALE_BD="$BIN/bd" ORCH_STALE_NOW="$NOW" STUB_ROWS="$RR_ROWS" \
+        bash "$SCRIPT" --emit-reratify-count
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]                                 # 整数不能時 無出力
+}
+
+@test "(RR-FAILOPEN-JQ-CLOSED) 既存モード(report)は jq 不在で fail-closed(exit1)＝re-ratify fail-open の非対称 pin" {
+    local p; p="$(_build_nojq_path)"
+    run env PATH="$p" ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" \
+        ORCH_STALE_BD="$BIN/bd" ORCH_STALE_NOW="$NOW" STUB_ROWS="$RR_ROWS" \
+        bash "$SCRIPT"
+    [ "$status" -eq 1 ]                               # report/count/dry は従来どおり fail-closed（byte 不変）
+    [[ "$output" == *"fail-closed"* ]] || [[ "$output" == *"jq が PATH に無い"* ]]
+}
+
+@test "(RR-FAILOPEN-NOW) now 解決不能（date 障害）→ run_reratify fail-open exit 0・判定不能 note" {
+    ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
+        ORCH_STALE_NOW="totally-not-a-valid-date" STUB_ROWS="$RR_ROWS" \
+        run bash "$SCRIPT" --re-ratify
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"判定不能"* ]]
+}
+
+@test "(RR-FAILOPEN-NOW-COUNT) now 解決不能の --emit-reratify-count は無出力・exit 0（date 障害 × count 分岐）" {
+    ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
+        ORCH_STALE_NOW="totally-not-a-valid-date" STUB_ROWS="$RR_ROWS" \
+        run bash "$SCRIPT" --emit-reratify-count
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "(RR-FAILOPEN-BD) bd read 失敗（BD_FAIL）→ 判定不能 note・RERATIFY-NONE へ silent 畳まない（bd/空台帳を弁別）" {
+    # acceptance(7) は bd 失敗を fail-open 明示列挙。bd outage を『候補なし(RERATIFY-NONE)』と混同すると
+    #   re-ratify sweep の目的（silent 滞留検出）と自己矛盾する＝bd rc 弁別の teeth。slate --surface と対称。
+    BD_FAIL=1 ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
+        ORCH_STALE_NOW="$NOW" STUB_ROWS="$RR_ROWS" \
+        run bash "$SCRIPT" --re-ratify
+    [ "$status" -eq 0 ]                               # fail-open（brick しない）
+    [[ "$output" == *"判定不能（bd read 失敗"* ]]
+    [[ "$output" != *"[RERATIFY-NONE]"* ]]            # bd 失敗を空台帳へ silent 畳み込みしない
+}
+
+@test "(RR-FAILOPEN-BD-COUNT) bd read 失敗の --emit-reratify-count は無出力・exit 0（整数不能時契約）" {
+    BD_FAIL=1 ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
+        ORCH_STALE_NOW="$NOW" STUB_ROWS="$RR_ROWS" \
+        run bash "$SCRIPT" --emit-reratify-count
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "(RR-BD-VS-EMPTY) bd 正常・空台帳は RERATIFY-NONE（bd 失敗との弁別が空虚でない＝mutation 非空虚）" {
+    # BD_FAIL 無し・死角クラス 0 件 → RERATIFY-NONE（判定不能 と別）。BD_FAIL 版(RR-FAILOPEN-BD)と対で
+    #   「rc≠0 のときだけ判定不能へ落ちる」ことを pin（rc 弁別を no-op 化した mutant は両者を混同して赤化）。
+    ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
+        ORCH_STALE_NOW="$NOW" STUB_ROWS="orch-onlyact|open||2026-07-01T00:00:00Z" \
+        run bash "$SCRIPT" --re-ratify
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[RERATIFY-NONE]"* ]]
+    [[ "$output" != *"判定不能"* ]]                   # 空台帳は「判定不能」ではない（bd rc=0）
+}
+
+@test "(RR-RO) re-ratify の bd 呼出も list のみ（write verb 非出現・surfacing 専任）" {
+    rm -f "$FIX_DIR/bd-invocations.log"
+    run_reratify --re-ratify
+    [ -f "$FIX_DIR/bd-invocations.log" ]
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        [[ "$line" == *"list"* ]]
+    done < "$FIX_DIR/bd-invocations.log"
+    ! grep -qE '(^| )(update|create|close|dep|assign|delete|import|dolt) ' "$FIX_DIR/bd-invocations.log" || false
+    ! grep -qE -- '--add-label|--label ' "$FIX_DIR/bd-invocations.log"
+}
+
+@test "(RR-BYTE-INVARIANT) --re-ratify は既存 [STALE-TRIPWIRE] 行を出さない（別 tripwire＝既存出力を perturbate しない）" {
+    run_reratify --re-ratify
+    [[ "$output" != *"[STALE-TRIPWIRE]"* ]]          # 停滞 scan の tripwire は re-ratify モードに漏れない
+    [[ "$output" != *"[CLASS]"* ]]                   # 分類テーブルも出さない（別軸別表示）
 }
 
 # ==============================================================================
