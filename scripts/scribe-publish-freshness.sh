@@ -194,8 +194,7 @@ cmd_mark_published() {
   SCRIBE_ANCHOR="$ANCHOR" scribe_bd_id_exists "$norm" \
     || scribe_die "bd issue が存在しません: '$norm'"
   # soft warn: federate-publish ラベルの無い bead を mark するのは誤操作の可能性（advisory・block しない）。
-  if ! ( cd "$ANCHOR" 2>/dev/null && "$BD" show "$norm" --json 2>/dev/null ) \
-       | grep -q "\"${PUBLISH_LABEL}\""; then
+  if ! grep -q "\"${PUBLISH_LABEL}\"" <<< "$( cd "$ANCHOR" 2>/dev/null && "$BD" show "$norm" --json 2>/dev/null )"; then
     printf 'scribe: warn: %s に %s ラベルがありません（publish 候補でない bead を mark している可能性）\n' \
       "$norm" "$PUBLISH_LABEL" >&2
   fi
