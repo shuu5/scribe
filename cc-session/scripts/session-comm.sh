@@ -526,9 +526,9 @@ _rb_extract_input_box() {
 #   return 2 = INCONCLUSIVE（帰属不能な非空内容＝ダイアログ/他者入力。受理も Enter もしない）
 _rb_classify_interior() {
     local interior="$1" head_sent="$2" tail_marker="$3"
-    if [[ -n "$head_sent" ]] && printf '%s' "$interior" | grep -qF -- "$head_sent"; then return 3; fi
-    if [[ -n "$tail_marker" ]] && printf '%s' "$interior" | grep -qF -- "$tail_marker"; then return 3; fi
-    if printf '%s' "$interior" | grep -qE -- "$_RB_PASTE_PLACEHOLDER_RE"; then return 3; fi
+    if [[ -n "$head_sent" ]] && grep -qF -- "$head_sent" <<< "$interior"; then return 3; fi
+    if [[ -n "$tail_marker" ]] && grep -qF -- "$tail_marker" <<< "$interior"; then return 3; fi
+    if grep -qE -- "$_RB_PASTE_PLACEHOLDER_RE" <<< "$interior"; then return 3; fi
     # 空判定: 空白・NBSP（実 CC TUI の空入力欄は「❯ + NBSP」）・余剰プロンプト記号のみなら DELIVERED
     local core
     core="$(printf '%s' "$interior" | tr -d '[:space:]')"
@@ -889,7 +889,7 @@ cmd_inject_file() {
                 # modality ガード: 承認/質問ダイアログが見えていれば、これは未 submit ではなく正当な
                 # post-submit input-waiting。追い Enter は既定選択を確定する実アクションになるため送らず停止。
                 _se_pane=$(tmux capture-pane -p -t "$target" 2>/dev/null || true)
-                if printf '%s' "$_se_pane" | grep -qE -- "$_se_dialog_re"; then
+                if grep -qE -- "$_se_dialog_re" <<< "$_se_pane"; then
                     break
                 fi
                 # 依然 input-waiting かつダイアログ無し＝paste 折りたたみで Enter が吸収され未 submit。
@@ -980,7 +980,7 @@ cmd_inject_file() {
             if [[ "$_rb_xrc" -eq 0 ]]; then
                 while IFS= read -r _rb_sline; do
                     [[ -z "${_rb_sline//[[:space:]]/}" ]] && continue
-                    if ! printf '%s' "$_rb_baseline" | grep -qF -- "$_rb_sline"; then
+                    if ! grep -qF -- "$_rb_sline" <<< "$_rb_baseline"; then
                         _rb_strong_new=1
                         break
                     fi
@@ -1039,7 +1039,7 @@ cmd_inject_file() {
                                 # 抑止時は budget 失効 → 呼出側再送に委ねる（旧実装の modality ガードを復帰）。
                                 _rb_vanish_streak=0
                                 if [[ "$_rb_resub" -lt "$_se_max" ]] \
-                                   && ! printf '%s' "$_rb_pane" | grep -qE -- "$_se_dialog_re"; then
+                                   && ! grep -qE -- "$_se_dialog_re" <<< "$_rb_pane"; then
                                     session_msg send "$target" "" --enter-only
                                     ((_rb_resub++)) || true
                                 fi
@@ -1049,7 +1049,7 @@ cmd_inject_file() {
                                 #     ∧ baseline に不在 ＝ submit の積極証拠（fast-complete / post-submit dialog）
                                 if [[ -n "$_rb_sentinel" ]] \
                                    && printf '%s' "$_rb_scan" | grep -qF -- "$_rb_sentinel" \
-                                   && ! printf '%s' "$_rb_baseline" | grep -qF -- "$_rb_sentinel"; then
+                                   && ! grep -qF -- "$_rb_sentinel" <<< "$_rb_baseline"; then
                                     _rb_ok=true; break
                                 fi
                                 # (B') folded-paste echo（ccs-pwr）: 複数行 paste は submit 後の transcript にも
