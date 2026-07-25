@@ -34,7 +34,43 @@ export const meta = {
 //  (3) autoFix は confirmed のみ適用 + self-test fail-closed(失敗=即停止+escalate)+ amend。
 //      self-test gate が無い(selfTestCmd 未指定)なら autoFix を無効化(fail-closed)。
 //  (4) 返り値 history/blocking/refuted/diff を呼出元が一次監査(verdict を鵜呑みにしない)
-//      → admin は薄 gate(merge 権限 + outward/risk 人間確認 + 収束証跡確認)のみ、再 review しない。
+//      → admin は薄 gate(merge 権限 + 収束証跡確認 + 3 クラス該当判定)のみ、再 review しない。
+//      承認体制の裁定(bd sc-tx8s / 裁定 SSOT = bd orch-vhiu)により、人間確認の【発火条件】だけが
+//      旧カテゴリ判定から「3 クラス該当時のみ」へ縮小した(admin の責務は減っていない=列挙は 3 項のまま)。
+//      以下は裁定本文の canonical 3-クラス block の verbatim 転記(言い換え禁止・本 repo の実行時 carrier で
+//      唯一の設置箇所)。※実行時 carrier(result.gate 文字列 / bd notes / 報告)では裸の (a)/(b)/(c) を使わず
+//      「3 クラス(消す/出す/使う)」と語で書く(protocol §5.4 の park トリガ記号と衝突するため。
+//      §5.4 の park トリガを指す場合だけは「protocol §5.4(c)」と修飾付きで書く=裸参照ではない)。
+//      ※【発火条件の縮小は 3 クラス軸に限る】: protocol §5.4(c)「acceptance snapshot mismatch =
+//      auto-merge 資格剥奪 → 人間 ratify 昇格」は 3 クラス分類と直交する独立の機械 fail-closed トリガ
+//      (契約が dispatch 後にすり替わった検知)であり、本裁定では廃止も縮小もされていない。ゆえに
+//      CONVERGED 文字列の排他(「のみ」)は 3 クラス軸内の排他であって §5.4(c) を打ち消さない=
+//      carve-out を必ず併記する(欠かすと契約すり替え cell が auto-merge へ fail-open する)。
+//      ┌──── canonical 3-クラス block(verbatim・言い換え禁止) ────
+//      │ 【人間確認が要るのは「取り消せない」3 クラスのみ】
+//      │ (a) 消す — データ / repo / 履歴 / live 成果物の破壊（第一防衛線は機械 guard 層）
+//      │ (b) 出す — public 化・外部公開・外部サービスへの送信（scriptorium 核② private 保証はこの型）
+//      │ (c) 使う — 大きな金銭コスト（承認でなく予算上限で制御）
+//      │
+//      │ それ以外（規約ファイル・全ホスト配布物・事前合意逸脱を含む）は
+//      │ AI 敵対 gate 通過をもって AI 判断で merge する。
+//      │
+//      │ 【聞かないこと】順序・選択肢の是認だけを求める問いは出さない（AI が推奨を出し、決めて進む）。
+//      │ 【上げること】複数の妥当な設計が併存し、選択が人間の目的・価値観に依存するとき
+//      │ ＝承認要求ではなく grill 提案として上げる。事実で決まるなら止めない。
+//      │
+//      │ 【本裁定で緩めないもの（fence）】
+//      │ AI 敵対 gate / write-isolation（foreign 台帳 write 禁止）/ 完了 truth=bd（終端宣言）/
+//      │ 破壊操作の機械 guard / 核② private 保証（orch-ufz・orch-xkec boundary）/
+//      │ gate 分離（worker は自己 merge しない・gate-pending funnel）/
+//      │ 承認要求の可視性様式（🔴 バナー・AskUserQuestion 最優先・安売り禁止）
+//      │ ※様式は存続。変わるのは発火条件（④ 該当 → 3 クラス該当）だけ。
+//      │
+//      │ 【必ず添える 3 つの誤読防止句】
+//      │ 1. 人間承認を外しても **gate は外さない**（gate が実効安全弁になったので強化側）。
+//      │ 2. 「worker が自己 merge してよい」ではない（gate 分離＝独立レビューは不変）。
+//      │ 3. front-load / バナーは **廃止でなく scope 縮小**（user 裁定 2026-07-17 の可視性要件を壊さない）。
+//      └────────────────────────────────────────────
 //  (5) machinery の silent 失敗を「真に clean」と区別する(除去禁止の不変条件):
 //      review/verify/snapshot の agent() throw は .catch で観測可能な値へ正規化し、握り潰さない。
 //      review 失敗(reviewFailed)/snapshot 失敗(snapshotFailed)の round は blocking=0 でも clean 扱い
@@ -1306,7 +1342,7 @@ const schemaNote =
 result.gate = escalate
   ? 'ESCALATE: 未収束/self-test 失敗/machinery 失敗。silent ship 禁止 — 人間が判断すること。' + unvNote + machNote + schemaNote
   : converged
-    ? 'CONVERGED: 収束。outward/risk(boot-path/全ホスト/破壊的)があれば merge 前に人間 ratify。' + unvNote + machNote + schemaNote
+    ? 'CONVERGED: 収束。人間 ratify が要るのは 3 クラス(消す/出す/使う)該当時のみ(＋ acceptance snapshot mismatch は protocol §5.4(c) の独立 fail-closed としてそのまま人間 ratify 昇格)、非該当は AI 敵対 gate 通過をもって AI 判断で merge。gate 分離は不変(worker は自己 merge しない)。収束証跡は呼出元が直読して一次監査。' + unvNote + machNote + schemaNote
     : 'OPEN: 呼出元が confirmed を修正し再 invoke(single モードのループ駆動)。' + unvNote + machNote + schemaNote
 
 log(`cell-quality done: ${result.gate}`)

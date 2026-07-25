@@ -3,7 +3,7 @@ export const meta = {
   description:
     'needs-user タスクの pre-bake WF（admin が回す）: 並列 read-only facet 分析 → 各 facet が「現状調査(read-only・事実/推測を区別)→決定木→選択肢+トレードオフ→admin 起票候補」を構造化 brief で返す → opus が単一の構造化 brief へ統合し admin に返す。grill は含まない(対話 grill は grill-consult が別途行う=protocol §7)。F2 構造解消: WF は admin にデータを返すだけで自己 pre-bake を grill しない。固有物(taskRef/taskTitle/anchor/facets/model/roAgentType)は args で差し込む(骨格は再利用)。',
   whenToUse:
-    'admin が needs-user タスク(人間判断依存)の grill 準備として pre-bake brief を作りたいとき。相互独立な複数の決定軸(facet)を並列 read-only 分析する。返り値の brief を admin が file へ書き grill-consult へ `scribe-spawn --consult --context <brief> <grill-issue>` で渡す(protocol §7)。1 facet なら admin インラインで足り fan-out 不要。roAgentType は read-only 段の agentType 上書き escape hatch(既定 scribe:explore・"none" で agentType 無し強制)。',
+    'admin が「3 クラス(消す/出す/使う)該当、または複数の妥当な設計が併存し選択が人間の目的・価値観に依存する論点(承認要求ではなく grill 提案として上げる型)」の pre-bake brief を作りたいとき。相互独立な複数の決定軸(facet)を並列 read-only 分析する。返り値の brief を admin が file へ書き grill-consult へ `scribe-spawn --consult --context <brief> <grill-issue>` で渡す(protocol §7)。1 facet なら admin インラインで足り fan-out 不要。roAgentType は read-only 段の agentType 上書き escape hatch(既定 scribe:explore・"none" で agentType 無し強制)。',
   // phases は phase() 呼び出し / opts.phase と同名で対応させる(タイトル完全一致でグループ化)。
   // 全 substantive agent は model:'opus'(args.model 既定)。facet 分析は read-only だが「決定木構築・
   // 選択肢起草」= 設計分析(thinking)ゆえ opus(CLAUDE.md model 階層: opus=思考・統合・分析の主力)。
