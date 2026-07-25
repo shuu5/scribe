@@ -18,11 +18,11 @@
 #   よって consult モードでは:
 #     - **worktree を作らない / worker prompt を出さない / --bd-id を渡さない**（role 契約遵守）。
 #       `--cd` は anchor（cwd）を指す＝worktree ではない（consult は anchor 同居）。
-#     - anchor（cwd）で `cld-spawn --model <fable 既定・不可時 opus> --env-file <SCRIBE_ROLE=consult> "<consult テンプレ本文>"`。
+#     - anchor（cwd）で `cld-spawn --model <consult 既定 opus[1m]> --env-file <SCRIBE_ROLE=consult> "<consult テンプレ本文>"`。
 #       consult テンプレは read-only 規律・記憶系のみ write・サマリ保存義務のみ（bdw/selftest/cell-quality を含まない）。
 #     - SCRIBE_ROLE=consult を --env-file で注入（C2 の role 判定が最優先で読む side）。env-file は
 #       **anchor working tree の外**（/tmp）に作り spawn 後に rm する＝anchor リポを汚さない（read-only 起動器の自浄）。
-#     - model は既定 fable・利用不可時のみ opus へ loud fallback（sc-9q6・role-context-spec §2.3。--model 明示が優先・worker は fable 厳禁）。
+#     - model は既定 opus[1m]（role-context-spec §2.3。--model 明示が優先・worker は fable 厳禁）。
 #   bd id は consult では **任意の議題参照**（read-only な `bd show` のみ・worktree/branch には焼かない）。
 #
 # 既知バグ防御（un-ivb・別セル）: 現行 cld-spawn は未知オプションを PROMPT に落とす。
@@ -45,8 +45,9 @@
 #                   §7 needs-user regime: grill-issue id 必須。grill-consult は brief を出発点にユーザーと対話 grill し、
 #                   決定を own grill-issue の bd notes へ書く（決定 handoff は bdw 経由 --append-notes のみ・claim は着手時 1 回限り・read-only 限定緩和）。
 #                   （pre-bake 自体は admin が回す dynamic Workflow = workflows/needs-user-prebake.workflow.js へ移管。）
-#   --model MODEL   cld-spawn のモデル（既定: worker=opus / consult=fable）。worker は fable 厳禁＝コスト爆発。
-#                   consult は既定 fable・利用不可時のみ opus へ loud fallback（sc-9q6・role-context-spec §2.3）
+#   --model MODEL   cld-spawn のモデル（既定: worker=opus / consult=opus[1m]）。worker は fable 厳禁＝コスト爆発。
+#                   consult 既定は alias 形 + 1M context（role-context-spec §2.3）。--model 明示は常に優先で、
+#                   consult では `--model claude-fable-5` の明示も受理される（fable は既定から外れただけ）。
 #   --effort LEVEL  worker の実効 effort（既定 high・env SCRIBE_WORKER_EFFORT で既定上書き・allowlist low|medium|high|xhigh|max）。
 #                   settings.json の "effortLevel":"xhigh" 無差別波及を止め、CC 正規名 CLAUDE_CODE_EFFORT_LEVEL を
 #                   worker env-file へ後勝ち注入する（CLAUDE_EFFORT は CC 非正規名＝silent no-op ゆえ使わない・sc-dc9）。
@@ -129,8 +130,9 @@ Options:
   --consult       consult role セッションを anchor で起動（worktree/worker prompt なし）
   --context FILE  consult 専用。admin 集約 brief（FILE）を grill 材料として焼き込み grill-consult モードへ（§7・grill-issue id 必須）。
                   grill-consult は brief を grill し決定を own grill-issue の bd notes へ書く（bdw 経由・read-only 限定緩和）
-  --model MODEL   cld-spawn のモデル（既定: worker=opus / consult=fable）。worker は fable 厳禁＝コスト爆発。
-                  consult は既定 fable・利用不可時のみ opus へ loud fallback（sc-9q6・role-context-spec §2.3）
+  --model MODEL   cld-spawn のモデル（既定: worker=opus / consult=opus[1m]）。worker は fable 厳禁＝コスト爆発。
+                  consult 既定は alias 形 + 1M context（role-context-spec §2.3）。--model 明示は常に優先で、
+                  consult では --model claude-fable-5 の明示も受理される（fable は既定から外れただけ）。
   --effort LEVEL  worker の実効 effort（既定 high・env SCRIBE_WORKER_EFFORT で既定上書き・allowlist low|medium|high|xhigh|max・worker のみ）
   --transport T   worker の起動 transport（tmux|bg|auto・既定 tmux・worker のみ・DJ1）。env SCRIBE_TRANSPORT で既定上書き。
                   tmux=現行 cld-spawn 経路（恒久 fallback）／bg=native background agent（claude --bg・opt-in）／
@@ -145,8 +147,8 @@ REPO="$(pwd)"
 BASE="HEAD"
 ANCHOR="$(pwd)"
 CONSULT=0
-MODEL="opus"       # worker 既定。consult は --model 未指定なら fable 既定へ解決する（sc-9q6・consult 分岐冒頭）
-MODEL_EXPLICIT=0   # --model 明示の有無（明示は consult の fable 既定より常に優先）
+MODEL="opus"       # worker 既定。consult は --model 未指定なら consult 既定へ解決する（consult 分岐冒頭）
+MODEL_EXPLICIT=0   # --model 明示の有無（明示は consult の既定より常に優先）
 # worker 実効 effort（sc-dc9）。既定 high（settings.json の xhigh 無差別波及を止める＝この issue の核）。
 # env SCRIBE_WORKER_EFFORT が既定を上書きし、--effort フラグがさらに上書きする（flag > env > 既定 high）。
 # allowlist 検証は worker 分岐入口（effort を実際に使う経路）で fail-loud。consult は effort を使わない。
@@ -325,7 +327,7 @@ config_dir_plan_line() {
 
 # spawn preflight（fail-loud・sc-rvq 実装3）: 注入予定 config dir が set のとき、その dir が worker/consult を
 # 安全に起こせるかを検査する。欠落を黙って既定 ~/.claude へ fallback させない（AC3）。**実起動時のみ**呼ぶ
-# （dry-run は side-effect ゼロ＝fable preflight / sandbox dep-preflight と同じ real-path-only 規律）。unset（既定
+# （dry-run は side-effect ゼロ＝sandbox dep-preflight / この config dir 検査と同じ real-path-only 規律）。unset（既定
 # ~/.claude）は挙動不変ゆえ検査しない（AC1）。理由（c）= hooks は ${CLAUDE_PLUGIN_ROOT}（=アクティブ config dir
 # 配下 plugin）から発火するため、plugin 欠落 dir で worker を起こすと edit-write-guard（SBX-ESC-1 境界）/
 # git-destructive-guard / rm-destructive-guard / tmux-send-keys-guard / session-start-role-inject が全て黙って
@@ -552,42 +554,27 @@ fi
 
 # fable の許否は role で非対称（道具は規約を変えない）:
 #   - worker: fable 厳禁（protocol.md §1: worker は opus 必須＝コスト爆発防止）。worker 分岐内で die する。
-#   - consult: fable は **既定**（sc-9q6: 既定 fable・利用不可時のみ opus へ loud fallback・--model 明示は常に優先。
-#     consult は admin と同じ main-loop 系統ゆえ fable 起動が許される唯一の役割＝role-context-spec §2.3）。
+#   - consult: fable は **既定ではない**が `--model claude-fable-5` の明示は受理される（consult は admin と同じ
+#     main-loop 系統ゆえ fable 起動が許される唯一の役割＝role-context-spec §2.3。既定は opus[1m]）。
 # ＝この一括 die をここに置くと consult の例外パスを塞いで規約を変えてしまうため、
 #   worker 分岐の入口へ移動する（下記）。
 
 # ===========================================================================
 # consult モード（--consult）: role-context-spec §2.3 / design §14 の契約どおりに分岐。
 #   worktree 作成・worker prompt 生成・--bd-id を **一切しない**（consult に spawn worktree は禁止）。
-#   anchor で `cld-spawn --cd <anchor> --model <fable 既定・不可時 opus> --env-file <SCRIBE_ROLE=consult> "<consult テンプレ>"` を出す
+#   anchor で `cld-spawn --cd <anchor> --model <consult 既定 opus[1m]> --env-file <SCRIBE_ROLE=consult> "<consult テンプレ>"` を出す
 #   （--cd は anchor=cwd を指す＝worktree ではない）。
 #   bd id は consult では任意の議題参照（read-only な実在検証のみ・worktree/branch には焼かない）。
 # ===========================================================================
 if [[ "$CONSULT" -eq 1 ]]; then
-  # --- consult 既定 model = fable（sc-9q6・2026-07-03 ユーザー確定）---
-  # --model 明示は常に優先（MODEL_EXPLICIT）。未指定なら fable を既定にし、fable が利用できない
-  # （API/アクセス障害）ときだけ opus へ **loud** fallback する（silent 降格しない）。
-  # preflight は実起動時のみ（dry-run は API を叩かない＝dry-run の副作用ゼロを維持）。
-  # SCRIBE_FABLE_PREFLIGHT=1/0 で可否を強制注入できる（テスト・緊急時の seam。未設定=実測）。
-  CONSULT_FABLE_MODEL="claude-fable-5"
-  fable_available() {
-    case "${SCRIBE_FABLE_PREFLIGHT:-}" in
-      1) return 0 ;;
-      0) return 1 ;;
-    esac
-    # 実測（sc-9q6・2026-07-03）: fable は最小 -p 呼び出しでも応答に 60s+ かかる（重 reasoning 系の固有コスト）
-    # 一方、利用不可（モデル不存在・アクセス不能・limit 到達）は ~5s で fast fail する（rc=1 等）。
-    # ゆえに判定は「fast fail だけが不可」: timeout(rc=124) は **受理された＝利用可** とみなす
-    # （完了を待つ判定だと正常 fable が常に偽不可＝恒常 opus 降格になる）。timeout 15s は fast fail(~5s) の
-    # 3 倍マージン。--strict-mcp-config + 空 mcp-config で MCP ロードを抑止し preflight を軽く保つ。
-    local rc=0
-    timeout 15 "${SCRIBE_CLAUDE_BIN:-claude}" --model "$CONSULT_FABLE_MODEL" -p "ok" \
-      --strict-mcp-config --mcp-config '{"mcpServers":{}}' >/dev/null 2>&1 || rc=$?
-    [[ "$rc" -eq 0 || "$rc" -eq 124 ]]
-  }
+  # --- consult 既定 model = opus[1m]（2026-07-25 ユーザー裁定・role-context-spec §2.3）---
+  # alias 形（版 bump で pin が腐らない）+ 1M context（長寿命 main-loop の context 肥大に耐える）。
+  # --model 明示は常に優先（MODEL_EXPLICIT）。未指定のときだけこの既定へ解決する。
+  # 既定が opus 系になったため model 可否の実測 preflight と降格 fallback は持たない（残すと既定値から
+  # 素 opus への silent 降格経路になり、この既定が買っている 1M context を失う）。
+  CONSULT_DEFAULT_MODEL="opus[1m]"
   if [[ "$MODEL_EXPLICIT" -eq 0 ]]; then
-    MODEL="$CONSULT_FABLE_MODEL"
+    MODEL="$CONSULT_DEFAULT_MODEL"
   fi
 
   TOPIC=""
@@ -720,9 +707,6 @@ PROMPT
     echo "         ENV_FILE=\$(mktemp /tmp/scribe-consult-XXXXXX.env)"
     echo "         printf '%s\\n' '$ENV_LINE' > \"\$ENV_FILE\""
     echo "         $(emit_config_dir_envline) >> \"\$ENV_FILE\"   # sc-rvq config-dir 追随（源=$WCFG_SOURCE）"
-    if [[ "$MODEL_EXPLICIT" -eq 0 ]]; then
-      echo "[plan] model: 既定 fable（$CONSULT_FABLE_MODEL・sc-9q6）。本起動時に preflight し、利用不可なら opus へ loud fallback（dry-run は API を叩かない）"
-    fi
     echo "[plan] $CLD_SPAWN --cd $ANCHOR --model $MODEL --window-name $CONSULT_WINDOW --force-new --env-file \"\$ENV_FILE\" \"<consult テンプレ本文>\""
     echo "[plan] rm -f \"\$ENV_FILE\"   # source 済みなので spawn 後に消す（anchor に残さない）"
     echo "[plan] (consult は worktree を作らない / --bd-id を渡さない / worker prompt を出さない＝role 契約)"
@@ -733,11 +717,6 @@ PROMPT
   fi
 
   # ===== consult 実行（real）=====
-  # fable preflight（sc-9q6）: fable 既定で解決されたときだけ実測し、利用不可なら opus へ loud fallback。
-  if [[ "$MODEL_EXPLICIT" -eq 0 ]] && ! fable_available; then
-    echo "[scribe-spawn] WARN: fable preflight 失敗 → consult を opus で起動します（既定 fable の fallback 経路・sc-9q6）" >&2
-    MODEL="opus"
-  fi
   # config-dir preflight（sc-rvq・item2/3）: consult も worktree add せず anchor 同居で cld-spawn するが、
   # tmux env 剥ぎで既定 ~/.claude へ落ちる非対称は worker と同じ（consult は chain-source 無しゆえ余計に落ちる）。
   # 注入予定 config dir が set なら preflight で欠落を fail-loud にしてから起動する。
@@ -1218,13 +1197,13 @@ if [[ "$EFFECTIVE_TRANSPORT" == "bg" ]]; then
     echo "scribe: ⚠ bg: '$CLAUDE_BIN --help' に --effort フラグが見当たりません → effort フラグを付けません。bg（native background agent）では process env / CLAUDE_CODE_EFFORT_LEVEL が daemon fixation で無効なため、この worker の実効 effort を指定できません（sc-47l REFUTED・env carrier では effort が届かない）。" >&2
   fi
   # --model（worker=opus 不変条件を bg にも運ぶ・finding#1）: tmux 経路は cld-spawn へ **必ず** --model "$MODEL" を渡し
-  # worker=opus を強制する（:680 で *fable* を die＝コスト爆発防止）。bg は claude を直呼びするため model を argv で明示
-  # しないと起動セッション/アカウント既定モデル（admin main-loop=ユーザー規約上 fable）へ帰着し、当のコスト爆発を再導入する。
+  # worker=opus を強制する（worker 分岐入口の *fable* die ＝コスト爆発防止）。bg は claude を直呼びするため model を
+  # argv で明示しないと**起動セッション/アカウントの既定モデル**へ帰着し、当のコスト爆発を再導入する。
   if grep -q -- '--model' <<< "$("$CLAUDE_BIN" --help 2>/dev/null)"; then
     BG_MODEL_ARG=(--model "$MODEL")
     BG_MODEL_DETECTED=1
   else
-    echo "scribe: ⚠ bg: '$CLAUDE_BIN --help' に --model フラグが見当たりません → model フラグを付けません。bg（native background agent）では起動セッション/アカウント既定モデルへ帰着し、この worker のモデルを '$MODEL'（worker=opus）に固定できません。admin main-loop が fable の場合 worker が fable を継承しコスト爆発しうる（tmux 経路は cld-spawn 経由で --model を必ず渡すため保護されるが、この bg バイナリでは model を運べません・finding#1）。" >&2
+    echo "scribe: ⚠ bg: '$CLAUDE_BIN --help' に --model フラグが見当たりません → model フラグを付けません。bg（native background agent）では起動セッション/アカウント既定モデルへ帰着し、この worker のモデルを '$MODEL'（worker=opus）に固定できません。起動セッション/アカウントの既定モデルが高コスト系だと worker がそれを継承しコスト爆発しうる（tmux 経路は cld-spawn 経由で --model を必ず渡すため保護されるが、この bg バイナリでは model を運べません・finding#1）。" >&2
   fi
 fi
 
