@@ -565,6 +565,36 @@ _link_bin_without_awk() {
     [[ "$output" == *"needs-user-prebake.workflow.js"* ]]
 }
 
+# ---- sc-pegi: §2.3 モデル規約の docs teeth（新既定 opus[1m]・裁定履歴の保存） ----
+# 背景: 改訂前は docs の model 記述を pin する assert が repo 内に 1 本も無く、docs の
+# acceptance は構造的に空虚だった（sc-pegi・admin 実測）。以下 2 本がその teeth。
+# literal 検索は必ず固定文字列モード（grep -F / bash の二重引用部分一致）で行う——`opus[1m]` を
+# 未 escape の正規表現で探すと bracket expression 化して常に不一致になり false-green になる。
+@test "注入(consult/sc-pegi): §2.3 の新既定 opus[1m] が注入本文に届く(§2.3 抽出 awk を通過している)" {
+    run --separate-stderr inject consult "$REPO" "$ANCHOR_JSON"
+    [ "$status" -eq 0 ]
+    # positive: 新既定が注入本文に出る＝doc 改訂が consult セッションまで到達している。
+    # （§2.3 節内に水平線を入れると以降が silent に注入から脱落するため、この assert は
+    #   FENCE-SECTION-2.3 の tripwire も兼ねる: モデル規約は 2.3 節の後半にある。）
+    [[ "$output" == *"opus[1m]"* ]]
+    # negative: 旧既定文言（sc-9q6 の「既定 **fable**」）が現役規約として残っていない。
+    [[ "$output" != *"既定 **fable**"* ]]
+}
+
+@test "docs(sc-pegi): role-context-spec §2.3 は新既定 opus[1m] を持ち裁定履歴(sc-9q6 / sc-pegi)を消さない" {
+    local f="$REPO/docs/role-context-spec.md"
+    run grep -Fq -- 'opus[1m]' "$f"
+    [ "$status" -eq 0 ]
+    # 裁定の履歴を消さない契約の teeth: 上書きされた旧裁定 id と、上書きした本裁定 id の両方が残る。
+    run grep -Fq -- 'sc-9q6' "$f"
+    [ "$status" -eq 0 ]
+    run grep -Fq -- 'sc-pegi' "$f"
+    [ "$status" -eq 0 ]
+    # negative: 旧「既定 **fable**」は現役規約として不在（履歴として言及する文とは literal が異なる）。
+    run grep -Fq -- '既定 **fable**' "$f"
+    [ "$status" -ne 0 ]
+}
+
 # ---- fail-safe: doc 不在で exit 0 degrade ----
 @test "fail-safe(admin): protocol.md 不在 → exit 0・stdout 無注入・stderr 警告" {
     run --separate-stderr inject - "$BATS_TEST_TMPDIR" "$ANCHOR_JSON"

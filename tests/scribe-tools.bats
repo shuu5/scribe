@@ -107,7 +107,15 @@ _mk_main_and_linked() {
   run "$SPAWN" --dry-run un-4nm
   [ "$status" -eq 0 ]
   [[ "$output" == *"--bd-id un-4nm"* ]]
-  [[ "$output" == *"--model opus"* ]]
+  # sc-pegi: 隣接語込み literal で pin する（`*"--model opus"*` 単独では `--model opus[1m]` にも match し
+  # consult 既定の漏れを弁別できない＝旧 assert の穴）。隣接語は **次トークンが flag であること**だけに
+  # 結合させる（`--model opus --`）: worker plan 行の model 直後は cld-spawn の --effort feature-detect
+  # （scribe-spawn.sh の _effort_show）で `--disallowed-tools` / `--effort <LEVEL>` に分岐するため、片方の
+  # 具体語へ結合させると cld-spawn を PATH に持つホストで model と無関係に RED になる（fleet 配布 suite の
+  # host 依存 RED）。`--model opus --` は両分岐に一致し、`--model opus[1m] --` には一致しない（`opus` の
+  # 次文字が `[` ゆえ）＝弁別能を保ったまま host 非依存。
+  [[ "$output" == *"--model opus --"* ]]
+  [[ "$output" != *"opus[1m]"* ]]
   [[ "$output" == *"spawn/un-4nm-"* ]]
   [[ "$output" == *"@N"* ]]
   [[ "$output" == *"window_id"* ]]
@@ -364,7 +372,10 @@ _mk_beads() {
   [[ "$output" == *"settings.local.json"* ]]
   [[ "$output" == *"SCRIBE_SANDBOX"* ]]
   [[ "$output" == *"--bd-id un-4nm"* ]]      # 本番 spawn 行は SCRIBE_SANDBOX で変わらない
-  [[ "$output" == *"--model opus"* ]]
+  # sc-pegi: 隣接語込み（opus[1m] と弁別）。隣接語は「次トークンが flag」にのみ結合させ、--effort
+  # feature-detect の有無に非依存にする（host 依存 RED 回避・詳細は先頭の worker dry-run テスト参照）。
+  [[ "$output" == *"--model opus --"* ]]
+  [[ "$output" != *"opus[1m]"* ]]
 }
 
 @test "spawn(sandbox/sc-u53): 既定（SCRIBE_SANDBOX 未指定）で sandbox 節を出す（default-on・opt-out 化）" {
@@ -372,7 +383,10 @@ _mk_beads() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"settings.local.json"* ]]   # 既定で sandbox materialization を plan に出す（旧 default-off から反転・sc-u53）
   [[ "$output" == *"--bd-id un-4nm"* ]]
-  [[ "$output" == *"--model opus"* ]]
+  # sc-pegi: 隣接語込み（opus[1m] と弁別）。隣接語は「次トークンが flag」にのみ結合させ、--effort
+  # feature-detect の有無に非依存にする（host 依存 RED 回避・詳細は先頭の worker dry-run テスト参照）。
+  [[ "$output" == *"--model opus --"* ]]
+  [[ "$output" != *"opus[1m]"* ]]
 }
 
 @test "spawn(sandbox/sc-u53): SCRIBE_SANDBOX=0 で sandbox 節を出さない（明示 opt-out で旧 byte 経路へ戻る）" {
@@ -380,7 +394,10 @@ _mk_beads() {
   [ "$status" -eq 0 ]
   [[ "$output" != *"settings.local.json"* ]]
   [[ "$output" == *"--bd-id un-4nm"* ]]
-  [[ "$output" == *"--model opus"* ]]
+  # sc-pegi: 隣接語込み（opus[1m] と弁別）。隣接語は「次トークンが flag」にのみ結合させ、--effort
+  # feature-detect の有無に非依存にする（host 依存 RED 回避・詳細は先頭の worker dry-run テスト参照）。
+  [[ "$output" == *"--model opus --"* ]]
+  [[ "$output" != *"opus[1m]"* ]]
 }
 
 @test "spawn(sandbox/sc-u53): SCRIBE_SANDBOX=0(opt-out) と既定(on) で cld-spawn の spawn 行は byte 同一（full-line で pin）" {
@@ -827,6 +844,11 @@ _mk_beads() {
   [[ "$output" != *"[plan]"* ]]
 }
 
+# sc-pegi honest note（test 本体は byte 不変で維持・削除禁止）: 本 test は「consult は fable を締め出さない」
+# という**裁定 1 の fence**であって、fable 受理**機構**を検証したとは主張しない。consult 分岐には model 値の
+# allowlist も拒否分岐も存在せず（worker 側の die はここへ届かない）、現時点でこの assert を壊す実装が無い
+# ＝構造的に**準空虚**である。それでも残すのは、将来 consult 側に model 拒否分岐が足された瞬間に RED になる
+# 回帰網としての価値ゆえ。RED になったら実装が正しくなったのではなく裁定違反なので、test でなく実装を直すこと。
 @test "spawn: consult は --model fable を許容する（role-context-spec §2.3 の例外・worker との非対称）" {
   # consult は admin と同じ main-loop 系統ゆえ fable 起動が許される唯一の例外。
   # 同じ fable 指定でも worker（上テスト）は die・consult は通る＝道具が規約を変えない証拠。
@@ -1174,7 +1196,8 @@ _mk_valid_cfgdir() {
   cfg="$(CFG_NO_CREDS=1 _mk_valid_cfgdir)"
   noop="$BATS_TEST_TMPDIR/noop-cld-spawn"
   printf '#!/bin/bash\necho "cld-spawn-args: $*"\n' > "$noop"; chmod +x "$noop"
-  run env SCRIBE_CLD_SPAWN="$noop" SCRIBE_FABLE_PREFLIGHT=1 SCRIBE_WORKER_CONFIG_DIR="$cfg" "$SPAWN" --consult un-consult
+  # 本 test が見るのは config dir 欠落の fail-loud のみ（die は env-file の mktemp 到達前）。
+  run env SCRIBE_CLD_SPAWN="$noop" SCRIBE_WORKER_CONFIG_DIR="$cfg" "$SPAWN" --consult un-consult
   rm -rf "$cfg"
   [ "$status" -ne 0 ]
   [[ "$output" == *"credentials.json"* ]]
@@ -1194,107 +1217,20 @@ _mk_valid_cfgdir() {
   [ "$status" -eq 0 ]
 }
 
-# ---------- spawn: consult 既定 model = fable（sc-9q6・利用不可時 opus fallback） ----------
-@test "spawn: consult 既定 model は fable（--model 未指定・dry-run は preflight しない・sc-9q6）" {
-  run "$SPAWN" --dry-run --consult un-consult
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"--model claude-fable-5"* ]]
-  # dry-run は API を叩かず、本起動時 preflight の予告行だけ出す（副作用ゼロ維持）。
-  [[ "$output" == *"preflight"* ]]
-}
-
-@test "spawn: consult --model 明示は fable 既定より優先される（sc-9q6）" {
-  run "$SPAWN" --dry-run --consult --model opus un-consult
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"--model opus"* ]]
-  [[ "$output" != *"--model claude-fable-5"* ]]
-  # 明示時は preflight 予告も出ない（既定解決の経路に入らない）。
-  [[ "$output" != *"preflight"* ]]
-}
-
-@test "spawn: consult 実起動で fable preflight 失敗 → opus へ loud fallback（SCRIBE_FABLE_PREFLIGHT=0 注入・sc-9q6）" {
-  noop="$BATS_TEST_TMPDIR/noop-cld-spawn"
-  printf '#!/bin/bash\necho "cld-spawn-args: $*"\n' > "$noop"; chmod +x "$noop"
-  run env SCRIBE_CLD_SPAWN="$noop" SCRIBE_FABLE_PREFLIGHT=0 "$SPAWN" --consult un-consult
-  [ "$status" -eq 0 ]
-  # spawn 行と結果行の両方が opus（fallback 済み）になり、WARN が loud に出る（silent 降格禁止）。
-  [[ "$output" == *"--model opus"* ]]
-  [[ "$output" == *"model=opus"* ]]
-  [[ "$output" == *"WARN"* ]]
-  [[ "$output" != *"claude-fable-5"* ]]
-}
-
-@test "spawn: consult 実起動で fable preflight 成功 → fable のまま起動（SCRIBE_FABLE_PREFLIGHT=1 注入・sc-9q6）" {
-  noop="$BATS_TEST_TMPDIR/noop-cld-spawn"
-  printf '#!/bin/bash\necho "cld-spawn-args: $*"\n' > "$noop"; chmod +x "$noop"
-  run env SCRIBE_CLD_SPAWN="$noop" SCRIBE_FABLE_PREFLIGHT=1 "$SPAWN" --consult un-consult
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"--model claude-fable-5"* ]]
-  [[ "$output" == *"model=claude-fable-5"* ]]
-  [[ "$output" != *"WARN"* ]]
-}
-
-@test "spawn: consult --model 明示時は preflight を実行しない（SCRIBE_FABLE_PREFLIGHT=0 でも fallback しない・sc-9q6）" {
-  # 明示 --model claude-fable-5 はユーザーの確定指定＝preflight 対象外（fallback で上書きしない）。
-  noop="$BATS_TEST_TMPDIR/noop-cld-spawn"
-  printf '#!/bin/bash\necho "cld-spawn-args: $*"\n' > "$noop"; chmod +x "$noop"
-  run env SCRIBE_CLD_SPAWN="$noop" SCRIBE_FABLE_PREFLIGHT=0 "$SPAWN" --consult --model claude-fable-5 un-consult
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"--model claude-fable-5"* ]]
-  [[ "$output" != *"WARN"* ]]
-}
-
-@test "spawn: worker の既定 model は opus のまま（consult の fable 既定が worker へ漏れない・sc-9q6）" {
+# ---------- spawn: consult 既定 model（sc-pegi で fable→opus[1m] へ改訂） ----------
+# 旧 sc-9q6 の既定 fable + preflight/fallback を検証していた 9 本（既定 fable / 明示優先 / preflight 3 枝 /
+# fable_available 実路 4 本）は sc-pegi の機構撤去に伴い撤去・書換した。後継 teeth は本ファイル末尾の
+# 「sc-pegi:」ブロック（既定 pin / 明示優先 / 撤去 3 識別子の 0 hit / mutation 非空虚 / real-exec argv 行完全一致 /
+# docs teeth）。旧 3 枝は検証対象の機構ごと消えたため後継を持たない（teeth 純減は上記 6 本で埋めている）。
+@test "spawn(sc-pegi): worker の既定 model は素の opus のまま（consult 既定 opus[1m] が worker へ漏れない）" {
   run "$SPAWN" --dry-run un-4nm
   [ "$status" -eq 0 ]
-  [[ "$output" == *"--model opus"* ]]
+  # sc-pegi: 隣接語込み（opus[1m] と弁別）。隣接語は「次トークンが flag」にのみ結合させ、--effort
+  # feature-detect の有無に非依存にする（host 依存 RED 回避・詳細は先頭の worker dry-run テスト参照）。
+  [[ "$output" == *"--model opus --"* ]]
+  # negative: consult 既定（opus[1m]）も旧既定（fable）も worker 経路には現れない。
+  [[ "$output" != *"opus[1m]"* ]]
   [[ "$output" != *"claude-fable-5"* ]]
-}
-
-# ---------- spawn: fable_available 実路（SCRIBE_CLAUDE_BIN stub 注入・rc 述語の境界を実証・sc-9q6 gate 指摘） ----------
-# SCRIBE_FABLE_PREFLIGHT を渡さず実路（timeout + rc 述語 [[ rc==0 || rc==124 ]]）を駆動する。
-# stub claude が exit code を返す＝timeout(1) は子の exit code を透過するため、受理/棄却境界を決定的に再現できる。
-_make_claude_stub() { # $1=exit code
-  local stub="$BATS_TEST_TMPDIR/claude-stub-$1"
-  printf '#!/bin/bash\nexit %s\n' "$1" > "$stub"; chmod +x "$stub"; echo "$stub"
-}
-_make_noop_cld_spawn() {
-  local noop="$BATS_TEST_TMPDIR/noop-cld-spawn"
-  printf '#!/bin/bash\necho "cld-spawn-args: $*"\n' > "$noop"; chmod +x "$noop"; echo "$noop"
-}
-
-@test "spawn: fable_available 実路 rc=0（即成功）→ fable 維持（sc-9q6）" {
-  noop="$(_make_noop_cld_spawn)"; stub="$(_make_claude_stub 0)"
-  run env SCRIBE_CLD_SPAWN="$noop" SCRIBE_CLAUDE_BIN="$stub" "$SPAWN" --consult un-consult
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"model=claude-fable-5"* ]]
-  [[ "$output" != *"WARN"* ]]
-}
-
-@test "spawn: fable_available 実路 rc=124（timeout=受理）→ fable 維持（正常 fable は 60s+ ゆえ timeout を利用可とみなす・sc-9q6）" {
-  # rc=124 を不可扱いに退行させると正常 fable が恒常 opus 降格になる＝この境界が本 feature の核心。
-  noop="$(_make_noop_cld_spawn)"; stub="$(_make_claude_stub 124)"
-  run env SCRIBE_CLD_SPAWN="$noop" SCRIBE_CLAUDE_BIN="$stub" "$SPAWN" --consult un-consult
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"model=claude-fable-5"* ]]
-  [[ "$output" != *"WARN"* ]]
-}
-
-@test "spawn: fable_available 実路 rc=1（fast fail=利用不可）→ opus へ loud fallback（sc-9q6）" {
-  noop="$(_make_noop_cld_spawn)"; stub="$(_make_claude_stub 1)"
-  run env SCRIBE_CLD_SPAWN="$noop" SCRIBE_CLAUDE_BIN="$stub" "$SPAWN" --consult un-consult
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"model=opus"* ]]
-  [[ "$output" == *"WARN"* ]]
-  [[ "$output" != *"model=claude-fable-5"* ]]
-}
-
-@test "spawn: fable_available 実路 rc=127（bin 不在相当）→ opus へ loud fallback（sc-9q6）" {
-  noop="$(_make_noop_cld_spawn)"; stub="$(_make_claude_stub 127)"
-  run env SCRIBE_CLD_SPAWN="$noop" SCRIBE_CLAUDE_BIN="$stub" "$SPAWN" --consult un-consult
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"model=opus"* ]]
-  [[ "$output" == *"WARN"* ]]
 }
 
 @test "spawn: prompt テンプレに cell-quality WF / receivedArgs / bdw / 禁止が含まれる" {
@@ -4161,4 +4097,133 @@ cmd=m[0]['hooks'][0]['command']; assert 'edit-write-guard.py' in cmd, 'guard 未
   run bash -c "grep -n 'worktree add -b \"\$BRANCH\"' '$SPAWN' | cut -d: -f1"
   local add_ln="$output"
   [ "$mktemp_ln" -lt "$add_ln" ]
+}
+
+# ============================================================================
+# sc-pegi: consult 既定 model = opus[1m]（2026-07-25 user 裁定・sc-9q6 の既定 fable を上書き）
+# ----------------------------------------------------------------------------
+# TEETH 記法の規約（本 cell で確立・admin 実測）: `opus` と `opus[1m]` は **部分一致で弁別できない**
+# （`*"--model opus"*` は `--model opus[1m]` にも match する＝旧 assert 群は誤実装を全 green で通した）。
+# ゆえに model 系 assert は
+#   (a) positive を **隣接語込み literal** で書く（bash 部分一致なら右辺を必ず二重引用し `--window-name`
+#       まで含める / grep なら `-F` 必須）。右辺を引用しないと `[1m]` が文字クラス化して常に不一致になる。
+#   (b) negative を対で置く（`claude-fable-5` が出ないこと・素の `--model opus` + 区切りが出ないこと）。
+# 未 escape の grep で `opus[1m]` を探す形は bracket expression 化して常に不一致＝false-green ゆえ禁止。
+# ============================================================================
+
+@test "spawn(sc-pegi): consult 既定 model は opus[1m]（--model 未指定・隣接語込み literal で pin + 素 opus/fable を対で refute）" {
+  run "$SPAWN" --dry-run --consult un-consult
+  [ "$status" -eq 0 ]
+  # positive: `--window-name` まで含めた隣接語込み literal＝部分一致でも opus と弁別できる唯一の形。
+  [[ "$output" == *"--model opus[1m] --window-name consult-"* ]]
+  # negative(1): 旧既定 fable が既定解決に残っていない。
+  [[ "$output" != *"claude-fable-5"* ]]
+  # negative(2): 素の opus（裁定 2 の 1M context を失う退行）へ落ちていない。
+  [[ "$output" != *"--model opus --window-name"* ]]
+  # negative(3): 撤去済み preflight/fallback の予告文言が plan に残っていない（NEG-TERM: 汎用語
+  # `preflight` / `fallback` は config-dir 追随・sandbox 依存検査など**別機構**が正当に出力するため
+  # negative に使えない。判定は撤去対象の具体 literal に限定する）。
+  [[ "$output" != *"opus へ loud fallback"* ]]
+  [[ "$output" != *"[plan] model:"* ]]
+}
+
+@test "spawn(sc-pegi): consult --model opus 明示は新既定 opus[1m] に上書きされない（明示優先・弁別可能な negative 付き）" {
+  run "$SPAWN" --dry-run --consult --model opus un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--model opus --window-name consult-"* ]]
+  # 明示した素 opus が既定 opus[1m] に化けていない（旧 assert では両者を弁別できなかった）。
+  [[ "$output" != *"opus[1m]"* ]]
+  [[ "$output" != *"claude-fable-5"* ]]
+}
+
+@test "spawn(sc-pegi): 撤去した fable preflight 機構の 3 識別子が scribe-spawn.sh に 0 hit（dangling 参照ゼロ）" {
+  local _id
+  for _id in CONSULT_FABLE_MODEL fable_available SCRIBE_FABLE_PREFLIGHT; do
+    run grep -Fq -- "$_id" "$SPAWN"
+    [ "$status" -ne 0 ]
+  done
+  # 撤去禁止の兄弟 seam は不変で残る（bg transport の claude 実体 seam。参照実装を写経して
+  # これらまで消すと transport / confirm suite が全滅する＝非対称が正）。
+  run grep -Fq -- 'SCRIBE_CLAUDE_BIN' "$SPAWN"
+  [ "$status" -eq 0 ]
+  # `CLAUDE_BIN` 単体は `SCRIBE_CLAUDE_BIN` の部分文字列＝独立した保証にならないので、実体の
+  # 既定解決行を literal で pin する（この 1 行が消えると bg transport の claude 実体 seam が壊れる）。
+  run grep -Fq -- 'CLAUDE_BIN="${SCRIBE_CLAUDE_BIN:-claude}"' "$SPAWN"
+  [ "$status" -eq 0 ]
+}
+
+@test "spawn(sc-pegi): mutation 非空虚 — 既定を fable へ変異させると既定 pin teeth が RED flip する" {
+  # MUTATION-HOWTO: scribe-spawn.sh は readlink で自身の実体 dir を解決して lib を source するため、
+  # 変異コピーは lib を隣接複製してから実行する（consult 分岐は sandbox 生成器を使わないので lib のみで足りる）。
+  local mut="$BATS_TEST_TMPDIR/mut-spawn"
+  mkdir -p "$mut/lib"
+  cp "$SPAWN" "$mut/scribe-spawn.sh"; chmod +x "$mut/scribe-spawn.sh"
+  cp "$SCRIPTS/lib/scribe-lib.sh" "$mut/lib/scribe-lib.sh"
+  # 変異**前**の存在 assert（sed が対象を掴めず silent no-op になる形を塞ぐ・その 1）
+  run grep -Fq -- 'CONSULT_DEFAULT_MODEL="opus[1m]"' "$mut/scribe-spawn.sh"
+  [ "$status" -eq 0 ]
+  sed -i 's|^[[:space:]]*CONSULT_DEFAULT_MODEL=.*|  CONSULT_DEFAULT_MODEL="claude-fable-5"|' "$mut/scribe-spawn.sh"
+  # 変異**後**の存在 assert（その 2・変異が実際に当たった＝no-op でない）
+  run grep -Fq -- 'CONSULT_DEFAULT_MODEL="claude-fable-5"' "$mut/scribe-spawn.sh"
+  [ "$status" -eq 0 ]
+  run grep -Fq -- 'CONSULT_DEFAULT_MODEL="opus[1m]"' "$mut/scribe-spawn.sh"
+  [ "$status" -ne 0 ]
+  # 変異体の dry-run では既定 pin teeth が落ちる＝上の既定 teeth は非空虚（実装を見ている）。
+  run "$mut/scribe-spawn.sh" --dry-run --consult un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"--model opus[1m] --window-name consult-"* ]]
+  [[ "$output" == *"--model claude-fable-5 --window-name consult-"* ]]
+}
+
+# real-exec argv pin（TEETH-IDIOM-TRANSLATION (B)）: **1 引数 1 行**で argv を dump する専用 stub を
+# SCRIBE_CLD_SPAWN へ渡し、**行完全一致**（grep -Fxq）で新既定を pin する。dry-run 側 teeth は plan 行に
+# anchor path と時刻由来 window 名が混ざるため行完全一致が原理的に不可能で、隣接語込み literal が上限。
+# 既存 noop stub は多数テストの共有資産ゆえ書き換えず、本 stub を別に足す。
+# 注（CELL-ENV）: consult 実起動路は env-file を `mktemp /tmp/...` の絶対テンプレートで作り TMPDIR を
+# 無視するため、/tmp が read-only な CC worker sandbox 下では本 test は **環境 RED** になる（実装退行では
+# ない）。green 確認は anchor / gate 側で行う。
+_make_argvdump_cld_spawn() { # $1=dump file
+  local stub="$BATS_TEST_TMPDIR/argvdump-cld-spawn"
+  printf '#!/usr/bin/env bash\nfor a in "$@"; do printf "%%s\\n" "$a" >> "%s"; done\nexit 0\n' "$1" > "$stub"
+  chmod +x "$stub"; echo "$stub"
+}
+
+@test "spawn(sc-pegi): consult 実起動の実 argv が行完全一致で --model / opus[1m] を持つ（素 opus と fable を行完全一致で refute）" {
+  local dump stub
+  dump="$BATS_TEST_TMPDIR/argv.dump"; : > "$dump"
+  stub="$(_make_argvdump_cld_spawn "$dump")"
+  run env SCRIBE_CLD_SPAWN="$stub" "$SPAWN" --consult un-consult
+  [ "$status" -eq 0 ]
+  run grep -Fxq -- '--model' "$dump"
+  [ "$status" -eq 0 ]
+  run grep -Fxq -- 'opus[1m]' "$dump"
+  [ "$status" -eq 0 ]
+  # refute は `run` + status 比較で書く（`! grep …` を中間位置に置くと errexit 免除で無牙になる）。
+  run grep -Fxq -- 'opus' "$dump"
+  [ "$status" -ne 0 ]
+  run grep -Fxq -- 'claude-fable-5' "$dump"
+  [ "$status" -ne 0 ]
+}
+
+# ---------- sc-pegi: docs teeth（改訂前は docs の model 記述を pin する assert が repo に 1 本も無く空虚だった） ----------
+@test "docs(sc-pegi): skills/consult/SKILL.md の model 行が新既定 opus[1m]（旧「既定 fable」と素 opus 明示例は不在）" {
+  local f="$REPO_ROOT/skills/consult/SKILL.md"
+  run grep -Fq -- 'model は既定 opus[1m]' "$f"
+  [ "$status" -eq 0 ]
+  run grep -Fq -- 'model は既定 fable' "$f"
+  [ "$status" -ne 0 ]
+  # 素 opus を勧める明示例は削除する（新既定の 1M context を失う後遺症を生むため・裁定 2）。
+  run grep -Fq -- '--consult --model opus' "$f"
+  [ "$status" -ne 0 ]
+}
+
+@test "docs(sc-pegi): scripts/README.md の consult モデル規約が新既定 opus[1m]（worker 非対称は保持・旧「既定 fable」不在）" {
+  local f="$REPO_ROOT/scripts/README.md"
+  run grep -Fq -- 'opus[1m]' "$f"
+  [ "$status" -eq 0 ]
+  run grep -Fq -- '既定 fable' "$f"
+  [ "$status" -ne 0 ]
+  # worker/consult の非対称という構造は保持する（内容だけ新既定へ書き換える）。
+  run grep -Fq -- 'worker は fable 厳禁' "$f"
+  [ "$status" -eq 0 ]
 }

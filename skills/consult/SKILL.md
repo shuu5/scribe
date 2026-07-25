@@ -5,7 +5,7 @@ description: |
   scribe-spawn --consult の薄い wrapper。ユーザーが consult を能動起動する唯一の入口。
   spawn 前に protocol §7 入口B のルーティング判定を行う（決定確定型の議題は pre-bake を推奨・ユーザー裁定）。
   consult は anchor 同居・read-only セッション（実装・gate 代行・オーケストレーションはしない）。
-  model は既定 fable・利用不可時のみ opus へ自動 fallback（--model 明示が優先・role-context-spec §2.3）。
+  model は既定 opus[1m]（alias 形 + 1M context・--model 明示が優先・role-context-spec §2.3）。
 
   Use when user wants to: 設計を相談したい / 別セッションに grill させたい / 論点を第 2 視点で詰めたい,
   says 「consult 起動」「相談役を呼んで」「設計を詰める別セッション」「grill セッション立てて」。
@@ -44,14 +44,17 @@ consult を **ユーザーが能動起動する唯一の入口**。役割・禁�
    "${CLAUDE_PLUGIN_ROOT}/scripts/scribe-spawn.sh" --consult
    ```
    - **議題参照付き**: `"${CLAUDE_PLUGIN_ROOT}/scripts/scribe-spawn.sh" --consult <bd-id>`
-   - **model 明示**（既定 fable を上書きしたいとき・例: opus を強制）:
-     `"${CLAUDE_PLUGIN_ROOT}/scripts/scribe-spawn.sh" --consult --model opus`
+   - **model 明示**（既定 `opus[1m]` を上書きしたいとき・例: fable を明示指定）:
+     `"${CLAUDE_PLUGIN_ROOT}/scripts/scribe-spawn.sh" --consult --model claude-fable-5`
+     （素の `opus` を明示すると新既定が買っている 1M context を失うので、既定でよいなら `--model` を付けない）
 3. 起動後、`scribe-spawn` が出す `spawned(consult): ...` 行をユーザーに伝える。
 
-## モデル規約（SSOT = role-context-spec §2.3・sc-9q6 改訂）
-- **既定 fable**（`claude-fable-5`）。scribe-spawn が実起動時に preflight し、**fable 利用不可のときだけ
-  opus へ loud fallback** する（dry-run は API を叩かない）。`--model` 明示は既定より常に優先。
-- worker は fable 厳禁（不変）。consult の fable 既定と混同しないこと。
+## モデル規約（SSOT = role-context-spec §2.3）
+- **既定 `opus[1m]`**（alias 形＝版 bump で pin が腐らない・1M context で長寿命 main-loop の context 肥大に耐える）。
+  model 可否の preflight と降格 fallback は持たない（既定が opus 系なら判定は死にコードで、残すと素 opus への
+  silent 降格経路になり 1M context を失う）。`--model` 明示は既定より常に優先。
+- worker は fable 厳禁（不変）。consult は fable が**既定ではない**が `--model claude-fable-5` の明示なら
+  受理される——この非対称を混同しないこと。
 
 ## window 名（一目で識別できるように）
 - `scribe-spawn --consult` は `--bd-id` を渡さない設計のため、放っておくと window 名が汎用命名
