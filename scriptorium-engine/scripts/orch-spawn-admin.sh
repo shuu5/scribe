@@ -36,21 +36,23 @@
 #     --force-new（封鎖付きで建て直し）を使う（詳細は下記「window 再利用 × --disallowed-tools」節・使い方セクション）。
 #     封鎖なし（--no-disallowed-tools）なら従来どおり二度叩いても窓が増えず既存へ select される。
 #
-# model / effort（admin spawn 既定改訂・orch-k660・user 裁定 2026-07-14） ────────────
-#   ★admin session の spawn 既定 = **fable かつ effort xhigh**（~/.claude/CLAUDE.md「Workflow モデル階層
-#     ルーティング」が SSOT）。fable は admin main-loop 系統で許される規約内既定（WF agent への fable 投入とは
-#     無関係）。従来は既定 opus 明示だったが、admin main-loop は fable で運用する user 裁定に合わせて改訂した
-#     （worker spawn=`--model opus` 必ず明示 は不変＝改訂は admin spawn の既定だけ）。
-#   ★fable 利用不可（API/アクセス障害）の preflight fallback = **Opus 1M で xhigh**。model 文字列は実 binary
-#     照合で受理形を確定した（orch-k660 worker・実機 claude binary で `--model opus[1m]` /
-#     `claude-opus-4-8[1m]` 両形が rc=0 応答・不受理 model は "There's an issue with the selected model" を返し
-#     区別可＝stub fidelity 教訓の実 binary verify）。version-robust な alias 形 `opus[1m]`（＝latest opus + 1M
-#     context）を採用する（fable も alias 既定・opus 4.8 の版 bump で pin が腐らない）。fable preflight は scribe
-#     consult の sc-9q6（fast fail のみ不可扱い・timeout=利用可）を REUSE する（下記 fable_available）。preflight
-#     は **実起動時のみ**（dry-run は API を叩かない＝副作用ゼロ）。seam ORCH_SPAWN_ADMIN_FABLE_PREFLIGHT=1/0。
+# model / effort（admin spawn 既定・orch-i7ft・user 裁定 2026-07-25／orch-k660 を改訂） ──
+#   ★admin session の spawn 既定 = **opus[1m] かつ effort xhigh**（~/.claude/CLAUDE.md「Workflow モデル階層
+#     ルーティング」が上位 SSOT。上位 SSOT 側の追随は courier orch-gerr 便で係属中（規約と実装は独立 land 可）
+#     ゆえ本 script の先行で一貫性は壊れない）。Opus 5 が利用可能になったため admin/orchestrator の既定を
+#     fable から Opus（1M context）へ切り替えた。orch-k660（2026-07-14）当時は既定 fable +「fable 不可なら
+#     opus[1m] へ preflight fallback」だったが、本改訂で **fallback 先を既定へ昇格**させ、死にコードとなる
+#     fable preflight 機構（判定関数 / fallback model 変数 / 可否注入 seam / preflight 専用 claude 実体 seam）は
+#     撤去した。`--model fable` の明示経路は残す（既定から外すだけ＝締め出さない・裁定 1）。worker spawn=
+#     `--model opus` 必ず明示 と orch-dispatch の worker fable die は不変（改訂は admin spawn の既定だけ）。
+#   ★model 文字列は version-robust な alias 形 `opus[1m]`（＝latest opus + 1M context）。版 bump で pin が腐らず、
+#     長寿命な admin main-loop の context 肥大に 1M context で耐える。受理形は orch-k660 worker・実機 claude
+#     binary で `--model opus[1m]` が rc=0 応答・不受理 model は "There's an issue with the selected model" を
+#     返し区別可＝実 binary 照合で確定済み（stub fidelity 教訓）。本改訂は当時の fallback 文字列をそのまま既定へ
+#     昇格させる形ゆえ追加の受理検証は不要（裁定 2）。
 #   ★effort xhigh は ambient 既定に依存しない（実測: 素の session は high であって xhigh 保証なし）ゆえ cld-spawn
 #     の --effort passthrough で **明示注入して保証**する（--effort で override 可・下記 EFFORT）。
-#   --model 明示は常に既定 fable/preflight より優先（MODEL_EXPLICIT）。
+#   --model 明示は常に既定より優先（MODEL_EXPLICIT）。
 #
 # /effort ultracode 注入（spawn 後・kickoff 前・orch-k660 leg2） ─────────────────────
 #   admin を ultracode で起動したい（standing multi-agent orchestration）。ultracode は env で載せられず、CLI の
@@ -58,9 +60,10 @@
 #   コマンド `/effort ultracode` を spawn 後に別 submission として直接注入**する（scribe 運用 memory の「/effort
 #   ultracode 打鍵」実績＝feasible）。kickoff より前に注入し、effort が kickoff の turn に効くようにする。
 #   送達確認は cld-spawn --inject-existing の read-back（inject-file + 受理確認）を REUSE する。不受理/送達失敗は
-#   **fail-open**（admin は fable+xhigh のまま稼働継続）+ ⚠ loud、opt-out は --no-effort-inject。
-#   ★[xhigh]（effort level）と ultracode（session mode）は footer に共存する（acceptance(f) の実 spawn footer
-#     「Fable 5 [xhigh] + ultracode」で orchestrator が gate 後に実測確認する＝worker sandbox は実 spawn 不能）。
+#   **fail-open**（admin は既定 model+xhigh のまま稼働継続）+ ⚠ loud、opt-out は --no-effort-inject。
+#   ★[xhigh]（effort level）と ultracode（session mode）は footer に共存する（実 spawn footer に「Opus（1M）系
+#     表記 + [xhigh] + ultracode」が並ぶ形を orchestrator が gate 後に実測確認する＝worker sandbox は実 spawn
+#     不能。alias 解決先の literal は版で変わるため断定しない）。
 #
 # spawn 後の kickoff turn-start 実照合（併修 orch-sm6p・boot-race defense-in-depth） ──
 #   起動レースで cld-spawn の read-back（受理確認）が偽陽性を返し、初回注入が boot 中の TUI 再描画に飲まれても
@@ -118,9 +121,9 @@
 #                        未指定は従来挙動（既定 ~/.claude・unset 注入・下記「account 選択」節）。
 #     --force-new        既存 admin window を再利用せず必ず新規作成（cld-spawn へ pass-through）。
 #     --dry-run          実行予定の cld-spawn コマンドを print するのみ（何も起動しない）。
-#     --model MODEL      cld の model（既定 fable・不可時 opus[1m] へ preflight fallback・明示は既定より優先）。
+#     --model MODEL      cld の model（既定 opus[1m]・明示は既定より優先。`--model fable` も締め出さず透過する）。
 #     --effort LEVEL     cld の effort（既定 xhigh・明示注入で保証）。cld-spawn --effort passthrough へ透過。
-#     --no-effort-inject spawn 後の `/effort ultracode` 注入を無効化（ultracode 起動を見送る＝fable+xhigh のまま）。
+#     --no-effort-inject spawn 後の `/effort ultracode` 注入を無効化（ultracode 起動を見送る＝既定 model+xhigh のまま）。
 #     --disallowed-tools CSV  cld→claude へ物理封鎖する対話 tool（既定 'AskUserQuestion,ExitPlanMode'・orch-ce6）。
 #                        cld-spawn の --disallowed-tools passthrough（orch-6sd）へ verbatim 1-argv 透過する。
 #     --no-disallowed-tools   対話 tool 封鎖を無効化（人間直付き admin を明示 spawn する等の例外用）。
@@ -164,9 +167,6 @@
 #                         （SCRIBE_USAGE_JSON / SCRIBE_USAGE_CMD / SCRIBE_USAGE_NOW）は env でそのまま透過する。
 #   ORCH_ACCOUNTS_BASE    account label→dir の基底（既定: ~/.claude-accounts・F12）。<base>/<label> を注入。
 #   CLD_ENV_FILE          env-file が chain-source するホスト既定 env（既定: ~/.cld-env）。
-#   ORCH_SPAWN_ADMIN_FABLE_PREFLIGHT  1=fable 利用可を強制 / 0=不可を強制（未設定=実測。fable 既定の fallback
-#                         判定用 seam・sc-9q6 の SCRIBE_FABLE_PREFLIGHT と同型・bats/緊急時の注入口）。
-#   ORCH_SPAWN_CLAUDE_BIN fable preflight が叩く claude 実体（既定: claude）。
 #   ORCH_SPAWN_ADMIN_SESSION_STATE  kickoff turn-start 照合の session-state.sh 実体（既定: ~/.claude/plugins/
 #                         session/scripts/session-state.sh）。`state <window>` が processing/input-waiting 等を返す。
 #   ORCH_SPAWN_ADMIN_VERIFY_ATTEMPTS / _VERIFY_SETTLE  turn-start poll の試行回数（既定 6）/ 間隔秒（既定 2）。
@@ -250,14 +250,14 @@ CLD_SPAWN="${ORCH_SPAWN_CLD:-$HOME/.claude/plugins/session/scripts/cld-spawn}"
 PROJECT=""
 DRY_RUN=false
 FORCE_NEW=false
-# admin spawn 既定改訂（orch-k660・user 裁定 2026-07-14）: 既定 model=fable（従来 opus）・不可時 opus[1m] へ
-#   preflight fallback（下記 fable_available）。--model 明示は MODEL_EXPLICIT で既定/fallback より常に優先。
-MODEL="fable"
+# admin spawn 既定（orch-i7ft・user 裁定 2026-07-25／orch-k660 の既定 fable を改訂）: 既定 model=opus[1m]
+#   （旧: 既定 fable + 不可時 opus[1m] へ preflight fallback → fallback 先を既定へ昇格し preflight 機構は撤去）。
+#   --model 明示は MODEL_EXPLICIT で既定より常に優先（`--model fable` も die させず verbatim 透過＝裁定 1）。
+MODEL="opus[1m]"
 MODEL_EXPLICIT=false
-FABLE_FALLBACK_MODEL="opus[1m]"   # fable 利用不可時の fallback（Opus 1M・alias 形＝version-robust・実 binary 受理確認済み）
 # effort xhigh は ambient 既定に依存せず --effort 明示注入で保証する（orch-k660 leg1）。--effort で override 可。
 EFFORT="xhigh"
-# spawn 後の `/effort ultracode` 注入（orch-k660 leg2）。--no-effort-inject で見送り（fable+xhigh のまま）。
+# spawn 後の `/effort ultracode` 注入（orch-k660 leg2）。--no-effort-inject で見送り（既定 model+xhigh のまま）。
 INJECT_EFFORT_ULTRACODE=true
 ACCOUNT=""        # spawn する admin の CLAUDE_CONFIG_DIR account（""=未指定=従来挙動・"auto"=maximin・その他=label）。
 PROMPT_ARGS=()
@@ -741,34 +741,6 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# fable preflight → Opus 1M fallback（orch-k660 leg1・sc-9q6 REUSE・実起動時のみ）
-# ─────────────────────────────────────────────────────────────────────────────
-#   admin spawn 既定 model=fable（user 裁定）。fable が利用不可（API/アクセス障害）のときだけ Opus 1M
-#   （$FABLE_FALLBACK_MODEL=opus[1m]・xhigh は EFFORT で別途保証）へ **loud** fallback する（silent 降格しない）。
-#   判定は scribe consult の sc-9q6 を REUSE: fable は最小 -p でも応答に 60s+ かかる一方、利用不可は ~5s で
-#   fast fail する（rc≠0/124以外）。ゆえに rc=0（応答）or rc=124（timeout=受理され処理中）を **利用可**、
-#   fast fail のみ **不可** とみなす（完了待ちだと正常 fable が常に偽不可＝恒常 opus 降格になる）。
-#   --model 明示（MODEL_EXPLICIT）は fallback 対象外（常に優先）。preflight は実起動時のみ（dry-run は API を
-#   叩かない＝副作用ゼロ）。seam ORCH_SPAWN_ADMIN_FABLE_PREFLIGHT=1/0 で可否を強制注入（bats/緊急時）。
-fable_available() {
-    case "${ORCH_SPAWN_ADMIN_FABLE_PREFLIGHT:-}" in
-        1) return 0 ;;
-        0) return 1 ;;
-    esac
-    local rc=0
-    timeout 15 "${ORCH_SPAWN_CLAUDE_BIN:-claude}" --model "$MODEL" -p "ok" \
-        --strict-mcp-config --mcp-config '{"mcpServers":{}}' >/dev/null 2>&1 || rc=$?
-    [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]
-}
-# 実起動時のみ preflight（dry-run は fable のまま plan 表示し「実起動時に fallback」と注記する）。
-if [ "$DRY_RUN" = false ] && [ "$MODEL_EXPLICIT" = false ] && [ "$MODEL" = "fable" ]; then
-    if ! fable_available; then
-        echo "orch-spawn-admin: ⚠ fable preflight 失敗 → admin を $FABLE_FALLBACK_MODEL（Opus 1M）で起動します（既定 fable の loud fallback・orch-k660/sc-9q6）。effort は $EFFORT を維持。" >&2
-        MODEL="$FABLE_FALLBACK_MODEL"
-    fi
-fi
-
-# ─────────────────────────────────────────────────────────────────────────────
 # cld-spawn コマンド構築（spawn 専用＝payload なし・kickoff/effort は spawn 後に別 submission で注入）
 # ─────────────────────────────────────────────────────────────────────────────
 #   ★orch-k660: 従来は `-- "$KICKOFF"` を spawn 呼出に束ねて cld-spawn に注入させたが、`/effort ultracode` を
@@ -800,20 +772,18 @@ echo "== orch-spawn-admin ($mode_label) =="
 echo "  project : $PROJECT"
 echo "  cwd     : $CWD"
 echo "  window  : $WINDOW_NAME"
-# model 行は MODEL_EXPLICIT でも分岐する（cell-quality gate minor#1）: --model 明示時は preflight/fallback を
-#   実行しない（:684 のガード `[ "$MODEL_EXPLICIT" = false ]`）ため、dry-run でも preflight/fallback を予告しない。
+# model 行は MODEL_EXPLICIT で分岐する（旧 3 分岐は orch-i7ft の preflight 撤去で 2 分岐へ縮約＝dry-run と実起動で
+#   model 解決が同一になり「実起動時に fallback」の予告が不要になった）。明示は既定より常に優先（MODEL_EXPLICIT）。
 if [ "$MODEL_EXPLICIT" = true ]; then
-    echo "  model   : $MODEL（--model 明示ゆえ既定 fable / preflight / opus[1m] fallback は適用しない・orch-k660）"
-elif [ "$DRY_RUN" = false ]; then
-    echo "  model   : $MODEL（既定 fable・不可時 $FABLE_FALLBACK_MODEL へ preflight 済・orch-k660）"
+    echo "  model   : $MODEL（--model 明示ゆえ既定より優先・orch-i7ft）"
 else
-    echo "  model   : $MODEL（既定 fable・実起動時に preflight し不可なら $FABLE_FALLBACK_MODEL へ loud fallback・orch-k660）"
+    echo "  model   : $MODEL（既定・user 裁定 2026-07-25・orch-i7ft）"
 fi
 echo "  effort  : $EFFORT（--effort 明示注入で保証・cld-spawn --effort passthrough・orch-k660）"
 if [ "$INJECT_EFFORT_ULTRACODE" = true ]; then
     echo "  ultra   : spawn 後に /effort ultracode を kickoff 前へ注入（送達確認つき・不受理は fail-open+loud・orch-k660 leg2）"
 else
-    echo "  ultra   : /effort ultracode 注入は見送り（--no-effort-inject＝fable+xhigh のまま）"
+    echo "  ultra   : /effort ultracode 注入は見送り（--no-effort-inject＝既定 model+xhigh のまま）"
 fi
 echo "  account : $CFG_SOURCE"
 echo "  cfgdir  : ${CFG_DIR:-<unset＝既定 ~/.claude>}（cld-spawn --env-file 経由で config-dir 追随・F1/F5）"
@@ -902,13 +872,13 @@ _inject_kickoff() {
 
 # _run_post_spawn_injections — spawn 後の submission 列（effort ultracode → kickoff）を実行する。
 #   effort ultracode: 送達確認のみ（スラッシュコマンドは turn を起こさない可能性ゆえ turn 照合しない）・不受理は
-#     fail-open+loud（admin は fable+xhigh のまま稼働継続）。kickoff: 送達確認＋turn 起動照合（fail-loud）。
+#     fail-open+loud（admin は既定 model+xhigh のまま稼働継続）。kickoff: 送達確認＋turn 起動照合（fail-loud）。
 _run_post_spawn_injections() {
     if [ "$INJECT_EFFORT_ULTRACODE" = true ]; then
         if _deliver "/effort ultracode"; then
             echo "orch-spawn-admin: /effort ultracode を注入しました（送達確認済み・orch-k660 leg2）。" >&2
         else
-            echo "orch-spawn-admin: ⚠ /effort ultracode の注入に失敗しました（不受理/送達失敗）。admin は fable+xhigh のまま稼働継続します（fail-open・--no-effort-inject で本注入を見送れる・orch-k660 leg2）。" >&2
+            echo "orch-spawn-admin: ⚠ /effort ultracode の注入に失敗しました（不受理/送達失敗）。admin は既定 model+xhigh のまま稼働継続します（fail-open・--no-effort-inject で本注入を見送れる・orch-k660 leg2）。" >&2
         fi
     fi
     # kickoff（終端宣言ブリーフ + user prompt）は turn 起動照合つきで注入（fail-loud）。

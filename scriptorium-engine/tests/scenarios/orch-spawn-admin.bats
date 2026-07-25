@@ -151,14 +151,14 @@ teardown() {
 #   ORCH_ACCOUNT_SELECT / ORCH_ACCOUNTS_BASE / CLD_ENV_FILE は setup で export 済（inherit される）。
 #   account テストは呼出前に `ORCH_ACCOUNT_SELECT="$SELECTOR_STUB"` を prepend して selector を差し替える。
 run_spawn_admin() {
-    #   orch-k660 seam 硬化: exec 経路は (1) fable preflight で実 claude を叩く (2) kickoff turn-start 照合で
-    #   実 session-state を叩く。両者を hermetic に固定する: FABLE_PREFLIGHT=1（fable 利用可＝fallback しない・
-    #   fallback テストは各自 =0 へ上書き）/ SESSION_STATE=processing stub（turn 起動確認＝happy path が通る・
-    #   boot-race テストは各自 input-waiting stub へ上書き）/ VERIFY_SETTLE=0（sleep しない＝bats を高速に保つ）。
+    #   orch-k660 seam 硬化 → orch-i7ft で縮約: 旧 exec 経路は (1) fable preflight で実 claude を叩き (2) kickoff
+    #   turn-start 照合で実 session-state を叩いた。(1) は既定 model が opus[1m] へ切り替わり preflight 機構ごと
+    #   撤去された（orch-i7ft・user 裁定 2026-07-25）ため seam 注入も不要になった＝残る hermetic 固定は (2) のみ:
+    #   SESSION_STATE=processing stub（turn 起動確認＝happy path が通る・boot-race テストは各自 input-waiting stub
+    #   へ上書き）/ VERIFY_SETTLE=0（sleep しない＝bats を高速に保つ）。
     ORCH_SPAWN_CLD="$BIN/cld-spawn-stub" \
     ORCH_ADMIN_PROJECTS="tb=$BEADS_DIR tn=$NOBEADS_DIR self=$SELF_DIR" \
     ORCH_SPAWN_ADMIN_SKIP_SLATE_GATE="${ORCH_SPAWN_ADMIN_SKIP_SLATE_GATE:-1}" \
-    ORCH_SPAWN_ADMIN_FABLE_PREFLIGHT="${ORCH_SPAWN_ADMIN_FABLE_PREFLIGHT:-1}" \
     ORCH_SPAWN_ADMIN_SESSION_STATE="${ORCH_SPAWN_ADMIN_SESSION_STATE:-$SESSION_STATE_STUB}" \
     ORCH_SPAWN_ADMIN_VERIFY_SETTLE=0 \
     CLD_ARGS_FILE="$CLD_ARGS_FILE" \
@@ -859,11 +859,22 @@ STUB
 }
 
 # ==============================================================================
-# orch-k660: admin spawn 既定改訂（model=fable+xhigh / fallback opus[1m] / /effort ultracode / boot-race 照合）
-#   検証方式: (a) 既定 model/effort を spawn 呼出 argv（CLD_ARGS_FILE）で pin / (b) fable preflight seam で
-#   fallback 両枝 + mutation / (c)(d) session-state stub で turn-start 照合の boot-race 両枝 + inject 順序 /
-#   (e) CLAUDE.md docs drift。exec 経路の hermeticity は run_spawn_admin の seam（FABLE_PREFLIGHT=1 /
-#   SESSION_STATE=processing stub / VERIFY_SETTLE=0）が担保する。
+# orch-k660 → orch-i7ft: admin spawn 既定（model=opus[1m]+xhigh / /effort ultracode / boot-race 照合）
+#   検証方式: (a) 既定 model/effort を spawn 呼出 argv（CLD_ARGS_FILE）で pin / (b) 既定の非空虚（mutation）と
+#   --model 明示（優先 / fable 締め出しなし）と preflight 機構の不在（durable negative teeth）/ (c)(d)
+#   session-state stub で turn-start 照合の boot-race 両枝 + inject 順序。exec 経路の hermeticity は
+#   run_spawn_admin の seam（SESSION_STATE=processing stub / VERIFY_SETTLE=0）が担保する。
+#   ★orch-i7ft（user 裁定 2026-07-25）: 既定 model が fable → opus[1m] へ切り替わり、fable preflight fallback
+#     機構が死にコードとして撤去された。これに伴い (b) の旧 3 本（K660-b-fallback / K660-b-available /
+#     K660-b-mut＝preflight 両枝と fallback 代入の mutation）を撤去し、新既定の teeth へ差し替えた（teeth 純減を
+#     作らない）: I7FT-b-fable-explicit（裁定 1 の締め出さない fence）/ I7FT-b-mut-default（既定 argv pin の
+#     mutation 非空虚）/ I7FT-b-no-preflight-symbols（撤去 4 識別子の durable negative teeth）+ 追加 1 本
+#     I7FT-plan-no-fable（--no-effort-inject 枝の dry-run 出力に残存文言が出ない）。
+#   ★人間可視 prose の残存文言 teeth は **4 modality** を被覆する（旧既定文言を実際に抱えていた surface の数）:
+#     1/4 既定 dry-run の model 行（K660-dryrun-plan）/ 2/4 --no-effort-inject の ultra 行（I7FT-plan-no-fable）
+#     3/4 fail-open stderr（K660-c-effort-failopen）/ 4/4 MODEL_EXPLICIT 枝の model 行（I7FT-b-fable-explicit）。
+#   ★docs drift teeth（K660-e-docs 相当）は engine copy には移植しない（本 file header と末尾の (K660-e-docs)
+#     削除注記のとおり private 配備層 residual bats の担当＝engine tree に CLAUDE.md / docs/ は無い）。
 # ==============================================================================
 
 # 指定した state を echo する session-state stub を作り path を返す（boot-race 等の差替用）。
@@ -877,14 +888,16 @@ STUB
     printf '%s' "$p"
 }
 
-@test "(K660-a-model-fable) 既定 spawn（--model 無指定）が fable を cld へ渡す（acceptance a・leg1）" {
+@test "(I7FT-a-model-default) 既定 spawn（--model 無指定）が opus[1m] を cld へ verbatim で渡す（acceptance 既定 argv pin・orch-i7ft）" {
     run_spawn_admin tb
     [ "$status" -eq 0 ]
-    # spawn 呼出 argv に --model fable が verbatim で載る（既定 opus→fable の改訂）。
+    # spawn 呼出 argv に --model opus[1m] が verbatim で載る（既定 fable→opus[1m] の改訂・user 裁定 2026-07-25）。
     grep -Fq $'ARG\t--model' "$CLD_ARGS_FILE"
-    grep -Fq $'ARG\tfable' "$CLD_ARGS_FILE"
-    # 既定 opus はもう出ない（改訂の非vacuity＝既定を opus に戻す mutation で RED）。
-    refute_grep -Fxq $'ARG\topus' "$CLD_ARGS_FILE"
+    # ★行完全一致（-Fx）が load-bearing: -F のみだと $'ARG\topus' が "ARG<TAB>opus[1m]" 行にも部分一致して
+    #   「素の opus へ退行した」場合と弁別できない（実測）。値 assert は必ず -Fx で行う。
+    grep -Fxq $'ARG\topus[1m]' "$CLD_ARGS_FILE"
+    refute_grep -Fxq $'ARG\tfable' "$CLD_ARGS_FILE"   # 旧既定 fable はもう出ない
+    refute_grep -Fxq $'ARG\topus' "$CLD_ARGS_FILE"    # 素の opus（1M でない）へ落ちてもいない
 }
 
 @test "(K660-a-effort-xhigh) 既定 spawn が --effort xhigh を cld へ明示注入する（acceptance a・leg1・ambient 非依存）" {
@@ -901,48 +914,73 @@ STUB
     refute_grep -Fxq $'ARG\txhigh' "$CLD_ARGS_FILE"
 }
 
-@test "(K660-b-fallback) fable 不可 preflight で Opus 1M（opus[1m]）へ loud fallback（acceptance b・両枝の不可枝）" {
-    # FABLE_PREFLIGHT=0 で fable 利用不可を強制注入（hazard-faithful seam）→ spawn 呼出 argv が opus[1m] になる。
-    ORCH_SPAWN_ADMIN_FABLE_PREFLIGHT=0 run_spawn_admin tb
-    [ "$status" -eq 0 ]
-    grep -Fq $'ARG\topus[1m]' "$CLD_ARGS_FILE"      # 実 binary 受理確認済みの Opus 1M 形
-    refute_grep -Fxq $'ARG\tfable' "$CLD_ARGS_FILE"       # fable ではなくなった
-    [[ "$output" == *"fable preflight 失敗"* ]]       # loud fallback（silent 降格しない）
+@test "(I7FT-b-fable-explicit) --model fable 明示は die せず argv へ verbatim 透過する（裁定 1: 既定から外すだけ＝締め出さない）" {
+    # 裁定 1（user 2026-07-25）の durable fence: 既定は opus[1m] へ移すが fable 明示経路は残す（die させない）。
+    # ★honest 注記: 現時点の実装には --model 値を検査/拒否する分岐が無く、この assert を **壊す実装が存在しない**
+    #   ＝構造的に準空虚な fence である。「fable 受理機構を検証した」とは主張しない。将来 --model allowlist や
+    #   「fable は既定から外したので拒否」の実装が入ったとき RED になる回帰線としてのみ意味を持つ。
+    run_spawn_admin tb --model fable
+    [ "$status" -eq 0 ]                                   # die しない
+    grep -Fxq $'ARG\tfable' "$CLD_ARGS_FILE"              # verbatim 透過（行完全一致）
+    refute_grep -Fxq $'ARG\topus[1m]' "$CLD_ARGS_FILE"    # 既定へ差し戻されていない（明示が優先）
+    # ★modality 4/4（MODEL_EXPLICIT 枝の plan 行）: この行も旧既定文言「既定 fable / preflight / opus[1m]
+    #   fallback は適用しない」を抱えていた人間可視 surface で、argv assert だけでは stale 文言の復活を捕捉
+    #   できない（cell-quality gate round2 completeness-critic finding）。plan 行は dry-run/exec 共通で stdout
+    #   へ出るため exec 経路のまま検査できる（--dry-run を足すと argv assert が壊れる＝cld-spawn を呼ばない）。
+    local plan_model
+    plan_model=$(printf '%s\n' "$output" | grep -E '^  model   :' || true)
+    [ -n "$plan_model" ]                                  # 当該行を確かに拾えている（空虚でない）
+    [[ "$plan_model" == *"--model 明示ゆえ既定より優先"* ]]
+    [[ "$plan_model" != *"preflight"* ]]
+    [[ "$plan_model" != *"fallback"* ]]
 }
 
-@test "(K660-b-available) fable 利用可 preflight なら fable を維持（両枝の可枝＝fallback しない）" {
-    ORCH_SPAWN_ADMIN_FABLE_PREFLIGHT=1 run_spawn_admin tb
-    [ "$status" -eq 0 ]
-    grep -Fq $'ARG\tfable' "$CLD_ARGS_FILE"
-    refute_grep -Fq $'ARG\topus[1m]' "$CLD_ARGS_FILE"     # fallback していない
-    [[ "$output" != *"fable preflight 失敗"* ]]
+@test "(I7FT-b-no-preflight-symbols) fable preflight 機構の 4 識別子が script から消えている（durable negative teeth・acceptance grep 0 hit）" {
+    # acceptance の判定式（記号レベル 0 hit・対象は scripts/orch-spawn-admin.sh のみ）を bats へ内在化する。
+    #   撤去は「今回消した」だけでなく「再導入しない」ことが契約ゆえ、外部 grep でなく suite 内に pin する。
+    #   否定 assert は必ず refute_grep（中間位置の `!` は無牙・本 suite header 参照）。
+    #   ★vacuity 封じ: path を再構築せず setup 済みの $SCRIPT を使い、冒頭で実在と positive control を確かめる
+    #     （refute_grep はファイル不在の grep rc=2 を「不在＝OK」に化けさせる＝実測 false-green の穴）。
+    #   ★語としての 'fable' の 0 hit は要求しない（裁定 1 の説明・改訂履歴の帰属記述が残るのが正）。
+    [ -f "$SCRIPT" ]                                               # 対象ファイルが実在する
+    grep -Fq 'MODEL=' "$SCRIPT"                                    # positive control（grep が実際に中身を見ている）
+    refute_grep -Fq 'fable_available' "$SCRIPT"                    # preflight 判定関数
+    refute_grep -Fq 'FABLE_FALLBACK_MODEL' "$SCRIPT"               # fallback model 変数
+    refute_grep -Fq 'ORCH_SPAWN_ADMIN_FABLE_PREFLIGHT' "$SCRIPT"   # 可否強制注入 seam
+    refute_grep -Fq 'ORCH_SPAWN_CLAUDE_BIN' "$SCRIPT"              # preflight 専用 claude 実体 seam（道連れ撤去）
 }
 
-@test "(K660-b-explicit-precedence) --model 明示は fable 既定/preflight より優先（不可でも fallback しない）" {
-    # MODEL_EXPLICIT=true ゆえ preflight=0（不可）でも指定 model のまま（fallback 対象外）。
-    ORCH_SPAWN_ADMIN_FABLE_PREFLIGHT=0 run_spawn_admin tb --model sonnet
+@test "(K660-b-explicit-precedence) --model 明示は既定より優先する（MODEL_EXPLICIT・不変の回帰 teeth）" {
+    # ★orch-i7ft 注記: preflight 撤去により本 test は準 vacuous になった。旧形は「preflight=0（fable 不可）でも
+    #   指定 model のまま」＝fallback 分岐を迂回することの証明だったが、いま迂回すべき分岐自体が存在しない。
+    #   残す理由は MODEL_EXPLICIT が将来 model を上書きする分岐（新 fallback 等）が入ったときの回帰線として。
+    run_spawn_admin tb --model sonnet
     [ "$status" -eq 0 ]
-    grep -Fq $'ARG\tsonnet' "$CLD_ARGS_FILE"
-    refute_grep -Fq $'ARG\topus[1m]' "$CLD_ARGS_FILE"
-    [[ "$output" != *"fable preflight 失敗"* ]]       # 明示ゆえ preflight 分岐に入らない
+    grep -Fxq $'ARG\tsonnet' "$CLD_ARGS_FILE"
+    refute_grep -Fxq $'ARG\topus[1m]' "$CLD_ARGS_FILE"    # 既定で上書きされていない
 }
 
-@test "(K660-b-mut) mutation 非vacuity: fallback 代入を殺すと preflight=0 でも fable のまま（opus[1m] 非出現で RED）" {
-    # SSOT-mut* / _build_mutant と同型: 実 script を sed 変異させ実 lib を隣へ複製（BASH_SOURCE 相対解決を成立）。
-    #   MODEL=\$FABLE_FALLBACK_MODEL 代入行を no-op 化 → preflight=0 でも fable のまま（fallback しない）＝mutant で
-    #   opus[1m] が出ないことを確認（本来の実装なら opus[1m] が出る＝この差が mutation を捕捉する非vacuity）。
-    _build_mutant 's/^        MODEL="\$FABLE_FALLBACK_MODEL"/        : # mutated: fallback removed/' "$BIN/mut-fallback"
+@test "(I7FT-b-mut-default) mutation 非vacuity: 既定 MODEL を fable へ変異させると既定 argv pin が RED flip する" {
+    # SSOT-mut* / _build_mutant と同型: 実 script を sed 変異させ合成 registry fixture を隣へ生成（BASH_SOURCE
+    #   相対解決を成立）。MODEL="opus[1m]" の代入を旧既定 MODEL="fable" へ戻す → I7FT-a-model-default の positive
+    #   assert が消え negative assert が点灯する＝既定 argv pin が実装に依存している（空虚でない）ことの証明。
+    # ★変異前後の存在 assert を必ず添える（sed が pattern 不一致で silent no-op 化する穴を塞ぐ・K660-b-mut 欠落分）。
+    # ★-Fx（行完全一致）が load-bearing: -F のみだと trailing comment 付き行にも一致し、sed の ^...$ が
+    #   no-op 化する穴を単独では塞げない（契約 TEETH 節の「変異前に対象 literal が -Fx で実在」）。
+    grep -Fxq 'MODEL="opus[1m]"' "$SCRIPT"                         # 元 script に列 0 の bare 行として実在する
+    _build_mutant 's/^MODEL="opus\[1m\]"$/MODEL="fable"/' "$BIN/mut-default-model"
+    refute_grep -Fq 'MODEL="opus[1m]"' "$MUT_SCRIPT"               # mutant では消えている（sed が効いた）
+    grep -Fq 'MODEL="fable"' "$MUT_SCRIPT"                         # 旧既定へ変異している
     ORCH_SPAWN_CLD="$BIN/cld-spawn-stub" \
     ORCH_ADMIN_PROJECTS="tb=$BEADS_DIR tn=$NOBEADS_DIR self=$SELF_DIR" \
     ORCH_SPAWN_ADMIN_SKIP_SLATE_GATE=1 \
-    ORCH_SPAWN_ADMIN_FABLE_PREFLIGHT=0 \
     ORCH_SPAWN_ADMIN_SESSION_STATE="$SESSION_STATE_STUB" \
     ORCH_SPAWN_ADMIN_VERIFY_SETTLE=0 \
     CLD_ARGS_FILE="$CLD_ARGS_FILE" CLD_PROMPT_FILE="$CLD_PROMPT_FILE" \
         run bash "$MUT_SCRIPT" tb
     [ "$status" -eq 0 ]
-    grep -Fq $'ARG\tfable' "$CLD_ARGS_FILE"          # fallback を殺したので fable のまま
-    refute_grep -Fq $'ARG\topus[1m]' "$CLD_ARGS_FILE"     # ← 本来の実装なら opus[1m] が出る＝mutant で消える＝非vacuity
+    grep -Fxq $'ARG\tfable' "$CLD_ARGS_FILE"                       # ★RED flip: 旧既定へ退行
+    refute_grep -Fxq $'ARG\topus[1m]' "$CLD_ARGS_FILE"             # 新既定が消える＝pin が非空虚
 }
 
 @test "(K660-leg2-payloadless-spawn) spawn 呼出 argv に kickoff payload（-- / ブリーフ本文）が無い（leg2 中核不変条件の直接 pin・cell-quality gate minor#2）" {
@@ -999,13 +1037,15 @@ STUB
     ORCH_SPAWN_CLD="$failstub" \
     ORCH_ADMIN_PROJECTS="tb=$BEADS_DIR tn=$NOBEADS_DIR self=$SELF_DIR" \
     ORCH_SPAWN_ADMIN_SKIP_SLATE_GATE=1 \
-    ORCH_SPAWN_ADMIN_FABLE_PREFLIGHT=1 \
     ORCH_SPAWN_ADMIN_SESSION_STATE="$SESSION_STATE_STUB" \
     ORCH_SPAWN_ADMIN_VERIFY_SETTLE=0 \
     CLD_ARGS_FILE="$CLD_ARGS_FILE" CLD_PROMPT_FILE="$CLD_PROMPT_FILE" \
         run bash "$SCRIPT" tb
     [ "$status" -eq 0 ]                                       # fail-open＝admin 稼働継続
     [[ "$output" == *"fail-open"* ]]                          # loud
+    # orch-i7ft modality 3/4: fail-open stderr の文言も新既定へ改訂済み（旧「admin は fable+xhigh のまま稼働継続」
+    #   を放置すると人間可視の実出力が新既定下で嘘を吐く）。当該枝を通った上で 'fable' 0 hit を pin する。
+    [[ "$output" != *"fable"* ]]
     grep -q 'ORCH-WATCH-CONTRACT' "$CLD_PROMPT_FILE"          # kickoff は注入される
     refute_grep -Fq '/effort ultracode' "$CLD_PROMPT_FILE"         # effort は届かなかった（記録されない）
 }
@@ -1041,16 +1081,33 @@ STUB
     [[ "$output" == *"turn 起動を確認できません"* ]]
 }
 
-@test "(K660-dryrun-plan) dry-run が model=fable / effort=xhigh / ultracode 注入 / injection plan を表示（side-effect ゼロ）" {
+@test "(K660-dryrun-plan) dry-run が model=opus[1m] / effort=xhigh / ultracode 注入 / injection plan を表示（side-effect ゼロ）" {
     run_spawn_admin tb --dry-run
     [ "$status" -eq 0 ]
-    [[ "$output" == *"model   : fable"* ]]
+    # ★orch-i7ft FOOTGUN-BRACKET: grep -q 'opus[1m]' は bracket expression と解釈され literal に一致しない（実測）。
+    #   [[ ]] の RHS は quote すれば literal 比較になるのでここでは *"opus[1m]"* を使う（grep する場合は -F）。
+    [[ "$output" == *"model   : opus[1m]"* ]]
     [[ "$output" == *"effort  : xhigh"* ]]
     [[ "$output" == *"/effort ultracode"* ]]
-    [[ "$output" == *"opus[1m]"* ]]                          # fallback 先を plan に明示
     [[ "$output" == *"turn 起動照合"* ]]                     # orch-sm6p の照合を plan に明示
+    # 旧既定の残存文言が plan に出ない（modality 1/4・既定 plan 経路）。旧 assert の *"opus[1m]"*（「fallback 先を
+    #   plan に明示」）は model 行で自己充足するため vacuous duplicate として削除した。
+    #   engine の dry-run 出力には model fallback 以外の 'fallback' 語を出す機構が無い（local copy が持つ session 名
+    #   fail-open fallback 警告＝topology(1) は engine 未取込み）ため、出力全体で 0 hit を要求できる（実測確認済み）。
+    [[ "$output" != *"fable"* ]]
+    [[ "$output" != *"preflight"* ]]
+    [[ "$output" != *"fallback"* ]]
     [ ! -s "$CLD_PROMPT_FILE" ]                              # dry-run は cld-spawn を呼ばない
     [ ! -s "$CLD_ARGS_FILE" ]
+}
+
+@test "(I7FT-plan-no-fable) --dry-run --no-effort-inject の plan にも旧既定文言（fable）が出ない（modality 2/4・ultra 見送り枝の直接被覆）" {
+    # --no-effort-inject 枝の ultra 行は人間可視の実出力で、旧文言「fable+xhigh のまま」を放置すると新既定下で
+    #   嘘を吐く（既定 plan 経路の teeth では被覆されない別枝）。ここで直接 pin する。
+    run_spawn_admin tb --dry-run --no-effort-inject
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"注入は見送り"* ]]                      # 当該枝を確かに通っている（空虚でない）
+    [[ "$output" != *"fable"* ]]
 }
 
 # (K660-e-docs) は削除: private 配備層の docs/systemd drift teeth（$REPO_ROOT/CLAUDE.md 等を grep する @test）は
