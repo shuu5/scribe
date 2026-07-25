@@ -47,6 +47,9 @@ setup() {
     # suite を回すと seam pin が効かず (1a)(4a)(4b)(F7a) が落ちる＝test の緑が環境依存になる。
     # test 側でも叩き落として「どこで回しても同じ結果」を保証する（script 側の unset との二重防御）。
     unset WORKING_MEMORY_FILE WORKING_MEMORY_CONSUMED_FILE
+    # 同じ理由で 2 節スキーマの定数も叩き落とす（bd sc-0hm6）: (W5) は「cc-session が WM_HEADING_PLAN を
+    # 定義しない版ずれ」を模すため、ambient に残った定数が seam を貫通すると skew fixture が無効化される。
+    unset WM_HEADING_PLAN WM_HEADING_DIRECTIVES WM_HEADING_LEGACY_CONTEXT
 
     # ── cc-session lib を fixture へ供給（F6: 陽性 modality を SKIP に落とさない） ──
     CC_LIB="$BATS_TEST_TMPDIR/cc-lib"
@@ -124,6 +127,37 @@ run_fetch() {
         SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
         SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
         bash "$SCRIPT" </dev/null
+}
+
+# seam 付き駆動の **チャネル弁別版**（bd sc-0hm6 gate 差し戻し・teeth-vacuity の是正）。
+# bats 既定の `run` は **stdout と stderr を合流**して $output へ入れるため、marker が DATA チャネル(stdout)に
+# 出ているのか診断チャネル(stderr)へ落ちたのかを **一切弁別できない**（行順も合流 pipe 上で保たれるので
+# 位置 assert でも見抜けない）。消費側 overlay は canonical の **stdout だけ**を envelope の body へ passthrough し
+# stderr は FATAL 要旨用に隔離するため、marker が stderr へ落ちると overlay 経由の DATA から完全に消える
+# （script header の「payload に診断を混ぜない」契約が 0 teeth だった）。
+# 実測（bats 1.13.0・本 suite で計測）: `run --separate-stderr` では **$output=stdout / $stderr=stderr /
+# $stdout は未設定**。よって assert は $output(=stdout) と $stderr の対で書く。
+run_fetch_split() {
+    run --separate-stderr env \
+        SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
+        bash "$SCRIPT" </dev/null
+}
+
+# _wm_plan_states <出力>: [WM-PLAN*] の 4 値のうち **成立している状態の数**を返す（本文は何行でも 1 状態）。
+# 排他（1 実行 1 状態）を状態ごとに非対称でなく全数で pin するための helper（gate minor(2)）。
+# `producer | grep -q` は使わない（pipefail 下で producer が SIGPIPE 死し rc=141 の偽 RED になる）＝herestring。
+_wm_plan_states() {
+    local out="$1" n=0 m
+    if grep -qE '^\[WM-PLAN\] ' <<< "$out"; then n=$((n+1)); fi
+    for m in NONE EMPTY UNAVAILABLE; do
+        if grep -qE "^\[WM-PLAN-$m\]" <<< "$out"; then n=$((n+1)); fi
+    done
+    printf '%s' "$n"
 }
 
 # ─────────────────────────── 構文 ───────────────────────────
@@ -766,6 +800,9 @@ _make_minimal_path() {
     # (1a)/(P1) の jq baseline と完全一致する DATA（degraded しない）。
     [[ "$output" == *"[BD-COUNT] open=0 in_progress=1 blocked=0"* ]]
     [[ "$output" == *"[DIFF-DRIFT] sc-aaa WM=in_progress bd=closed"* ]]
+    # 新 marker（bd sc-0hm6）も python3 単独経路で jq baseline と同一に出る（(W1)/(B3) と同値）。
+    [[ "$output" == *"[WM-PLAN] - sc-8eyw を実装中"* ]]
+    [[ "$output" == *"[BD-INPROGRESS-SKIP] reason=field-missing"* ]]
 }
 
 @test "(FL17) core は粗 grep の JSON 近似 parse を持たない（degraded mode の非再導入）" {
@@ -811,6 +848,553 @@ _make_minimal_path() {
     [[ "$output" == *"$cfg/plugins/session/scripts/lib"* ]]
 }
 
+# ══════════ 俯瞰 slot の一次データ: [WM-PLAN*] / [BD-INPROGRESS*]（bd sc-0hm6） ══════════
+# canonical fetch は「命令・制約」節しか読まず、**現在地の一次データが DATA 面に一度も出ない**（＝admin が毎回
+# 「現状を整理して」と聞き直す構造原因）。計画弧節と in_progress の id/title を surface して塞ぐ。
+# 抽出は cc-session の **private 記号** `_wm_extract_section` を consume するが、**記号 gate へは足さない**
+# （正当な内部 rename が fleet 全 admin の boot path を brick させるため）＝不在は degrade（rc 0）で継続する。
+
+# _skew_plan_lib_no_symbol: 公開 API（extract_effort_directives）と定数は保ったまま **private helper だけ**
+#   rename/削除した版ずれ lib を作る（記号 gate は通り、計画弧抽出だけができなくなる忠実な模擬）。
+_skew_plan_lib_no_symbol() {
+    local d="$BATS_TEST_TMPDIR/skew-plan-nosym"; mkdir -p "$d"
+    cp "$CC_LIB/session-env.sh" "$d/"
+    cat > "$d/working-memory.sh" <<'SKEOF'
+#!/usr/bin/env bash
+# 版ずれ模擬(1): public API は保つが private helper _wm_extract_section を rename/削除した版。
+WM_HEADING_PLAN="## 計画弧・次のステップ"
+WM_HEADING_DIRECTIVES="## この effort を貫く命令・制約"
+export WM_HEADING_PLAN WM_HEADING_DIRECTIVES
+extract_effort_directives() {
+    awk -v h="$WM_HEADING_DIRECTIVES" '
+        $0 == h          { in_sec=1; next }
+        in_sec && /^## / { in_sec=0; next }
+        !in_sec          { next }
+        /^[[:space:]]*<!--/ { next }
+        /^[[:space:]]*$/ { next }
+                         { print }' "$1" 2>/dev/null
+}
+SKEOF
+    printf '%s' "$d"
+}
+
+# _skew_plan_lib_no_const: 記号は在るが **定数 WM_HEADING_PLAN を定義しない**版ずれ lib（`set -u` 下で裸参照が
+#   script 全体を rc1 で殺す modality の teeth＝degrade-loud の要求と正反対の死に方をしないこと）。
+_skew_plan_lib_no_const() {
+    local d="$BATS_TEST_TMPDIR/skew-plan-noconst"; mkdir -p "$d"
+    cp "$CC_LIB/session-env.sh" "$d/"
+    cat > "$d/working-memory.sh" <<'SKEOF'
+#!/usr/bin/env bash
+# 版ずれ模擬(2): 関数は在るが定数 WM_HEADING_PLAN を持たない版（定数側の rename）。
+WM_HEADING_DIRECTIVES="## この effort を貫く命令・制約"
+export WM_HEADING_DIRECTIVES
+_wm_extract_section() {
+    awk -v h="$2" '
+        $0 == h          { in_sec=1; next }
+        in_sec && /^## / { in_sec=0; next }
+        !in_sec          { next }
+        /^[[:space:]]*<!--/ { next }
+        /^[[:space:]]*$/ { next }
+                         { print }' "$1" 2>/dev/null
+}
+extract_effort_directives() { _wm_extract_section "$1" "$WM_HEADING_DIRECTIVES"; }
+SKEOF
+    printf '%s' "$d"
+}
+
+@test "(W1) [WM-PLAN]: 計画弧の本文を 1 行ごとに marker 前置で emit（現在地の一次データが DATA 面に出る）" {
+    run_fetch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[WM-PLAN] - sc-8eyw を実装中"* ]]
+    # 4 値排他を **状態の総数**で張る（本文は何行でも 1 状態・gate minor(2): 状態ごとに非対称な穴を塞ぐ）。
+    [ "$(_wm_plan_states "$output")" -eq 1 ]
+    # 節内位置: [WM] found → [CONSUME-TARGET] → [WM-PLAN]（既存 2 行の隣接を割らない・純粋な行追加）。
+    n_wm="$(printf '%s\n' "$output" | grep -nE '^\[WM\] ' | cut -d: -f1)"
+    n_target="$(printf '%s\n' "$output" | grep -nE '^\[CONSUME-TARGET\] ' | cut -d: -f1)"
+    n_plan="$(printf '%s\n' "$output" | grep -nE '^\[WM-PLAN\] ' | head -n1 | cut -d: -f1)"
+    [ "$n_target" -eq "$((n_wm + 1))" ]
+    [ "$n_plan" -eq "$((n_target + 1))" ]
+    # overlay envelope: 新 marker は footer より前（footer 後 append は envelope 契約を壊す）。
+    n_footer="$(printf '%s\n' "$output" | grep -nE '^=== end rebrief DATA ===$' | cut -d: -f1)"
+    [ "$n_plan" -lt "$n_footer" ]
+}
+
+@test "(W2) [WM-PLAN-EMPTY]: テンプレ生成直後 WM / 旧 3 節 WM は『判定不能』側（NONE と融合しない）" {
+    # (a) cc-session の新規テンプレ相当（見出し + HTML コメントのみ＝_wm_extract_section がコメントと空行を除去する）。
+    cat > "$WMDIR/working-memory.$CUR.md" <<'WMEOF'
+## 計画弧・次のステップ
+<!-- ephemeral: 毎サイクル再生成。今どこにいて、次に何をするか。 -->
+
+## この effort を貫く命令・制約
+- [auto] sc-aaa を in_progress で継続実装
+WMEOF
+    run_fetch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[WM-PLAN-EMPTY] reason=section-absent-or-empty"* ]]
+    [[ "$output" != *"[WM-PLAN-NONE]"* ]]
+    [[ "$output" != *"[WM-PLAN] "* ]]
+    [ "$(_wm_plan_states "$output")" -eq 1 ]   # EMPTY 分岐へ他状態を足す変異を RED にする
+    # EMPTY は「WM 全体の不在」ではない＝命令・制約側の突合は生きている。
+    [[ "$output" == *"[DIFF-DRIFT] sc-aaa WM=in_progress bd=closed"* ]]
+
+    # (b) 旧 3 節スキーマ（計画弧節が存在しない）。
+    cat > "$WMDIR/working-memory.$CUR.md" <<'WMEOF'
+## 重要なコンテキスト
+- [auto] sc-aaa を in_progress で継続実装
+WMEOF
+    run_fetch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[WM-PLAN-EMPTY] reason=section-absent-or-empty"* ]]
+    [ "$(_wm_plan_states "$output")" -eq 1 ]
+    [[ "$output" == *"[DIFF-DRIFT] sc-aaa WM=in_progress bd=closed"* ]]   # legacy fallback は命令節側に在る
+}
+
+@test "(W3) [WM-PLAN-NONE]: current sid の WM file 自体が不在（『計画なし』ではない）" {
+    rm -f "$WMDIR/working-memory.$CUR.md"
+    run_fetch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[WM-PLAN-NONE]"* ]]
+    [[ "$output" != *"[WM-PLAN] "* ]]
+    [[ "$output" != *"[WM-PLAN-EMPTY]"* ]]
+    [ "$(_wm_plan_states "$output")" -eq 1 ]
+    # 節内位置: [CONSUME-NONE] の直後・[WM-CANDIDATE] ループより前。
+    n_consume="$(printf '%s\n' "$output" | grep -nE '^\[CONSUME-NONE\]' | cut -d: -f1)"
+    n_plan="$(printf '%s\n' "$output" | grep -nE '^\[WM-PLAN-NONE\]' | cut -d: -f1)"
+    n_cand="$(printf '%s\n' "$output" | grep -nE '^\[WM-CANDIDATE\] ' | head -n1 | cut -d: -f1)"
+    [ "$n_plan" -eq "$((n_consume + 1))" ]
+    [ "$n_plan" -lt "$n_cand" ]
+}
+
+@test "(W4) [WM-PLAN-UNAVAILABLE]: private 記号が無い版ずれは degrade（rc 0 で継続・FATAL にしない）" {
+    skew="$(_skew_plan_lib_no_symbol)"
+    run env SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$skew" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
+        bash "$SCRIPT" </dev/null
+    # 本 test の眼目: rc 0（記号 gate へ足していない＝boot path を brick させない）。
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"FATAL"* ]]
+    [[ "$output" == *"[WM-PLAN-UNAVAILABLE]"* ]]
+    [[ "$output" != *"[WM-PLAN] "* ]]
+    [[ "$output" != *"[WM-PLAN-EMPTY]"* ]]
+    [ "$(_wm_plan_states "$output")" -eq 1 ]   # UNAVAILABLE 分岐へ他状態を足す変異を RED にする
+    # degrade しても他の DATA は健全（brief 自体は出る）。
+    [[ "$output" == *"[DIFF-DRIFT] sc-aaa WM=in_progress bd=closed"* ]]
+    [[ "$output" == *"[BD-COUNT] open=0 in_progress=1 blocked=0"* ]]
+}
+
+@test "(W5) [WM-PLAN-UNAVAILABLE]: 定数 WM_HEADING_PLAN が無くても set -u で即死しない（rc 0）" {
+    skew="$(_skew_plan_lib_no_const)"
+    run env -u WM_HEADING_PLAN \
+        SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$skew" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
+        bash "$SCRIPT" </dev/null
+    # 裸参照だと set -uo pipefail で script 全体が rc1 で死ぬ（degrade-loud の要求と正反対）＝その teeth。
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[WM-PLAN-UNAVAILABLE]"* ]]
+    [ "$(_wm_plan_states "$output")" -eq 1 ]
+    [[ "$output" != *"FATAL"* ]]
+    [[ "$output" == *"=== end rebrief DATA ==="* ]]   # 最後まで走り切る
+}
+
+@test "(W6) [WM-PLAN-TRUNCATED]: 20 行超は shown/total を loud に言う（黙って切らない）" {
+    {
+        echo "## 計画弧・次のステップ"
+        for ((i = 1; i <= 25; i++)); do echo "- step $i"; done
+        echo ""
+        echo "## この effort を貫く命令・制約"
+        echo "- [auto] sc-aaa を in_progress で継続実装"
+    } > "$WMDIR/working-memory.$CUR.md"
+    run_fetch
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -cE '^\[WM-PLAN\] ')" -eq 20 ]
+    [[ "$output" == *"[WM-PLAN-TRUNCATED] shown=20 total=25"* ]]
+    [ "$(_wm_plan_states "$output")" -eq 1 ]   # TRUNCATED は状態行でなく本文の補助（状態は本文 1 つのまま）
+    [[ "$output" == *"[WM-PLAN] - step 20"* ]]
+    [[ "$output" != *"[WM-PLAN] - step 21"* ]]
+}
+
+@test "(W7) [WM-PLAN*] は 4 値排他: 1 回の実行で状態は 1 つだけ出る（[DIFF-*] と同型）" {
+    run_fetch
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -cE '^\[WM-PLAN-(NONE|EMPTY|UNAVAILABLE)\]')" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -cE '^\[WM-PLAN\] ')" -eq 1 ]
+    rm -f "$WMDIR/working-memory.$CUR.md"
+    run_fetch
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -cE '^\[WM-PLAN-NONE\]')" -eq 1 ]
+    [ "$(printf '%s\n' "$output" | grep -cE '^\[WM-PLAN\] ')" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -cE '^\[WM-PLAN-(EMPTY|UNAVAILABLE)\]')" -eq 0 ]
+    # 4 状態を総数で張る（片側だけ張ると「EMPTY 分岐へ UNAVAILABLE を足す」型の変異が生存する）。
+    [ "$(_wm_plan_states "$output")" -eq 1 ]
+}
+
+@test "(B1) [BD-INPROGRESS]: in_progress の id + updated + title を emit（件数だけでは次アクションが選べない）" {
+    export BD_STUB_ACTIVE_JSON='[{"id":"sc-bbb","status":"in_progress","title":"rebrief 俯瞰節の実装","updated_at":"2026-07-25T09:00:00Z"},{"id":"sc-ddd","status":"open","title":"別件","updated_at":"2026-07-01T00:00:00Z"},{"id":"un-xxx","status":"in_progress","title":"foreign 台帳の bead","updated_at":"2026-07-02T00:00:00Z"}]'
+    run_fetch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-INPROGRESS] sc-bbb updated=2026-07-25T09:00:00Z rebrief 俯瞰節の実装"* ]]
+    [[ "$output" != *"[BD-INPROGRESS-NONE]"* ]]
+    [[ "$output" != *"[BD-INPROGRESS-SKIP]"* ]]
+    # open の bead を in_progress として出さない（false-green の封じ）。
+    [[ "$output" != *"sc-ddd"* ]]
+    # SELF_PREFIX filter の再適用（連結 substrate の foreign bead を自台帳として数えない）。
+    [[ "$output" != *"un-xxx"* ]]
+    # 節内位置: [BD-COUNT] の直後・同一節内。
+    n_count="$(printf '%s\n' "$output" | grep -nE '^\[BD-COUNT\] ' | cut -d: -f1)"
+    n_ip="$(printf '%s\n' "$output" | grep -nE '^\[BD-INPROGRESS\] ' | head -n1 | cut -d: -f1)"
+    [ "$n_ip" -eq "$((n_count + 1))" ]
+}
+
+@test "(B2) [BD-INPROGRESS-NONE]: in_progress が 0 件なら NONE（確認した上で 0 件）" {
+    export BD_STUB_ACTIVE_JSON='[{"id":"sc-bbb","status":"open","title":"x","updated_at":"y"}]'
+    run_fetch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-INPROGRESS-NONE]"* ]]
+    [[ "$output" != *"[BD-INPROGRESS] "* ]]
+    [[ "$output" != *"[BD-INPROGRESS-SKIP]"* ]]
+    [[ "$output" == *"[BD-COUNT] open=1 in_progress=0 blocked=0"* ]]
+}
+
+@test "(B3) [BD-INPROGRESS-SKIP]: title/updated_at キーが無い bd 版差は SKIP（NONE と融合しない）" {
+    # 既定 stub の active JSON は title/updated_at を持たない＝bd 版差 / stub 相当（新 stub 機構は要らない）。
+    run_fetch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-INPROGRESS-SKIP] reason=field-missing"* ]]
+    # 「read は成功したが enrich できない」を「0 件」に融合させない（判定不能を NONE/0 と書かない）。
+    [[ "$output" != *"[BD-INPROGRESS-NONE]"* ]]
+    [[ "$output" == *"[BD-COUNT] open=0 in_progress=1 blocked=0"* ]]
+    # bd read 失敗（FL4/FL5/FL6）は従来どおり FATAL 側＝SKIP に化けていない。
+    [[ "$output" != *"FATAL"* ]]
+}
+
+@test "(B4) [BD-INPROGRESS] の title は単一行化 + 120 文字 cap（DATA チャネル無害化）" {
+    long=""
+    for ((i = 0; i < 15; i++)); do long="${long}0123456789"; done   # 150 文字
+    export BD_STUB_ACTIVE_JSON="[{\"id\":\"sc-bbb\",\"status\":\"in_progress\",\"title\":\"${long}\",\"updated_at\":\"t1\"}]"
+    run_fetch
+    [ "$status" -eq 0 ]
+    line="$(printf '%s\n' "$output" | grep -E '^\[BD-INPROGRESS\] ' | head -n1)"
+    [[ "$line" == *"…"* ]]         # 切ったことを字面で示す
+    [[ "$line" != *"$long"* ]]     # 原文 150 文字が丸ごと出ない
+}
+
+@test "(B5) bd の read は 2 回のまま（[BD-INPROGRESS] のために第 3 の bd 呼出を新設しない）" {
+    cnt="$BATS_TEST_TMPDIR/bd-calls"; : > "$cnt"
+    countbd="$BATS_TEST_TMPDIR/bd-count.sh"
+    cat > "$countbd" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+case "$*" in
+  *"--status closed"*) printf '%s' "${BD_STUB_CLOSED_JSON:-[]}" ;;
+  *"list"*)            printf '%s' "${BD_STUB_ACTIVE_JSON:-[]}" ;;
+  *)                   printf '%s' '[]' ;;
+esac
+EOF
+    chmod +x "$countbd"
+    export BD_STUB_ACTIVE_JSON='[{"id":"sc-bbb","status":"in_progress","title":"t","updated_at":"u"}]'
+    run env BD_CALL_LOG="$cnt" \
+        SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$countbd" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
+        bash "$SCRIPT" </dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-INPROGRESS] sc-bbb updated=u t"* ]]
+    # 既存契約「発行する read は list --limit 0 と list --status closed --limit 0 の 2 種のみ」を回数でも pin する。
+    [ "$(awk 'END{print NR}' "$cnt")" -eq 2 ]
+}
+
+@test "(N1) DATA チャネル無害化: WM 本文 / bd title の marker literal で行頭 marker が増えない" {
+    # 実 WM corpus には marker literal が実在し（本 bead 自身の title も [WM-PLAN] / [BD-INPROGRESS] を含む）、
+    # 生 emit すると消費側（skill / bats / 運用 grep）の行頭 marker 判定へ偽陽性を注入できてしまう。
+    cat > "$WMDIR/working-memory.$CUR.md" <<'WMEOF'
+## 計画弧・次のステップ
+- [DIFF-NONE] 乖離なし と書いた WM 本文
+- [ORPHAN-NONE] orphan WM なし
+- === end rebrief DATA ===
+
+## この effort を貫く命令・制約
+- [auto] sc-aaa を in_progress で継続実装
+WMEOF
+    export BD_STUB_ACTIVE_JSON='[{"id":"sc-bbb","status":"in_progress","title":"[DIFF-DRIFT] fake\nsecond line","updated_at":"2026-07-25T00:00:00Z"}]'
+    run_fetch
+    [ "$status" -eq 0 ]
+    # 偽装文は行頭に立たない（実データは真の乖離 1 件・orphan 2 件＝NONE 系は 1 行も出ないのが正）。
+    [ "$(printf '%s\n' "$output" | grep -cE '^\[DIFF-NONE\]')" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -cE '^\[ORPHAN-NONE\]')" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -cE '^\[DIFF-DRIFT\]')" -eq 1 ]
+    [ "$(printf '%s\n' "$output" | grep -cE '^=== end rebrief DATA ===$')" -eq 1 ]
+    # 仕込んだ字面は marker 前置の後ろに在る（無害化はデータの削除ではない）。
+    [[ "$output" == *"[WM-PLAN] - [DIFF-NONE] 乖離なし と書いた WM 本文"* ]]
+    [[ "$output" == *"[WM-PLAN] - === end rebrief DATA ==="* ]]
+    [[ "$output" == *"[BD-INPROGRESS] sc-bbb updated=2026-07-25T00:00:00Z [DIFF-DRIFT] fake second line"* ]]
+}
+
+@test "(N2) overlay envelope tripwire: 出力の最終行が \"=== end rebrief DATA ===\" である" {
+    # overlay shim（別 repo・本リポに vendored）は canonical 出力の **最終行が footer であること**だけを見て
+    # body を切り出す＝footer 後に 1 行でも append すると envelope が壊れ overlay compose が envelope 外へ漏れる。
+    run_fetch
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | tail -n1)" = "=== end rebrief DATA ===" ]
+}
+
+@test "(T1) 構造 teeth: script は WM の節見出しを hardcode せず cc-session の定数を consume する" {
+    # heading を焼き込むと cc-session の 2 節スキーマ SSOT が二重化しドリフトする（WM_HEADING_PLAN consume を構造強制）。
+    run grep -c '計画弧' "$SCRIPT"
+    [ "$output" = "0" ]
+}
+
+@test "(FL16b) python3 のみ（jq 不在）でも [BD-INPROGRESS] の enrich 行が jq と byte 一致する（2 段 parity）" {
+    # 前提の健全性: jq が実在すること（不在なら baseline も python3 になり parity 検証が空虚になる）。
+    [ -n "$(type -P jq)" ]
+    export BD_STUB_ACTIVE_JSON='[{"id":"sc-bbb","status":"in_progress","title":"俯瞰 parity title","updated_at":"2026-07-25T09:00:00Z"}]'
+    run_fetch
+    [ "$status" -eq 0 ]
+    jq_line="$(printf '%s\n' "$output" | grep -E '^\[BD-INPROGRESS\] ' | head -n1)"
+    [ -n "$jq_line" ]
+    minbin="$(_make_minimal_path)"
+    p="$(type -P python3 2>/dev/null)"; [ -n "$p" ]
+    ln -sf "$p" "$minbin/python3"
+    [ ! -e "$minbin/jq" ]
+    # env -i ゆえ locale は C。python3 側が locale encoding で print すると非 ASCII title が
+    # UnicodeEncodeError になる（＝jq と非 parity）ので stdout.buffer へ UTF-8 bytes を直書きしている。
+    run env -i PATH="$minbin" HOME="$HOME" TMPDIR="$BATS_TEST_TMPDIR" \
+        SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
+        BD_STUB_ACTIVE_JSON="$BD_STUB_ACTIVE_JSON" \
+        BD_STUB_CLOSED_JSON="$BD_STUB_CLOSED_JSON" \
+        bash "$SCRIPT" </dev/null
+    [ "$status" -eq 0 ]
+    py_line="$(printf '%s\n' "$output" | grep -E '^\[BD-INPROGRESS\] ' | head -n1)"
+    [ "$py_line" = "$jq_line" ]
+}
+
+@test "(FL16c) id に改行/TAB を含む bead でも row が分割されず jq/python3 が byte 一致する（id sanitize の parity）" {
+    # id を squash せずに TSV へ流すと row 自体が分割され、断片行から **台帳に存在しない id** の
+    # [BD-INPROGRESS] 行が emit され（消費側 SKILL.md §3「id / title は [BD-INPROGRESS] を写す」が
+    # 誤った bead を掴む）、頭の断片が -SKIP reason=field-missing を誤発火させる。
+    # 3 列（id / updated_at / title）すべてを同じ規律で潰すことを、jq/python3 双方で pin する。
+    # 注: BD-COUNT 側の map（_parse_id_status）は本 bead の scope 外（fence ■11）ゆえ比較対象にしない
+    #     ＝ここで比較するのは enrich 行（[BD-INPROGRESS*]）のブロックのみ。
+    [ -n "$(type -P jq)" ]
+    export BD_STUB_ACTIVE_JSON='[{"id":"sc-bbb","status":"in_progress","title":"legit","updated_at":"u1"},{"id":"sc-x\nsc-forged","status":"in_progress","title":"t2","updated_at":"u2"}]'
+    run_fetch
+    [ "$status" -eq 0 ]
+    # 分割された断片 id（台帳に無い "sc-forged" 単体）の行を emit しない。
+    [[ "$output" != *"[BD-INPROGRESS] sc-forged updated="* ]]
+    # 断片行由来の field-missing 誤発火が無い（enrich は成功している）。
+    [[ "$output" != *"[BD-INPROGRESS-SKIP]"* ]]
+    # squash 後の id が 1 行に収まる（無害化はデータの削除ではない）。
+    [[ "$output" == *"[BD-INPROGRESS] sc-x sc-forged updated=u2 t2"* ]]
+    [ "$(printf '%s\n' "$output" | grep -cE '^\[BD-INPROGRESS\] ')" -eq 2 ]
+    jq_block="$(printf '%s\n' "$output" | grep -E '^\[BD-INPROGRESS')"
+
+    minbin="$(_make_minimal_path)"
+    p="$(type -P python3 2>/dev/null)"; [ -n "$p" ]
+    ln -sf "$p" "$minbin/python3"
+    [ ! -e "$minbin/jq" ]
+    run env -i PATH="$minbin" HOME="$HOME" TMPDIR="$BATS_TEST_TMPDIR" \
+        SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
+        BD_STUB_ACTIVE_JSON="$BD_STUB_ACTIVE_JSON" \
+        BD_STUB_CLOSED_JSON="$BD_STUB_CLOSED_JSON" \
+        bash "$SCRIPT" </dev/null
+    [ "$status" -eq 0 ]
+    py_block="$(printf '%s\n' "$output" | grep -E '^\[BD-INPROGRESS')"
+    [ "$py_block" = "$jq_block" ]
+}
+
+@test "(B6) [BD-INPROGRESS-SKIP] reason=count-mismatch: 件数と行数の不一致は **両方向** loud（多い側も信用しない）" {
+    # 片側（行が足りない）だけを loud にすると、逆向き（独立 map が in_progress と数えていない bead を
+    # enrich 行として emit する＝2 read 間で close された等）が無警告で brief に載り、admin が閉じた bead を
+    # 「再開すべき作業」として掴む。ここでは sc-bbb が active では in_progress・closed 一覧にも在る状態を作る
+    # （map は closed が後勝ちで確定＝件数 1 に対し行 2 の矛盾）。
+    export BD_STUB_ACTIVE_JSON='[{"id":"sc-bbb","status":"in_progress","title":"stale","updated_at":"u1"},{"id":"sc-ccc","status":"in_progress","title":"live","updated_at":"u2"}]'
+    export BD_STUB_CLOSED_JSON='[{"id":"sc-bbb","status":"closed"}]'
+    run_fetch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-COUNT] open=0 in_progress=1 blocked=0"* ]]
+    [ "$(printf '%s\n' "$output" | grep -cE '^\[BD-INPROGRESS\] ')" -eq 2 ]
+    [[ "$output" == *"[BD-INPROGRESS-SKIP] reason=count-mismatch"* ]]
+    [[ "$output" != *"[BD-INPROGRESS-NONE]"* ]]
+}
+
+@test "(B7) updated_at が空/null でも title が updated= スロットへ滑らない（区切りは IFS-whitespace でない）" {
+    # `IFS=$'\t' read` の TAB は IFS-whitespace ゆえ連続区切りが 1 つに collapse し、空 updated_at の row で
+    # title が updated= の位置へずれる（消費側 SKILL.md §3「id / title / 更新時刻は写す」が誤った値を掴む）。
+    export BD_STUB_ACTIVE_JSON='[{"id":"sc-bbb","status":"in_progress","title":"ずれない title","updated_at":null}]'
+    run_fetch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-INPROGRESS] sc-bbb updated= ずれない title"* ]]
+    [[ "$output" != *"updated=ずれない title"* ]]
+    # キーは在る（null）ので enrich 成功扱い＝field-missing ではない。
+    [[ "$output" != *"[BD-INPROGRESS-SKIP]"* ]]
+}
+
+@test "(B8) title の 120 文字 cap は locale 非依存（C locale でも多バイト文字を割らず不正 UTF-8 を出さない）" {
+    # bash の ${#var} / ${var:0:N} は C/POSIX locale で **byte 単位**になり、多バイト title を途中で切って
+    # 不正 UTF-8 を DATA チャネルへ出す（rebrief は hook / cron / env -i 経路でも走る）。cap は codepoint 単位の
+    # 抽出層（jq / python3）で掛ける契約＝その teeth。
+    t="$(python3 -c 'print("あ"*150, end="")')"
+    expected="$(python3 -c 'print("あ"*120 + "…", end="")')"
+    export BD_STUB_ACTIVE_JSON="[{\"id\":\"sc-bbb\",\"status\":\"in_progress\",\"title\":\"$t\",\"updated_at\":\"u1\"}]"
+    # jq 経路（既定 PATH・UTF-8 locale）。
+    run_fetch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-INPROGRESS] sc-bbb updated=u1 $expected"* ]]
+    # C locale（env -i）でも同じ 120 文字で切れ、出力全体が正当な UTF-8 であること。
+    run env -i PATH="$PATH" HOME="$HOME" TMPDIR="$BATS_TEST_TMPDIR" LC_ALL=C \
+        SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
+        BD_STUB_ACTIVE_JSON="$BD_STUB_ACTIVE_JSON" \
+        BD_STUB_CLOSED_JSON="$BD_STUB_CLOSED_JSON" \
+        bash "$SCRIPT" </dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-INPROGRESS] sc-bbb updated=u1 $expected"* ]]
+    printf '%s\n' "$output" > "$BATS_TEST_TMPDIR/utf8check.txt"
+    run python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' < "$BATS_TEST_TMPDIR/utf8check.txt"
+    [ "$status" -eq 0 ]   # 不正 UTF-8 なら decode が落ちる（＝byte 切りの検知）
+}
+
+# ══════ 新 marker の **チャネル契約**（stdout=DATA / stderr=診断）・bd sc-0hm6 gate 差し戻しの blocking ══════
+# 消費側 overlay は canonical の stdout だけを envelope の body へ入れ、stderr は FATAL 要旨用に隔離する。
+# marker が stderr へ落ちれば overlay 経由の DATA から消え、本 bead の目的（現在地の一次データが DATA 面に
+# 出る）が無効化されるのに、合流 `run` だけの suite は満点で通る（emit 行へ `>&2` を付ける変異が生存する）。
+# 以下は **新 marker 9 emit 行すべて**（WM-PLAN 系 5 / BD-INPROGRESS 系 4）を stdout 側で pin する。
+
+@test "(CH1) チャネル契約: [WM-PLAN] 本文 / -TRUNCATED は stdout（DATA）に出て stderr へ落ちない" {
+    {
+        echo "## 計画弧・次のステップ"
+        for ((i = 1; i <= 25; i++)); do echo "- step $i"; done
+        echo ""
+        echo "## この effort を貫く命令・制約"
+        echo "- [auto] sc-aaa を in_progress で継続実装"
+    } > "$WMDIR/working-memory.$CUR.md"
+    run_fetch_split
+    [ "$status" -eq 0 ]
+    # $output = stdout（実測: bats 1.13.0 の --separate-stderr は $stdout を設定しない）。
+    [[ "$output" == *"[WM-PLAN] - step 1"* ]]
+    [[ "$output" == *"[WM-PLAN-TRUNCATED] shown=20 total=25"* ]]
+    # envelope の body は stdout 側にある（footer も stdout）。
+    [ "$(printf '%s\n' "$output" | tail -n1)" = "=== end rebrief DATA ===" ]
+    # 診断チャネルへ marker を 1 文字も落とさない（overlay が body から取り落とす経路の封鎖）。
+    [[ "${stderr:-}" != *"[WM-PLAN"* ]]
+}
+
+@test "(CH2) チャネル契約: [WM-PLAN-NONE] / -EMPTY も stdout（DATA）側" {
+    # (a) NONE（current sid の WM 不在）
+    rm -f "$WMDIR/working-memory.$CUR.md"
+    run_fetch_split
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[WM-PLAN-NONE]"* ]]
+    [[ "${stderr:-}" != *"[WM-PLAN"* ]]
+    # (b) EMPTY（WM は在るが当該節が空）
+    cat > "$WMDIR/working-memory.$CUR.md" <<'WMEOF'
+## 計画弧・次のステップ
+<!-- ephemeral -->
+
+## この effort を貫く命令・制約
+- [auto] sc-aaa を in_progress で継続実装
+WMEOF
+    run_fetch_split
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[WM-PLAN-EMPTY] reason=section-absent-or-empty"* ]]
+    [[ "${stderr:-}" != *"[WM-PLAN"* ]]
+}
+
+@test "(CH3) チャネル契約: UNAVAILABLE は marker=stdout / WARN 散文=stderr（隣接記述の取り違え検知）" {
+    # 本 diff は同一関数内に「stderr の WARN」と「stdout の marker」を隣接記述する新パターンを導入した＝
+    # リダイレクト 1 個の取り違えが起きやすい。双方向（marker が stderr へ / WARN が stdout へ）を張る。
+    skew="$(_skew_plan_lib_no_symbol)"
+    run --separate-stderr env SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$skew" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
+        bash "$SCRIPT" </dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[WM-PLAN-UNAVAILABLE]"* ]]     # marker は DATA チャネル
+    [[ "${stderr:-}" != *"[WM-PLAN"* ]]              # 診断チャネルへ marker を落とさない
+    [[ "${stderr:-}" == *"WARN"* ]]                  # 版ずれの理由は診断チャネルへ（degrade-loud）
+    [[ "$output" != *"WARN"* ]]                      # 診断散文を payload へ混ぜない（header の契約）
+}
+
+@test "(CH4) チャネル契約: [BD-INPROGRESS] / -SKIP / -NONE の 3 状態すべて stdout（DATA）側" {
+    # (a) enrich 行
+    export BD_STUB_ACTIVE_JSON='[{"id":"sc-bbb","status":"in_progress","title":"t","updated_at":"u"}]'
+    run_fetch_split
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-INPROGRESS] sc-bbb updated=u t"* ]]
+    [[ "${stderr:-}" != *"[BD-INPROGRESS"* ]]
+    # (b) SKIP（field-missing）
+    export BD_STUB_ACTIVE_JSON='[{"id":"sc-bbb","status":"in_progress"}]'
+    run_fetch_split
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-INPROGRESS-SKIP] reason=field-missing"* ]]
+    [[ "${stderr:-}" != *"[BD-INPROGRESS"* ]]
+    # (c) SKIP（count-mismatch）
+    export BD_STUB_ACTIVE_JSON='[{"id":"sc-bbb","status":"in_progress","title":"stale","updated_at":"u1"},{"id":"sc-ccc","status":"in_progress","title":"live","updated_at":"u2"}]'
+    export BD_STUB_CLOSED_JSON='[{"id":"sc-bbb","status":"closed"}]'
+    run_fetch_split
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-INPROGRESS-SKIP] reason=count-mismatch"* ]]
+    [[ "${stderr:-}" != *"[BD-INPROGRESS"* ]]
+    # (d) NONE
+    export BD_STUB_ACTIVE_JSON='[{"id":"sc-bbb","status":"open","title":"x","updated_at":"y"}]'
+    export BD_STUB_CLOSED_JSON='[]'
+    run_fetch_split
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-INPROGRESS-NONE]"* ]]
+    [[ "${stderr:-}" != *"[BD-INPROGRESS"* ]]
+}
+
+@test "(SK1) SKILL.md §3 の構造 teeth: フェンス内先頭が 俯瞰 4 行（順序固定）・規律散文はフェンス外" {
+    # 受入基準(7)「§3 のフェンス内テンプレート先頭に俯瞰 4 行が在り、規律散文はフェンス外に在る」を
+    # presence grep でなく **位置と順序**で pin する（並び替え・フェンス内外の入れ替えを検知する）。
+    local f="$REPO/skills/rebrief/SKILL.md" n3 nd nf l
+    n3="$(grep -nF '### 3. brief を出す' "$f" | head -n1 | cut -d: -f1)"
+    [ -n "$n3" ]
+    nd="$(grep -nF '**俯瞰 4 slot の規律**' "$f" | head -n1 | cut -d: -f1)"
+    [ -n "$nd" ]
+    # §3 以降の最初のフェンス開始行。
+    nf="$(awk -v s="$n3" 'NR>s && /^```/ {print NR; exit}' "$f")"
+    [ -n "$nf" ]
+    # 規律散文は §3 見出しの後・フェンス開始より前（＝フェンスの外）。
+    [ "$nd" -gt "$n3" ]
+    [ "$nd" -lt "$nf" ]
+    # フェンス開始の次行が俯瞰の見出し、その後 4 行が固定順（ゴール→現在地→残りの塊→user 手番）。
+    [ "$(awk -v n="$((nf + 1))" 'NR==n' "$f")" = "## 全体像" ]
+    l="$(awk -v n="$((nf + 2))" 'NR==n' "$f")"; [[ "$l" == "- ゴール:"* ]]
+    l="$(awk -v n="$((nf + 3))" 'NR==n' "$f")"; [[ "$l" == "- 現在地:"* ]]
+    l="$(awk -v n="$((nf + 4))" 'NR==n' "$f")"; [[ "$l" == "- 残りの塊:"* ]]
+    l="$(awk -v n="$((nf + 5))" 'NR==n' "$f")"; [[ "$l" == "- user 手番:"* ]]
+    # 既存 4 節はその後に続く（俯瞰が既存節を置換していない）。
+    [ "$(awk -v s="$nf" 'NR>s && /^## 判定根拠$/ {print "y"; exit}' "$f")" = "y" ]
+}
+
 # ────────────────── 層の fence（F3: overlay を持ち込まない） ──────────────────
 
 @test "(F3) overlay 非混入: STALE / GREEN gate / gate-pending は core の DATA に出ない" {
@@ -846,4 +1430,33 @@ _make_minimal_path() {
     # consult/setup とも ${CLAUDE_PLUGIN_ROOT} で統一）。literal 部分一致だけの assert は placeholder を通すため teeth 化する。
     grep -qF '${CLAUDE_PLUGIN_ROOT}/scripts/scribe-rebrief-fetch.sh' "$REPO/skills/rebrief/SKILL.md"
     ! grep -qF '<scribe plugin root>' "$REPO/skills/rebrief/SKILL.md"
+}
+
+@test "(skill) SKILL.md が新 marker 8 種と俯瞰 4 slot を持つ（表に無い marker は inert land になる・sc-0hm6）" {
+    # fetch が emit しても skill 側の対応表 / 定型に slot が無ければ、LLM がコピーする面に現れず land しても使われない。
+    local f="$REPO/skills/rebrief/SKILL.md" m s
+    for m in '[WM-PLAN]' '[WM-PLAN-EMPTY]' '[WM-PLAN-NONE]' '[WM-PLAN-UNAVAILABLE]' '[WM-PLAN-TRUNCATED]' \
+             '[BD-INPROGRESS]' '[BD-INPROGRESS-NONE]' '[BD-INPROGRESS-SKIP]'; do
+        grep -qF -- "$m" "$f" || { echo "SKILL.md に marker 記載なし: $m" >&2; return 1; }
+    done
+    grep -qF -- '## 全体像' "$f"
+    for s in '- ゴール:' '- 現在地:' '- 残りの塊:' '- user 手番:'; do
+        grep -qF -- "$s" "$f" || { echo "SKILL.md に俯瞰 slot なし: $s" >&2; return 1; }
+    done
+    # 規律散文はフェンス外・スケルトンはフェンス内先頭（順序固定）。
+    grep -qF -- '俯瞰 4 slot の規律' "$f"
+    # 層 fence 本文（generic core の 4 要素）は動かさない。
+    grep -qF -- 'generic core の 4 要素' "$f"
+    # -SKIP の reason 値は両方 skill 側に列挙されていること（列挙漏れは消費側で inert land になる）。
+    grep -qF -- 'reason=field-missing' "$f"
+    grep -qF -- 'reason=count-mismatch' "$f"
+}
+
+@test "(doc) README の marker/degrade 記述が committed teeth を持つ（doc-drift が cell 消滅で検知不能にならない）" {
+    # 契約は scripts/README.md:19 と skills/README.md:15 の同時更新を要求する。untracked な self-test だけに
+    # teeth を置くと cell 終了で消え、以後の doc-drift（marker を足して README を忘れる）を誰も検知できない。
+    grep -qF -- '[WM-PLAN-UNAVAILABLE]' "$REPO/scripts/README.md"
+    grep -qF -- '[BD-INPROGRESS' "$REPO/scripts/README.md"
+    grep -qF -- 'reason=count-mismatch' "$REPO/scripts/README.md"
+    grep -qF -- '全体像（ゴール / 現在地 / 残りの塊 / user 手番）' "$REPO/skills/README.md"
 }

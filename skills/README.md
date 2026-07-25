@@ -12,7 +12,8 @@ scribe plugin の skill 群を置くディレクトリ。各サブディレク�
   冪等収束させ、scribe role 別 SessionStart 注入を opt-in 成立させる reconciler（旧 ubuntu-note-system
   `beads-init` を移管）。`PRIME.template.md`（role 中立版）を同梱する。
 - **`rebrief/`** → `/scribe:rebrief`（bd sc-8eyw で新設）: admin respawn / compaction 後の**第一手**。退避した
-  Working Memory と bd の現在値を突合し、brief〔判定根拠 / 推奨 / 次アクション / hygiene tripwire〕を定型出力して
+  Working Memory と bd の現在値を突合し、brief〔全体像（ゴール / 現在地 / 残りの塊 / user 手番）/ 判定根拠 /
+  推奨 / 次アクション / hygiene tripwire〕を定型出力して
   current session の WM を consumed 化する（`.md`→`.consumed.md` の mv）。機械層（DATA の read-only fetch）は
   `scripts/scribe-rebrief-fetch.sh`、判断と consume が本 skill＝**機械 fetch / LLM judgment** の分担。
   退避側の対は cc-session の `/session:ready-compaction`（cc-session は **user-scope enable が前提**）。
