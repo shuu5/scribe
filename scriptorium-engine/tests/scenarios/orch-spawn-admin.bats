@@ -870,6 +870,9 @@ STUB
 #     作らない）: I7FT-b-fable-explicit（裁定 1 の締め出さない fence）/ I7FT-b-mut-default（既定 argv pin の
 #     mutation 非空虚）/ I7FT-b-no-preflight-symbols（撤去 4 識別子の durable negative teeth）+ 追加 1 本
 #     I7FT-plan-no-fable（--no-effort-inject 枝の dry-run 出力に残存文言が出ない）。
+#   ★人間可視 prose の残存文言 teeth は **4 modality** を被覆する（旧既定文言を実際に抱えていた surface の数）:
+#     1/4 既定 dry-run の model 行（K660-dryrun-plan）/ 2/4 --no-effort-inject の ultra 行（I7FT-plan-no-fable）
+#     3/4 fail-open stderr（K660-c-effort-failopen）/ 4/4 MODEL_EXPLICIT 枝の model 行（I7FT-b-fable-explicit）。
 #   ★docs drift teeth（K660-e-docs 相当）は engine copy には移植しない（本 file header と末尾の (K660-e-docs)
 #     削除注記のとおり private 配備層 residual bats の担当＝engine tree に CLAUDE.md / docs/ は無い）。
 # ==============================================================================
@@ -920,6 +923,16 @@ STUB
     [ "$status" -eq 0 ]                                   # die しない
     grep -Fxq $'ARG\tfable' "$CLD_ARGS_FILE"              # verbatim 透過（行完全一致）
     refute_grep -Fxq $'ARG\topus[1m]' "$CLD_ARGS_FILE"    # 既定へ差し戻されていない（明示が優先）
+    # ★modality 4/4（MODEL_EXPLICIT 枝の plan 行）: この行も旧既定文言「既定 fable / preflight / opus[1m]
+    #   fallback は適用しない」を抱えていた人間可視 surface で、argv assert だけでは stale 文言の復活を捕捉
+    #   できない（cell-quality gate round2 completeness-critic finding）。plan 行は dry-run/exec 共通で stdout
+    #   へ出るため exec 経路のまま検査できる（--dry-run を足すと argv assert が壊れる＝cld-spawn を呼ばない）。
+    local plan_model
+    plan_model=$(printf '%s\n' "$output" | grep -E '^  model   :' || true)
+    [ -n "$plan_model" ]                                  # 当該行を確かに拾えている（空虚でない）
+    [[ "$plan_model" == *"--model 明示ゆえ既定より優先"* ]]
+    [[ "$plan_model" != *"preflight"* ]]
+    [[ "$plan_model" != *"fallback"* ]]
 }
 
 @test "(I7FT-b-no-preflight-symbols) fable preflight 機構の 4 識別子が script から消えている（durable negative teeth・acceptance grep 0 hit）" {
@@ -952,7 +965,9 @@ STUB
     #   相対解決を成立）。MODEL="opus[1m]" の代入を旧既定 MODEL="fable" へ戻す → I7FT-a-model-default の positive
     #   assert が消え negative assert が点灯する＝既定 argv pin が実装に依存している（空虚でない）ことの証明。
     # ★変異前後の存在 assert を必ず添える（sed が pattern 不一致で silent no-op 化する穴を塞ぐ・K660-b-mut 欠落分）。
-    grep -Fq 'MODEL="opus[1m]"' "$SCRIPT"                          # 元 script に変異対象が実在する
+    # ★-Fx（行完全一致）が load-bearing: -F のみだと trailing comment 付き行にも一致し、sed の ^...$ が
+    #   no-op 化する穴を単独では塞げない（契約 TEETH 節の「変異前に対象 literal が -Fx で実在」）。
+    grep -Fxq 'MODEL="opus[1m]"' "$SCRIPT"                         # 元 script に列 0 の bare 行として実在する
     _build_mutant 's/^MODEL="opus\[1m\]"$/MODEL="fable"/' "$BIN/mut-default-model"
     refute_grep -Fq 'MODEL="opus[1m]"' "$MUT_SCRIPT"               # mutant では消えている（sed が効いた）
     grep -Fq 'MODEL="fable"' "$MUT_SCRIPT"                         # 旧既定へ変異している
@@ -1028,7 +1043,7 @@ STUB
         run bash "$SCRIPT" tb
     [ "$status" -eq 0 ]                                       # fail-open＝admin 稼働継続
     [[ "$output" == *"fail-open"* ]]                          # loud
-    # orch-i7ft modality 3/3: fail-open stderr の文言も新既定へ改訂済み（旧「admin は fable+xhigh のまま稼働継続」
+    # orch-i7ft modality 3/4: fail-open stderr の文言も新既定へ改訂済み（旧「admin は fable+xhigh のまま稼働継続」
     #   を放置すると人間可視の実出力が新既定下で嘘を吐く）。当該枝を通った上で 'fable' 0 hit を pin する。
     [[ "$output" != *"fable"* ]]
     grep -q 'ORCH-WATCH-CONTRACT' "$CLD_PROMPT_FILE"          # kickoff は注入される
@@ -1075,7 +1090,7 @@ STUB
     [[ "$output" == *"effort  : xhigh"* ]]
     [[ "$output" == *"/effort ultracode"* ]]
     [[ "$output" == *"turn 起動照合"* ]]                     # orch-sm6p の照合を plan に明示
-    # 旧既定の残存文言が plan に出ない（modality 1/3・既定 plan 経路）。旧 assert の *"opus[1m]"*（「fallback 先を
+    # 旧既定の残存文言が plan に出ない（modality 1/4・既定 plan 経路）。旧 assert の *"opus[1m]"*（「fallback 先を
     #   plan に明示」）は model 行で自己充足するため vacuous duplicate として削除した。
     #   engine の dry-run 出力には model fallback 以外の 'fallback' 語を出す機構が無い（local copy が持つ session 名
     #   fail-open fallback 警告＝topology(1) は engine 未取込み）ため、出力全体で 0 hit を要求できる（実測確認済み）。
@@ -1086,7 +1101,7 @@ STUB
     [ ! -s "$CLD_ARGS_FILE" ]
 }
 
-@test "(I7FT-plan-no-fable) --dry-run --no-effort-inject の plan にも旧既定文言（fable）が出ない（modality 2/3・ultra 見送り枝の直接被覆）" {
+@test "(I7FT-plan-no-fable) --dry-run --no-effort-inject の plan にも旧既定文言（fable）が出ない（modality 2/4・ultra 見送り枝の直接被覆）" {
     # --no-effort-inject 枝の ultra 行は人間可視の実出力で、旧文言「fable+xhigh のまま」を放置すると新既定下で
     #   嘘を吐く（既定 plan 経路の teeth では被覆されない別枝）。ここで直接 pin する。
     run_spawn_admin tb --dry-run --no-effort-inject
