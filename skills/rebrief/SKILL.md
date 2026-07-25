@@ -2,7 +2,8 @@
 name: rebrief
 description: |
   respawn / compaction 後の第一手として、rebrief DATA（WM主張↔bd現在値の乖離 / orphan WM / auto-compact 強制回復 mode /
-  consumed 化対象）を機械層 fetch から取り込み、判定根拠・推奨・次アクション・hygiene tripwire を定型 brief で提示し、
+  consumed 化対象）を機械層 fetch から取り込み、全体像（ゴール / 現在地 / 残りの塊 / user 手番）+
+  判定根拠・推奨・次アクション・hygiene tripwire を定型 brief で提示し、
   current session の Working Memory を consumed 化する。
   機械層（fetch）= scripts/scribe-rebrief-fetch.sh が read-only で DATA を出し、判断（brief）と consume（mv）は本 skill が担う。
   cc-session(session plugin) の user-scope enable が前提（Working Memory の退避側＝/session:ready-compaction の対）。
@@ -53,17 +54,23 @@ cwd の repo（`.beads/` を持つ root へ walk-up）を anchor とし、その
 | anchor を解決できない | cwd が `.beads/` を持つ repo の外 | 対象 repo で実行するか `SCRIBE_REBRIEF_ANCHOR` を渡す |
 | dolt_database を確定できない | anchor 直下の `.beads/metadata.json` が不在/壊れ | 台帳の metadata を直す（`/scribe:setup`） |
 | cc-session lib 不在 | session plugin が user-scope で enable されていない | cc-session を enable する |
-| cc-session lib の API 不在 | lib は在るが版ずれ（関数が rename/移設） | cc-session を更新して再 enable する |
+| cc-session lib の API（`extract_effort_directives`）不在 | lib は在るが版ずれ（**公開 API** が rename/移設） | cc-session を更新して再 enable する |
 | bd read 失敗 | bd 不在 / dolt lock 競合 / 台帳破損 / JSON parse 不能 | bd と台帳の健全性を直す（**再実行前に**） |
 | JSON parser 不在 | `jq` も `python3` も PATH に無い | どちらかを入れる（粗い近似 parse には落とさない＝捏造 DRIFT を出さないため） |
 | WM / WM dir が読めない | `.claude-session/` や WM の所有権・権限ずれ（例: container root が書いた） | 権限/所有者を直す（`[ORPHAN-NONE]` が嘘になるため skip しない） |
+
+> **非 FATAL degrade（意図的な非対称）**: 上表の「API 不在＝FATAL」は cc-session の **公開 API**
+> （`extract_effort_directives`）に限る。計画弧（現在地）の抽出に使う `_wm_extract_section` は cc-session の
+> **private 記号**ゆえ記号 gate に含めない——正当な内部 rename で fleet 全 admin の rebrief が boot path で
+> brick するのを避けるため。不在時は `[WM-PLAN-UNAVAILABLE]` を出して **rc 0 で継続**（FATAL ではなく brief は出す）。
+> この場合「現在地」は**判定不能扱い**とし `[BD-INPROGRESS]` / `[BD-COUNT]` で代替する。
 
 いずれも「読めなかった／識別できなかった」を「**異常なし（乖離なし・BD-COUNT=0）**」に化けさせないための
 死に方＝黙って skip しない。**FATAL のときは brief を出さない**——DATA が無いのに「やり残しなし」と要約するのが
 この skill の最悪の失敗（respawn 直後の第一手ゆえ、偽の全クリアはそのまま作業放棄になる）。
 FATAL の内容をそのまま報告し、原因を直してから再実行する。
 
-### 2. DATA を読んで brief を組む（下記 4 要素・この形を崩さない）
+### 2. DATA を読んで brief を組む（下記 俯瞰 + 4 節・この形を崩さない）
 
 fetch の marker と、brief に落とす先の対応:
 
@@ -80,6 +87,22 @@ fetch の marker と、brief に落とす先の対応:
   **`.consumed.md` が併存していても orphan として出る**（consume は mv ゆえ plain `.md` の存在自体が未 consume の証拠。
   過去に 1 度 consume した痕跡は、その後の**再**外部化を打ち消さない）。
 - `[WM] found|missing` / `[CONSUME-TARGET] / [CONSUME-NONE]` … current session の WM＝consume 対象。
+- `[WM-PLAN] / [WM-PLAN-EMPTY] / [WM-PLAN-NONE] / [WM-PLAN-UNAVAILABLE] / [WM-PLAN-TRUNCATED]` …
+  WM の「計画弧・次のステップ」節＝**「現在地」の一次データ**（4 値排他・1 回の実行で状態は 1 つだけ出る）。
+  落とす先は §3 俯瞰の **現在地**（および「残りの塊」の補強）。
+  - `[WM-PLAN] <本文 1 行>` … 本文は **1 行ごとに marker を前置**して出る（行頭に生の WM 本文を出さない＝
+    実 WM には marker literal が実在するため、生 emit は消費側の行頭 marker 判定を汚染する）。
+  - `[WM-PLAN-EMPTY] reason=section-absent-or-empty` … WM は在るが当該節が不在/空（テンプレ生成直後 /
+    旧 3 節スキーマ）→ 現在地は **判定不能**（「やることなし」ではない）。
+  - `[WM-PLAN-NONE]` … current sid の WM file 自体が不在 → §2-b の復元手順へ（候補 sid で再 fetch すれば実データになる）。
+  - `[WM-PLAN-UNAVAILABLE]` … cc-session lib の抽出記号/定数が無い（版ずれ）。**FATAL ではない**（rc 0 で brief は出す）
+    ＝現在地は判定不能扱いとし `[BD-INPROGRESS]` / `[BD-COUNT]` で代替する（§1 の非対称注記）。
+  - `[WM-PLAN-TRUNCATED] shown=N total=M` … 20 行で切った合図（黙って切らない）。全文が要るなら WM を直接 Read する。
+- `[BD-INPROGRESS] <id> updated=<ts> <title>` / `[BD-INPROGRESS-NONE]` / `[BD-INPROGRESS-SKIP] reason=<...>` …
+  bd の in_progress の **id + 更新時刻 + title**（固定 arity 前置 + 自由文末尾＝title 内の空白で parse が壊れない順）。
+  落とす先は §3 俯瞰の **現在地**（force-recovery では一次）と §3「次のアクション」（in_progress を優先する判断の実データ）。
+  `-NONE` は**確認した上で 0 件**。`-SKIP` は「read は成功したが enrich できない」（bd 版差で title/updated_at キーが無い等）
+  ＝**`-NONE` と融合させず判定不能として扱う**（bd read の失敗自体は §1 の FATAL 側＝brief を出さない）。
 
 #### 2-b. `[WM] missing` + `[WM-CANDIDATE]` のとき（respawn / `/clear` の既定経路・**ここを飛ばさない**）
 
@@ -94,15 +117,54 @@ fetch の marker と、brief に落とす先の対応:
    ```
 
    `<候補の sid>` は `working-memory.<sid>.md` の `<sid>` 部分。再 fetch の `[DIFF-DRIFT]` を §3 の brief に載せる。
+   **候補 sid で再 fetch すると `[WM-PLAN]` が実データになる＝§3 俯瞰「現在地」の一次ソースはここで得る**
+   （1 回目は `[WM-PLAN-NONE]`＝まだ取得していない状態。ここを踏まずに「現在地: 判定不能」と書くのは禁止＝下記 §3 の手順ゲート）。
 3. `[DIFF-UNKNOWN]` のまま brief を書かない。**`[DIFF-UNKNOWN]` を「乖離: なし」と要約するのは禁止**
    （§1 の「最悪の失敗」＝偽の全クリア）。候補を読んでも突合できなかったなら、その旨を brief に明記する。
 
 `[WM-CANDIDATE-NONE]`（候補が 1 件も無い）なら、退避物自体が存在しない＝真に新規 session。この場合のみ
 「復元すべき WM は無い」と要約してよい（ただし bd の in_progress は残るので §3 の「次のアクション」は出す）。
 
-### 3. brief を出す（定型・4 節）
+### 3. brief を出す（定型・俯瞰 + 4 節）
+
+**本テンプレは fetch が rc 0 で DATA を出したときのみ適用**する（§1 の FATAL 時は brief を出さない＝DATA が無いのに
+定型を埋めて「やり残しなし」を捏造しない）。
+
+**俯瞰 4 slot の規律**（フェンス内テンプレ先頭の `## 全体像`・順序固定。規律はここ＝フェンス外に置く）:
+
+- **4 slot の定義と順序**: ① **ゴール** = 今の effort が達成しようとしている状態（個別 bead ではなく effort 単位）
+  → ② **現在地** = どこまで進んでいるか → ③ **残りの塊** = これから残っている作業の塊 → ④ **user 手番** =
+  user の承認・裁定・入力を待っている項目。**この順序を入れ替えない**（「今どこにいるか」を掴む順序そのものが規約）。
+- **現在地の MODE 別優先順位**: `normal` は `[WM-PLAN]` を**一次**とし `[BD-INPROGRESS]` / `[BD-COUNT]` で裏取りする。
+  `force-recovery` は `[BD-INPROGRESS]` / `[BD-COUNT]` を**一次**とし、`[WM-PLAN]` は「**古い可能性のある参考**」
+  としてのみ引用する（§2 の `[REBRIEF-MODE]` 規律と同一＝`docs/protocol.md` §9「強制回復モード」）。
+- **3 値則（判定不能を 0 / なしと書かない）**: 各 slot は〔実データ〕〔`判定不能(理由)`〕〔`なし`〕の 3 値で書き分ける。
+  DATA から決められないものを `0 件` / `なし` と書くのは §1 の「最悪の失敗」（偽の全クリア）と同型。
+  **`判定不能` を書いてよいのは §2-b の復元手順（先頭候補の Read → 採用候補の sid で再 fetch）を踏んだ後だけ**——
+  踏まずに `判定不能` で埋めるのは禁止。`[DIFF-UNKNOWN]` 固有の規律は §2 / §2-b が SSOT（本文をここへ複製しない）。
+- **`user 手番` が 0 件のときは空欄にせず「なし」と明示する**（＝確認した上で 0 件。判定不能と弁別する）。
+  判定条件を自前定義せず §4 の RULE-1（正規ケース＝自動 consume / 正規外＝人間へ確認）と §1 の FATAL 表を参照する。
+  **バナー / 承認待ちは提示層の表示であり、§4 の consume 手順（正規ケースの自動 mv）を停止させない**。
+- **承認バナー**: 「user 手番」に挙げた項目のうち **user の承認・裁定を実際に要するものが 1 件以上あるとき**に
+  バナー / AskUserQuestion を立て、**承認不要の報告では立てない**（安売り禁止＝バナー出現が承認要求を含意する不変量）。
+  発火条件・表示様式・在席分岐の SSOT は `docs/protocol.md` §5.4 と §7.2 であり、本 skill は独自条件を定義しない。
+- **「残りの塊」は conditional-required**: 3 クラス分類等の**分類器 marker は canonical fetch が持たない**（層の fence＝
+  orchestrator overlay の領分）ので、**既定は常に未分類経路**＝`[BD-COUNT]` の内訳をそのまま写した 1 行で可
+  （**合算値を単独で書かない**）。`[BD-COUNT]` は open / in_progress / blocked の 3 値のみで bd の `deferred` を
+  計上しないため、「残り総数」を名乗らず「**bd 現在値の内訳（deferred 等は未計上）**」と限定する。分類器 marker が
+  DATA に在る層（overlay）で回す場合はその分類を写す。
+- **長さ cap の適用範囲**: cap（俯瞰の各 slot 1 行）は **俯瞰 4 slot の表示にのみ**掛かる。`[DIFF-DRIFT]` 各件・
+  `[ORPHAN-WM]` 各件の列挙義務には掛からず、cap を理由に省略・要約丸めしてはならない。
+  **cap は提示層の書式規約であって思考量への cap ではない**。
+- **平易さ**: 提示の平易さは各 host の user CLAUDE.md「言語・伝え方」節に従う（規約本文をここへ複製しない）。
 
 ```
+## 全体像
+- ゴール: <この effort が達成しようとしている状態／判定不能(理由)>
+- 現在地: <どこまで進んでいるか（MODE 別の一次ソースは上記規律）／判定不能(理由)>
+- 残りの塊: <残作業の塊。分類器が無ければ「bd 現在値の内訳（open=N in_progress=N blocked=N・deferred 等は未計上）」を写す>
+- user 手番: <user の承認・裁定・入力を待つ項目／なし>
+
 ## 判定根拠
 - MODE: <normal|force-recovery>（force-recovery なら「bd 一次 truth」と明記）
 - WM: <found|missing→候補 sid=X を採用（respawn/clear）|missing かつ候補なし>（採用した WM の「命令・制約」節の要旨）
@@ -115,7 +177,7 @@ fetch の marker と、brief に落とす先の対応:
 - force-recovery のときは WM 主張を採用しない理由を 1 行で明示する。
 
 ## 次のアクション
-- 直近で再開すべき作業を 1〜3 個（bd id 付き）。in_progress の bead を優先する。
+- 直近で再開すべき作業を 1〜3 個（bd id 付き）。in_progress の bead を優先する（id / title / 更新時刻は [BD-INPROGRESS] を写す）。
 
 ## hygiene tripwire
 - orphan WM が在れば列挙し「別 session が退避したまま復元されていない」ことを警告する（放置＝作業文脈の喪失）。

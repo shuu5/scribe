@@ -47,6 +47,13 @@
 #   ⑥ で空台帳を巻き込まないこと: `bd list --limit 0 --json` は空台帳でも rc=0 + `[]` を返す（実測）ので、
 #   判定は「出力の空虚さ」でなく **rc と JSON 形状**で行う（`[]` は正当な空＝成功扱い）。
 #
+# **非 FATAL degrade（⑤ の意図的な例外・bd sc-0hm6）**: plan-arc 抽出に使う cc-session の **private 記号**
+#   （`_wm_extract_section`）と定数 `WM_HEADING_PLAN` の不在は **FATAL にしない**——`[WM-PLAN-UNAVAILABLE]` を
+#   emit して **rc 0 で続行**する（⑤ の記号 gate は cc-session の **公開 API** `extract_effort_directives` に限る）。
+#   理由: private 記号を記号 gate へ足すと、cc-session の**正当な内部 rename**が fleet 全 admin の rebrief を
+#   boot path で brick させる新モダリティを作る（読めなかったことは degrade-loud に言えば足り、死ぬ必要がない）。
+#   消費側（skill）はこの marker を見たら「現在地」を判定不能扱いにし `[BD-INPROGRESS]` / `[BD-COUNT]` で代替する。
+#
 # **「WM を突合していない」を「乖離なし」と呼ばない（[DIFF-UNKNOWN] / [WM-CANDIDATE]）**: WM file は
 #   `working-memory.<sid>.md` と **sid で scope** される（cc-session un-gcu）。`/clear` は session_id を変え
 #   （cc-session compaction-memory-model.md が verified と明記）、respawn は新プロセスゆえ a fortiori で新 sid。
@@ -252,8 +259,20 @@ BD_TIMEOUT_SECS="${SCRIBE_REBRIEF_BD_TIMEOUT:-20}"
 # どちらも設定しない）ゆえ、本 core が狙う「全 scribe project で使える generic core」が既定構成で不成立になる。
 # header が「判定は『出力の空虚さ』でなく **rc と JSON 形状**で行う」と契約している以上、payload に診断を
 # 混ぜてはならない。stderr は **rc≠0 のときの FATAL 要旨用にだけ** 保持する（原因の surface は維持）。
+#
+# **active list の JSON を memo する（bd sc-0hm6・第 3 の bd 呼出を新設しない）**: `[BD-INPROGRESS]` の
+# id + title + updated_at は **既存 2 read から derive** する契約（header :41-48 / tests の「発行する read は
+# 2 種のみ」）。`_build_bd_status_map` は `active="$(_bd_json …)"` と **command substitution**（= subshell）で
+# 呼ぶため、関数内で globals へ書いても親へ伝わらない。よって main で先に 1 度呼んで結果を global へ捕捉し、
+# 以降の同一 read は下の memo hit で返す（bd の実呼出は従来どおり 2 回のまま＝read の種類も回数も増やさない）。
+BD_ACTIVE_JSON=""
+BD_ACTIVE_JSON_READY=0
 _bd_json() {
     local out rc err errf
+    if [ "$*" = "list --limit 0" ] && [ "${BD_ACTIVE_JSON_READY:-0}" = "1" ]; then
+        printf '%s' "$BD_ACTIVE_JSON"
+        return 0
+    fi
     errf="$(mktemp "${TMPDIR:-/tmp}/scribe-rebrief-bderr.XXXXXX" 2>/dev/null)" || errf=""
     if [ -z "$errf" ]; then
         echo "[scribe-rebrief-fetch] FATAL: 一時ファイルを作成できない（bd の stderr を stdout と分離して捕捉するのに必要）→ 実行しない（stderr を JSON へ混ぜると健全な read を parse 不能と誤診するため）" >&2
@@ -345,7 +364,120 @@ _normalize_status() {
     echo ""
 }
 
+# ── plan-arc（WM の「現在地」の一次データ）抽出（bd sc-0hm6） ────────────────
+# **cc-session の private 記号を「記号 gate」へ足さない**（意図的な非対称・header の「非 FATAL degrade」参照）:
+# 抽出は cc-session lib の `_wm_extract_section` を **consume** する（awk を自前再実装すると 2 節スキーマの
+# SSOT が二重化し、コメント/空行除去や CRLF 正規化の細部でドリフトする）。ただしこの記号は cc-session の
+# **private**（`export -f` されていない＝lib を source した shell では呼べるが公開 API ではない）ゆえ、
+# 起動時の記号 gate（`extract_effort_directives`）へ足すと**正当な内部 rename が fleet 全 admin の rebrief を
+# boot path で brick** させる。よって gate とは **独立の述語**で存在を見て、不在なら degrade-loud に継続する
+# （後続 review がこの判断を「防御の非対称」と読んで gate へ戻す往復を止めるため理由をここに残す。
+#  header :190-196 / :218-220 の「非対称を解消せよ」は**外部 lib の public API に対する規律**であり private 記号には適用しない）。
+#
+# `WM_HEADING_PLAN` は必ず `"${WM_HEADING_PLAN:-}"` 形で参照する: 本 script は `set -uo pipefail` ゆえ裸参照は
+# **script 全体を rc1 で即死**させる（command substitution 内なら subshell だけが静かに死んで空文字になり、
+# 「節が空」と区別できない）。rc1 は overlay が伝播するため fleet 全 admin の boot path が落ちる。
+# `_wm_extract_section <file> ""` は **呼んではならない**（awk の `$0 == h` が空行にマッチし「命令・制約」節の
+# 内容を plan-arc として返す＝silent な偽データ）。存在判定は `command -v` ではなく `declare -F`
+# （`command -v` は PATH 上の同名実行ファイル・builtin・alias にも一致する）。
+_wm_plan_supported() {
+    declare -F _wm_extract_section >/dev/null 2>&1 || return 1
+    [ -n "${WM_HEADING_PLAN:-}" ] || return 1
+    return 0
+}
+
+# plan-arc の truncate 行数（固定・黙って切らず [WM-PLAN-TRUNCATED] で言う）。
+WM_PLAN_MAX_LINES=20
+
+# 4 値排他（優先順位: ① file 不在 → NONE〔呼出側〕 ② 記号/定数欠落 → UNAVAILABLE ③ 抽出が空 → EMPTY ④ → 本文）。
+# **本文は 1 行ごとに marker を前置**する（行頭に生の WM 本文を出さない＝実 WM corpus に marker literal が
+# 実在するため、生 emit すると消費側の行頭 marker 判定へ偽陽性を注入できてしまう）。
+_emit_wm_plan() {
+    local file="$1" full shown total
+    if ! _wm_plan_supported; then
+        # 診断文に marker literal を書かない（既存 FATAL 群と同規律）。**"FATAL" の字面も書かない**:
+        # 本経路は死なない degrade ゆえ、消費側（bats / 運用 grep）が stderr の字面で死因を数えると
+        # 「degrade したのに致命扱い」の偽陽性になる（degrade と死の弁別が語彙で崩れる）。
+        echo "[scribe-rebrief-fetch] WARN: cc-session lib の plan-arc 抽出（private 記号 _wm_extract_section / 定数 WM_HEADING_PLAN）が不在＝版ずれ。plan-arc は取得せず degrade して続行する（rc 0 で継続＝致命扱いにしない。非対称の理由は本 script header 参照）" >&2
+        echo "[WM-PLAN-UNAVAILABLE] cc-session lib の抽出記号/定数が無い（版ずれ）＝現在地の一次データを取得できない（degrade・rc 0 で継続。bd 側の in_progress と件数で代替せよ）"
+        return 0
+    fi
+    full="$(_wm_extract_section "$file" "${WM_HEADING_PLAN:-}")"
+    if [ -z "$full" ]; then
+        echo "[WM-PLAN-EMPTY] reason=section-absent-or-empty  WM は在るが当該節が不在/空（テンプレ生成直後 / 旧 3 節スキーマ）＝現在地は判定不能（『やることなし』ではない）"
+        return 0
+    fi
+    # **`producer | head -n N` を使わない**: `set -o pipefail` 下で本文が大きいと producer が SIGPIPE 死し
+    # rc=141 へ昇格する（実測 flaky）。先に変数へ確定させ herestring で切る（docs/protocol.md:128 / methodology.md:143）。
+    total="$(printf '%s\n' "$full" | awk 'END{print NR}')"
+    shown="$(head -n "$WM_PLAN_MAX_LINES" <<< "$full")"
+    while IFS= read -r _wm_plan_line; do
+        printf '[WM-PLAN] %s\n' "$_wm_plan_line"
+    done <<< "$shown"
+    if [ "$total" -gt "$WM_PLAN_MAX_LINES" ]; then
+        echo "[WM-PLAN-TRUNCATED] shown=$WM_PLAN_MAX_LINES total=$total"
+    fi
+}
+
+# ── [BD-INPROGRESS] 用の抽出（bd sc-0hm6・独立関数＝既存 map 構築を一切変更しない） ──
+# stdin = `bd list --limit 0 --json` の配列 1 個（memo 済みの active list）。出力 = TSV 4 列:
+#   <id> \t <1=title/updated_at の両キーが在る|0=欠落> \t <updated_at> \t <title（CR/LF/TAB を空白へ潰し単一行化）>
+# **jq と python3 の 2 段 fallback を両方実装**（起動時 parser gate が双方不在を弾く）。SELF_PREFIX filter を
+# ここでも再適用する（連結 substrate の foreign bead を自台帳として数えない）。title の単一行化は **DATA チャネル
+# 無害化**（行頭 marker 偽装の封鎖）: 実台帳には `[` で始まる title が実在する。
+# **id も同じく squash する**（title / updated_at だけでは足りない）: id に CR/LF/TAB が入ると TSV row 自体が
+# 分割され、下の `while IFS=$'\t' read` が **台帳に存在しない id の [BD-INPROGRESS] 行**を emit し、断片行が
+# `-SKIP reason=field-missing` を誤発火させる（3 列すべてを同じ規律で潰す＝jq/python3 の 2 段 parity の前提）。
+# squash は **prefix 判定より前**に置く（python3 側も `i=s(...)` 後に startswith する＝判定対象を揃える）。
+# python3 側は `sys.stdout.buffer` へ UTF-8 bytes を直書きする（`env -i` の C locale で非 ASCII title が
+# UnicodeEncodeError にならず jq と byte 一致する＝2 段 parity の実体）。
+_bd_inprogress_rows() {
+    if command -v jq >/dev/null 2>&1; then
+        jq -r --arg pfx "$SELF_PREFIX" '
+            .[]?
+            | select(type == "object")
+            | select(((.status? // "") | tostring) == "in_progress")
+            | (((.id? // "") | tostring) | gsub("[\r\n\t]"; " ")) as $id
+            | select($id | startswith($pfx + "-"))
+            | [ $id,
+                (if (has("title") and has("updated_at")) then "1" else "0" end),
+                (((.updated_at? // "") | tostring) | gsub("[\r\n\t]"; " ")),
+                (((.title? // "") | tostring) | gsub("[\r\n\t]"; " ")) ]
+            | join("\t")' 2>/dev/null
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import sys,json
+pfx=sys.argv[1]
+def s(v):
+    t="" if v is None else str(v)
+    for c in ("\r","\n","\t"): t=t.replace(c," ")
+    return t
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for o in (d or []):
+    if not isinstance(o,dict): continue
+    if s(o.get("status","")) != "in_progress": continue
+    i=s(o.get("id",""))
+    if not i.startswith(pfx+"-"): continue
+    ok="1" if ("title" in o and "updated_at" in o) else "0"
+    row="\t".join([i, ok, s(o.get("updated_at","")), s(o.get("title",""))])
+    sys.stdout.buffer.write((row+"\n").encode("utf-8"))' "$SELF_PREFIX" 2>/dev/null
+    else
+        # 到達不能（起動時の parser gate が双方不在で既に exit 1 している）。近似 parse へ落ちない。
+        echo "[scribe-rebrief-fetch] FATAL: JSON parser（jq / python3）不在（parser gate を素通りした＝内部不整合）→ 実行しない" >&2
+        exit 1
+    fi
+}
+
+# title の表示 cap（超過は省略記号を付す・固定）。
+BD_INPROGRESS_TITLE_CAP=120
+
 # ── main: DATA ブロックを emit ────────────────────────────────────────────
+# active list を先に 1 度読んで memo（上記 `_bd_json` の memo 参照＝bd の実呼出は 2 回のまま）。
+# rc 伝播は既存 idiom と同じ（command substitution の rc を `|| exit 1` で親へ）＝fail-loud ⑥ を緩めない。
+BD_ACTIVE_JSON="$(_bd_json list --limit 0)" || exit 1
+BD_ACTIVE_JSON_READY=1
 _build_bd_status_map
 
 # (3) MODE 判定（auto-compact marker の有無だけを見る＝判定のみ・marker write は scope 外）。
@@ -409,11 +541,17 @@ if [ -f "$WORKING_MEMORY_FILE" ]; then
     fi
     echo "[WM] file=$WORKING_MEMORY_FILE found"
     echo "[CONSUME-TARGET] $WORKING_MEMORY_FILE → $WORKING_MEMORY_CONSUMED_FILE（brief 提示後に skill が mv する）"
+    # plan-arc（＝brief の「現在地」の一次データ・bd sc-0hm6）。ここまで DATA 面に一度も出ておらず、
+    # skill は「命令・制約」節しか受け取れていなかった（現在地を毎回人間が聞き直す構造原因）。
+    _emit_wm_plan "$WORKING_MEMORY_FILE"
     WM_CLAIMS="$(extract_effort_directives "$WORKING_MEMORY_FILE")"
     WM_FOUND=1
 else
     echo "[WM] file=$WORKING_MEMORY_FILE missing"
     echo "[CONSUME-NONE] current sid の WM 不在＝consume 対象なし（新規 session / 退避未実施 / **sid が変わった**）"
+    # 4 値の ①（優先順位最上位・記号の有無を問わない）: file 自体が無ければ抽出は成立しない。
+    # 「現在地なし」ではなく「現在地の一次データを取得していない」＝下の復元候補を読んで再 fetch すれば実データになる。
+    echo "[WM-PLAN-NONE] current sid の WM file 自体が不在＝現在地の一次データを取得していない（『計画なし』ではない・下の復元候補の sid で再 fetch すれば実データになる）"
     WM_CLAIMS=""
     WM_FOUND=0
     # **respawn / `/clear` の既定経路をここで surface する（header 参照）**: WM は sid で scope されるため、
@@ -433,6 +571,40 @@ echo ""
 echo "── bd 現在値（自台帳 ${SELF_PREFIX}-・read-only） ──"
 _count_status() { local want="$1" n=0 id; for id in "${!BD_STATUS[@]}"; do [ "${BD_STATUS[$id]}" = "$want" ] && n=$((n+1)); done; echo "$n"; }
 echo "[BD-COUNT] open=$(_count_status open) in_progress=$(_count_status in_progress) blocked=$(_count_status blocked)"
+#
+# ── in_progress の id + title + 更新時刻（bd sc-0hm6） ────────────────────────
+# 件数だけでは skill の「次のアクション … in_progress を優先する」が **DATA だけでは実行不能**（id も title も
+# 無い）。既存 map（`_parse_id_status` 経路）の件数を **独立の照合軸**として使い、抽出が 0 行に化けたときに
+# `-NONE`（＝確認した上で 0 件）を騙らせない: 件数 0 のときだけ NONE を名乗り、件数 >0 なのに行が足りなければ
+# **reason 付きの SKIP**（判定不能）を出す（NONE と融合させない＝courier orch-cbvl の意図の保全）。
+_bd_ip_total="$(_count_status in_progress)"
+if [ "$_bd_ip_total" -eq 0 ]; then
+    echo "[BD-INPROGRESS-NONE] in_progress の bead なし（確認した上で 0 件）"
+else
+    _bd_ip_rows="$(printf '%s' "$BD_ACTIVE_JSON" | _bd_inprogress_rows)"
+    _bd_ip_shown=0
+    _bd_ip_skipped=0
+    while IFS=$'\t' read -r _ip_id _ip_ok _ip_upd _ip_title; do
+        [ -n "${_ip_id:-}" ] || continue
+        if [ "${_ip_ok:-0}" = "1" ]; then
+            if [ "${#_ip_title}" -gt "$BD_INPROGRESS_TITLE_CAP" ]; then
+                _ip_title="${_ip_title:0:$BD_INPROGRESS_TITLE_CAP}…"
+            fi
+            # 固定 arity 前置（id / updated=）+ 自由文末尾（title）。title を末尾に置くのは title 内の空白で
+            # 消費側の field parse が壊れないため（courier 便の記載順から意図的に逸脱・実装後に返信で通知）。
+            echo "[BD-INPROGRESS] $_ip_id updated=${_ip_upd:-} ${_ip_title:-}"
+            _bd_ip_shown=$((_bd_ip_shown+1))
+        else
+            _bd_ip_skipped=$((_bd_ip_skipped+1))
+        fi
+    done <<< "$_bd_ip_rows"
+    if [ "$_bd_ip_skipped" -gt 0 ]; then
+        echo "[BD-INPROGRESS-SKIP] reason=field-missing  read は成功したが bd の JSON に title / updated_at キーが無い（bd 版差）＝$_bd_ip_skipped 件を enrich できない（0 件ではない＝判定不能として扱え）"
+    fi
+    if [ "$((_bd_ip_shown + _bd_ip_skipped))" -lt "$_bd_ip_total" ]; then
+        echo "[BD-INPROGRESS-SKIP] reason=extract-failed  in_progress は $_bd_ip_total 件だが enrich できたのは $((_bd_ip_shown + _bd_ip_skipped)) 件（JSON 形状の想定外）＝差分は判定不能として扱え（0 件ではない）"
+    fi
+fi
 
 # ── (1) WM主張 ↔ bd現在値 diff ─────────────────────────────────────────────
 echo ""
