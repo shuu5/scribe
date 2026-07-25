@@ -101,8 +101,10 @@ fetch の marker と、brief に落とす先の対応:
 - `[BD-INPROGRESS] <id> updated=<ts> <title>` / `[BD-INPROGRESS-NONE]` / `[BD-INPROGRESS-SKIP] reason=<...>` …
   bd の in_progress の **id + 更新時刻 + title**（固定 arity 前置 + 自由文末尾＝title 内の空白で parse が壊れない順）。
   落とす先は §3 俯瞰の **現在地**（force-recovery では一次）と §3「次のアクション」（in_progress を優先する判断の実データ）。
-  `-NONE` は**確認した上で 0 件**。`-SKIP` は「read は成功したが enrich できない」（bd 版差で title/updated_at キーが無い等）
-  ＝**`-NONE` と融合させず判定不能として扱う**（bd read の失敗自体は §1 の FATAL 側＝brief を出さない）。
+  `-NONE` は**確認した上で 0 件**。`-SKIP` は「read は成功したが enrich できない」＝**`-NONE` と融合させず
+  判定不能として扱う**（bd read の失敗自体は §1 の FATAL 側＝brief を出さない）。reason 値は 2 種:
+  `reason=field-missing`（bd 版差で title / updated_at キーが無い）/ `reason=count-mismatch`（`[BD-COUNT]` の
+  in_progress 件数と enrich 行数が合わない＝2 read 間の status 変化等。**多い側も信用しない**＝差分は判定不能）。
 
 #### 2-b. `[WM] missing` + `[WM-CANDIDATE]` のとき（respawn / `/clear` の既定経路・**ここを飛ばさない**）
 
@@ -140,8 +142,15 @@ fetch の marker と、brief に落とす先の対応:
   としてのみ引用する（§2 の `[REBRIEF-MODE]` 規律と同一＝`docs/protocol.md` §9「強制回復モード」）。
 - **3 値則（判定不能を 0 / なしと書かない）**: 各 slot は〔実データ〕〔`判定不能(理由)`〕〔`なし`〕の 3 値で書き分ける。
   DATA から決められないものを `0 件` / `なし` と書くのは §1 の「最悪の失敗」（偽の全クリア）と同型。
-  **`判定不能` を書いてよいのは §2-b の復元手順（先頭候補の Read → 採用候補の sid で再 fetch）を踏んだ後だけ**——
-  踏まずに `判定不能` で埋めるのは禁止。`[DIFF-UNKNOWN]` 固有の規律は §2 / §2-b が SSOT（本文をここへ複製しない）。
+  `判定不能` を書いてよい条件は **DATA の状態で 2 分岐する**（どちらでも「理由」は必須）:
+  - (i) **WM が取れていない**経路（`[WM-PLAN-NONE]` / `[DIFF-UNKNOWN]`）: **§2-b の復元手順（先頭候補の Read →
+    採用候補の sid で再 fetch）を踏んだ後だけ**書いてよい。踏まずに `判定不能` で埋めるのは禁止
+    （踏めば `[WM-PLAN]` が実データになる＝現在地の一次ソースはそこで得る）。
+  - (ii) **WM は取れたが決められない**経路（`[WM-PLAN-EMPTY]` / `[WM-PLAN-UNAVAILABLE]`＝`[WM] found` ゆえ
+    §2-b は適用不能）: その marker 自体が「取得した上で決められない」の一次証拠ゆえ手順は不要。
+    **理由に marker 名を書く**（例: `判定不能(WM-PLAN-EMPTY: 計画弧節が空)`）。この経路で `なし` / `0 件` と
+    書くのが禁止事項であって、`判定不能` は正しい答え。
+  `[DIFF-UNKNOWN]` 固有の規律は §2 / §2-b が SSOT（本文をここへ複製しない）。
 - **`user 手番` が 0 件のときは空欄にせず「なし」と明示する**（＝確認した上で 0 件。判定不能と弁別する）。
   判定条件を自前定義せず §4 の RULE-1（正規ケース＝自動 consume / 正規外＝人間へ確認）と §1 の FATAL 表を参照する。
   **バナー / 承認待ちは提示層の表示であり、§4 の consume 手順（正規ケースの自動 mv）を停止させない**。

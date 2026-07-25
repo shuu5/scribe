@@ -1181,6 +1181,62 @@ WMEOF
     [ "$py_block" = "$jq_block" ]
 }
 
+@test "(B6) [BD-INPROGRESS-SKIP] reason=count-mismatch: 件数と行数の不一致は **両方向** loud（多い側も信用しない）" {
+    # 片側（行が足りない）だけを loud にすると、逆向き（独立 map が in_progress と数えていない bead を
+    # enrich 行として emit する＝2 read 間で close された等）が無警告で brief に載り、admin が閉じた bead を
+    # 「再開すべき作業」として掴む。ここでは sc-bbb が active では in_progress・closed 一覧にも在る状態を作る
+    # （map は closed が後勝ちで確定＝件数 1 に対し行 2 の矛盾）。
+    export BD_STUB_ACTIVE_JSON='[{"id":"sc-bbb","status":"in_progress","title":"stale","updated_at":"u1"},{"id":"sc-ccc","status":"in_progress","title":"live","updated_at":"u2"}]'
+    export BD_STUB_CLOSED_JSON='[{"id":"sc-bbb","status":"closed"}]'
+    run_fetch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-COUNT] open=0 in_progress=1 blocked=0"* ]]
+    [ "$(printf '%s\n' "$output" | grep -cE '^\[BD-INPROGRESS\] ')" -eq 2 ]
+    [[ "$output" == *"[BD-INPROGRESS-SKIP] reason=count-mismatch"* ]]
+    [[ "$output" != *"[BD-INPROGRESS-NONE]"* ]]
+}
+
+@test "(B7) updated_at が空/null でも title が updated= スロットへ滑らない（区切りは IFS-whitespace でない）" {
+    # `IFS=$'\t' read` の TAB は IFS-whitespace ゆえ連続区切りが 1 つに collapse し、空 updated_at の row で
+    # title が updated= の位置へずれる（消費側 SKILL.md §3「id / title / 更新時刻は写す」が誤った値を掴む）。
+    export BD_STUB_ACTIVE_JSON='[{"id":"sc-bbb","status":"in_progress","title":"ずれない title","updated_at":null}]'
+    run_fetch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-INPROGRESS] sc-bbb updated= ずれない title"* ]]
+    [[ "$output" != *"updated=ずれない title"* ]]
+    # キーは在る（null）ので enrich 成功扱い＝field-missing ではない。
+    [[ "$output" != *"[BD-INPROGRESS-SKIP]"* ]]
+}
+
+@test "(B8) title の 120 文字 cap は locale 非依存（C locale でも多バイト文字を割らず不正 UTF-8 を出さない）" {
+    # bash の ${#var} / ${var:0:N} は C/POSIX locale で **byte 単位**になり、多バイト title を途中で切って
+    # 不正 UTF-8 を DATA チャネルへ出す（rebrief は hook / cron / env -i 経路でも走る）。cap は codepoint 単位の
+    # 抽出層（jq / python3）で掛ける契約＝その teeth。
+    t="$(python3 -c 'print("あ"*150, end="")')"
+    expected="$(python3 -c 'print("あ"*120 + "…", end="")')"
+    export BD_STUB_ACTIVE_JSON="[{\"id\":\"sc-bbb\",\"status\":\"in_progress\",\"title\":\"$t\",\"updated_at\":\"u1\"}]"
+    # jq 経路（既定 PATH・UTF-8 locale）。
+    run_fetch
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-INPROGRESS] sc-bbb updated=u1 $expected"* ]]
+    # C locale（env -i）でも同じ 120 文字で切れ、出力全体が正当な UTF-8 であること。
+    run env -i PATH="$PATH" HOME="$HOME" TMPDIR="$BATS_TEST_TMPDIR" LC_ALL=C \
+        SCRIBE_REBRIEF_ANCHOR="$ANCHOR" \
+        SCRIBE_REBRIEF_WM_DIR="$WMDIR" \
+        SCRIBE_REBRIEF_SID="$CUR" \
+        SCRIBE_REBRIEF_BD="$BDSTUB" \
+        SCRIBE_REBRIEF_SESSION_LIB="$CC_LIB" \
+        SCRIBE_REBRIEF_AUTOCOMPACT_MARKER="$MARKER" \
+        BD_STUB_ACTIVE_JSON="$BD_STUB_ACTIVE_JSON" \
+        BD_STUB_CLOSED_JSON="$BD_STUB_CLOSED_JSON" \
+        bash "$SCRIPT" </dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[BD-INPROGRESS] sc-bbb updated=u1 $expected"* ]]
+    printf '%s\n' "$output" > "$BATS_TEST_TMPDIR/utf8check.txt"
+    run python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' < "$BATS_TEST_TMPDIR/utf8check.txt"
+    [ "$status" -eq 0 ]   # 不正 UTF-8 なら decode が落ちる（＝byte 切りの検知）
+}
+
 # ────────────────── 層の fence（F3: overlay を持ち込まない） ──────────────────
 
 @test "(F3) overlay 非混入: STALE / GREEN gate / gate-pending は core の DATA に出ない" {
@@ -1233,4 +1289,16 @@ WMEOF
     grep -qF -- '俯瞰 4 slot の規律' "$f"
     # 層 fence 本文（generic core の 4 要素）は動かさない。
     grep -qF -- 'generic core の 4 要素' "$f"
+    # -SKIP の reason 値は両方 skill 側に列挙されていること（列挙漏れは消費側で inert land になる）。
+    grep -qF -- 'reason=field-missing' "$f"
+    grep -qF -- 'reason=count-mismatch' "$f"
+}
+
+@test "(doc) README の marker/degrade 記述が committed teeth を持つ（doc-drift が cell 消滅で検知不能にならない）" {
+    # 契約は scripts/README.md:19 と skills/README.md:15 の同時更新を要求する。untracked な self-test だけに
+    # teeth を置くと cell 終了で消え、以後の doc-drift（marker を足して README を忘れる）を誰も検知できない。
+    grep -qF -- '[WM-PLAN-UNAVAILABLE]' "$REPO/scripts/README.md"
+    grep -qF -- '[BD-INPROGRESS' "$REPO/scripts/README.md"
+    grep -qF -- 'reason=count-mismatch' "$REPO/scripts/README.md"
+    grep -qF -- '全体像（ゴール / 現在地 / 残りの塊 / user 手番）' "$REPO/skills/README.md"
 }

@@ -419,37 +419,50 @@ _emit_wm_plan() {
     fi
 }
 
+# title の表示 cap（超過は省略記号を付す・固定）。**cap は抽出層（jq / python3）で掛ける**（下記 ★locale）。
+BD_INPROGRESS_TITLE_CAP=120
+
 # ── [BD-INPROGRESS] 用の抽出（bd sc-0hm6・独立関数＝既存 map 構築を一切変更しない） ──
-# stdin = `bd list --limit 0 --json` の配列 1 個（memo 済みの active list）。出力 = TSV 4 列:
-#   <id> \t <1=title/updated_at の両キーが在る|0=欠落> \t <updated_at> \t <title（CR/LF/TAB を空白へ潰し単一行化）>
+# stdin = `bd list --limit 0 --json` の配列 1 個（memo 済みの active list）。出力 = **US(0x1f) 区切り 4 列**:
+#   <id> ␟ <1=title/updated_at の両キーが在る|0=欠落> ␟ <updated_at> ␟ <title（cap 済み・単一行）>
 # **jq と python3 の 2 段 fallback を両方実装**（起動時 parser gate が双方不在を弾く）。SELF_PREFIX filter を
-# ここでも再適用する（連結 substrate の foreign bead を自台帳として数えない）。title の単一行化は **DATA チャネル
+# ここでも再適用する（連結 substrate の foreign bead を自台帳として数えない）。単一行化は **DATA チャネル
 # 無害化**（行頭 marker 偽装の封鎖）: 実台帳には `[` で始まる title が実在する。
-# **id も同じく squash する**（title / updated_at だけでは足りない）: id に CR/LF/TAB が入ると TSV row 自体が
-# 分割され、下の `while IFS=$'\t' read` が **台帳に存在しない id の [BD-INPROGRESS] 行**を emit し、断片行が
-# `-SKIP reason=field-missing` を誤発火させる（3 列すべてを同じ規律で潰す＝jq/python3 の 2 段 parity の前提）。
+# **3 列すべて同じ規律で潰す**（title / updated_at だけでは足りない）: id に CR/LF/TAB が入ると row 自体が
+# 分割され、下の read が **台帳に存在しない id の [BD-INPROGRESS] 行**を emit し、断片行が
+# `-SKIP reason=field-missing` を誤発火させる（＝jq/python3 の 2 段 parity の前提）。
 # squash は **prefix 判定より前**に置く（python3 側も `i=s(...)` 後に startswith する＝判定対象を揃える）。
-# python3 側は `sys.stdout.buffer` へ UTF-8 bytes を直書きする（`env -i` の C locale で非 ASCII title が
-# UnicodeEncodeError にならず jq と byte 一致する＝2 段 parity の実体）。
+#
+# **区切りは TAB でなく US(0x1f)**: `IFS=$'\t' read` の TAB は **IFS-whitespace** ゆえ連続区切りが 1 つに
+# collapse し、`updated_at` が空（キーは在るが値が null / 空文字）の row で **title が updated= スロットへ
+# 滑る**（実測）。US は IFS-whitespace ではないので空フィールドが保存される。データ側にも US を squash 対象へ
+# 入れて、区切り文字そのものをデータで注入できないようにする（delimiter injection の封鎖）。
+#
+# ★**cap は bash の `${var:0:N}` で掛けない（locale 依存）**: `${#var}` / `${var:0:N}` は locale が C/POSIX の
+# とき **byte 単位**になり、多バイト文字の途中で切って **不正 UTF-8 を DATA チャネルへ出す**（実測: `env -i`
+# ＝C locale で `あ`×150 の title が position 152 で decode 不能になる。契約の「120 **文字** cap」も破れる）。
+# rebrief は hook / cron / `env -i` 経路でも走るため、cap は codepoint 単位の抽出層（jq の `.[0:N]` /
+# python3 の `t[:N]`）で掛ける＝locale 非依存で jq/python3 の byte 一致も保つ。
 _bd_inprogress_rows() {
     if command -v jq >/dev/null 2>&1; then
-        jq -r --arg pfx "$SELF_PREFIX" '
+        jq -r --arg pfx "$SELF_PREFIX" --argjson cap "$BD_INPROGRESS_TITLE_CAP" '
+            def squash: tostring | gsub("[\r\n\t\u001f]"; " ");
             .[]?
             | select(type == "object")
-            | select(((.status? // "") | tostring) == "in_progress")
-            | (((.id? // "") | tostring) | gsub("[\r\n\t]"; " ")) as $id
+            | select(((.status? // "") | squash) == "in_progress")
+            | ((.id? // "") | squash) as $id
             | select($id | startswith($pfx + "-"))
             | [ $id,
                 (if (has("title") and has("updated_at")) then "1" else "0" end),
-                (((.updated_at? // "") | tostring) | gsub("[\r\n\t]"; " ")),
-                (((.title? // "") | tostring) | gsub("[\r\n\t]"; " ")) ]
-            | join("\t")' 2>/dev/null
+                ((.updated_at? // "") | squash),
+                (((.title? // "") | squash) | if (length > $cap) then (.[0:$cap] + "…") else . end) ]
+            | join("\u001f")' 2>/dev/null
     elif command -v python3 >/dev/null 2>&1; then
         python3 -c 'import sys,json
-pfx=sys.argv[1]
+pfx=sys.argv[1]; cap=int(sys.argv[2])
 def s(v):
     t="" if v is None else str(v)
-    for c in ("\r","\n","\t"): t=t.replace(c," ")
+    for c in ("\r","\n","\t","\x1f"): t=t.replace(c," ")
     return t
 try:
     d=json.load(sys.stdin)
@@ -461,8 +474,10 @@ for o in (d or []):
     i=s(o.get("id",""))
     if not i.startswith(pfx+"-"): continue
     ok="1" if ("title" in o and "updated_at" in o) else "0"
-    row="\t".join([i, ok, s(o.get("updated_at","")), s(o.get("title",""))])
-    sys.stdout.buffer.write((row+"\n").encode("utf-8"))' "$SELF_PREFIX" 2>/dev/null
+    t=s(o.get("title",""))
+    if len(t) > cap: t=t[:cap]+"…"
+    row="\x1f".join([i, ok, s(o.get("updated_at","")), t])
+    sys.stdout.buffer.write((row+"\n").encode("utf-8"))' "$SELF_PREFIX" "$BD_INPROGRESS_TITLE_CAP" 2>/dev/null
     else
         # 到達不能（起動時の parser gate が双方不在で既に exit 1 している）。近似 parse へ落ちない。
         echo "[scribe-rebrief-fetch] FATAL: JSON parser（jq / python3）不在（parser gate を素通りした＝内部不整合）→ 実行しない" >&2
@@ -470,8 +485,6 @@ for o in (d or []):
     fi
 }
 
-# title の表示 cap（超過は省略記号を付す・固定）。
-BD_INPROGRESS_TITLE_CAP=120
 
 # ── main: DATA ブロックを emit ────────────────────────────────────────────
 # active list を先に 1 度読んで memo（上記 `_bd_json` の memo 参照＝bd の実呼出は 2 回のまま）。
@@ -584,12 +597,14 @@ else
     _bd_ip_rows="$(printf '%s' "$BD_ACTIVE_JSON" | _bd_inprogress_rows)"
     _bd_ip_shown=0
     _bd_ip_skipped=0
-    while IFS=$'\t' read -r _ip_id _ip_ok _ip_upd _ip_title; do
+    # **区切りは US(0x1f)・TAB にしない**: TAB は IFS-whitespace ゆえ連続区切りが collapse し、`updated_at` が
+    # 空（キーは在るが値が null / 空文字）の row で **title が updated= スロットへ滑る**（実測）。US は
+    # IFS-whitespace でないため空フィールドが保存される（抽出層が US をデータから squash 済み）。
+    while IFS=$'\x1f' read -r _ip_id _ip_ok _ip_upd _ip_title; do
         [ -n "${_ip_id:-}" ] || continue
         if [ "${_ip_ok:-0}" = "1" ]; then
-            if [ "${#_ip_title}" -gt "$BD_INPROGRESS_TITLE_CAP" ]; then
-                _ip_title="${_ip_title:0:$BD_INPROGRESS_TITLE_CAP}…"
-            fi
+            # title の cap は抽出層（jq / python3）で codepoint 単位に掛け済み（bash の `${var:0:N}` は locale が
+            # C/POSIX のとき byte 切りになり多バイト文字を割って不正 UTF-8 を DATA へ出すため使わない）。
             # 固定 arity 前置（id / updated=）+ 自由文末尾（title）。title を末尾に置くのは title 内の空白で
             # 消費側の field parse が壊れないため（courier 便の記載順から意図的に逸脱・実装後に返信で通知）。
             echo "[BD-INPROGRESS] $_ip_id updated=${_ip_upd:-} ${_ip_title:-}"
@@ -601,8 +616,12 @@ else
     if [ "$_bd_ip_skipped" -gt 0 ]; then
         echo "[BD-INPROGRESS-SKIP] reason=field-missing  read は成功したが bd の JSON に title / updated_at キーが無い（bd 版差）＝$_bd_ip_skipped 件を enrich できない（0 件ではない＝判定不能として扱え）"
     fi
-    if [ "$((_bd_ip_shown + _bd_ip_skipped))" -lt "$_bd_ip_total" ]; then
-        echo "[BD-INPROGRESS-SKIP] reason=extract-failed  in_progress は $_bd_ip_total 件だが enrich できたのは $((_bd_ip_shown + _bd_ip_skipped)) 件（JSON 形状の想定外）＝差分は判定不能として扱え（0 件ではない）"
+    # **照合は両方向で行う（`-ne`）**: 片側（行が足りない）だけを loud にすると、逆向きの矛盾——独立 map が
+    # in_progress と数えていない bead を enrich 行として emit する（2 read の間に status が動いた race 等）——が
+    # 無警告で brief に載り、admin が既に閉じた bead を「再開すべき作業」として掴む。多い側も少ない側も
+    # 「件数と行が合っていない＝どちらかが古い」ことだけは確実なので、判定不能として loud に言う。
+    if [ "$((_bd_ip_shown + _bd_ip_skipped))" -ne "$_bd_ip_total" ]; then
+        echo "[BD-INPROGRESS-SKIP] reason=count-mismatch  in_progress は件数 $_bd_ip_total 件だが enrich 行は $((_bd_ip_shown + _bd_ip_skipped)) 件（2 read 間の status 変化 / JSON 形状の想定外）＝差分は判定不能として扱え（0 件ではない・多い側も信用しない）"
     fi
 fi
 
