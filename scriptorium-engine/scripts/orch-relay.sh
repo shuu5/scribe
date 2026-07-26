@@ -2,7 +2,10 @@
 # orch-relay.sh — orchestrator→既存 window への push relay primitive（bd orch-z7g H2 / orch-ce6）
 #
 # 役割 ──────────────────────────────────────────────────────────────────────────
-#   spawn した admin / worker が human 承認を要する判断（固い merge 確認等）に突き当たり **NEEDS-USER で park し turn を終えた**
+#   spawn した admin / worker が human 承認を要する判断（＝人間確認が要るのは取り消せない 3 クラス〔(a) 消す /
+#   (b) 出す / (c) 使う〕該当時のみ・裁定 orch-vhiu 2026-07-25 + 追加裁定 R-A/R-B 2026-07-26。旧「固い merge 確認」
+#   〔規約ファイル・全ホスト配布物・事前合意逸脱＝旧 merge-ratify ②③〕は廃止＝AI 敵対 gate 通過をもって AI 判断で
+#   merge する。文面 SSOT は top-spec §5.4 の canonical block v2）に突き当たり **NEEDS-USER で park し turn を終えた**
 #   とき、orchestrator（human 承認〔standing go〕に基づき決定を下し中継する側）が その決定を **停止した既存 window へ push**
 #   して再開させるための
 #   薄い wrapper。ORCH-WATCH-CONTRACT ブリーフが約束する「orchestrator が bead 直読 poll で NEEDS-USER を検知し、

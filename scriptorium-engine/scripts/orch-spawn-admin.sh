@@ -19,8 +19,10 @@
 # 設計境界 ──────────────────────────────────────────────────────────────────────
 #   admin spawn は orchestrator の正当な設計役割で write-isolation 違反ではない: spawn された admin は
 #   その project の台帳へ write してよい（正当）。orchestrator 自身は foreign 台帳を read-only のまま
-#   （hydrate して読むだけ）保つ。ツールは人間の依頼時に叩く＝自律 dispatch はしない（notice/nudge
-#   までが orchestrator の役割で action は人間判断）。
+#   （hydrate して読むだけ）保つ。**foreign admin spawn / cross-project dispatch は「③ 通知付き自律」**＝人間の
+#   依頼を待たず、計画を提示して即進行してよい（人間はいつでも介入可）。旧規約（人間の依頼を待って初めてツールを
+#   叩く受動運用・action は人間判断）は **orch-rvbz / orch-6srt 裁定で supersede 済み**（SSOT=top-spec §5.4）。
+#   人間承認が要るのは「取り消せない」3 クラス（消す / 出す / 使う）該当時のみ＝下記「終端宣言作法」⑦ が SSOT。
 #
 # window 命名規約 ────────────────────────────────────────────────────────────────
 #   window 名は現状 admin-<project>（下記 WINDOW_NAME 代入行）。cld-spawn は同名の既存 window があれば再利用する（--force-new で強制新規）。
@@ -145,8 +147,32 @@
 #   明示宣言 ③背景 pending 中は宣言しない ④orchestrator は --foreign-repo 直読 poll で監視 ⑤pane は truth でない。
 #   加えて無人 window 作法（orch-z7g grill・user ratified 2026-07-01・文面即効の layer ①）: ⑥対話プロンプト
 #   （AskUserQuestion / ExitPlanMode / permission 待ち）を使うな＝この window に人間は付いていない（無人）ゆえ
-#   誰も答えられず固まる ⑦human 決定（固い merge 確認を含む）は NEEDS-USER を宣言して turn を終えよ（gate-pending は
-#   worker→自 admin 用ゆえ foreign admin は human 決定に使わない）⑧orchestrator が bead 直読 poll で検知し window
+#   誰も答えられず固まる ⑦人間確認が要るのは「取り消せない」3 クラス該当時のみで、該当時は NEEDS-USER を宣言して
+#   turn を終えよ（user 裁定 2026-07-25 / 2026-07-26・bd orch-vhiu）:
+#     (a) 消す＝データ / repo / 履歴 / live 成果物の破壊（第一防衛線は機械 guard 層）
+#     (b) 出す＝public 化・外部公開・外部サービスへの送信（scriptorium 核② private 保証はこの型）
+#     (c) 使う＝**追加課金が発生する操作**（従量課金 API 呼出 / 有料サービスの新規契約 / クラウド資源の課金発生。
+#         定額プラン内は対象外＝token 消費それ自体は非該当。user 裁定 2026-07-26 で (c) の閾値を確定＝観測できない
+#         程度表現を廃し「追加課金の有無」という二値の判定基準へ置換した）
+#   **merge それ自体は 3 クラスに該当しない＝自判断 merge**（規約ファイル・全ホスト配布物を含む・旧「固い merge
+#   確認」は廃止）。例外は merge が 3 クラスを発生させるときに限り、**(b) の判定単位は repo でなく「情報」**＝
+#   public 面の情報集合を増やすかで判定する（private 配備層→public engine への同期は機械 2 条件〔① 配備層 file を
+#   touch しない ② private 実名 DATA literal 0 hit〕が両方 green なら非該当＝自判断 merge・どちらかが赤 or 機械照合
+#   できないなら (b) として人間確認へ倒す fail-safe。**「既に public な repo だから非該当」という
+#   repo 単位の断定は禁止**＝public repo の中に private 由来の同期先がある〔実例 scribe 内 scriptorium-engine〕）。(a) 側の例外＝
+#   履歴改変・live 成果物や repo の削除・破壊的 migration・merge 発火の deploy。(c) 側の例外＝merge が追加課金を
+#   発生させるとき。**gate 側の fail-closed トリガ（self-test / acceptance 検証の FAIL）の出口は人間確認ではない**
+#   ＝gate FAIL として merge せず、契約を直して再 gate せよ。**ただし acceptance snapshot mismatch は例外**＝dispatch
+#   後に契約がすり替わった機械 tamper 検知ゆえ、3 クラス非該当でも auto-merge 資格を剥奪し
+#   **NEEDS-USER（人間 ratify）へ昇格**せよ（すり替えた当人が契約を書き換えて検知線を自己解除する経路を塞ぐ
+#   fail-closed。3 クラスのいずれにも属さないため orch-vhiu 裁定でも据置＝SSOT は scribe protocol §5.4 と
+#   orch-dispatch 入口 gate G2）。誤読防止 3 句: (i) 人間承認を外しても **gate は外さない**
+#   （gate が実効安全弁になったので強化側）(ii)「worker が自己 merge してよい」ではない（gate 分離＝独立レビューは
+#   不変）(iii) front-load / loud バナーは**廃止でなく scope 縮小**（user 裁定 2026-07-17 の可視性要件を壊さない）。
+#   **precedence: 本 mandate は旧 merge-ratify ①〜④ に優先する**（正本＝scribe protocol §5.4 の改訂は courier 係属中
+#   ゆえ、primer 側に旧規約が残っていても本 mandate が勝つ。**ただし ①〜④ 番号を持たない
+#   snapshot-mismatch トリガは本条の対象外**＝§5.4 の据置規定が優先する）。gate-pending は worker→自 admin 用ゆえ foreign admin は
+#   human 決定に使わない ⑧orchestrator が bead 直読 poll で検知し window
 #   メッセージ（push relay）で再開指示する＝それを待て。
 #   さらに bead-append 規律（orch-edv grill T1・user ratified 2026-07-02・silent mutual-wait deadlock 恒久 fix）:
 #   ⑨orchestrator への新質問/報告/再 pause は**該当 bead の notes に append し updated_at を必ず動かせ**（pane-only 禁止）。
@@ -490,8 +516,26 @@ WINDOW_NAME="admin-$PROJECT"
 #   加えて無人 window 作法（orch-z7g grill・user ratified 2026-07-01・文面 layer ①＝orch-355／機構強制 layer ③＝orch-ce6 で本 script の cld-spawn 起動に --disallowed-tools として着地）:
 #     - 対話プロンプト（AskUserQuestion / ExitPlanMode / permission 待ち）を使うな＝この window に人間は付いて
 #       いない（無人）ゆえ対話 UI を出しても誰も答えられず固まる（out-of-band で bead-truth poll から不可視）
-#     - human 決定（固い merge 確認を含む）が要るときは NEEDS-USER を宣言して turn を終えよ（gate-pending は
-#       worker→自 admin 用ゆえ foreign admin は human 決定に使わない）
+#     - 人間確認が要るのは「取り消せない」3 クラスのみ＝該当時だけ NEEDS-USER を宣言して turn を終えよ
+#       （文面 SSOT は上記 header ⑦＝--help 可視。ここは同一意味論の再掲で、header より permissive にしない）:
+#       (a) 消す＝データ/repo/履歴/live 成果物の破壊（第一防衛線は機械 guard 層）／(b) 出す＝public 化・外部公開・
+#       外部サービスへの送信（scriptorium 核② private 保証はこの型）／(c) 使う＝**追加課金が発生する操作**（従量課金 API・
+#       有料サービス新規契約・クラウド資源の課金発生。定額プラン内は対象外＝token 消費それ自体は非該当）。
+#       gate-pending は worker→自 admin 用ゆえ foreign admin は human 決定に使わない。
+#       merge それ自体は該当しない＝AI 敵対 gate 通過で自判断 merge（旧「固い merge 確認」は廃止・orch-vhiu）。
+#       例外は merge が 3 クラスを発生させるときに限り、**(b) の判定単位は repo でなく「情報」**（public 面の情報
+#       集合を増やすか。private 配備層→public engine 同期は機械 2 条件〔配備層 file 非 touch ∧ private 実名 DATA
+#       literal 0 hit〕が両方 green なら非該当・片方でも赤/照合不能なら (b) として人間確認へ倒す fail-safe。**「既 public repo だから
+#       非該当」という repo 単位の断定は禁止**）／(a) は履歴改変・削除・破壊的 migration・merge 発火の deploy ／
+#       (c) は merge が追加課金を発生させるとき。**gate 側 fail-closed トリガ（self-test / acceptance 検証の FAIL）
+#       の出口は人間確認ではない＝gate FAIL**＝merge せず契約を直して再 gate。
+#       **ただし acceptance snapshot mismatch は例外**＝dispatch 後の契約すり替えを捕らえる機械 tamper 検知ゆえ、
+#       3 クラス非該当でも auto-merge 資格を剥奪し
+#       **NEEDS-USER（人間 ratify）へ昇格**（SSOT = scribe protocol §5.4 / orch-dispatch 入口 gate G2）。
+#       gate 自体と gate 分離は不変（人間承認を外した分 gate が実効安全弁＝強化側）＝本裁定は
+#       「worker が自己 merge してよい」ではない。front-load / loud バナーは廃止でなく scope 縮小（2026-07-17 の可視性要件は存続）。
+#       precedence: 本 mandate は旧 merge-ratify ①〜④ に優先する（正本改訂は courier 係属中。
+#       **ただし ①〜④ 番号を持たない snapshot-mismatch トリガは本条の対象外**＝§5.4 の据置規定が優先する）。
 #     - 宣言後は待て: orchestrator が bead 直読 poll で NEEDS-USER を検知し、この window へメッセージ（push relay）で
 #       再開指示する＝自分で対話 prompt を出して先へ進もうとしない
 #   さらに bead-append 規律（orch-edv grill T1・user ratified 2026-07-02・silent mutual-wait deadlock 恒久 fix）:
@@ -512,7 +556,12 @@ if [ "$BEADS_KIND" = "beads" ]; then
 - orchestrator は \`orch-dispatch --watch --actor admin --foreign-repo $CWD <bead-id>\` であなたの bead を **直読 poll** で監視する。pane idle は INCONCLUSIVE 補助でしかない（一致しても DONE にしない）。
 - 宣言なく終了/死亡した場合、orchestrator は **INCONCLUSIVE（要確認）** として扱い決して DONE とはみなさない。
 - **対話プロンプトを使うな**（**AskUserQuestion / ExitPlanMode / permission 待ち**）＝この window に人間は付いていない（**a human is not attending your window**）。無人 window で対話 UI を出しても誰も答えられず window が固まり、out-of-band ゆえ bead-truth poll からも不可視になる。
-- human 決定（**固い merge 確認を含む**）が要るときは、**NEEDS-USER を宣言**（この bead を blocked＋needs-user ラベル）して **turn を終えよ**。gate-pending は worker→自 admin 用ゆえ、foreign admin のあなたは human 決定に gate-pending を使わない。
+- **人間確認が要るのは「取り消せない」3 クラスのみ**（user 裁定 2026-07-25 / 2026-07-26・bd orch-vhiu）: **(a) 消す**＝データ/repo/履歴/live 成果物の破壊（**第一防衛線は機械 guard 層**）／ **(b) 出す**＝public 化・外部公開・外部サービスへの送信（**scriptorium 核② private 保証はこの型**）／ **(c) 使う**＝**追加課金が発生する操作**（従量課金 API 呼出・有料サービスの新規契約・クラウド資源の課金発生。**定額プラン内は対象外**＝token 消費それ自体は非該当）。**この 3 クラスに該当するときだけ NEEDS-USER を宣言**（この bead を blocked＋needs-user ラベル）して **turn を終えよ**。gate-pending は worker→自 admin 用ゆえ、foreign admin のあなたは human 決定に gate-pending を使わない。
+- **merge それ自体は 3 クラスに該当しない＝人間確認を取るな**（旧「固い merge 確認」は廃止）。規約ファイル・全ホスト配布物を含め、**AI 敵対 gate 通過をもって自分の判断で merge してよい**。ただし **gate は外さない**（人間承認を外した分 gate が実効安全弁になったので強化側）。**gate 分離（worker は自己 merge しない・gate-pending funnel）は不変**＝本裁定は「worker が自己 merge してよい」ではない。
+- **例外は merge が 3 クラスを発生させるときに限る**。**(b) の判定単位は repo でなく「情報」**＝その merge が **public 面の情報集合を増やすか**で判定せよ。private 配備層→public repo 内の同期先への同期は、**機械 2 条件〔① 配備層 file を touch しない ② private 実名 DATA literal が 0 hit〕が両方 green なら非該当＝自判断で merge**・どちらかが赤 or 2 条件を機械照合できないなら **(b) として人間確認へ倒せ**（fail-safe）。**「既に public な repo だから非該当」という repo 単位の断定は禁止**（public repo の中に private 由来の同期先がありうる〔実例 scribe 内 scriptorium-engine〕＝核② の最大 leak 面をそれで自判断側へ落とすことになる）。**(a) 側の例外**＝履歴改変（force push / 既 push branch の上書き）・live 成果物や repo の削除・破壊的 migration・merge 発火の deploy。**(c) 側の例外**＝その merge が追加課金を発生させるとき。
+- **gate 側の fail-closed トリガ（self-test / acceptance 検証の FAIL）の出口は人間確認ではない**＝**gate FAIL として merge せず、契約を直して再 gate せよ**（人間へ上げて解くのではなく、gate を通る形に直して通す）。**ただし acceptance snapshot mismatch は例外**＝dispatch 入口で焼いた acceptance snapshot と gate 時点の現 acceptance が食い違う＝**契約が dispatch 後にすり替わった機械 tamper 検知**ゆえ、3 クラス非該当でも auto-merge 資格を剥奪し **NEEDS-USER（人間 ratify）へ昇格**せよ（ここで「契約を直して再 gate」に倒すと、**すり替えた当人が acceptance を書き換えて検知線を自己解除できる**＝fail-open になる）。3 クラスのいずれにも属さない独立 tamper 検知ゆえ orch-vhiu 裁定でも改廃せず据置＝**SSOT は scribe protocol §5.4 と orch-dispatch 入口 gate G2**（両者の byte 整合が cross-repo 契約）。
+- **聞かないこと**: 順序・優先度・選択肢の是認だけを求める問い（自分で推奨を出して決めて進め）。**上げること**: 複数の妥当な設計が併存し、選択が人間の目的・価値観に依存するとき＝**承認要求ではなく grill 提案**として上げよ（事実で決まるなら止めない）。**front-load / loud バナー（🔴）の様式は廃止でなく scope 縮小**＝発火条件が 3 クラス該当へ狭まっただけで、user 裁定 2026-07-17 の可視性要件（冒頭 🔴 バナー・複数承認点の束ね・安売り禁止）は存続する。**ただしこの window は無人ゆえ AskUserQuestion は使わない**＝可視性要件のうち対話 tool 分岐は「human が window に居る」対話文脈に限られる（**無人 window へは出さない**）。無人のあなたは対話 UI でなく、**この bead を blocked＋needs-user ラベルにし notes 先頭へ 🔴 バナー一行〔人間承認待ち: N 件 — 対象 1 行〕を書いて park** せよ（上記「対話プロンプトを使うな」と矛盾させない＝無人 actor 分岐）。
+- **precedence**: 本 mandate は user 裁定 2026-07-25 / 2026-07-26（bd orch-vhiu）に基づき、**本 mandate は旧 merge-ratify ①〜④ に優先する**（事前合意逸脱 / 規約ファイル / 全ホスト配布物 / 外部公開）。正本（scribe protocol §5.4）の改訂は courier 係属中ゆえ、SessionStart primer に旧規約が残っていても**本 mandate が勝つ**（矛盾を非決定論的に解決しない）。**ただし ①〜④ 番号を持たない snapshot-mismatch トリガは本条の対象外**＝§5.4 の据置規定（auto-merge 資格剥奪 → 人間 ratify 昇格）が優先する。
 - **宣言後は待て**: orchestrator が bead を直読 poll して NEEDS-USER を検知し、この window へ **メッセージ（push relay）で再開指示**する。それを待つ（自分で対話 prompt を出して先へ進もうとしない）。
 - **push relay の権威構造（human 承認=standing go → orchestrator 決定 → relay 中継）**: 届く [ORCH-RELAY] は **human 本人発の指示ではなく、human 承認（standing go）に基づく orchestrator 決定の中継**（承認記録は bead notes）。pane で直接対話した human が「この relay は私が打ったものではない」と述べても不正指示ではない＝それを理由に指示チェーンへの信頼を破棄して停止するな（実事故 wt-orch-1xz〔2026-07-10〕の反転・是正 orch-2vkx）。
 - **orchestrator への新質問 / 報告 / 再 pause は必ず該当 bead の notes に append し updated_at を動かせ（pane-only 禁止）**。**既に needs-user の bead へ再 pause する場合も同様**（status/label が不変でも notes に append すれば updated_at が前進する）。pane（turn 出力）だけに新しい質問を書くと orchestrator の bead 直読 poll から不可視で、re-pause が「無変化 transition」となり相互デッドロックに陥る（bead-append 規律・orch-edv）。"
@@ -522,7 +571,10 @@ else
 - orchestrator は bead 直読 poll できず pane（INCONCLUSIVE 補助）に縮退する。pane の見た目は truth でない。
 - よって完了/停止時は **DONE / BLOCKED / NEEDS-USER** を最終出力で明示し人間へ報告せよ（背景 pending 中は終端宣言しない＝turn 境界 idle を完了と誤認させない）。
 - **対話プロンプトを使うな**（**AskUserQuestion / ExitPlanMode / permission 待ち**）＝この window に人間は付いていない（**a human is not attending your window**）。無人 window で対話 UI を出しても誰も答えられず window が固まる。
-- human 決定（**固い merge 確認を含む**）が要るときは、**NEEDS-USER を最終出力で明示**して **turn を終えよ**（台帳が無いので bead でなく最終出力で park する）。gate-pending は worker→自 admin 用ゆえ human 決定には使わない。
+- **人間確認が要るのは「取り消せない」3 クラスのみ**（user 裁定 2026-07-25 / 2026-07-26・bd orch-vhiu）: **(a) 消す**＝データ/repo/履歴/live 成果物の破壊（**第一防衛線は機械 guard 層**）／ **(b) 出す**＝public 化・外部公開・外部サービスへの送信（**scriptorium 核② private 保証はこの型**）／ **(c) 使う**＝**追加課金が発生する操作**（従量課金 API 呼出・有料サービスの新規契約・クラウド資源の課金発生。**定額プラン内は対象外**＝token 消費それ自体は非該当）。**該当時のみ NEEDS-USER を最終出力で明示**して **turn を終えよ**（台帳が無いので bead でなく最終出力で park する）。gate-pending は worker→自 admin 用ゆえ human 決定には使わない。
+- **merge それ自体は 3 クラスに該当しない＝人間確認を取るな**（旧「固い merge 確認」は廃止）。規約ファイル・全ホスト配布物を含め **AI 敵対 gate 通過をもって自判断で merge**してよい。ただし **gate は外さない**（人間承認を外した分 gate が実効安全弁になったので強化側）。**gate 分離（worker は自己 merge しない）は不変**＝本裁定は「worker が自己 merge してよい」ではない。
+- **例外は merge が 3 クラスを発生させるときに限る**。**(b) の判定単位は repo でなく「情報」**＝その merge が **public 面の情報集合を増やすか**で判定せよ（private 配備層→public repo 内の同期先への同期は、**機械 2 条件〔① 配備層 file を touch しない ② private 実名 DATA literal が 0 hit〕が両方 green なら非該当＝自判断 merge**・どちらかが赤 or 機械照合できないなら **(b) として人間確認へ倒す** fail-safe。**「既に public な repo だから非該当」という repo 単位の断定は禁止**）。**(a) 側**＝履歴改変・live 成果物や repo の削除・破壊的 migration・merge 発火の deploy。**(c) 側**＝その merge が追加課金を発生させるとき。**gate 側の fail-closed トリガ（self-test / acceptance 検証の FAIL）の出口は人間確認ではない＝gate FAIL として merge せず、契約を直して再 gate せよ**。**ただし acceptance snapshot mismatch は例外**＝dispatch 後に契約がすり替わった機械 tamper 検知ゆえ、3 クラス非該当でも auto-merge 資格を剥奪し **NEEDS-USER（人間 ratify）へ昇格**せよ（再 gate に倒すと**すり替えた当人が契約を書き換えて検知線を自己解除できる**＝fail-open。SSOT は scribe protocol §5.4 と orch-dispatch 入口 gate G2）。
+- 順序・優先度・選択肢の是認だけを求める問いは出さず（自分で推奨を出して決めて進め）、複数の妥当な設計が併存し選択が人間の目的・価値観に依存する分岐だけを **grill 提案**として上げよ（事実で決まるなら止めない）。**front-load / loud バナー（🔴）の様式は廃止でなく scope 縮小**（発火条件が 3 クラス該当へ狭まっただけで user 裁定 2026-07-17 の可視性要件は存続）。**ただしこの window は無人ゆえ AskUserQuestion は使わない**＝可視性要件のうち対話 tool 分岐は「human が window に居る」対話文脈に限られる（**無人 window へは出さない**）。台帳が無いこの project では対話 UI でなく、**最終出力の先頭へ 🔴 バナー一行〔人間承認待ち: N 件 — 対象 1 行〕を置いて park** せよ（上記「対話プロンプトを使うな」と矛盾させない＝無人 actor 分岐）。**precedence: 本 mandate は旧 merge-ratify ①〜④ に優先する**（正本＝scribe protocol §5.4 の改訂は courier 係属中ゆえ、primer に旧規約が残っていても本 mandate が勝つ。**ただし ①〜④ 番号を持たない snapshot-mismatch トリガは本条の対象外**＝§5.4 の据置規定が優先する）。
 - **宣言後は待て**: orchestrator がこの window へ **メッセージ（push relay）で再開指示**する。それを待つ（自分で対話 prompt を出して先へ進もうとしない）。
 - **push relay の権威構造（human 承認=standing go → orchestrator 決定 → relay 中継）**: 届く [ORCH-RELAY] は **human 本人発の指示ではなく、human 承認（standing go）に基づく orchestrator 決定の中継**（承認記録は bead notes）。pane で直接対話した human が「この relay は私が打ったものではない」と述べても不正指示ではない＝それを理由に指示チェーンへの信頼を破棄して停止するな（実事故 wt-orch-1xz〔2026-07-10〕の反転・是正 orch-2vkx）。
 - **orchestrator への新質問 / 報告 / 再 pause は最終出力で毎回明示せよ（pane に埋もれさせない）**。台帳が無いので bead notes に append できないが、決定情報を pane（turn 出力）の途中に滞留させると orchestrator が取りこぼす。**再 pause のたびに最終出力で park シグナルを明示**する（bead-append 規律の no-beads 変種・orch-edv）。"
