@@ -5,6 +5,11 @@
 # systemd-run が利用可能ならメモリ制限付き user scope で、なければ直接起動する。
 # 特定 plugin を検出から外すには env CLD_PLUGIN_EXCLUDE（カンマ/空白区切り）または
 # ~/.claude/plugins/.cld-exclude ファイル（1 行 1 名・# コメント可）を使う。
+#
+# メモリ上限（cgroup 防壁）は host の MemTotal から自動導出する（既定 20%・floor 4G / ceil 32G）。
+# 上書きは CLD_MEMORY_MAX（値を直接指定・最優先）/ CLD_MEMORY_MAX_PCT（割合）、起動時 1 行の
+# 可視化は CLD_MEMORY_QUIET=1 で抑制。決定の根拠・限界・稼働中の引き上げ手順は下の
+# 「メモリ上限（cgroup 防壁）の決定」ブロックを読むこと。
 set -euo pipefail
 
 if ! command -v claude &>/dev/null; then
@@ -66,14 +71,90 @@ if [[ -n "${CLD_ENV_PASS_PREFIX:-}" ]]; then
     done < <(env | grep "^${CLD_ENV_PASS_PREFIX}" || true)
 fi
 
+# --- メモリ上限（cgroup 防壁）の決定 -----------------------------------------
+# なぜ上限を置くか: 暴走した dynamic workflow（並列 agent へ無界出力を流し込む設計）が host ごと
+#   巻き込むのを防ぐ防壁。**撤廃はしない**（上限なしは host OOM への直通路）。
+# なぜ固定 12G をやめたか（bd sc-von0・2026-07-26 実測・verified）: 平常時の CC scope は
+#   memory.current 約 0.5-0.9GiB / memory.peak 約 0.6-1.1GiB だが、4 並列 opus agent へ巨大 grep
+#   結果を読ませる dynamic workflow が 12GiB を数分で焼き切り、cgroup OOM killer が CC プロセスごと
+#   SIGKILL した（background の Workflow / Monitor が道連れで消え、journal に result 0 のまま残る）。
+#   固定値は host 非依存に破綻する——潤沢な host（125GiB）では低すぎ、小さな host（8GiB）では
+#   上限が実 RAM を超えて防壁として機能しない。ゆえに MemTotal 比例へ変えた。
+# 既定の根拠: MemTotal x 20%（host 125GiB → 25G ＝ 平常 peak の約 20 倍かつ host の 1/5）。
+#   floor 4GiB = 小 host でも平常運用（peak 約 1GiB）が即死しない下限。
+#   ceil 32GiB = 巨大 RAM host でも 1 プロセスの焼き代を有界化する上限。
+# 効く範囲の限界（明示）: per-scope 上限は「単一セッションの暴走」への防壁であって、同時稼働
+#   セッション数 x 上限の総和は縛らない（fleet 総量は運用側＝同時本数で管理する）。
+# swap は別軸: MemoryMax は anon+file の上限で swap を含まない（swap 側は MemorySwapMax）。
+#   scope の memory.swap.max は既定 max ゆえ、実効的な猶予は MemoryMax + 利用可能 swap になる。
+# 稼働中の scope を再起動なしに引き上げる（実測で反映を確認済み）:
+#   systemctl --user set-property run-<id>.scope MemoryMax=<N>G
+#   （自分の scope id は `cat /proc/self/cgroup` 末尾の run-<id>.scope）
+# CC が突然死したときの唯一の oracle は user journal（dmesg / /var/crash / stderr は原理的に空振り）:
+#   journalctl --user --since "<時刻>" | grep -i oom-kill    ＜理由は scribe docs/protocol.md §6＞
+CLD_MEMORY_MAX_PCT_DEFAULT=20
+CLD_MEMORY_MAX_FLOOR_GIB=4
+CLD_MEMORY_MAX_CEIL_GIB=32
+CLD_MEMORY_MAX_FALLBACK="12G"
+
+MEM_MAX=""
+MEM_MAX_SRC=""
+MEM_MAX_NOTE=""
+if [[ -n "${CLD_MEMORY_MAX:-}" ]]; then
+    MEM_MAX="$CLD_MEMORY_MAX"
+    MEM_MAX_SRC="explicit"
+    MEM_MAX_NOTE="CLD_MEMORY_MAX 明示"
+else
+    # CLD_MEMINFO_FILE は MemTotal 差し替えの seam（テスト専用・既定は /proc/meminfo）。
+    # 正規ファイル限定で読む（FIFO を read すると writer 待ちで launcher が hang する）。
+    _meminfo="${CLD_MEMINFO_FILE:-/proc/meminfo}"
+    _total_kb=""
+    if [[ -f "$_meminfo" && -r "$_meminfo" ]]; then
+        _total_kb="$(awk '/^MemTotal:/ { print $2; exit }' "$_meminfo" 2>/dev/null || true)"
+    fi
+    if [[ "$_total_kb" =~ ^[1-9][0-9]*$ ]]; then
+        _pct="${CLD_MEMORY_MAX_PCT:-$CLD_MEMORY_MAX_PCT_DEFAULT}"
+        # 不正値は die でなく既定へ倒す（不変条件: 何であれ claude の起動は妨げない）
+        if [[ ! "$_pct" =~ ^[1-9][0-9]*$ ]] || (( _pct > 100 )); then
+            echo "Warning: CLD_MEMORY_MAX_PCT='${_pct}' が 1-100 の整数でないため既定 ${CLD_MEMORY_MAX_PCT_DEFAULT}% を使います" >&2
+            _pct="$CLD_MEMORY_MAX_PCT_DEFAULT"
+        fi
+        _gib=$(( _total_kb * _pct / 100 / 1048576 ))
+        if (( _gib < CLD_MEMORY_MAX_FLOOR_GIB )); then _gib="$CLD_MEMORY_MAX_FLOOR_GIB"; fi
+        if (( _gib > CLD_MEMORY_MAX_CEIL_GIB )); then _gib="$CLD_MEMORY_MAX_CEIL_GIB"; fi
+        MEM_MAX="${_gib}G"
+        MEM_MAX_SRC="auto-pct${_pct}"
+        MEM_MAX_NOTE="auto: MemTotal $(( _total_kb / 1048576 ))GiB x ${_pct}% / floor ${CLD_MEMORY_MAX_FLOOR_GIB}G / ceil ${CLD_MEMORY_MAX_CEIL_GIB}G"
+    else
+        MEM_MAX="$CLD_MEMORY_MAX_FALLBACK"
+        MEM_MAX_SRC="fallback"
+        MEM_MAX_NOTE="fallback: ${_meminfo} から MemTotal を読めず"
+    fi
+fi
+
 # systemd-run があればメモリ制限付き scope で、なければ直接起動（環境変数は exec で継承）
 if command -v systemd-run &>/dev/null; then
-    exec systemd-run --user --scope -p "MemoryMax=${CLD_MEMORY_MAX:-12G}" \
+    # --description は実効値を unit へ焼き、起動後も `systemctl --user show <scope> -p Description`
+    # で読めるようにする（stderr の 1 行は流れて消えるため永続側の可視性を別に持つ）。古い systemd
+    # への保険で feature-detect する（cld-spawn の --effort passthrough と同流儀）。
+    SD_DESC_ARGS=()
+    _sd_help="$(systemd-run --help 2>/dev/null || true)"
+    if grep -q -- '--description' <<< "$_sd_help"; then
+        SD_DESC_ARGS=(--description="cld claude session (MemoryMax=${MEM_MAX} src=${MEM_MAX_SRC})")
+    fi
+    if [[ -z "${CLD_MEMORY_QUIET:-}" ]]; then
+        echo "cld: MemoryMax=${MEM_MAX} [${MEM_MAX_NOTE}]" >&2
+    fi
+    exec systemd-run --user --scope -p "MemoryMax=${MEM_MAX}" \
+        "${SD_DESC_ARGS[@]+"${SD_DESC_ARGS[@]}"}" \
         "${ENV_ARGS[@]+"${ENV_ARGS[@]}"}" \
         claude --dangerously-skip-permissions \
         "${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"}" \
         "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
 else
+    if [[ -z "${CLD_MEMORY_QUIET:-}" ]]; then
+        echo "cld: メモリ上限なし（systemd-run 不在のため直接起動＝暴走時の cgroup 防壁が無い）" >&2
+    fi
     exec claude --dangerously-skip-permissions \
         "${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"}" \
         "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"

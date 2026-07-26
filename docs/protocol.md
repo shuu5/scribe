@@ -404,6 +404,37 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 
 検知の足場（2 層）: **worker 側 = sc-sau env-probe**（cross-call sentinel + `base..HEAD` 0-commit で fail-closed＝env 劣化時に worker 自身が `STATUS: blocked` を書き done を申告しない・Layer1）。**admin 側 = §5 step1 の commit-count 独立照合**（Layer2）+ 本節の窓生死（fleet-monitor `✗`）+ **pane idle-at-prompt 持続の併読（zombie 変種向け）**。**zombie 変種では Layer1 が構造的に沈黙する**（Bash ごと死ぬため blocked を書けない）ため、**fail-closed の主網は Layer2 の idle-at-prompt × 0-commit 併読**であり、pane sentinel（sc-c7c・上記 degraded-zombie 変種の bullet）はそれを補う追加信号にとどまる（sentinel 出力前に LLM ループごと死にうるため主網の代替にはしない）。**§7 の grill-consult 中断リカバリ（3段）は、この一般 salvage の consult 版**（出力がコードでなく決定・session-comm inject → 残 facet 再 spawn → admin 引き取り）。
 
+### CC プロセス突然死（cgroup OOM）の oracle（sc-von0・2026-07-26 admin 実測）
+
+上の salvage 群は **worker の env / tool 層が壊れる**系統。本節は**別系統**——**CC プロセス自体が cgroup OOM killer に SIGKILL される**（admin / worker を問わず起きる）。`cld` launcher は CC を `systemd-run --user --scope -p MemoryMax=…` で起動するため、**すべての session は上限付き scope の中に居る**。
+
+**症状（この形なら本節を疑う）**: background の `Workflow` / `Monitor` が **journal に result 0 のまま消える**（＝「失敗した」痕跡すら残らない）・session 自体は `-c` で復帰するが **WF は戻らない**・重い dynamic workflow の実行中に**繰り返し**起きる。
+
+**oracle（第一手・これ一つ）**:
+
+```
+journalctl --user --since "<消えた時刻>" | grep -i oom-kill
+```
+
+決定的な 2 行が出る — `run-<id>.scope: A process of this unit has been killed by the OOM killer.` と `run-<id>.scope: Failed with result 'oom-kill'.`。**死んだ WF の agent 最終書込時刻と oom-kill 行の時刻が一致すれば確定**（実測: 2026-07-26 の 00:45:32 / 00:51:18 が調査 WF 2 試行の最終書込と一致）。
+
+**空振りする調査経路（過去の誤診・再びここへ人手を流さない）**:
+
+- **`dmesg` / kern.log は空**: cgroup OOM は **host OOM ではない**ため dmesg に出ない。**host が潤沢でも起きる**（実測時 125GiB 中 69GiB free で発生）——「host に空きがあるから OOM ではない」は**誤った消去法**。
+- **`/var/crash` は空**: OOM killer は **SIGKILL** ゆえ **core dump も stderr も原理的に残らない**。加えて CC は現在 **native binary**（`~/.local/share/claude/versions/`）で動くので `_usr_bin_node.*.crash` には現れない。**当該ディレクトリにあった node crash dump は codex 由来**（`ProcCmdline` が `node ~/.local/bin/codex`・SIGABRT・RSS 44MB）で **CC と無関係**だった＝「古い crash dump が新規記録を塞いでいる」という当時の作業仮説は**撤回済み**。
+- **起動時 stderr をファイルへ退避する経路も空振り**: 同じ理由（SIGKILL は stderr を残さない）。
+
+**一次対処**:
+
+- **稼働中の scope を再起動なしに引き上げる**（実測で反映を確認済み）: `systemctl --user set-property run-<id>.scope MemoryMax=<N>G`。自分の scope id は `cat /proc/self/cgroup` 末尾の `run-<id>.scope`。実効値の確認は `systemctl --user show <scope> -p MemoryMax -p Description`（`cld` が Description へ実効値と出所を焼く）か cgroup 直読（`/sys/fs/cgroup/…/memory.max`・`memory.current`・`memory.peak`）。
+- **恒久既定は launcher が持つ**: `cc-session/scripts/cld` が **MemTotal 比例**（既定 20%・floor 4G / ceil 32G・`/proc/meminfo` 不読時は 12G へ fallback）で導出し、起動時に stderr 1 行（`cld: MemoryMax=…`）で可視化する。上書きは `CLD_MEMORY_MAX`（値）/ `CLD_MEMORY_MAX_PCT`（割合）、抑制は `CLD_MEMORY_QUIET=1`。**上限の撤廃はしない**——暴走 WF が host を巻き込むのを防ぐ防壁でもあるため（per-scope 上限は単一 session の暴走への防壁であって、同時稼働セッション数 × 上限の総和は縛らない＝fleet 総量は運用側で管理する）。
+- **再発防止は WF 設計側**: 無界出力（巨大 grep 結果・全文 `cat`）を agent context へ流さず機械 cap を課す＝ `methodology.md` §2「WF agent への出力 cap 規律」が SSOT。
+- **猶予の実効値に注意**: `MemoryMax` は anon+file の上限で **swap を含まない**（swap 側は `MemorySwapMax`・scope 既定は `max`）。実効的な猶予は `MemoryMax` + 利用可能 swap になる。
+
+**証拠種別（本 §6 凡例）**: oom-kill 行・時刻一致・`memory.max` / `memory.peak` の実測はいずれも **observable（admin 検証済み）**。本節の手順は observable のみに立脚し、mechanism 診断に依存しない。
+
+> 一次出典: bd `sc-von0`（admin 実測 2026-07-26: journal の oom-kill 2 行と WF 2 試行の最終書込時刻の一致／平常時 scope は memory.current 約 0.9GB・peak 約 1.1GB に対し上限 12GiB／host 125GiB 中 69GiB free ＝ host OOM ではない／`/var/crash` dump は codex 由来で CC 無関係／CC は native binary）／ `cc-session/scripts/cld`（MemoryMax 既定の導出・可視化の実装と根拠コメント）／ `methodology.md` §2「WF agent への出力 cap 規律」（再発防止側）。
+
 ### native 監視への段階移行方針（暫定・PoC 完了までの橋・sc-pp9 論点6）
 
 本 §6 の監視は現状 tmux pane 観測（busy 判定 regex・capture-pane・fleet-monitor の窓照合）を主網とするが、worker substrate の CC native background agents 化（§1「A1 は sc-99c に従属」注記・§2 境界②）に備え、監視も **(2) 段階移行**を採る（即 cutover でも恒久ハイブリッドでもなく、**検証待ちの橋**）。本方針は PoC 結果で更新される前提の**暫定**である（詳細昇格条件 = PoC bead）:
