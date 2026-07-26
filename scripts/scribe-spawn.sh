@@ -329,33 +329,87 @@ emit_config_dir_envline() {
 # `${TMPDIR:-/tmp}` 置換だけでは置き場が caller 制御になり、この設計契約が無牙になる）。
 # 包含判定は readlink -f で正準化してから行う（`..` / symlink 経由の迂回を塞ぐ）が、**返す値は生の $TMPDIR**
 # （正準化した値を返すと symlink された /tmp を持つ環境〔macOS/一部 CI〕で表示パスと実 mktemp が乖離する
-# ＝cleanup un-c4s と同型の配慮）。縮退（禁止 root ヒット）は silent にせず stderr へ loud warn する。
+# ＝cleanup un-c4s と同型の配慮）。生値を返す設計が成立するのは **採用値が絶対パスのとき**に限るため、
+# 非絶対 $TMPDIR は禁止 root 判定より前に弾いて /tmp へ落とす（相対値を返すと mktemp は spawner の cwd 配下に
+# 作る一方 argv の --env-file も相対のまま `--cd <anchor>` 付きで渡り、consumer が解決できない＝env-file が
+# 届かず guard が発火しない fail-open。詳細は関数内コメント）。
+# 縮退（非絶対 / 禁止 root ヒット）は silent にせず stderr へ loud warn する。
 # 禁止 root は渡された **ディレクトリ**に留めず、**それが属する git working tree の根**まで広げる: 契約文言は
 # 「anchor **working tree** の外」であり、ANCHOR 既定は cwd ゆえ `cd <repo>/sub && scribe-spawn` という現実的な
 # 操作だけで anchor が tree の根でなくなる。dir 比較のみだと同 tree の別 sub-dir を指す $TMPDIR が素通りし、
 # git 管理下（`git add -A` が拾う untracked 経路）へ env-file が落ちる——旧実装の絶対 /tmp には構造上無かった
-# fail-open ゆえ、$TMPDIR 追随と同時に閉じる。非 git dir / git 不在では toplevel は空文字＝無視され、
+# fail-open ゆえ、$TMPDIR 追随と同時に閉じる。どの tree にも属さない dir では根は空文字＝無視され、
 # 「anchor が非 repo なら tree 全体を禁止しない」既存挙動のまま退化する（過剰に /tmp へ落として sandbox 下の
-# die を招かない）。anchor=repo 根という主経路では toplevel==anchor で挙動不変。
+# die を招かない）。anchor=repo 根という主経路では根==anchor で挙動不変。
 # 引数 = 禁止 root（可変長・空要素は無視）。stdout に採用 dir（末尾スラッシュ無し）を返す。
+
+# <dir> が属する git working tree の根（= 自身を含む直近の祖先で `.git` を持つ dir）を stdout に返す。
+# 属さなければ空文字。**git を呼ばない**（純 bash の filesystem walk）。
+#   理由（sc-kvvk gate B2）: 旧実装は `git rev-parse --show-toplevel` の失敗を握り潰して（`2>/dev/null || true`）
+#   空文字へ縮退させたため、**git が答えられない**状況——GIT_CEILING_DIRECTORIES が根の走査を止める（実測
+#   rc=128）/ safe.directory の dubious ownership 拒否 / PATH に git 不在——で禁止 root が「渡された dir 自身」
+#   だけに縮み、同 tree の別 sub-dir を指す $TMPDIR を **警告 0 行のまま**採用した（無音 fail-open）。判定を
+#   filesystem の事実だけに置けば git の設定・環境・実在から独立し、この枝ごと消える（subprocess も 0）。
+#   縮退方向も安全側: 誤判定は「tree を見つけすぎて /tmp へ落とす」側にしか倒れない（汚染ではなく退避）。
+# `.git` は **dir（通常 repo）と file（linked worktree / submodule）の両方**を採るため -e で判定する。
+# 停止は直近の `.git`（= `--show-toplevel` と同じ nearest 意味論。nested repo で外側の根まで昇らない）。
+# 実在しない path（例: これから作る worktree）でも歩ける: readlink -f が失敗したら生の文字列を辿る。
+enclosing_tree_root() {
+  local p="${1:-}" c
+  [[ -n "$p" ]] || return 0
+  c="$(readlink -f "$p" 2>/dev/null || true)"; [[ -n "$c" ]] || c="$p"
+  c="${c%/}"; [[ -n "$c" ]] || c="/"
+  while : ; do
+    if [[ -e "$c/.git" ]]; then printf '%s\n' "$c"; return 0; fi
+    [[ "$c" == */?* ]] || break         # これ以上昇れない（"/" or 相対 path の最上位成分）
+    c="${c%/*}"; [[ -n "$c" ]] || c="/"
+  done
+  return 0
+}
+
+# 正準化済み $TMPDIR ($1) が禁止候補 dir ($2) と同一かその配下なら 0。空候補・退化指定は 1（非該当）。
+# 包含判定の前に候補側も readlink -f で正準化する（`..` / symlink 経由の迂回綴りを潰す）。
+tmpdir_under_root() {
+  local dc="$1" cand="${2:-}" cc
+  cand="${cand%/}"
+  [[ -n "$cand" ]] || return 1          # root="/" 等の退化指定も除外（fallback も配下になり判定が無意味）
+  cc="$(readlink -f "$cand" 2>/dev/null || true)"; [[ -n "$cc" ]] || cc="$cand"
+  [[ "$dc" == "$cc" || "$dc" == "$cc"/* ]]
+}
+
 resolve_env_tmpdir() {
-  local d="${TMPDIR:-/tmp}" dc root cand cc
+  local d="${TMPDIR:-/tmp}" dc root cand
   d="${d%/}"; [[ -n "$d" ]] || d="/tmp"
+  # 非絶対 $TMPDIR は採用しない（禁止 root 判定より前・sc-kvvk 自己点検 round2）。
+  # 本関数は比較用にだけ正準化し **返す値は生の $TMPDIR** ゆえ（symlink された /tmp を持つ環境で表示と実
+  # mktemp を乖離させないための設計判断）、相対値はそのまま mktemp テンプレートと argv へ流れる。すると
+  # cld-spawn へ `--cd <anchor 絶対パス>` と `--env-file <相対パス>` が同時に渡り、env-file の実体は spawner の
+  # cwd 配下・consumer は --cd 先の別 cwd で解決＝一致しない（実測: TMPDIR=reltmp で argv に
+  # `--cd /abs/anchor` と `--env-file reltmp/scribe-consult-XXXXXX.env` が並ぶ）。この env-file は worker の
+  # SCRIBE_WORKER=1 + SCRIBE_WORKTREE / consult の SCRIBE_ROLE を運ぶ **唯一の carrier** で、source に失敗すれば
+  # SCRIBE_WORKER が未設定になり edit-write-guard は**発火せず全書込みが allow** になる（fail-closed でなく
+  # fail-open の向き。「非 worker は発火せず worktree 外書込みも allow」を pin する既存 test がその挙動側）。
+  # 旧実装（絶対 /tmp テンプレート固定）には構造上あり得なかった経路＝$TMPDIR 追随が新規に開いた穴ゆえ、
+  # 「置き場が caller 制御になる危険を構造で塞ぐ」本 bead の主張どおり同時に閉じる。POSIX 的にも TMPDIR は
+  # 絶対パス名であるべきで、相対値は malformed な環境＝既知既定（/tmp）へ loud に落とすのが予測可能。
+  # /tmp が書込不可（CC sandbox）なら後段の mktemp が scribe_die で **loud に落ちる**＝fail-closed の向き。
+  if [[ "$d" != /* ]]; then
+    echo "scribe-spawn: warn: \$TMPDIR ($d) が絶対パスでないため env-file の置き場に採用しません → /tmp へ落とします（--cd 先で解決不能な相対 env-file を作らない・sc-kvvk）" >&2
+    printf '/tmp\n'
+    return 0
+  fi
   dc="$(readlink -f "$d" 2>/dev/null || true)"; [[ -n "$dc" ]] || dc="$d"
   for root in "$@"; do
     [[ -n "$root" ]] || continue
-    # 禁止候補 = そのディレクトリ自身 + それが属する git working tree の根（非 git は空＝無視）。
-    # scribe_git は GIT_DIR/GIT_WORK_TREE を落として叩く（admin 側 env の漏れ込みで誤判定しない）。
-    for cand in "$root" "$(scribe_git -C "$root" rev-parse --show-toplevel 2>/dev/null || true)"; do
-      cand="${cand%/}"
-      [[ -n "$cand" ]] || continue        # root="/" 等の退化指定も除外（fallback も配下になり判定が無意味）
-      cc="$(readlink -f "$cand" 2>/dev/null || true)"; [[ -n "$cc" ]] || cc="$cand"
-      if [[ "$dc" == "$cc" || "$dc" == "$cc"/* ]]; then
-        echo "scribe-spawn: warn: \$TMPDIR ($d) が working tree ($cand) の配下です → env-file は /tmp へ落とします（anchor 汚染防止の設計契約・sc-kvvk）" >&2
-        printf '/tmp\n'
-        return 0
-      fi
-    done
+    # 禁止候補 = ① そのディレクトリ自身 → ② それが属する working tree の根（① で決まらない時だけ歩く）。
+    cand="$root"
+    if ! tmpdir_under_root "$dc" "$cand"; then
+      cand="$(enclosing_tree_root "$root")"
+      tmpdir_under_root "$dc" "$cand" || continue
+    fi
+    echo "scribe-spawn: warn: \$TMPDIR ($d) が working tree ($cand) の配下です → env-file は /tmp へ落とします（anchor 汚染防止の設計契約・sc-kvvk）" >&2
+    printf '/tmp\n'
+    return 0
   done
   printf '%s\n' "$d"
 }

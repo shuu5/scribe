@@ -653,7 +653,7 @@ _mk_beads() {
   # 禁止判定が「渡された dir の配下か」だけだと、同 tree の別 sub-dir を指す $TMPDIR が素通りし env-file が
   # git 管理下（git add -A が拾う untracked 経路）へ落ちる。旧実装（絶対 /tmp）には構造上無かった fail-open で、
   # bd acceptance の文言も「anchor **working tree** 外」＝dir でなく tree が契約の単位。
-  # mutation: resolve_env_tmpdir の toplevel 展開（cand ループの rev-parse --show-toplevel）を外すと本 test が RED。
+  # mutation: resolve_env_tmpdir の tree 根展開（enclosing_tree_root 呼出）を外すと本 test が RED。
   local sub="$SCRIBE_TEST_CWD/sub" other="$SCRIBE_TEST_CWD/other"
   mkdir -p "$sub" "$other"
   # (1) consult: anchor=repo の sub-dir。同 tree の別 sub-dir を指す TMPDIR は採用しない。
@@ -667,13 +667,171 @@ _mk_beads() {
   [ "$status" -eq 0 ]
   [[ "$output" != *"mktemp $other/"* ]]
   [[ "$output" == *"mktemp /tmp/scribe-worker-"* ]]
-  # (3) 過剰締め付けの refute: 非 git な anchor では tree 展開が空＝その兄弟 dir は従来どおり採用される
+  # (3) 過剰締め付けの refute: どの tree にも属さない anchor では展開が空＝その兄弟 dir は従来どおり採用される
   #     （全部 /tmp へ落とすと sandbox 下の read-only /tmp で die し、本 fix の目的そのものを潰すため）。
+  #     **期待値は環境で反転する**（gate B1）: $BATS_TEST_TMPDIR は $TMPDIR 配下ゆえ、本 repo の正規 sandbox
+  #     迂回 TMPDIR=$PWD/.bats-tmp（sc-gpzj/sc-3lj・.gitignore 済）で走らせると ng は「非 git」ではなく
+  #     **tree 内**になり、guard が発火するのが正しい。期待を片側へ決め打ちすると、本 bead が消したい
+  #     「環境要因の false RED」を自分で 1 本足すことになる → tree 所属を test 側で**独立に**判定し
+  #     （実装の関数を呼ばない・同じ nearest 意味論を素の bash で再実装）、**両枝とも非空虚**に assert する。
   local ng="$BATS_TEST_TMPDIR/nongit" ngsib="$BATS_TEST_TMPDIR/nongit-sib"
   mkdir -p "$ng" "$ngsib"
+  local encl="" p="$ng"
+  while : ; do
+    if [[ -e "$p/.git" ]]; then encl="$p"; break; fi
+    [[ "$p" == */?* ]] || break
+    p="${p%/*}"; [[ -n "$p" ]] || break
+  done
   run env TMPDIR="$ngsib" "$SPAWN" --dry-run --consult --anchor "$ng" un-consult
   [ "$status" -eq 0 ]
-  [[ "$output" == *"mktemp $ngsib/scribe-consult-"* ]]
+  if [[ -n "$encl" ]]; then
+    # ng が tree ($encl) の内側 → 兄弟 dir も同 tree 内ゆえ guard 発火が正（tree 展開の teeth がこちらで効く）。
+    [[ "$output" != *"mktemp $ngsib/"* ]]
+    [[ "$output" == *"mktemp /tmp/scribe-consult-"* ]]
+    [[ "$output" == *"が working tree"*"の配下です"* ]]
+  else
+    # ng がどの tree にも属さない → 兄弟 dir は採用（過剰締め付けの refute がこちらで効く）。
+    [[ "$output" == *"mktemp $ngsib/scribe-consult-"* ]]
+  fi
+
+  # (4) 過剰締め付けの refute（**hermetic**・(3) と違い $TMPDIR の置き場に依存しない）: tree 根の探索は
+  #     **直近の .git** で止まる（git rev-parse --show-toplevel と同じ nearest 意味論）。anchor 自身を repo に
+  #     すれば走査はそこで止まるので、その **外側**の兄弟 dir は $BATS_TEST_TMPDIR がどこに在っても採用される。
+  #     「迷ったら全部 /tmp」実装との弁別が全環境で必ず 1 本走ることを保証する（(3) の env 分岐の安全網）。
+  local ownrepo="$BATS_TEST_TMPDIR/ownrepo" sib="$BATS_TEST_TMPDIR/ownrepo-sib"
+  mkdir -p "$ownrepo" "$sib"
+  git -C "$ownrepo" -c init.defaultBranch=main init -q
+  run env TMPDIR="$sib" "$SPAWN" --dry-run --consult --anchor "$ownrepo" un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mktemp $sib/scribe-consult-"* ]]
+  [[ "$output" != *"が working tree"*"の配下です"* ]]
+}
+
+@test "spawn(sc-kvvk): tree 根の解決は git に依存しない（rev-parse が死ぬ環境でも禁止 root が縮まず無音 fail-open しない）" {
+  # gate B2: 旧実装は tree 根を `git rev-parse --show-toplevel` で解き、失敗を握り潰して（2>/dev/null || true）
+  # 空文字へ縮退させた。git が答えられない環境——GIT_CEILING_DIRECTORIES が根の走査を止める / safe.directory の
+  # dubious ownership 拒否 / PATH に git 不在——では禁止 root が「渡された dir 自身」だけに縮み、同 tree の別
+  # sub-dir を指す $TMPDIR を **警告 0 行のまま**採用した（無音 fail-open＝縮退の存在すら観測できない）。
+  # 判定を filesystem walk（enclosing_tree_root）へ移したので git の可否から独立する。
+  local t="$BATS_TEST_TMPDIR/ceilrepo"
+  mkdir -p "$t/sub" "$t/other"
+  git -C "$t" -c init.defaultBranch=main init -q
+  # 前提の実測 pin（この assert が無いと ceiling が効かない環境で test 全体が vacuous になる）:
+  # この ceiling 下では git は t/sub の tree 根を答えられない＝旧実装が fail-open する条件が成立している。
+  run env GIT_CEILING_DIRECTORIES="$t" git -C "$t/sub" rev-parse --show-toplevel
+  [ "$status" -ne 0 ]
+  # それでも guard は発火する（同 tree の別 sub-dir を採用しない）。
+  run env GIT_CEILING_DIRECTORIES="$t" TMPDIR="$t/other" "$SPAWN" --dry-run --consult --anchor "$t/sub" un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"mktemp $t/other/"* ]]
+  [[ "$output" == *"mktemp /tmp/scribe-consult-"* ]]
+  [[ "$output" == *"が working tree"*"の配下です"* ]]
+}
+
+@test "spawn(sc-kvvk): cross-repo worker（--repo X ≠ --anchor Y）でも X の tree 内 \$TMPDIR を弾く" {
+  # gate B3: 禁止 root は ANCHOR / REPO / WORKTREE の 3 者。cross-repo（X≠Y）は anchor だけを見る実装でも
+  # 素の worker テストが全て緑のままになる盲点ゆえ、X 側 tree を指す $TMPDIR を明示的に pin する。
+  # 併せて **実在しない path から歩けること**も踏む: WORKTREE=$X/.worktrees/spawn/... は dry-run 時点で未作成
+  # （readlink -f が解決できない）だが、生の文字列を辿って X の .git に到達する必要がある。
+  local repoX anchorY inX
+  repoX="$SCRIBE_TEST_CWD"                          # worktree を作るリポ（= --repo X）
+  anchorY="$(cd "$(mktemp -d)" && pwd -P)"          # 真の bd graph（= --anchor Y・X とは別 tree）
+  git -C "$anchorY" -c init.defaultBranch=main init -q
+  [ ! -e "$repoX/.worktrees" ]                      # 前提: WORKTREE の親はまだ無い（生文字列 walk を通す条件）
+  inX="$repoX/sub/inside-repoX"; mkdir -p "$inX"
+  run env TMPDIR="$inX" "$SPAWN" --dry-run --repo "$repoX" --anchor "$anchorY" un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"mktemp $inX/"* ]]
+  [[ "$output" == *"mktemp /tmp/scribe-worker-"* ]]
+  [[ "$output" == *"が working tree"*"の配下です"* ]]
+  # 対照（cross-repo が vacuous でない証拠）: Y 側 tree 内の $TMPDIR も同じく弾かれる＝X/Y 双方が禁止 root。
+  local inY="$anchorY/inside-anchorY"; mkdir -p "$inY"
+  run env TMPDIR="$inY" "$SPAWN" --dry-run --repo "$repoX" --anchor "$anchorY" un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"mktemp $inY/"* ]]
+  [[ "$output" == *"mktemp /tmp/scribe-worker-"* ]]
+  rm -rf "$anchorY"
+}
+
+@test "spawn(sc-kvvk): linked worktree（.git が **file**）の topology でも tree 根を解決する（worker cell 自身の配置・-e→-d 退行を落とす）" {
+  # 実装コメントは「`.git` は dir（通常 repo）と file（linked worktree / submodule）の**両方**を採るため -e で
+  # 判定する」と明記するのに、既存の tree 根 test が作る git tree は全て `git init` の **.git dir** だけだった
+  # （651/710/731 いずれも）。実測: enclosing_tree_root の `-e` を `-d` へ落としても sc-kvvk teeth は全緑＝この
+  # claim に teeth が 1 本も無い。その変異下では main repo の **外**に置いた linked worktree で tree 根が縮み、
+  # 同 tree 内を指す $TMPDIR を **warn 0 行のまま**採用する＝gate B2 が塞いだのと同型の無音 fail-open が別経路で
+  # 復活する。しかも scribe の worker cell は**常に** linked worktree（本 cell の .git も file）＝最も踏む topology。
+  # 非空虚性の要（gate B1 の規律＝期待値を env で反転させない）: warn が名指す tree 根を **linked worktree 自身**へ
+  # 完全一致で pin する。`-d` 変異では根が「囲いが git tree なら外側の repo へずれ」「非 git なら空へ縮み warn 消滅」
+  # のどちらかになるので、$BATS_TEST_TMPDIR がどこに在っても RED へ反転する（片側決め打ちの false RED を作らない）。
+  local lwt lwtc
+  lwt="$BATS_TEST_TMPDIR/lwt"                       # main repo の **外**に置く（この配置の .git は file）
+  git -C "$SCRIBE_TEST_CWD" worktree add -q -b lwt-kvvk "$lwt" >/dev/null
+  [ -f "$lwt/.git" ]                                # 前提の実測 pin: .git は dir でなく file（topology の定義そのもの）
+  mkdir -p "$lwt/sub" "$lwt/other"
+  lwtc="$(readlink -f "$lwt")"                      # 実装は正準化した根を warn に載せる
+  run env TMPDIR="$lwt/other" "$SPAWN" --dry-run --consult --anchor "$lwt/sub" un-consult
+  git -C "$SCRIBE_TEST_CWD" worktree remove --force "$lwt" 2>/dev/null || true   # 後始末は assert より先
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"mktemp $lwt/other/"* ]]         # 同 tree の別 sub-dir は採用しない
+  [[ "$output" == *"mktemp /tmp/scribe-consult-"* ]]
+  [[ "$output" == *"working tree ($lwtc) の配下です"* ]]   # ★根は linked worktree 自身（-e→-d でずれる/消える）
+}
+
+@test "spawn(sc-kvvk): 非絶対 \$TMPDIR は env-file の置き場に採用しない（相対 --env-file を --cd 先へ渡さない・consult/worker 両経路）" {
+  # 自己点検 round2: resolve_env_tmpdir は比較用にだけ正準化し **返す値は生の $TMPDIR** ゆえ、相対値は
+  # そのまま mktemp テンプレートと argv へ流れる。cld-spawn へ `--cd <anchor 絶対パス>` と `--env-file <相対>` が
+  # 同時に渡ると、実体は spawner の cwd 配下・consumer は --cd 先の別 cwd で解決＝一致しない。env-file は
+  # worker の SCRIBE_WORKER=1 / consult の SCRIBE_ROLE を運ぶ唯一の carrier で、届かなければ edit-write-guard が
+  # **発火せず全書込みが allow**（fail-open）。旧実装（絶対 /tmp 固定）には無く $TMPDIR 追随が開いた穴。
+  # 非空虚性の要（この test 固有）: 相対値は **禁止 root の tree 外**へ解決させる。cwd（= 既定 ANCHOR）配下へ
+  # 解決する綴り（"reltmp"）だと tree ガードが先に発火して素通りし、絶対パス判定を消しても緑のままになる。
+  # `../` 綴りは $SCRIBE_TEST_CWD の外＝どの禁止 root の tree にも属さない（実測: 修正前は両経路の plan 行に
+  # `mktemp ../relenv-kvvk/...` がそのまま出る＝tree ガードは沈黙する）。dir は作らない（作らせない側の pin）。
+  local rel="../relenv-kvvk"
+  # consult 面
+  run env TMPDIR="$rel" "$SPAWN" --dry-run --consult un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"mktemp $rel/"* ]]                     # 相対の置き場は採用しない
+  [[ "$output" == *"mktemp /tmp/scribe-consult-"* ]]      # 既知既定へ fail-safe
+  [[ "$output" == *"が絶対パスでないため"* ]]             # 縮退は loud（silent degrade を作らない）
+  # worker 面（本 fix の主消費者・非対称を残さない）
+  run env TMPDIR="$rel" "$SPAWN" --dry-run --repo "$SCRIBE_TEST_CWD" --anchor "$SCRIBE_TEST_CWD" un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"mktemp $rel/"* ]]
+  [[ "$output" == *"mktemp /tmp/scribe-worker-"* ]]
+  [[ "$output" == *"が絶対パスでないため"* ]]
+}
+
+@test "spawn(sc-kvvk): 非絶対 \$TMPDIR でも実 argv の --env-file が相対にならない（実行路・fail-open でなく fail-closed へ倒れる）" {
+  # 直上は dry-run plan 行（実経路の mirror）。ここは **実 spawn の argv** で同じ不変を pin する
+  # （plan だけ直して実経路が乖離する変異を落とす＝既存 real-argv teeth と同じ modality）。
+  # 結果は /tmp の書込可否で 2 分岐するが **どちらも非空虚**・どちらも同じ不変を述べる:
+  #   ・/tmp 書込可（anchor / gate host） → spawn 成功し argv の --env-file は /tmp 配下の**絶対**パス
+  #   ・/tmp 書込不可（CC worker sandbox） → mktemp が loud die し cld-spawn は起動しない（相対 env-file を
+  #     持つ spawn は起きない）＝fail-closed の向き
+  # 修正前は **両環境とも**「相対 --env-file を持つ spawn が成功」した（実測）ため、両分岐とも RED へ反転する。
+  # gate B1 の規律に従い env 条件付き skip は使わない（skip は teeth が黙って消える＝偽 green の温床）。
+  local dump stub rel st out ef
+  dump="$BATS_TEST_TMPDIR/argv-reltmp.dump"; : > "$dump"
+  stub="$(_make_argvdump_cld_spawn "$dump")"
+  rel="../relenv-kvvk-real"                               # 直上と同じ理由で禁止 root の tree 外へ解決させる
+  run env TMPDIR="$rel" SCRIBE_CLD_SPAWN="$stub" "$SPAWN" --consult un-consult
+  st="$status"; out="$output"
+  # 両分岐共通の不変 (1): 相対 env-file が argv に載らない。
+  run grep -Fq -- "$rel/scribe-consult-" "$dump"
+  [ "$status" -ne 0 ]
+  # 両分岐共通の不変 (2): 縮退は loud（この assert が修正前は必ず落ちる＝両環境での非空虚性の要）。
+  [[ "$out" == *"が絶対パスでないため"* ]]
+  if [ "$st" -eq 0 ]; then
+    ef="$(grep -A1 -Fx -- '--env-file' "$dump" | tail -n1)"
+    [ -n "$ef" ]
+    [[ "$ef" == /* ]]                                     # ★不変: --cd 先でも解決できる絶対パス
+    [[ "$ef" == "/tmp/scribe-consult-"*".env" ]]
+    [ ! -e "$ef" ]                                        # spawn 後に消える（artifact を残さない）
+  else
+    [[ "$out" == *"env-file の作成に失敗"* ]]             # loud die（無音縮退でない）
+    [ ! -s "$dump" ]                                      # cld-spawn は起動していない
+  fi
 }
 
 @test "spawn(sc-kvvk): scripts/ に sandbox で die する絶対 /tmp の mktemp テンプレートが残っていない（再導入の回帰ガード）" {
@@ -4360,6 +4518,69 @@ _make_argvdump_cld_spawn() { # $1=dump file
   [[ "$ef" == "$td/scribe-worker-"*".env" ]]   # $TMPDIR 配下（絶対 /tmp 直書きでない）
   # spawn 後に消える（worktree/外部に artifact を残さない・trap+rm の実挙動）。
   [ ! -e "$ef" ]
+}
+
+@test "spawn(sc-kvvk): 構造ガードの **発火枝**を実行路で pin（tree 内 \$TMPDIR で実起動しても env-file は tree 外・consult/worker 両経路）" {
+  # 本 bead の headline 不変（『$TMPDIR 追随が anchor 汚染契約を無牙にしない』）を pin していたのは、guard が
+  # **発火する**枝については dry-run の plan 文字列と source literal の grep だけだった。実 argv 系 3 本
+  # （非絶対 / consult / worker）はいずれも guard が発火しない枝＝「$TMPDIR を採用」「非絶対→/tmp」しか踏まない。
+  # 実測: 実 mktemp の直前へ `ENV_TMPDIR="${TMPDIR:-/tmp}"` を 1 行挿す変異（**plan 行は不変・実経路だけ guard を
+  # 迂回**）で sc-kvvk teeth は全て素通りした。この枝こそ anchor 汚染＝誤コミット経路という本 bead の防御対象。
+  # 両枝とも非空虚・どちらも同じ不変を述べる（/tmp 書込可否で結果が 2 分岐するため・gate B1 に従い env 条件付き
+  # skip はしない）:
+  #   ・/tmp 書込可（anchor / gate host） → spawn 成功。argv の --env-file は tree の**外**（/tmp 配下）
+  #   ・/tmp 書込不可（CC worker sandbox） → mktemp が loud die し cld-spawn は起動しない＝fail-closed の向き
+  # 変異下では **両環境とも** 「tree 配下の env-file を持つ spawn が成功」へ倒れるので、下の共通 assert が落ちる。
+  local dumpc stubc inA dumpw stubw repo inR wt st out ef
+  # --- consult 面（実 mktemp が別行ゆえ worker と独立に迂回されうる。先に置く＝両面が個別に検出される）---
+  dumpc="$BATS_TEST_TMPDIR/argv-guard-consult.dump"; : > "$dumpc"
+  stubc="$(_make_argvdump_cld_spawn "$dumpc")"
+  inA="$SCRIBE_TEST_CWD/inside-anchor-real"; mkdir -p "$inA"
+  run env TMPDIR="$inA" SCRIBE_CLD_SPAWN="$stubc" "$SPAWN" --consult --anchor "$SCRIBE_TEST_CWD" un-consult
+  st="$status"; out="$output"
+  [[ "$out" == *"が working tree"*"の配下です"* ]]   # 非空虚性の要: この $TMPDIR が実際に in-tree と判定されている
+  run grep -Fq -- "$inA/" "$dumpc"
+  [ "$status" -ne 0 ]                                # ★両枝共通の不変: tree 配下の env-file が argv に載らない
+  if [ "$st" -eq 0 ]; then
+    ef="$(grep -A1 -Fx -- '--env-file' "$dumpc" | tail -n1)"
+    [ -n "$ef" ]
+    [[ "$ef" != "$SCRIBE_TEST_CWD/"* ]]              # ★不変: anchor working tree の**配下に置かない**
+    [[ "$ef" == "/tmp/scribe-consult-"*".env" ]]     # 退避先は既知既定（/tmp）
+    [ ! -e "$ef" ]                                   # spawn 後に消える
+  else
+    [[ "$out" == *"env-file の作成に失敗"* ]]        # loud die（無音縮退でない）
+    # 実 spawn は起きていない。dump の**空**でなく `--env-file` の不在で見る: cld-spawn は effort の
+    # feature-detect（`--help`）でも呼ばれるため（scribe-spawn.sh:1078）、空判定は worker 面で必ず落ちる。
+    run grep -Fxq -- '--env-file' "$dumpc"
+    [ "$status" -ne 0 ]
+  fi
+  # --- worker 面（本 fix の主消費者。実 spawn 雛形は sc-rvq real-path test と同型）---
+  dumpw="$BATS_TEST_TMPDIR/argv-guard-worker.dump"; : > "$dumpw"
+  stubw="$(_make_argvdump_cld_spawn "$dumpw")"
+  repo="$SCRIBE_TEST_CWD"
+  inR="$repo/inside-repo-real"; mkdir -p "$inR"
+  wt="$repo/.worktrees/spawn/un-4nm-101011"
+  run env TMPDIR="$inR" BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$stubw" SCRIBE_HHMMSS=101011 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  st="$status"; out="$output"
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true   # 成功枝は実 worktree を作る（後始末を assert より先に）
+  [[ "$out" == *"が working tree"*"の配下です"* ]]
+  run grep -Fq -- "$inR/" "$dumpw"
+  [ "$status" -ne 0 ]                                # ★両枝共通の不変
+  if [ "$st" -eq 0 ]; then
+    ef="$(grep -A1 -Fx -- '--env-file' "$dumpw" | tail -n1)"
+    [ -n "$ef" ]
+    [[ "$ef" != "$repo/"* ]]                         # ★不変: repo/worktree の配下に置かない
+    [[ "$ef" == "/tmp/scribe-worker-"*".env" ]]
+    [ ! -e "$ef" ]
+  else
+    [[ "$out" == *"env-file の作成に失敗"* ]]
+    run grep -Fxq -- '--env-file' "$dumpw"           # 実 spawn は起きていない（--help 検出は載る＝空判定は使えない）
+    [ "$status" -ne 0 ]
+  fi
+  # 環境非依存の締め: どちらの枝を通っても tree 内に env-file の残骸が無い（trap+rm が効く／そもそも作らない）。
+  run bash -c 'find "$1" -name "scribe-*-*.env" -print' _ "$repo"
+  [ "$output" = "" ]
 }
 
 # ---------- sc-pegi: docs teeth（改訂前は docs の model 記述を pin する assert が repo に 1 本も無く空虚だった） ----------
