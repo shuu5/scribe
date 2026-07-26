@@ -1131,3 +1131,353 @@ STUB
     [ "$status" -ne 0 ]
     [[ "$output" == *"未供給"* ]]
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (VHIU) 承認規約 3 クラス改訂の teeth（orch-vhiu R1・engine copy への surgical port）
+#
+#   なぜ要るか（load-bearing）: 本 script の BRIEF は spawn される **全 foreign project admin** の kickoff
+#   prompt へ恒久注入される。「human 決定（固い merge 確認を含む）は NEEDS-USER」が焼かれている限り、規約 doc を
+#   全部直しても新規 admin は生まれた瞬間に旧規約を持つ。port 元 repo 側の ENGINE-KEEPSET-PARITY は本 script を
+#   型1（drift inventory）/型2（コメント carrier の hit 数 pin）とも被覆するが、それは **foreign repo 側にしか
+#   存在しない突合線**で engine repo 単独では RED にできない（かつ engine を持たない host では loud skip する）。
+#   ゆえに本 teeth 群が engine repo 内で自己完結する唯一の防壁。
+#   以下は「書いてあるか」でなく「旧文言なら落ちるか」を機械照合する: positive pin（新意味論の load-bearing
+#   要素）と negative pin（旧文言・極性反転形の不在）を対で置き、4 carrier（header ⑦ / BRIEF 生成箇所の inline
+#   comment / beads BRIEF / no-beads BRIEF）の同期を出現回数で pin する。
+#   ★旧文言を逐語引用しないこと（引用すると negative pin が素通りして空虚化する）。
+#   ★prompt file は inject stub が append し truncate は setup() の 1 回のみ＝両分岐を回す test は周回頭で
+#     truncate する（しないと 2 周目が和集合になり no-beads 側 positive assert が空虚化する・(VHIU-harness) が pin）。
+# ─────────────────────────────────────────────────────────────────────────────
+
+@test "(VHIU-3class) 両 brief に「取り消せない」3 クラスが canonical 括弧注記込みで入る（(c) の閾値=追加課金の有無＝観測可能）" {
+    for proj in tb tn; do
+        : > "$CLD_PROMPT_FILE"   # ★harness 汚染回避（下記 (VHIU-harness) 参照）
+        run_spawn_admin "$proj"
+        [ "$status" -eq 0 ]
+        grep -q '取り消せない' "$CLD_PROMPT_FILE"
+        grep -q '(a) 消す' "$CLD_PROMPT_FILE"
+        grep -q '(b) 出す' "$CLD_PROMPT_FILE"
+        grep -q '(c) 使う' "$CLD_PROMPT_FILE"
+        # canonical block が verbatim 搬送を要求した括弧注記 2 点
+        grep -q '第一防衛線は機械 guard 層' "$CLD_PROMPT_FILE"
+        grep -q '核② private 保証はこの型' "$CLD_PROMPT_FILE"
+        # (c) の閾値（user 裁定 2026-07-26）＝観測できない程度表現でなく二値で判定させる
+        grep -q '追加課金が発生する操作' "$CLD_PROMPT_FILE"
+        grep -q '定額プラン内は対象外' "$CLD_PROMPT_FILE"
+    done
+}
+
+@test "(VHIU-info-unit) 両 brief で (b) の判定単位が repo でなく「情報」＝機械 2 条件で判定し照合不能なら (b) 側へ倒す" {
+    for proj in tb tn; do
+        : > "$CLD_PROMPT_FILE"   # ★harness 汚染回避
+        run_spawn_admin "$proj"
+        [ "$status" -eq 0 ]
+        grep -q 'public 面の情報集合を増やす' "$CLD_PROMPT_FILE"
+        grep -q '配備層 file を touch しない' "$CLD_PROMPT_FILE"     # 機械 2 条件 ①
+        grep -q 'DATA literal' "$CLD_PROMPT_FILE"                     # 機械 2 条件 ②
+        grep -q '0 hit' "$CLD_PROMPT_FILE"
+        grep -q 'repo 単位の断定は禁止' "$CLD_PROMPT_FILE"           # over-permit の再発防止句
+        grep -q 'fail-safe' "$CLD_PROMPT_FILE"                        # 照合不能なら (b) 側へ倒す
+        # ★per-brief positive pin（(VHIU-4carrier-sync) の count は「分布」を見ないため、1 carrier を希釈して
+        #   別 carrier へ複製し総数 4 を保つ改訂を素通しする。連言条件そのものを各 brief で直接 pin して塞ぐ）。
+        grep -q '両方 green なら非該当' "$CLD_PROMPT_FILE"           # 機械 2 条件は連言（選言へ倒すと核② leak 面が開く）
+        grep -q '人間確認が要るのは' "$CLD_PROMPT_FILE"              # 発火条件の主語
+        grep -q '人間確認へ倒' "$CLD_PROMPT_FILE"                    # 照合不能時の倒し先
+    done
+}
+
+@test "(VHIU-old-permit-negative) 旧 mandate（human 決定＝merge 確認で park）と旧未定義閾値が両 brief から消えている" {
+    # ★このテストが本 port の意味変更を機械証明する中核: port 前の engine 文言で回すと落ちる（＝非空虚）。
+    for proj in tb tn; do
+        : > "$CLD_PROMPT_FILE"   # ★harness 汚染回避
+        run_spawn_admin "$proj"
+        [ "$status" -eq 0 ]
+        # port 前 engine の旧 mandate（3 クラス化そのものが未 land だった形）
+        refute_grep -q '固い merge 確認を含む' "$CLD_PROMPT_FILE"
+        # 観測できない程度表現（死文化する閾値）
+        refute_grep -q '大きな金銭コスト' "$CLD_PROMPT_FILE"
+        # over-permit（核② の最大 leak 面を自判断側へ落とす断定）
+        refute_grep -q '既に public な repo への通常 merge は非該当' "$CLD_PROMPT_FILE"
+        refute_grep -q '既 public repo への通常 merge は非該当' "$CLD_PROMPT_FILE"
+    done
+    # ★file 全体スコープの negative pin: 上の refute は生成された prompt（BRIEF 2 carrier）にしか当たらず、
+    #   header ⑦ / inline comment carrier へ旧 mandate を **共存的に再注入** する編集を素通しする
+    #   （(VHIU-4carrier-sync) は count の減少しか見ないため増加は検知できない）。source 全体で 0 hit を pin する。
+    [ -f "$SCRIPT" ]                                        # vacuity 封じ（不在なら RED）
+    grep -Fq '人間確認が要るのは' "$SCRIPT"                 # positive control（新 mandate が実在する証跡）
+    refute_grep -Fq '固い merge 確認を含む' "$SCRIPT"
+    refute_grep -Fq '大きな金銭コスト' "$SCRIPT"
+}
+
+@test "(VHIU-gate-fail-exit) 両 brief で gate 側 fail-closed の出口が 2 分岐する（self-test/acceptance FAIL=再 gate ／ snapshot mismatch=人間 ratify 昇格）" {
+    # ★carve-out が load-bearing な理由: snapshot-mismatch は「dispatch 後に acceptance がすり替わった」ことの
+    #   **機械 tamper 検知**で、3 クラスのいずれにも属さない独立トリガ（受け側 repo の規約正本 docs/protocol.md
+    #   §5.4 / §5「gate の義務」(c) と、engine 自身の orch-dispatch.sh G2 が「auto-merge 資格剥奪 → 人間 ratify
+    #   昇格」で据置と明記）。ここを「契約を直して再 gate」だけに倒すと **すり替えた当人が acceptance を書き換えて
+    #   mismatch を消し、独立の人間確認なしに merge へ抜ける**＝検知線を検知された本人が自己解除できる fail-open。
+    #   よって positive（昇格する）と negative（再 gate 一本槍の旧形が復活していない）を対で pin する。
+    for proj in tb tn; do
+        : > "$CLD_PROMPT_FILE"   # ★harness 汚染回避
+        run_spawn_admin "$proj"
+        [ "$status" -eq 0 ]
+        # 分岐 ①: self-test / acceptance 検証の FAIL は人間へ上げず gate を通る形へ直す
+        grep -q 'fail-closed トリガ' "$CLD_PROMPT_FILE"
+        grep -q '契約を直して再 gate' "$CLD_PROMPT_FILE"
+        # 分岐 ②（carve-out）: snapshot mismatch だけは人間 ratify へ昇格＝★極性語込み完全形で pin
+        grep -q 'acceptance snapshot mismatch は例外' "$CLD_PROMPT_FILE"
+        grep -q 'NEEDS-USER（人間 ratify）へ昇格' "$CLD_PROMPT_FILE"
+        # precedence の射程外であること（①〜④ 番号を持たない独立トリガゆえ「旧 ①〜④ 廃止」に呑まれない）
+        grep -q 'snapshot-mismatch トリガは本条の対象外' "$CLD_PROMPT_FILE"
+        # ★negative pin: 旧 fail-open 形（snapshot mismatch を「出口は人間確認ではない」側の例示に置く）の復活封鎖。
+        #   この形が戻ると carve-out が空文になるため、positive だけでは検知できない。
+        refute_grep -q 'acceptance snapshot mismatch 等' "$CLD_PROMPT_FILE"
+    done
+}
+
+@test "(VHIU-3misread) 両 brief に誤読防止 3 句（gate は外さない / worker 自己 merge ではない / バナーは scope 縮小）が入る" {
+    for proj in tb tn; do
+        : > "$CLD_PROMPT_FILE"   # ★harness 汚染回避
+        run_spawn_admin "$proj"
+        [ "$status" -eq 0 ]
+        grep -q 'gate 分離' "$CLD_PROMPT_FILE"                    # ② gate 分離は不変
+        grep -q '「worker が自己 merge してよい」ではない' "$CLD_PROMPT_FILE"   # ② ★極性込み完全形（被否定句だけを pin すると反転で逆に一致する）
+        grep -q '廃止でなく scope 縮小' "$CLD_PROMPT_FILE"        # ③ front-load/バナーは scope 縮小
+        grep -q '実効安全弁' "$CLD_PROMPT_FILE"                   # ① gate は外さない（強化側）
+    done
+}
+
+@test "(VHIU-precedence) 両 brief に precedence（本 mandate が旧 merge-ratify ①〜④ に優先・primer に旧規約が残っていても勝つ）が入る" {
+    # 無いと kickoff（新規約）と SessionStart primer（旧規約・正本改訂は courier 係属中）の矛盾が
+    #   非決定論的に解決される＝admin ごとに挙動が割れる。
+    for proj in tb tn; do
+        : > "$CLD_PROMPT_FILE"   # ★harness 汚染回避
+        run_spawn_admin "$proj"
+        [ "$status" -eq 0 ]
+        grep -q 'precedence' "$CLD_PROMPT_FILE"
+        grep -q '旧 merge-ratify' "$CLD_PROMPT_FILE"
+    done
+}
+
+@test "(VHIU-4carrier-sync) 4 carrier（header ⑦ / inline / beads BRIEF / no-beads BRIEF）が同一 anchor 句で同期している" {
+    # 3 層 drift（header ⑦ と inline comment が BRIEF より permissive になる非対称）の封鎖。
+    #   各 anchor 句がちょうど 4 箇所に出ることで同期を機械照合する＝1 箇所だけ直す片手落ち改訂が RED になる。
+    #   数 4 の由来: header ⑦ / BRIEF 生成箇所の inline comment / beads BRIEF / no-beads BRIEF。
+    #   （将来 BRIEF を関数化して carrier 数が変わる refactor では、この期待値も同時に更新すること）
+    #   ★anchor には **極性語を含む完全形** を使う（語彙の存在だけを pin すると「両方 green なら非該当」→
+    #     「どちらか green なら非該当」の 1 行置換が全 green のまま通り、連言が選言へ反転して核② leak 面が
+    #     自判断側へ開く）。極性語を anchor に含めれば反転で count が落ちて RED。
+    #   ★carve-out（snapshot-mismatch）は **operative predicate ごと** anchor に入れる: 'acceptance snapshot
+    #     mismatch は例外' / 'NEEDS-USER（人間 ratify）へ昇格' / 'snapshot-mismatch トリガは本条の対象外' は
+    #     いずれも述語（剥奪する / 昇格せよ）を含まない部分一致形ゆえ、「3 クラス非該当**なら** auto-merge 資格を
+    #     **維持**し」への 1 句反転が 3 句とも hit したまま素通りする（実測: mutation を当てても bats 全数 green）。
+    #     よって述語込みの '3 クラス非該当でも auto-merge 資格を剥奪し' を 4-count anchor に加え、反転側は
+    #     (VHIU-polarity-negative) の bad 語群（'auto-merge 資格を維持' / '昇格しなくてよい' 等）で対に塞ぐ。
+    for phrase in "追加課金が発生する操作" "契約を直して再 gate" "precedence" "第一防衛線は機械 guard 層" \
+                  "核② private 保証はこの型" "廃止でなく scope 縮小" "定額プラン内は対象外" \
+                  "人間確認が要るのは" "人間確認へ倒" "両方 green なら非該当" "repo 単位の断定は禁止" \
+                  "本 mandate は旧 merge-ratify ①〜④ に優先する" "出口は人間確認ではない" "実効安全弁" \
+                  "「worker が自己 merge してよい」ではない" \
+                  "acceptance snapshot mismatch は例外" "NEEDS-USER（人間 ratify）へ昇格" \
+                  "3 クラス非該当でも auto-merge 資格を剥奪し" \
+                  "snapshot-mismatch トリガは本条の対象外"; do
+        n=$(grep -c "$phrase" "$SCRIPT")
+        if [ "$n" -ne 4 ]; then
+            echo "carrier drift: '$phrase' は 4 carrier すべてに在るべきだが $n 箇所しか無い" >&2
+            return 1
+        fi
+    done
+}
+
+@test "(VHIU-header-help) header ⑦ は --help 可視で新意味論を含み旧文言を含まない" {
+    run bash "$SCRIPT" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"取り消せない"* ]]
+    [[ "$output" == *"追加課金が発生する操作"* ]]
+    [[ "$output" == *"public 面の情報集合を増やす"* ]]
+    [[ "$output" == *"契約を直して再 gate"* ]]
+    [[ "$output" == *"precedence"* ]]
+    # snapshot-mismatch carve-out も header ⑦ に在り --help で人間可読であること（BRIEF より permissive にしない）
+    [[ "$output" == *"acceptance snapshot mismatch は例外"* ]]
+    [[ "$output" == *"NEEDS-USER（人間 ratify）へ昇格"* ]]
+    [[ "$output" == *"snapshot-mismatch トリガは本条の対象外"* ]]
+    # 旧文言 negative（port 前の header で回すと RED＝非空虚）
+    [[ "$output" != *"固い merge 確認を含む"* ]]
+    [[ "$output" != *"大きな金銭コスト"* ]]
+    # fail-open 形 negative: snapshot mismatch を「出口は人間確認ではない」側の例示に戻していない
+    [[ "$output" != *"acceptance snapshot mismatch 等"* ]]
+}
+
+@test "(VHIU-autonomy-superseded) 設計境界の旧 autonomy 文言（受動運用）が supersede 記述へ置換されている（--help 可視）" {
+    # 同 file 内の同便 carrier。orch-rvbz / orch-6srt で③通知付き自律へ改訂済み（承認体制の自律化と同一主題）。
+    run bash "$SCRIPT" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"自律 dispatch はしない"* ]]
+    [[ "$output" == *"通知付き自律"* ]]
+    [[ "$output" == *"supersede 済み"* ]]
+}
+
+@test "(VHIU-polarity-negative) 極性を反転した形が 1 つも出現しない（部分一致 pin が反転を素通しする罠の封鎖）" {
+    # teeth の穴: 語彙の存在のみを pin し **述語の向き** を pin しないと、意味を反転させる 1 行置換が全緑のまま通る。
+    #   positive 側は (VHIU-4carrier-sync) が極性語込み anchor の出現数 4 で pin する。本 test はその対で、
+    #   反転形が 1 つでも現れたら RED にする。
+    #   ここに挙げる語は「反転したときにだけ現れる形」であること（正文に含まれる語を入れると誤爆する）。
+    #   ★carve-out の述語反転（'資格を剥奪し'→'資格を維持し' / '昇格せよ'→'昇格しなくてよい'）は本 cell で最も
+    #     stake が高い（検知線を検知された本人が自己解除できる fail-open の復活）ため、反転側 4 形をここで pin
+    #     する（4 形とも現行 source で 0 hit＝誤爆しないことを実測済み。positive 側は (VHIU-4carrier-sync) の
+    #     '3 クラス非該当でも auto-merge 資格を剥奪し' が count=4 で受け持つ）。
+    for bad in "どちらか green なら非該当" "いずれか green なら非該当" "片方が green なら非該当" \
+               "出口は人間確認である" "出口は人間確認でなく" \
+               "旧 merge-ratify ①〜④ が優先" "旧 merge-ratify ①〜④ に劣後" \
+               "repo 単位で判定" "既に public な repo への通常 merge は非該当" \
+               "acceptance snapshot mismatch 等" "snapshot mismatch は例外ではない" \
+               "snapshot-mismatch トリガも本条の対象" \
+               "auto-merge 資格を維持" "昇格しなくてよい" "昇格は不要" "昇格しない"; do
+        if grep -q "$bad" "$SCRIPT"; then
+            echo "polarity 反転形が出現している: '$bad'" >&2
+            return 1
+        fi
+    done
+    # ★逐語 list だけでは足りない理由（実測）: 正文は markdown 強調込みで '**…へ昇格**せよ' の形ゆえ、
+    #   義務語だけを裏返す編集は '…へ昇格**しなくてよい' のように **強調記号を跨いだ** 文字列になり、
+    #   contiguous な逐語 pin（'昇格しなくてよい'）を素通りする。強調記号・空白を許容する ERE で対に塞ぐ。
+    if grep -qE 'へ昇格[*_[:space:]]*(しなくてよい|しなくても|せずとも|は不要|しない|する必要はない)' "$SCRIPT"; then
+        echo "polarity 反転形: carve-out の義務語（人間 ratify へ昇格せよ）が反転している" >&2
+        return 1
+    fi
+    if grep -qE 'auto-merge 資格を[*_[:space:]]*(維持|据置|保持|剥奪しない|剥奪せず)' "$SCRIPT"; then
+        echo "polarity 反転形: auto-merge 資格の剥奪が維持側へ反転している" >&2
+        return 1
+    fi
+}
+
+@test "(VHIU-carrier-distribution) 各 anchor が 4 carrier に 1 hit ずつ **分布** する（count 一致だけでは片寄せ改訂を素通しするため）" {
+    # (VHIU-4carrier-sync) は grep -c（行数カウント）で総数 4 を見るだけなので、1 carrier から落として別 carrier へ
+    #   複製し総数を保つ「片寄せ」改訂を素通しする（gate が mutation で実証）。本 test は carrier ごとの実在を見る。
+    #   ★carrier の切り出しは行番号 pin を使わず observable な経路で行う:
+    #     header ⑦        = --help 出力（実測: --help は header の連続コメントのみを出し、BRIEF 生成箇所の
+    #                        inline comment は出さない＝'同一意味論の再掲' が --help に 0 hit であることで確認）
+    #     beads BRIEF     = tb（.beads 有り）で生成した prompt
+    #     no-beads BRIEF  = tn（.beads 無し）で生成した prompt
+    #     inline comment  = source 総数 4 から上記 3 carrier 分を引いた残余として導出（＝1 でなければ RED）
+    run bash "$SCRIPT" --help
+    [ "$status" -eq 0 ]
+    local help_out="$output"
+
+    : > "$CLD_PROMPT_FILE"; run_spawn_admin tb; [ "$status" -eq 0 ]
+    local beads_prompt; beads_prompt="$(cat "$CLD_PROMPT_FILE")"
+    : > "$CLD_PROMPT_FILE"; run_spawn_admin tn; [ "$status" -eq 0 ]
+    local nobeads_prompt; nobeads_prompt="$(cat "$CLD_PROMPT_FILE")"
+
+    # harness の非空虚性（切り出しが実際に別物を掴んでいること）: beads 専用句が no-beads 側に無い
+    grep -q '着手したら自台帳' <<< "$beads_prompt"
+    refute_grep -q '着手したら自台帳' <<< "$nobeads_prompt"
+    grep -q '同一意味論の再掲' "$SCRIPT"            # inline carrier 固有句が source に在る（残余導出の前提）
+    refute_grep -q '同一意味論の再掲' <<< "$help_out"  # かつ --help には出ない＝header と inline を弁別できる
+
+    local p n_total n_help n_b n_n n_inline
+    for p in "人間確認が要るのは" "追加課金が発生する操作" "契約を直して再 gate" "出口は人間確認ではない" \
+             "両方 green なら非該当" "人間確認へ倒" "repo 単位の断定は禁止" "実効安全弁" \
+             "acceptance snapshot mismatch は例外" "3 クラス非該当でも auto-merge 資格を剥奪し" \
+             "snapshot-mismatch トリガは本条の対象外" "廃止でなく scope 縮小"; do
+        n_total=$(grep -c "$p" "$SCRIPT")
+        n_help=$(grep -c "$p" <<< "$help_out")
+        n_b=$(grep -c "$p" <<< "$beads_prompt")
+        n_n=$(grep -c "$p" <<< "$nobeads_prompt")
+        n_inline=$(( n_total - n_help - n_b - n_n ))
+        if [ "$n_total" -ne 4 ] || [ "$n_help" -lt 1 ] || [ "$n_b" -lt 1 ] || [ "$n_n" -lt 1 ] || [ "$n_inline" -ne 1 ]; then
+            echo "carrier 分布 drift: '$p' total=$n_total header(--help)=$n_help beads=$n_b no-beads=$n_n inline(残余)=$n_inline" >&2
+            return 1
+        fi
+    done
+}
+
+@test "(VHIU-ask-escalate) canonical block の【聞かないこと】【上げること】が両 brief に入る（自律側の唯一の未 pin 節を塞ぐ）" {
+    # canonical block v2 の構成要素のうち、この 2 句だけが他の VHIU teeth のどれにも pin されていなかった
+    #   （承認体制の自律化＝「聞かない」側の実体で、黙って落ちると admin が旧来どおり是認を求めて止まる）。
+    #   ★出現数は 4 でなく 2: この節は BRIEF 2 carrier のみに在る（header ⑦ / inline comment は持たない＝
+    #     local as-landed と同型）。ゆえに (VHIU-4carrier-sync) の 4-anchor 群には入れず本 test で別枠 pin する。
+    for proj in tb tn; do
+        : > "$CLD_PROMPT_FILE"   # ★harness 汚染回避
+        run_spawn_admin "$proj"
+        [ "$status" -eq 0 ]
+        grep -q '推奨を出して決めて進め' "$CLD_PROMPT_FILE"   # 【聞かないこと】＝是認だけを求める問いは出さない
+        grep -q 'grill 提案' "$CLD_PROMPT_FILE"               # 【上げること】＝承認要求でなく grill 提案として上げる
+        grep -q '事実で決まるなら止めない' "$CLD_PROMPT_FILE" # 上げる境界（事実で決まる論点は止めない）
+    done
+    # 2 carrier 分布の pin（片方だけに在る状態＝出し分け漏れを RED にする）
+    n=$(grep -c 'grill 提案' "$SCRIPT")
+    [ "$n" -eq 2 ]
+}
+
+@test "(VHIU-harness) prompt file の truncate 無しでは no-beads 側 assert が空虚化する（harness 汚染の回帰 pin）" {
+    # harness の構造: CLD_PROMPT_FILE は inject stub が **append** し（本 file 冒頭 stub 定義）、truncate は
+    #   setup() の 1 回のみ。ゆえに truncate せずに tb→tn と 2 周回すと 2 周目の grep は tb+tn の **和集合** を
+    #   見ることになり、no-beads 側の positive assert が全て空虚になる。本 test はその append 挙動自体を pin
+    #   する（挙動が変われば VHIU 群の truncate 前提も見直しが要る）。
+    #   ※ 弁別句の選び方: '終端宣言 bead' は no-beads 側にも「終端宣言 bead を作れない」の形で出るため使えない。
+    #     beads 分岐だけが持つのは「着手したら自台帳」。
+    run_spawn_admin tb
+    [ "$status" -eq 0 ]
+    grep -q '着手したら自台帳' "$CLD_PROMPT_FILE"       # beads 分岐だけが持つ句
+    run_spawn_admin tn                                   # truncate せずに 2 周目を回すと…
+    [ "$status" -eq 0 ]
+    grep -q '着手したら自台帳' "$CLD_PROMPT_FILE"       # …前周の内容が残っている＝append である証拠
+    grep -q '台帳を持たない' "$CLD_PROMPT_FILE"         # かつ今周の内容も在る＝和集合
+    # truncate すれば分離される（VHIU 群が採る方式）
+    : > "$CLD_PROMPT_FILE"
+    run_spawn_admin tn
+    [ "$status" -eq 0 ]
+    refute_grep -q '着手したら自台帳' "$CLD_PROMPT_FILE"  # 前周の beads 専用句は消えている
+    grep -q '台帳を持たない' "$CLD_PROMPT_FILE"
+}
+
+@test "(VHIU-relay-header) orch-relay.sh の役割コメントも 3 クラス規約へ同期している（同便 carrier・旧文言の孤立残置を防ぐ）" {
+    # relay は「NEEDS-USER で park した window を再開させる」primitive ＝ park の発火条件を旧文言で説明したまま
+    #   残すと、spawn-admin だけ直しても fleet の説明が割れる（同便で同期する理由）。
+    local relay="$BATS_TEST_DIRNAME/../../scripts/orch-relay.sh"
+    [ -f "$relay" ]                                  # vacuity 封じ: 不在なら RED（grep の rc=2 を OK に化けさせない）
+    grep -q 'NEEDS-USER で park' "$relay"            # positive control（当該コメント block が実在する証跡）
+    grep -q '取り消せない 3 クラス' "$relay"
+    refute_grep -q '（固い merge 確認等）' "$relay"  # 旧文言 negative（port 前で回すと RED＝非空虚）
+}
+
+@test "(VHIU-unattended-visibility) 可視性要件は在席分岐込みで注入する（無人 brief へ「AskUserQuestion 最優先」を焼かない）" {
+    # ★本 test は **engine-only の意図的分岐** を pin する（port 元 as-landed は当該句を保持。分岐の実測根拠と
+    #   上流への申告は bd sc-r2ix の notes を参照＝根拠の詳細は台帳に留め公開 doc へ敷衍しない・protocol §5.4）。
+    #   engine 側は下記 assert のとおり 0 hit＋無人 actor 分岐で着地する。
+    # ★load-bearing: 同じ BRIEF の layer ①（orch-z7g・本 file 上部の「対話プロンプトを使うな」）は対話 tool を
+    #   **絶対形**で禁じている（この window に人間は付いていない）。そこへ user 裁定 2026-07-17 の可視性要件を
+    #   **在席修飾子ごと落として**転記すると「AskUserQuestion 最優先」が無人 window の runtime prompt に焼かれ、
+    #   同一 brief 内で正面衝突する（admin は非決定論的にどちらかへ倒れる）。
+    #   機構層（DISALLOWED_TOOLS_DEFAULT の --disallowed-tools 既定 ON）は二重化だが **opt-out 可**で、しかも
+    #   --no-disallowed-tools は「既存 window を再選択したい」等 **在席とは無関係な用途**でも正規手順として案内される。
+    #   その経路では文面 layer ① が唯一の防壁ゆえ（文面だけだと CC 既定挙動へ再発する＝orch-z7g H1 の裏返し）、
+    #   文面が逆向きの指示を持つと無人 window の out-of-band freeze（bead-truth poll から不可視＝相互デッドロック）が
+    #   再現する。規約正本も在席分岐を明示: 受け側 repo docs/protocol.md §7.2 可視性要件 (a)「対話文脈（human が
+    #   window に居る）では AskUserQuestion を最優先（**無人 window へは出さない**）」／同節 整合注記「orchestrator
+    #   監視下で human が window に居ない admin session は無人 actor 側に倒す」。
+    #   ★過剰補正（可視性要件ごと削る）も RED にする＝縮小されたのは**発火条件**で様式ではない。
+    #   ※出現数は 4 でなく 2: 可視性要件の列挙は BRIEF 2 carrier のみが持つ（header ⑦ / inline comment は持たない）
+    #     ＝(VHIU-4carrier-sync) の 4-anchor 群には入れず本 test で別枠 pin する（(VHIU-ask-escalate) と同型）。
+    for proj in tb tn; do
+        : > "$CLD_PROMPT_FILE"   # ★harness 汚染回避
+        run_spawn_admin "$proj"
+        [ "$status" -eq 0 ]
+        # negative: 在席修飾子を落とした転記形（layer ① との正面衝突）の封鎖
+        refute_grep -q 'AskUserQuestion 最優先' "$CLD_PROMPT_FILE"
+        # positive: 無人 actor 分岐が明示されている
+        grep -q 'window は無人ゆえ AskUserQuestion は使わない' "$CLD_PROMPT_FILE"
+        grep -q '無人 window へは出さない' "$CLD_PROMPT_FILE"
+        # positive: 様式自体は存続（過剰補正で可視性要件ごと落とすのも RED）
+        grep -q '可視性要件' "$CLD_PROMPT_FILE"
+        grep -q '🔴 バナー一行' "$CLD_PROMPT_FILE"
+        # positive control: layer ① 本体が同居している（分岐注記が孤立していない＝衝突相手が実在する）
+        grep -q '対話プロンプトを使うな' "$CLD_PROMPT_FILE"
+    done
+    # file 全体 negative: 生成 prompt に当たらない header ⑦ / inline comment carrier への再注入も封鎖
+    [ -f "$SCRIPT" ]                                                  # vacuity 封じ
+    refute_grep -Fq 'AskUserQuestion 最優先' "$SCRIPT"
+    # 2 carrier 分布の pin（片方だけ直す片手落ちを RED にする）
+    n=$(grep -c 'window は無人ゆえ AskUserQuestion は使わない' "$SCRIPT")
+    [ "$n" -eq 2 ]
+}

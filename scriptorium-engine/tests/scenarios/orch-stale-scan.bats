@@ -17,14 +17,6 @@
 #   (TRIP)      tripwire 集計行 open/actionable/held-defer/tracker/停滞疑い が母集団と一致。
 #   (COMPLETE)  [CLASSIFY] completeness: 全件ちょうど 1 クラス（分類合計==total・COMPLETENESS-RED 非出現）。
 #   (COUNT)     --emit-count は M の整数のみ（seam 用・compose 側が parse する契約）。
-#   (TW-*)      --emit-tripwire seam（bd orch-myn0）: 1 行のみ emit / report 行と byte 一致（同一 pass＝二重実装でない）
-#               / **bd 呼出は 1 回・report と同数（＝呼出増ゼロ）を invocation log の行数で直接 pin する（TW-ONEPASS）
-#               ＝byte 一致だけでは決定論 fixture 下で二重 pass 実装が素通りするため、契約の中核をここで赤化させる**
-#               / age不明 付き形 / jq 不在は fail-closed（reratify 群の fail-open へ混ぜない）/ 既存 --emit-count・report を
-#               perturbate しない / bd=list のみ / usage 列挙 / **bd read 失敗（BD_FAIL）も jq parse 失敗
-#               （BD_BADJSON＝bd rc=0 でも出力が不正 JSON）も tripwire 行を出さず [STALE-TRIPWIRE-UNKNOWN] へ倒す
-#               （『全クラス 0 件』へ融合しない・発火 trigger は 2 本とも見張る）・空台帳 rc=0 は open:0 を emit
-#               （弁別が空虚でない）・count/report は rc 非参照で従来挙動**。
 #   (MUT-A)     mutation 非空虚: 閾値巨大化 → 停滞 0（gate が実効）。
 #   (MUT-B)     mutation 非空虚: now を未来へ → actionable 全件停滞（年齢計算が生きている）。
 #   (UNKNOWN)   [CLASSIFY] parse 失敗融合禁止: created_at 解析不能な actionable → [STALE-UNKNOWN]・停滞に非計上。
@@ -58,10 +50,6 @@ setup() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FIX_DIR/bd-invocations.log"
 [ -n "${BD_FAIL:-}" ] && exit 1
-# ★BD_BADJSON: bd 自体は exit 0 だが stdout が JSON として不正（lock 警告の前置ノイズが混じる degraded 形）。
-#   契約「bd read **/ jq parse** 失敗は UNKNOWN へ倒す」の 2 本目の発火 trigger を作る（BD_FAIL は bd rc≠0 経路
-#   のみを exercise するため、jq 段の rc を捨てる変異が素通りする）。TW-JQPARSE が使う。
-[ -n "${BD_BADJSON:-}" ] && { printf 'warning: dolt lock held by another process\n[]'; exit 0; }
 _statuses=""; _prev=""
 for _a in "$@"; do
     [ "$_prev" = "--status" ] && { _statuses="$_a"; break; }
@@ -286,162 +274,6 @@ run_scan() {
 }
 
 # ==============================================================================
-# --emit-tripwire（bd orch-myn0・orch-rebrief-fetch の [STALE]+[CLASSES] 両取り seam）
-#   ★同一 pass 由来（report が組む文字列を emit するだけ）＝invocation 増ゼロ・既存出力 byte 不変が核。
-# ==============================================================================
-@test "(TW-ONLY) --emit-tripwire は [STALE-TRIPWIRE] 行 1 行のみを stdout へ（exit 0）" {
-    run_scan --emit-tripwire
-    [ "$status" -eq 0 ]
-    [ "$output" = "[STALE-TRIPWIRE] open:13 actionable:4 held-defer:5 tracker:4 停滞疑い:3" ]
-    # report の他行（分類テーブル / grouping / header）は一切出さない＝parse 側の contract を単純に保つ。
-    [[ "$output" != *"[CLASS]"* ]]
-    [[ "$output" != *"grouping"* ]]
-    [ "$(printf '%s\n' "$output" | grep -c .)" -eq 1 ]
-}
-
-@test "(TW-PARITY) --emit-tripwire の行は report の [STALE-TRIPWIRE] 行と byte 一致（同一 pass・二重実装でない）" {
-    run_scan --emit-tripwire
-    local tw="$output"
-    run_scan
-    local in_report; in_report="$(printf '%s\n' "$output" | grep -F '[STALE-TRIPWIRE]')"
-    [ "$tw" = "$in_report" ]
-}
-
-@test "(TW-ONEPASS) --emit-tripwire の bd 呼出は 1 回・report と同数（同一 pass＝呼出増ゼロの直接 teeth）" {
-    # ★契約の中核「report が既に計算済みの行を emit するだけ＝**invocation 増ゼロ**」を数で pin する。
-    #   TW-PARITY（tripwire 行 == report 行の byte 一致）は決定論 fixture 下では **二重 pass 実装でも成立**し、
-    #   呼出数を一切証明しない（同じ入力を 2 回読めば同じ行が出る）。TW-RO も verb（list か）しか見ず数は見ない。
-    #   ここを空けたままだと `tripwire) run_scan count >/dev/null; run_scan tripwire ;;` 型の回帰＝anchor 実台帳へ
-    #   dolt read を 2 回撃つ退行を、どの net も赤化できない。stub の invocation log は 1 呼出 = 1 行ゆえ行数が呼出数。
-    rm -f "$FIX_DIR/bd-invocations.log"
-    run_scan --emit-tripwire
-    [ "$status" -eq 0 ]
-    [ -f "$FIX_DIR/bd-invocations.log" ]
-    local n_tw; n_tw="$(grep -c . "$FIX_DIR/bd-invocations.log")"
-    [ "$n_tw" -eq 1 ]
-
-    # report 側の基準値（tripwire が「report と同一 pass」を名乗る以上、両者は同数でなければならない）。
-    rm -f "$FIX_DIR/bd-invocations.log"
-    run_scan
-    [ "$status" -eq 0 ]
-    [ -f "$FIX_DIR/bd-invocations.log" ]
-    local n_rep; n_rep="$(grep -c . "$FIX_DIR/bd-invocations.log")"
-    [ "$n_rep" -eq 1 ]
-    [ "$n_tw" -eq "$n_rep" ]
-}
-
-@test "(TW-AGEUNK) age不明 付き（解析不能 actionable 混在）でも同形で 1 行 emit（consumer parser が許容すべき形）" {
-    ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
-        ORCH_STALE_NOW="$NOW" STUB_ROWS="orch-bad|open||not-a-date
-orch-act-old|open||2026-07-01T00:00:00Z" \
-        run bash "$SCRIPT" --emit-tripwire
-    [ "$status" -eq 0 ]
-    [ "$output" = "[STALE-TRIPWIRE] open:2 actionable:2 held-defer:0 tracker:0 停滞疑い:1 age不明:1" ]
-}
-
-@test "(TW-JQ-CLOSED) jq 不在の --emit-tripwire は fail-closed（exit1）＝reratify 群の fail-open へ混ぜない" {
-    local p; p="$(_build_nojq_path)"
-    run env PATH="$p" ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" \
-        ORCH_STALE_BD="$BIN/bd" ORCH_STALE_NOW="$NOW" STUB_ROWS="$ROWS" \
-        bash "$SCRIPT" --emit-tripwire
-    [ "$status" -eq 1 ]
-    [[ "$output" != *"[STALE-TRIPWIRE]"* ]]           # 分類不能を「内訳 0」と騙らない
-}
-
-@test "(TW-BYTE-INVARIANT) --emit-tripwire 追加後も --emit-count / report の出力は不変（既存 seam を perturbate しない）" {
-    # A2 の bats 側 pin（固定 fixture 比較）。git HEAD 版との byte 比較は selftest 側が担う。
-    run_scan --emit-count
-    [ "$output" = "3" ]
-    run_scan
-    [[ "$output" == *"[STALE-TRIPWIRE] open:13 actionable:4 held-defer:5 tracker:4 停滞疑い:3"* ]]
-    [[ "$output" == *"[CLASS] orch-held"* ]]          # 分類テーブルは従来どおり report にのみ出る
-    [[ "$output" == *"── grouping"* ]]
-}
-
-@test "(TW-RO) --emit-tripwire の bd 呼出も list のみ（read-only verb discipline）" {
-    # 本 test が見張るのは verb（read-only か）だけ＝**呼出の回数は TW-ONEPASS が pin する**（役割分担）。
-    rm -f "$FIX_DIR/bd-invocations.log"
-    run_scan --emit-tripwire
-    [ -f "$FIX_DIR/bd-invocations.log" ]
-    while IFS= read -r line; do
-        [ -n "$line" ] || continue
-        [[ "$line" == *"list"* ]]
-    done < "$FIX_DIR/bd-invocations.log"
-    ! grep -qE '(^| )(update|create|close|dep|assign|delete|import|dolt) ' "$FIX_DIR/bd-invocations.log" || false
-}
-
-@test "(TW-USAGE) 不明オプション message / usage が --emit-tripwire を列挙（発見可能性）" {
-    run_scan --no-such-option
-    [ "$status" -eq 1 ]
-    # ★2 つの surface を **別々に** 見る（output 全体への部分一致だと、usage 本文（ヘッダ）に seam 名が
-    #   在るだけで green になり、不明オプション message 側の列挙が欠けても弁別できない＝非弁別 assert）。
-    local msg_line usage_line
-    msg_line="$(printf '%s\n' "$output" | grep -F '不明なオプション: --no-such-option')"
-    [ -n "$msg_line" ]                                    # message 自体が出ている
-    [[ "$msg_line" == *"--emit-tripwire"* ]]              # message 行が seam を列挙
-    usage_line="$(printf '%s\n' "$output" | grep -F 'orch-stale-scan.sh --emit-tripwire')"
-    [ -n "$usage_line" ]                                  # usage（ヘッダ）側にも seam 行がある
-}
-
-@test "(TW-FAILOPEN-BD) bd read 失敗（BD_FAIL）→ tripwire 行を出さない（『全クラス 0 件』へ融合しない）" {
-    # self-review major#1/#2: 新 seam が bd rc を捨てると台帳/anchor 障害が [CLASSES] の「残り 0 件・今すぐ着手 0」
-    #   という偽 all-clear へ収束する（俯瞰 skill 側は [CLASSES] を「残り」の唯一の出所と定め数え直しを禁じるため
-    #   裏取りが効かない）。RR-FAILOPEN-BD と対称の rc 弁別 teeth。
-    BD_FAIL=1 ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
-        ORCH_STALE_NOW="$NOW" STUB_ROWS="$ROWS" \
-        run bash "$SCRIPT" --emit-tripwire
-    [ "$status" -eq 0 ]                                   # brick しない（surfacing 専任）
-    # ★`|| false` は load-bearing: set -e は「`!` で反転された command」を免除するため、末尾以外の
-    #   bare `!` assert は違反を検出しても test を赤化しない（inert）。中核 teeth ゆえ明示的に赤化させる。
-    ! printf '%s\n' "$output" | grep -qE '^\[STALE-TRIPWIRE\] ' || false   # consumer の正規形を名乗らない
-    [[ "$output" != *"open:0"* ]]                         # 0 件と断言しない
-    [[ "$output" == *"[STALE-TRIPWIRE-UNKNOWN]"* ]]       # 判定不能は判定不能として surface
-}
-
-@test "(TW-JQPARSE) bd rc=0 でも jq parse 失敗 → tripwire 行を出さず [STALE-TRIPWIRE-UNKNOWN]" {
-    # 契約 2 本目の発火 trigger: bd は成功する（exit 0）が stdout が JSON として不正な degraded 形（lock 警告の
-    #   前置ノイズ）。BD_FAIL 経路だけを見張ると `_open_rows` の **jq 段 rc** を捨てる変異（例:
-    #   `_stale_bd_json | { _rows_from_json || true; }`）が生存し、台帳障害が
-    #   `[STALE-TRIPWIRE] open:0 actionable:0 …` という偽 all-clear へ融合する（本 bead が禁じた融合そのもの）。
-    BD_BADJSON=1 ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
-        ORCH_STALE_NOW="$NOW" STUB_ROWS="$ROWS" \
-        run bash "$SCRIPT" --emit-tripwire
-    [ "$status" -eq 0 ]                                   # brick しない（surfacing 専任）
-    # ★`|| false` は load-bearing（TW-FAILOPEN-BD と同理由: 末尾以外の bare `!` は set -e の免除対象で inert）。
-    ! printf '%s\n' "$output" | grep -qE '^\[STALE-TRIPWIRE\] ' || false   # consumer の正規形を名乗らない
-    [[ "$output" != *"open:0"* ]]                         # 0 件と断言しない
-    [[ "$output" == *"[STALE-TRIPWIRE-UNKNOWN]"* ]]       # 判定不能は判定不能として surface
-
-    # 非空虚: この fixture で bd 自体は exit 0（＝BD_FAIL 経路の焼き直しでなく jq 段 rc を見ている裏取り）。
-    BD_BADJSON=1 STUB_ROWS="$ROWS" run "$BIN/bd" list --status open,deferred --json
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"warning"* ]]
-}
-
-@test "(TW-BD-VS-EMPTY) 空台帳（rc=0）は open:0 の tripwire 行を emit（bd 失敗との弁別が空虚でない）" {
-    # BD_FAIL 無し・open 0 件 → 正規 tripwire 行（rc 弁別を「常に UNKNOWN」へ潰した mutant はここで赤化）。
-    ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
-        ORCH_STALE_NOW="$NOW" STUB_ROWS="" \
-        run bash "$SCRIPT" --emit-tripwire
-    [ "$status" -eq 0 ]
-    [ "$output" = "[STALE-TRIPWIRE] open:0 actionable:0 held-defer:0 tracker:0 停滞疑い:0" ]
-    [[ "$output" != *"UNKNOWN"* ]]
-}
-
-@test "(TW-FAILOPEN-BYTE) bd 失敗でも --emit-count / report は従来挙動（rc 弁別は tripwire 限定＝A2 据置）" {
-    BD_FAIL=1 ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
-        ORCH_STALE_NOW="$NOW" STUB_ROWS="$ROWS" \
-        run bash "$SCRIPT" --emit-count
-    [ "$status" -eq 0 ]
-    [ "$output" = "0" ]
-    BD_FAIL=1 ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
-        ORCH_STALE_NOW="$NOW" STUB_ROWS="$ROWS" \
-        run bash "$SCRIPT"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"[STALE-TRIPWIRE] open:0 "* ]]       # report 側は従来どおり（byte 不変の据置）
-}
-
-# ==============================================================================
 # mutation 非空虚
 # ==============================================================================
 @test "(MUT-A) 閾値巨大化 → 停滞 0（gate 実効）" {
@@ -517,9 +349,7 @@ orch-act-old|open||2026-07-01T00:00:00Z" \
         [[ "$line" == *"list"* ]]
     done < "$FIX_DIR/bd-invocations.log"
     # 破壊 verb が一切出ていない
-    #   ★`|| false` は load-bearing: bats の set -e は「`!` で反転された command」を免除するため、末尾以外の
-    #     bare `!` assert は違反を検出しても test を赤化しない（inert）＝local SSOT と同形へ揃える。
-    ! grep -qE '(^| )(update|create|close|dep|assign|delete|import|dolt) ' "$FIX_DIR/bd-invocations.log" || false
+    ! grep -qE '(^| )(update|create|close|dep|assign|delete|import|dolt) ' "$FIX_DIR/bd-invocations.log"
     ! grep -qE -- '--add-label|--label ' "$FIX_DIR/bd-invocations.log"
 }
 

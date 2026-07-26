@@ -54,22 +54,12 @@
 # 既存 hygiene 系との非二重配線（DEDUP）─────────────────────────────────────────────────────────────────
 #   clean-state-probe（respawn 可否軸）とは軸が直交＝合成しない。degraded-watch（窓消失 cell）とも別軸。本 script は
 #   停滞 backlog の surfacing 専任。/scriptorium:orch-rebrief の 1 行 tripwire への配線は orch-rebrief-fetch.sh の
-#   env seam（ORCH_RESUME_STALE_SCAN）経由で本 script を **1 回だけ** invoke する形に限定し（scan LOGIC の
-#   単一 SSOT を本 script が持ち fetch 側は compose のみ・二重呼びしない）、workinprogress hook へ勝手に足さない
-#   （越境=二重 surface）。
-#   ★provider 側 seam は 2 本: `--emit-tripwire`（[STALE-TRIPWIRE] 行 1 行＝fetch 側が [STALE] の M と [CLASSES] の
-#     3 クラス内訳を **同一 invocation** から両取りできる・bd orch-myn0）と `--emit-count`（M のみ・後方互換で残置）。
-#     どちらも 1 invocation ＝呼出増ゼロ。engine 同梱の orch-rebrief-fetch.sh は現時点で `--emit-count` を invoke
-#     する（consumer 側の tripwire 移行は本 script の fence 外＝別便。provider seam の先行提供が本節の範囲）。
+#   env seam（ORCH_RESUME_STALE_SCAN）経由で本 script を `--emit-count` invoke する形に限定し（scan LOGIC の
+#   単一 SSOT を本 script が持ち fetch 側は compose のみ）、workinprogress hook へ勝手に足さない（越境=二重 surface）。
 #
 # 使い方─────────────────────────────────────────────────────────────────────────────────────────────
 #   scripts/orch-stale-scan.sh              # 全 open を分類し停滞疑いを surface（人間可読レポート・常に exit 0）
 #   scripts/orch-stale-scan.sh --emit-count # 停滞疑い M（actionable ∩ created_at>閾値）の整数のみを stdout へ（seam 用）
-#   scripts/orch-stale-scan.sh --emit-tripwire # [STALE-TRIPWIRE] 行 1 行のみを stdout へ（3 クラス内訳 + M を同一 pass で
-#                                           #   compose する seam＝orch-rebrief-fetch の [STALE]/[CLASSES] 両取り用・
-#                                           #   report が既に計算済みの行を emit するだけ＝invocation 増ゼロ・_classify 無改修。
-#                                           #   bd read/jq parse 失敗時は tripwire 行を出さず [STALE-TRIPWIRE-UNKNOWN] へ倒す
-#                                           #   ＝「全クラス 0 件」と融合しない）
 #   scripts/orch-stale-scan.sh --re-ratify  # 死角クラス（courier/coord/held/seam/follow-up∨deferred）の re-ratify sweep
 #                                           #   ＝別軸・別閾値（既定 7d）・別表示（週次再裁定・stateless read-only・write ゼロ）
 #   scripts/orch-stale-scan.sh --emit-reratify-count # re-ratify 候補の整数のみ（--emit-count と別 seam・fail-open で無出力）
@@ -249,20 +239,13 @@ _reratify_target() {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # scan 本体: 全 open を分類し、actionable のみに created_at 年齢 gate を適用して M を算出。
-#   $1="report"（人間可読・stdout 全出力）| "count"（M の整数のみ）| "tripwire"（[STALE-TRIPWIRE] 行 1 行のみ）。副作用ゼロ。
-#   戻り値経由で M を返せないため、report は stdout へ・count は M のみ・tripwire は tripwire 行のみ stdout へ。
-#   ★tripwire mode は report が既に組み立てる同一文字列（$tw_line）を emit するだけ＝**同一 pass・invocation 増ゼロ**
-#     （fetch 側が [STALE] の M と [CLASSES] の 3 クラス内訳を 1 回の呼出で両取りするための seam・bd orch-myn0）。
-#     _classify も年齢 gate も一切触らない＝`--emit-count` / report 出力は **byte 不変**。
-#   ★tripwire mode のみ rows 取得の rc を弁別する（bd read/jq parse 失敗→[STALE-TRIPWIRE-UNKNOWN]・下記 fail-closed
-#     コメント参照）。count/report は rc を参照しない＝従来の「bd 失敗→空 rows→0/NONE」挙動を byte 不変で維持。
+#   $1="report"（人間可読・stdout 全出力）| "count"（M の整数のみ）。副作用ゼロ。
+#   戻り値経由で M を返せないため、report は stdout へ・count は M のみ stdout へ。
 # ─────────────────────────────────────────────────────────────────────────────
 run_scan() {
     local mode="$1"
-    local rows now_epoch rows_rc
-    # ★rc 捕捉（set -o pipefail 済＝bd 失敗も jq parse 失敗も拾える）。**tripwire mode だけ**が rc を参照する
-    #   （count/report は従来どおり rc を無視＝A2 byte 不変・_open_rows の pipe 形も無改修）。
-    rows="$(_open_rows)"; rows_rc=$?
+    local rows now_epoch
+    rows="$(_open_rows)"
     now_epoch="$(_now_epoch)"
 
     local total=0 n_action=0 n_held=0 n_tracker=0 stale=0 unknown=0
@@ -299,31 +282,8 @@ run_scan() {
         esac
     done <<< "$rows"
 
-    # tripwire 行は report / tripwire mode で同一文字列を使う（二重実装しない＝drift 源を作らない）。
-    local tw_line
-    tw_line="[STALE-TRIPWIRE] open:$total actionable:$n_action held-defer:$n_held tracker:$n_tracker 停滞疑い:$stale$([ "$unknown" -ne 0 ] && printf ' age不明:%s' "$unknown")"
-
     if [ "$mode" = "count" ]; then
         printf '%s\n' "$stale"
-        return 0
-    fi
-
-    # tripwire seam（bd orch-myn0）: 1 行のみを stdout へ（report の他行は出さない＝parse 側の contract を単純化）。
-    #   ★fail-closed（bd orch-myn0 self-review・major#1/#2）: bd read 失敗（anchor/bd 障害・dolt lock 競合）や
-    #     jq parse 失敗（rows_rc≠0）を **「全クラス 0 件」へ融合しない**。tripwire 行を出さず
-    #     `[STALE-TRIPWIRE-UNKNOWN]`（consumer の `^\[STALE-TRIPWIRE\] ` 正規形に**一致しない**別 marker）へ倒す。
-    #     provider 側の契約は「正規形を名乗らない」ことだけで、consumer は正規形に一致しない出力を自分の
-    #     skip 経路へ落とす（engine 同梱 orch-rebrief-fetch.sh は現時点で本 seam の consumer ではない＝別便）。
-    #     俯瞰 consumer は tripwire の 3 クラス内訳を「残り」の唯一の出所として数え直しを禁じる設計ゆえ、ここで
-    #     0 を返すと台帳障害が『残り 0 件・今すぐ着手 0』という偽 all-clear へ収束する（fail-open の方向が危険側）。
-    #     run_reratify が既に持つ「bd 失敗 vs 空台帳」弁別（本 script 内の先例）と対称にする。
-    #     ★空台帳（rc=0・rows 空）は従来どおり open:0 の tripwire 行を emit する＝弁別は空虚でない。
-    if [ "$mode" = "tripwire" ]; then
-        if [ "$rows_rc" -ne 0 ]; then
-            printf '%s\n' "[STALE-TRIPWIRE-UNKNOWN] bd read/parse 失敗（rc=$rows_rc・anchor/bd/jq 障害）＝3 クラス内訳と停滞疑いは測定不能（0 件・空台帳と融合しない）"
-            return 0
-        fi
-        printf '%s\n' "$tw_line"
         return 0
     fi
 
@@ -357,7 +317,7 @@ run_scan() {
     if [ "$classified" -ne "$total" ]; then
         echo "  [COMPLETENESS-RED] 分類合計 $classified ≠ open 総数 $total（分類漏れ＝要調査）"
     fi
-    echo "$tw_line"
+    echo "[STALE-TRIPWIRE] open:$total actionable:$n_action held-defer:$n_held tracker:$n_tracker 停滞疑い:$stale$([ "$unknown" -ne 0 ] && printf ' age不明:%s' "$unknown")"
     return 0
 }
 
@@ -490,17 +450,10 @@ run_self_test() {
 # read-only bd スタブ（list --json のみ）。STUB_ROWS の各行を JSON object へ。labels_csv 空→[] / "null"→labels 欠落。
 #   行形式は "id|status|labels_csv|created_at[|title]"（title は任意 5 列目＝re-ratify 表示用・省略時空）。
 #   ★BD_FAIL=1 で非0 exit（bd/anchor outage を模す＝re-ratify の bd 失敗弁別を exercise）。
-#   ★BD_BADJSON=1 は **exit 0 のまま** stdout を不正 JSON にする（dolt lock 警告の前置ノイズが混じる degraded 形）。
-#     tripwire の fail-closed には発火 trigger が 2 本ある（bd rc≠0 と jq parse rc≠0）。BD_FAIL は前者しか
-#     exercise しないため、jq 段の rc を捨てる変異が素通りする＝後者を叩く seam をここに置く。
-#   ★BD_LOG（既定 /dev/null）へ 1 呼出 = 1 行を記録する。行数がそのまま bd 呼出回数＝「report と同一 pass・
-#     invocation 増ゼロ」の直接 teeth（出力の byte 一致は決定論 fixture 下で二重 pass 実装を弁別できない）。
 # --status <csv> を尊重して実 bd の相互排他 status 挙動を模す（指定 status の行のみ emit・未指定は全件）。
 #   ★deferred 行は query が open,deferred を要求したときだけ返る＝deferred は deferred-scan 由来で返る（母集団が
 #   --status open のみだと deferred は返らない＝deferred branch を vacuous に green にしない現実的 stub）。
-printf '%s\n' "$*" >> "${BD_LOG:-/dev/null}"
 [ -n "${BD_FAIL:-}" ] && exit 1
-[ -n "${BD_BADJSON:-}" ] && { printf 'warning: dolt lock held by another process\n[]'; exit 0; }
 _statuses=""; _prev=""
 for _a in "$@"; do
     [ "$_prev" = "--status" ] && { _statuses="$_a"; break; }
@@ -537,7 +490,6 @@ STUB
         local flag=""
         case "$m" in
             count)          flag="--emit-count" ;;
-            tripwire)       flag="--emit-tripwire" ;;
             dry)            flag="--dry-run" ;;
             reratify)       flag="--re-ratify" ;;
             reratify-count) flag="--emit-reratify-count" ;;
@@ -619,55 +571,6 @@ pk-foreign|open||2026-06-01T00:00:00Z"
     local cnt
     cnt="$(STUB_ROWS="$rows" ORCH_STALE_NOW="2026-07-20T00:00:00Z" _run count)"
     _assert_eq "2" "$cnt" "--emit-count は M=2 の整数のみ"
-
-    # ── --emit-tripwire seam（bd orch-myn0）: [STALE-TRIPWIRE] 行 1 行のみ・report の同一 pass 由来で byte 一致 ──
-    local twout twlines
-    twout="$(STUB_ROWS="$rows" ORCH_STALE_NOW="2026-07-20T00:00:00Z" _run tripwire)"
-    _assert_eq "[STALE-TRIPWIRE] open:11 actionable:3 held-defer:5 tracker:3 停滞疑い:2" "$twout" "--emit-tripwire は tripwire 行のみ"
-    twlines="$(printf '%s\n' "$twout" | grep -c .)"
-    _assert_eq "1" "$twlines" "--emit-tripwire は 1 行のみ（report の他行を出さない）"
-    # report 内の同一行と byte 一致（同一 pass 由来＝二重実装でない証明）。
-    local twinreport
-    twinreport="$(printf '%s\n' "$out" | grep -F '[STALE-TRIPWIRE]')"
-    _assert_eq "$twinreport" "$twout" "--emit-tripwire は report の tripwire 行と byte 一致"
-    # age不明 付き（解析不能 actionable 混在）でも tripwire seam が同形で出る（consumer parser が許容すべき形）。
-    local twbad
-    twbad="$(STUB_ROWS="orch-bad|open||not-a-date
-orch-act-old|open||2026-07-01T00:00:00Z" ORCH_STALE_NOW="2026-07-20T00:00:00Z" _run tripwire)"
-    _assert_grep "$twbad" '^\[STALE-TRIPWIRE\] open:2 actionable:2 held-defer:0 tracker:0 停滞疑い:1 age不明:1$' "--emit-tripwire は age不明 付き形も emit"
-
-    # ── fail-closed: bd read 失敗（BD_FAIL=1）は tripwire 行を出さない（「全クラス 0 件」と融合しない・self-review#1/#2） ──
-    local tw_fail
-    tw_fail="$(STUB_ROWS="$rows" ORCH_STALE_NOW="2026-07-20T00:00:00Z" BD_FAIL=1 _run tripwire)"
-    _assert_ngrep "$tw_fail" '^\[STALE-TRIPWIRE\] ' "bd 失敗→正規 tripwire 行を出さない(偽 all-clear 封鎖)"
-    _assert_ngrep "$tw_fail" 'open:0' "bd 失敗→open:0 を名乗らない"
-    _assert_grep "$tw_fail" '^\[STALE-TRIPWIRE-UNKNOWN\] ' "bd 失敗→UNKNOWN marker（consumer の正規形に非一致）"
-    # ── 弁別が空虚でない: 空台帳（rc=0・rows 空）は従来どおり open:0 の正規 tripwire 行を emit する ──
-    local tw_empty
-    tw_empty="$(STUB_ROWS="" ORCH_STALE_NOW="2026-07-20T00:00:00Z" _run tripwire)"
-    _assert_eq "[STALE-TRIPWIRE] open:0 actionable:0 held-defer:0 tracker:0 停滞疑い:0" "$tw_empty" "空台帳(rc=0)→open:0 を emit（bd 失敗と弁別・非空虚）"
-    # ── byte 不変の据置: count/report は rc を参照しない（bd 失敗→従来どおり 0 / STALE-NONE） ──
-    local cnt_fail
-    cnt_fail="$(STUB_ROWS="$rows" ORCH_STALE_NOW="2026-07-20T00:00:00Z" BD_FAIL=1 _run count)"
-    _assert_eq "0" "$cnt_fail" "bd 失敗でも --emit-count は従来挙動 0（A2 byte 不変の据置）"
-    # ── fail-closed の 2 本目の trigger: bd rc=0 でも jq parse 失敗（BD_BADJSON）は UNKNOWN へ倒す ──
-    #   BD_FAIL は bd rc≠0 経路しか叩かないため、これが無いと jq 段の rc を捨てる変異（`_rows_from_json || true` /
-    #   rc を bd 側だけで採る refactor）が in-band moat を素通りする（bats 非同伴 host では本 self-test が唯一の網）。
-    local tw_badjson
-    tw_badjson="$(STUB_ROWS="$rows" ORCH_STALE_NOW="2026-07-20T00:00:00Z" BD_BADJSON=1 _run tripwire)"
-    _assert_ngrep "$tw_badjson" '^\[STALE-TRIPWIRE\] ' "jq parse 失敗→正規 tripwire 行を出さない(偽 all-clear 封鎖)"
-    _assert_ngrep "$tw_badjson" 'open:0' "jq parse 失敗→open:0 を名乗らない"
-    _assert_grep "$tw_badjson" '^\[STALE-TRIPWIRE-UNKNOWN\] ' "jq parse 失敗→UNKNOWN marker（bd rc=0 でも融合しない）"
-    # ── 同一 pass・invocation 増ゼロ の直接 teeth: bd 呼出回数を数える（出力の byte 一致では二重 pass を弁別不能） ──
-    local twlog replog n_tw_inv n_rep_inv
-    twlog="$tmp/bd-inv-tripwire"; replog="$tmp/bd-inv-report"
-    rm -f "$twlog" "$replog"
-    STUB_ROWS="$rows" ORCH_STALE_NOW="2026-07-20T00:00:00Z" BD_LOG="$twlog" _run tripwire >/dev/null
-    STUB_ROWS="$rows" ORCH_STALE_NOW="2026-07-20T00:00:00Z" BD_LOG="$replog" _run report >/dev/null
-    n_tw_inv="$( [ -f "$twlog" ] && grep -c . "$twlog" || echo 0 )"
-    n_rep_inv="$( [ -f "$replog" ] && grep -c . "$replog" || echo 0 )"
-    _assert_eq "1" "$n_tw_inv" "--emit-tripwire の bd 呼出は 1 回（invocation 増ゼロ）"
-    _assert_eq "$n_rep_inv" "$n_tw_inv" "tripwire の bd 呼出回数は report と同数（同一 pass）"
 
     # ── mutation 非空虚(a): 閾値を巨大化すると停滞 0（gate が効いている証明） ──
     local cnt_hi
@@ -797,11 +700,9 @@ pk-rr|open|courier|2026-07-01T00:00:00Z"
         grep -qE 'local-projects/scriptoriu[m]|/home/[a-z]' <<<"$_t" && { echo deploypath; return 1; }
         return 0
     }
-    # ★sample には run_scan も含める（sc-pik7 の --emit-tripwire seam は run_scan 内に入ったため、含めないと
-    #   本 diff の追加行が恒久 moat の射程外に落ちる＝出荷後の port が leak 検査を素通りする）。
-    local _lk_sample; _lk_sample="$(declare -f _stale_bd_json _rows_from_json _reratify_target run_reratify run_scan)"
-    if _leak_scan "$_lk_sample" >/dev/null; then echo "ok: leak-battery: scan/re-ratify 関数群は realname/shortname/deploypath clean"
-    else echo "FAIL: leak-battery: scan/re-ratify 関数群に leak（系統=$(_leak_scan "$_lk_sample")）" >&2; fails=$((fails+1)); fi
+    local _lk_sample; _lk_sample="$(declare -f _stale_bd_json _rows_from_json _reratify_target run_reratify)"
+    if _leak_scan "$_lk_sample" >/dev/null; then echo "ok: leak-battery: re-ratify 追加関数は realname/shortname/deploypath clean"
+    else echo "FAIL: leak-battery: re-ratify 追加関数に leak（系統=$(_leak_scan "$_lk_sample")）" >&2; fails=$((fails+1)); fi
     _inj="shu""u5"; if _leak_scan "$_lk_sample"$'\nleaked by '"$_inj"$' here\n'    >/dev/null; then echo "FAIL: leak-battery realname 系統に歯が無い（${_inj} 見逃し）" >&2; fails=$((fails+1)); else echo "ok: leak-battery realname 系統に歯あり（${_inj} mutation を RED 化）"; fi
     if _leak_scan "$_lk_sample"$'\nthe un project note\n'     >/dev/null; then echo "FAIL: leak-battery shortname 系統に歯が無い（bare un 見逃し）" >&2; fails=$((fails+1)); else echo "ok: leak-battery shortname 系統に歯あり（bare un mutation を RED 化）"; fi
     if _leak_scan "$_lk_sample"$'\nfallback=/home/someone/x\n' >/dev/null; then echo "FAIL: leak-battery deploypath 系統に歯が無い（/home/ 見逃し）" >&2; fails=$((fails+1)); else echo "ok: leak-battery deploypath 系統に歯あり（/home/ mutation を RED 化）"; fi
@@ -824,13 +725,12 @@ MODE="report"
 while [ $# -gt 0 ]; do
     case "$1" in
         --emit-count)          MODE="count"; shift ;;
-        --emit-tripwire)       MODE="tripwire"; shift ;;
         --re-ratify)           MODE="reratify"; shift ;;
         --emit-reratify-count) MODE="reratify-count"; shift ;;
         --dry-run)             MODE="dry"; shift ;;
         --self-test)           MODE="selftest"; shift ;;
         -h|--help)             usage 0 ;;
-        --*)                   echo "orch-stale-scan: 不明なオプション: $1（--emit-count / --emit-tripwire / --re-ratify / --emit-reratify-count / --dry-run / --self-test / --help）" >&2; usage 1 ;;
+        --*)                   echo "orch-stale-scan: 不明なオプション: $1（--emit-count / --re-ratify / --emit-reratify-count / --dry-run / --self-test / --help）" >&2; usage 1 ;;
         *)                     echo "orch-stale-scan: 位置引数は取りません: $1" >&2; usage 1 ;;
     esac
 done
@@ -850,9 +750,7 @@ if [ "${ORCH_STALE_SKIP_SESSION_GATE:-}" != "1" ]; then
     fi
 fi
 
-# jq は report/count/**tripwire**/dry では hard requirement（fail-closed・byte 不変・clean-state-probe と同型 F1）。
-#   ★tripwire は `*)` の fail-closed（exit 1）へ落ちるのが正＝count/report と同じ hard requirement で、fail-open 側の
-#     reratify 群へは混ぜない（bd orch-myn0 acceptance A3・分類不能を『内訳 0』と騙らない）。
+# jq は既存モード（report/count/dry）では hard requirement（fail-closed・byte 不変・clean-state-probe と同型 F1）。
 #   re-ratify 新モードは fail-open（jq 失敗でも exit 0 +「判定不能」note・count は無出力＝orch-cqf4 acceptance(7)）。
 if ! command -v jq >/dev/null 2>&1; then
     case "$MODE" in
@@ -879,7 +777,6 @@ fi
 case "$MODE" in
     dry)            run_dry_run ;;
     count)          run_scan count ;;
-    tripwire)       run_scan tripwire ;;
     report)         run_scan report ;;
     reratify)       run_reratify report ;;
     reratify-count) run_reratify count ;;
