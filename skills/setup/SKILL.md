@@ -148,9 +148,13 @@ git rm --cached --ignore-unmatch .beads/issues.jsonl .beads/interactions.jsonl .
 
 **問い（一問）**: 「この project を scriptorium orchestrator の **DEFAULT_PROJECTS**（= orchestrator が横断 read する
 federation-read 対象の project 集合。sweep の SSOT ではない）へ編入しますか?」
+**この一問は承認要求ではなく grill 提案として上げる**（承認体制の裁定 SSOT のポインタ = bd sc-tx8s）: 編入自体は
+3 クラス（消す/出す/使う）**非該当**で AI 判断域だが、「この project を orchestrator の観測下に置くか」は
+**複数の妥当な設計が併存し、選択が人間の目的・価値観に依存する**型ゆえ上げる（事実だけでは決まらない）。
+ゆえに 🔴 承認バナーは立てない（バナーの安売り禁止＝バナー出現が承認要求を含意する不変量を守る）。
 判断材料を添えて人間に問う: 継続的に作業が走る active な project か（dormant な project は編入しない先例）、
 orchestrator の観測・cross-project 調整の対象にする意思があるか。**無人実行では勝手に決めず「保留」**として
-Step 末の報告に残す（backstop が後日 surface する）。
+Step 末の報告に残す（backstop が後日 surface する）＝**自動 add はしない**（write-isolation は不変）。
 
 **yes → needs-orch 上り intake を起票**（**自動 add はしない**。DEFAULT_PROJECTS への実 write = scriptorium
 `scripts/lib/orch-projects.sh` の編集は **orchestrator 側 PR**。本 skill が scriptorium repo に触れることは無い）:
