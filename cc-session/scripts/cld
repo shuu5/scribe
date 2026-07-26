@@ -6,10 +6,14 @@
 # 特定 plugin を検出から外すには env CLD_PLUGIN_EXCLUDE（カンマ/空白区切り）または
 # ~/.claude/plugins/.cld-exclude ファイル（1 行 1 名・# コメント可）を使う。
 #
-# メモリ上限（cgroup 防壁）は host の MemTotal から自動導出する（既定 20%・floor 4G / ceil 32G）。
-# 上書きは CLD_MEMORY_MAX（値を直接指定・最優先）/ CLD_MEMORY_MAX_PCT（割合）、起動時 1 行の
-# 可視化は CLD_MEMORY_QUIET=1 で抑制。決定の根拠・限界・稼働中の引き上げ手順は下の
-# 「メモリ上限（cgroup 防壁）の決定」ブロックを読むこと。
+# メモリ上限（cgroup 防壁）は host の MemTotal から自動導出する（比例 20% / 下限 min(12G, 50%) /
+# 上限 32G。MemTotal を読めなければ 12G へ fallback）。上書き・可視化の env:
+#   CLD_MEMORY_MAX       値を直接指定（最優先。1GiB 未満・100% 超・形式不明は warn して自動導出へ
+#                        倒す。単位の小文字は systemd 受理形の大文字へ正規化して渡す）
+#   CLD_MEMORY_MAX_PCT   比例値の割合（1-100・不正値は既定 20 へ倒す）
+#   CLD_MEMORY_QUIET     1/true/yes/on で起動時 1 行の可視化を抑制（上限なし警告は抑制しない）
+#   CLD_MEMINFO_FILE     MemTotal 差し替えの seam（テスト専用・既定 /proc/meminfo）
+# 決定の根拠・限界・稼働中の引き上げ手順は下の「メモリ上限（cgroup 防壁）の決定」ブロックを読むこと。
 set -euo pipefail
 
 if ! command -v claude &>/dev/null; then
@@ -37,7 +41,7 @@ if [[ -f "$PLUGINS_BASE/.cld-exclude" && -r "$PLUGINS_BASE/.cld-exclude" ]]; the
         [[ -n "$_ex_line" ]] && PLUGIN_EXCLUDES+="${_ex_line} "
     done < "$PLUGINS_BASE/.cld-exclude"
 elif [[ -e "$PLUGINS_BASE/.cld-exclude" ]]; then
-    echo "Warning: $PLUGINS_BASE/.cld-exclude が読取り可能な正規ファイルでないため無視します（plugin 除外は無効のまま起動します）" >&2
+    echo "Warning: $PLUGINS_BASE/.cld-exclude が読取り可能な正規ファイルでないため無視します（plugin 除外は無効のまま起動します）" >&2 || true
 fi
 # env は read -a で配列化する（unquoted 展開だと glob 文字入りの値が cwd のファイル名へ
 # pathname 展開され denylist が汚染される）。IFS でカンマ/空白の両区切りを受ける。
@@ -80,28 +84,88 @@ fi
 #   SIGKILL した（background の Workflow / Monitor が道連れで消え、journal に result 0 のまま残る）。
 #   固定値は host 非依存に破綻する——潤沢な host（125GiB）では低すぎ、小さな host（8GiB）では
 #   上限が実 RAM を超えて防壁として機能しない。ゆえに MemTotal 比例へ変えた。
-# 既定の根拠: MemTotal x 20%（host 125GiB → 25G ＝ 平常 peak の約 20 倍かつ host の 1/5）。
-#   floor 4GiB = 小 host でも平常運用（peak 約 1GiB）が即死しない下限。
-#   ceil 32GiB = 巨大 RAM host でも 1 プロセスの焼き代を有界化する上限。
+# 既定の根拠（3 つのクランプ・すべて MemTotal 連動）:
+#   (1) 比例値 = MemTotal x 20%（host 125GiB → 25G ＝ 平常 peak の約 20 倍かつ host の 1/5）。
+#   (2) 下限 = min(12GiB, MemTotal の 50%)。**旧固定既定 12G に接続する**のが目的——比例だけだと
+#       中間帯 host（12-60GiB）で旧 12G を下回り、この bead が潰そうとした「CC ごと SIGKILL され
+#       WF が痕跡なく消える」失敗を中間帯で増やしてしまう（pct=20 が 12G に並ぶのは 60GiB）。
+#       同時に「MemTotal の 50% を超えない」を課すのは、**上限が実 RAM に迫ると防壁として bind
+#       しない**ため（旧 12G が 16GiB host で 75%・8GiB host で実 RAM 超だったのがまさにこれ）。
+#       結果: 32GiB→12G（旧と同値）/ 16GiB→8G（旧 12G=75% は防壁にならないので意図的に下げる）/
+#       8GiB→4G / 4GiB→2G。**MemTotal ≤ 2GiB 帯では下限 1G が CC の平常 peak（約 1.1GiB）を割る
+#       ——その帯では「防壁を効かせる」と「起動を妨げない」は原理的に両立せず、防壁側を採る。**
+#   (3) 上限 = 32GiB（巨大 RAM host でも 1 プロセスの焼き代を有界化する）。
 # 効く範囲の限界（明示）: per-scope 上限は「単一セッションの暴走」への防壁であって、同時稼働
-#   セッション数 x 上限の総和は縛らない（fleet 総量は運用側＝同時本数で管理する）。
+#   セッション数 x 上限の総和は縛らない。N session を常用する host は総和が MemTotal を超えない
+#   よう CLD_MEMORY_MAX_PCT を概ね 100/(2N) 以下へ下げるか、同時本数を絞ること（fleet 側の管理）。
+#   **ただし CLD_MEMORY_MAX_PCT は上記 (2) の下限より下へは下げられない**——比例値が下限を割れば
+#   必ず引き上げられるため、下限が binding な帯では pct を下げても実効値が変わらない（silent
+#   no-op）。pct レバーだけで総和を MemTotal 以下に収められるのは N ≦ MemTotal / min(12GiB,
+#   MemTotal/2) まで（32GiB→N≦2 / 125GiB→N≦10）。それを超える構成では (a) CLD_MEMORY_MAX で
+#   明示値を与える（明示値は下限/上限クランプを迂回する）か (b) 同時本数を絞る、の 2 択。
 # swap は別軸: MemoryMax は anon+file の上限で swap を含まない（swap 側は MemorySwapMax）。
 #   scope の memory.swap.max は既定 max ゆえ、実効的な猶予は MemoryMax + 利用可能 swap になる。
-# 稼働中の scope を再起動なしに引き上げる（実測で反映を確認済み）:
+# 既定変更が効くのは**次回 cld 起動から**。稼働中の scope は再起動なしに引き上げられる（実測済）:
 #   systemctl --user set-property run-<id>.scope MemoryMax=<N>G
 #   （自分の scope id は `cat /proc/self/cgroup` 末尾の run-<id>.scope）
-# CC が突然死したときの唯一の oracle は user journal（dmesg / /var/crash / stderr は原理的に空振り）:
+# CC が突然死したときの第一手は user journal（この fleet では dmesg / /var/crash / stderr は空振り）:
 #   journalctl --user --since "<時刻>" | grep -i oom-kill    ＜理由は scribe docs/protocol.md §6＞
 CLD_MEMORY_MAX_PCT_DEFAULT=20
-CLD_MEMORY_MAX_FLOOR_GIB=4
+CLD_MEMORY_MAX_FLOOR_GIB=12          # 下限の絶対値（旧固定既定に接続）
+CLD_MEMORY_MAX_FLOOR_SHARE_PCT=50    # ただし下限は MemTotal のこの割合を超えない（防壁が bind する保証）
 CLD_MEMORY_MAX_CEIL_GIB=32
+CLD_MEMORY_MAX_MIN_GIB=1             # 0G 化の防止（起動直後に必ず OOM kill されるのを避ける）
 CLD_MEMORY_MAX_FALLBACK="12G"
 
 MEM_MAX=""
 MEM_MAX_SRC=""
 MEM_MAX_NOTE=""
-if [[ -n "${CLD_MEMORY_MAX:-}" ]]; then
-    MEM_MAX="$CLD_MEMORY_MAX"
+# 明示指定は最優先だが、無検証で通すと `CLD_MEMORY_MAX=25`（`25G` の打ち間違い）が systemd に
+# 25 バイトと解釈され、CC が起動直後に OOM kill される＝本 bead が潰そうとした「痕跡なく消える」
+# 失敗を escape hatch の typo で再生産する。1GiB 未満・形式不明は warn して自動導出へ倒す。
+# **受理集合は systemd より広げない**: ここを素通りした値は `-p MemoryMax=<値>` としてそのまま
+# systemd-run へ渡るため、systemd が解釈できない値は property parse error で exec 自体を失敗させ、
+# claude が一切起動しない（ファイル冒頭の不変条件「何であれ claude の起動は妨げない」の破れ）。
+_mm_explicit="${CLD_MEMORY_MAX:-}"
+if [[ -n "$_mm_explicit" ]]; then
+    if [[ "$_mm_explicit" == "infinity" ]]; then
+        echo "Warning: CLD_MEMORY_MAX=infinity ＝ cgroup 防壁の撤廃です（暴走した dynamic workflow が host を巻き込みます）" >&2 || true
+    elif [[ "$_mm_explicit" =~ ^([1-9][0-9]*)%$ ]]; then
+        # 割合指定は systemd が MemTotal 比で解釈する（受理）。ただし 100% 超は systemd 側が
+        # 弾く（割合 parse が範囲外・バイト数としても解釈できない）ため素通しすると起動失敗になる。
+        # 自動導出側の pct が 1-100 を検査するのと平仄を取る（20%→200% の打ち間違い対策）。
+        if (( BASH_REMATCH[1] > 100 )); then
+            echo "Warning: CLD_MEMORY_MAX='${_mm_explicit}' は 100% を超えます（systemd が受理せず起動に失敗します）。自動導出へ倒します" >&2 || true
+            _mm_explicit=""
+        fi
+    elif [[ "$_mm_explicit" =~ ^([1-9][0-9]*)([KMGTkmgt]?)$ ]]; then
+        _mm_n="${BASH_REMATCH[1]}"
+        _mm_suf="${BASH_REMATCH[2]}"
+        case "$_mm_suf" in
+            K|k) _mm_b=$(( _mm_n * 1024 )) ;;
+            M|m) _mm_b=$(( _mm_n * 1048576 )) ;;
+            G|g) _mm_b=$(( _mm_n * 1073741824 )) ;;
+            T|t) _mm_b=$(( _mm_n * 1099511627776 )) ;;
+            *)   _mm_b="$_mm_n" ;;   # 単位なし = systemd はバイトと解釈する
+        esac
+        if (( _mm_b < 1073741824 )); then
+            echo "Warning: CLD_MEMORY_MAX='${_mm_explicit}' は 1GiB 未満（systemd は単位なしをバイトと解釈します）。自動導出へ倒します" >&2 || true
+            _mm_explicit=""
+        else
+            # systemd の接尾辞は**大小文字を区別**する（man systemd.resource-control は K/M/G/T と
+            # 大文字で規定）。`docker run -m 2g` / `free -g` の筋肉記憶から来る小文字 typo（8g）を
+            # そのまま渡すと systemd-run が落ちて claude が起動しない。受理はしたまま大文字へ
+            # 正規化して systemd 受理形に揃える（人間の意図どおり効かせる）。
+            _mm_explicit="${_mm_n}${_mm_suf^^}"
+        fi
+    else
+        echo "Warning: CLD_MEMORY_MAX='${_mm_explicit}' は解釈できない形式です（例: 25G / 20% / infinity）。自動導出へ倒します" >&2 || true
+        _mm_explicit=""
+    fi
+fi
+
+if [[ -n "$_mm_explicit" ]]; then
+    MEM_MAX="$_mm_explicit"
     MEM_MAX_SRC="explicit"
     MEM_MAX_NOTE="CLD_MEMORY_MAX 明示"
 else
@@ -116,15 +180,23 @@ else
         _pct="${CLD_MEMORY_MAX_PCT:-$CLD_MEMORY_MAX_PCT_DEFAULT}"
         # 不正値は die でなく既定へ倒す（不変条件: 何であれ claude の起動は妨げない）
         if [[ ! "$_pct" =~ ^[1-9][0-9]*$ ]] || (( _pct > 100 )); then
-            echo "Warning: CLD_MEMORY_MAX_PCT='${_pct}' が 1-100 の整数でないため既定 ${CLD_MEMORY_MAX_PCT_DEFAULT}% を使います" >&2
+            echo "Warning: CLD_MEMORY_MAX_PCT='${_pct}' が 1-100 の整数でないため既定 ${CLD_MEMORY_MAX_PCT_DEFAULT}% を使います" >&2 || true
             _pct="$CLD_MEMORY_MAX_PCT_DEFAULT"
         fi
+        _total_gib=$(( _total_kb / 1048576 ))
         _gib=$(( _total_kb * _pct / 100 / 1048576 ))
-        if (( _gib < CLD_MEMORY_MAX_FLOOR_GIB )); then _gib="$CLD_MEMORY_MAX_FLOOR_GIB"; fi
+        # 下限 = min(絶対 floor, MemTotal の share%)。前者が中間帯の退行を、後者が「上限が実 RAM に
+        # 迫って防壁が bind しない」を防ぐ（両方 MemTotal 連動なので host 非依存に破綻しない）。
+        _floor=$(( _total_kb * CLD_MEMORY_MAX_FLOOR_SHARE_PCT / 100 / 1048576 ))
+        if (( _floor > CLD_MEMORY_MAX_FLOOR_GIB )); then _floor="$CLD_MEMORY_MAX_FLOOR_GIB"; fi
+        if (( _gib < _floor )); then _gib="$_floor"; fi
         if (( _gib > CLD_MEMORY_MAX_CEIL_GIB )); then _gib="$CLD_MEMORY_MAX_CEIL_GIB"; fi
+        if (( _gib < CLD_MEMORY_MAX_MIN_GIB )); then _gib="$CLD_MEMORY_MAX_MIN_GIB"; fi
         MEM_MAX="${_gib}G"
         MEM_MAX_SRC="auto-pct${_pct}"
-        MEM_MAX_NOTE="auto: MemTotal $(( _total_kb / 1048576 ))GiB x ${_pct}% / floor ${CLD_MEMORY_MAX_FLOOR_GIB}G / ceil ${CLD_MEMORY_MAX_CEIL_GIB}G"
+        MEM_MAX_NOTE="auto: MemTotal ${_total_gib}GiB x ${_pct}% / floor ${_floor}G / ceil ${CLD_MEMORY_MAX_CEIL_GIB}G"
+        # seam 使用時は出所を明示する（env 汚染で偽 MemTotal から導出されたことに気づけるように）
+        if [[ "$_meminfo" != "/proc/meminfo" ]]; then MEM_MAX_NOTE="${MEM_MAX_NOTE} / src=${_meminfo}"; fi
     else
         MEM_MAX="$CLD_MEMORY_MAX_FALLBACK"
         MEM_MAX_SRC="fallback"
@@ -132,18 +204,29 @@ else
     fi
 fi
 
+# 可視化の抑止は真偽値で解釈する（`CLD_MEMORY_QUIET=0` が沈黙させる footgun を避ける）
+_mm_quiet=0
+case "${CLD_MEMORY_QUIET:-}" in
+    1|true|TRUE|yes|YES|on|ON) _mm_quiet=1 ;;
+esac
+
 # systemd-run があればメモリ制限付き scope で、なければ直接起動（環境変数は exec で継承）
 if command -v systemd-run &>/dev/null; then
     # --description は実効値を unit へ焼き、起動後も `systemctl --user show <scope> -p Description`
     # で読めるようにする（stderr の 1 行は流れて消えるため永続側の可視性を別に持つ）。古い systemd
     # への保険で feature-detect する（cld-spawn の --effort passthrough と同流儀）。
+    # transient scope は死ぬと `systemctl show` できないため、journal の Started 行に残る
+    # Description が post-mortem で run-<id> → session を辿る唯一の手掛かりになる。全 session が
+    # 同一文字列だと同定できないので cwd と pane を混ぜる。
     SD_DESC_ARGS=()
     _sd_help="$(systemd-run --help 2>/dev/null || true)"
     if grep -q -- '--description' <<< "$_sd_help"; then
-        SD_DESC_ARGS=(--description="cld claude session (MemoryMax=${MEM_MAX} src=${MEM_MAX_SRC})")
+        SD_DESC_ARGS=(--description="cld claude ${PWD##*/}${TMUX_PANE:+ ${TMUX_PANE}} (MemoryMax=${MEM_MAX} src=${MEM_MAX_SRC})")
     fi
-    if [[ -z "${CLD_MEMORY_QUIET:-}" ]]; then
-        echo "cld: MemoryMax=${MEM_MAX} [${MEM_MAX_NOTE}]" >&2
+    # 可視化行の書込失敗で launcher を落とさない（set -e 下の informational echo・不変条件:
+    # 何であれ claude の起動は妨げない）
+    if (( _mm_quiet == 0 )); then
+        echo "cld: MemoryMax=${MEM_MAX} [${MEM_MAX_NOTE}]" >&2 || true
     fi
     exec systemd-run --user --scope -p "MemoryMax=${MEM_MAX}" \
         "${SD_DESC_ARGS[@]+"${SD_DESC_ARGS[@]}"}" \
@@ -152,9 +235,10 @@ if command -v systemd-run &>/dev/null; then
         "${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"}" \
         "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
 else
-    if [[ -z "${CLD_MEMORY_QUIET:-}" ]]; then
-        echo "cld: メモリ上限なし（systemd-run 不在のため直接起動＝暴走時の cgroup 防壁が無い）" >&2
-    fi
+    # 「防壁が存在しない」は日常の実効値行と重要度が違うため CLD_MEMORY_QUIET では抑止しない
+    # （出力ノイズを消す設定が保護不在の隠蔽になってはならない）。この行が出る host では
+    # journalctl --user の oom-kill 行は原理的に出ず、OOM は host 側＝dmesg / kern.log に現れる。
+    echo "cld: メモリ上限なし（systemd-run 不在のため直接起動＝暴走時の cgroup 防壁が無い）" >&2 || true
     exec claude --dangerously-skip-permissions \
         "${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"}" \
         "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"

@@ -6,15 +6,21 @@
 # 防壁にならない）。既定を MemTotal 比例（pct・floor・ceil）へ変えたため、その導出を pin する。
 #
 # Scenarios covered:
-#   - CLD_MEMORY_MAX 明示が最優先（後方互換）
+#   - CLD_MEMORY_MAX 明示が最優先（後方互換）／1GiB 未満・形式不明は warn して自動導出へ倒す
+#   - 明示値の受理集合は systemd に揃える（小文字単位は大文字へ正規化・100% 超は自動導出へ倒す）
+#     ＝素通しすると systemd-run が property parse error で落ち claude が一切起動しないため
 #   - 未指定時は MemTotal x pct（既定 20%）から導出
 #   - CLD_MEMORY_MAX_PCT で割合を上書きできる
-#   - floor（小 host）/ ceil（巨大 host）でクランプされる
+#   - 下限 min(12G, MemTotal の 50%) と 上限 32G でクランプされる（中間帯 host の退行防止と
+#     「上限が実 RAM に迫って防壁が bind しない」の同時回避）
 #   - MemTotal を読めないときは fallback 12G（launcher は止めない）
 #   - 不正な pct は die でなく既定へ倒す（不変条件: 何であれ claude の起動を妨げない）
-#   - 実効値の可視化（stderr 1 行 / --description）と CLD_MEMORY_QUIET による抑制
+#   - 実効値の可視化（stderr 1 行 / --description）と CLD_MEMORY_QUIET（真偽値解釈）による抑制
+#   - 上限なし警告は QUIET でも抑制されない（保護不在の隠蔽を防ぐ）
+#   - stderr が書込不可でも launcher は claude 起動を妨げない
+#   - 既定 seam（/proc/meminfo）を踏む経路が壊れていない（seam 名 typo の silent fallback 検知）
 #   - systemd-run 不在時は上限なしで直接起動（回帰）＋その旨を可視化
-#   - --description は feature-detect（古い systemd で落ちない）
+#   - --description は feature-detect（古い systemd で落ちない）＋ session 識別子を含む
 #
 # スタブ方針:
 #   - claude stub が受け取った引数を出力する（既存 cld-plugin-exclude.bats と同流儀）
@@ -102,20 +108,69 @@ _memmax() {
     [ "$(_memmax)" = "25G" ]
 }
 
-@test "memmax: CLD_MEMORY_MAX_PCT で割合を上書きできる（100GiB x 10% → 10G）" {
+@test "memmax: CLD_MEMORY_MAX_PCT で割合を上書きできる（100GiB x 30% → 30G）" {
     local mi
     mi="$(_mk_meminfo 104857600)"
-    run env CLD_MEMINFO_FILE="$mi" CLD_MEMORY_MAX_PCT=10 bash "$CLD"
+    run env CLD_MEMINFO_FILE="$mi" CLD_MEMORY_MAX_PCT=30 bash "$CLD"
     [ "$status" -eq 0 ]
-    [ "$(_memmax)" = "10G" ]
+    [ "$(_memmax)" = "30G" ]
 }
 
-@test "memmax: 小さな host では floor 4G でクランプされる（8GiB x 20% = 1.6G → 4G）" {
+@test "memmax: pct を下げても下限は割らない（100GiB x 1% = 1G → 12G）" {
+    local mi
+    mi="$(_mk_meminfo 104857600)"
+    run env CLD_MEMINFO_FILE="$mi" CLD_MEMORY_MAX_PCT=1 bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "12G" ]
+}
+
+@test "memmax: 中間帯 host は下限 12G で旧既定より弱くならない（32GiB x 20% = 6G → 12G）" {
+    local mi
+    mi="$(_mk_meminfo 33554432)"
+    run env CLD_MEMINFO_FILE="$mi" bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "12G" ]
+}
+
+@test "memmax: 60GiB は比例値と下限が一致する境界（20% = 12G）" {
+    local mi
+    mi="$(_mk_meminfo 62914560)"
+    run env CLD_MEMINFO_FILE="$mi" bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "12G" ]
+}
+
+@test "memmax: 下限は MemTotal の 50% を超えない（16GiB → 12G でなく 8G）" {
+    local mi
+    mi="$(_mk_meminfo 16777216)"
+    run env CLD_MEMINFO_FILE="$mi" bash "$CLD"
+    [ "$status" -eq 0 ]
+    # 絶対 floor 12G は実 RAM の 75% で防壁として bind しないため 50% クランプが勝つ
+    [ "$(_memmax)" = "8G" ]
+}
+
+@test "memmax: 小さな host では下限も MemTotal 連動（8GiB x 20% = 1.6G → 4G）" {
     local mi
     mi="$(_mk_meminfo 8388608)"
     run env CLD_MEMINFO_FILE="$mi" bash "$CLD"
     [ "$status" -eq 0 ]
     [ "$(_memmax)" = "4G" ]
+}
+
+@test "memmax: 極小 host でも上限は実 RAM 未満に留まる（4GiB → 2G ＝ 防壁が bind する）" {
+    local mi
+    mi="$(_mk_meminfo 4194304)"
+    run env CLD_MEMINFO_FILE="$mi" bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "2G" ]
+}
+
+@test "memmax: 1GiB host でも 0G にはならない（MIN 1G）" {
+    local mi
+    mi="$(_mk_meminfo 1048576)"
+    run env CLD_MEMINFO_FILE="$mi" bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "1G" ]
 }
 
 @test "memmax: 巨大 host では ceil 32G でクランプされる（500GiB x 20% = 100G → 32G）" {
@@ -179,6 +234,115 @@ _memmax() {
     [ "$(_memmax)" = "12G" ]
 }
 
+@test "memmax: 単位なしの明示値（25＝25G の打ち間違い）は warn して自動導出へ倒れる" {
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=25 bash "$CLD"
+    [ "$status" -eq 0 ]
+    # 25 バイト上限で起動直後に OOM kill されるのを防ぐ
+    [ "$(_memmax)" = "25G" ]
+    [[ "$output" == *"1GiB 未満"* ]]
+}
+
+@test "memmax: 1GiB 未満の単位付き明示値（512M）も自動導出へ倒れる" {
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=512M bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "25G" ]
+}
+
+@test "memmax: 解釈できない明示値は warn して自動導出へ倒れる（launcher は落ちない）" {
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX="25 GB" bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "25G" ]
+    [[ "$output" == *"解釈できない形式"* ]]
+}
+
+@test "memmax: 割合形式の明示値（20%）はそのまま systemd へ渡る" {
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=20% bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "20%" ]
+}
+
+@test "memmax: 割合形式の境界 100% は受理される" {
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=100% bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "100%" ]
+}
+
+@test "memmax: 100% 超の明示割合（150%）は warn して自動導出へ倒れる" {
+    # systemd は 100% 超を受理しない＝素通しすると systemd-run が落ちて claude が起動しない
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=150% bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "25G" ]
+    [[ "$output" == *"100% を超えます"* ]]
+}
+
+@test "memmax: 200%（20% の打ち間違い）も自動導出へ倒れる＝防壁が外れない" {
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=200% bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "25G" ]
+    [[ "$output" == *"100% を超えます"* ]]
+}
+
+@test "memmax: 小文字単位の明示値（8g）は systemd 受理形（8G）へ正規化される" {
+    # systemd の接尾辞は大小文字を区別する。素通しすると property parse error で claude が起動しない
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=8g bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "8G" ]
+}
+
+@test "memmax: 小文字 t/m も正規化される（1t → 1T ／ 2048m → 2048M）" {
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=1t bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "1T" ]
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=2048m bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "2048M" ]
+}
+
+@test "memmax: 小文字でも 1GiB 未満（512m）は従来どおり自動導出へ倒れる" {
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=512m bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "25G" ]
+    [[ "$output" == *"1GiB 未満"* ]]
+}
+
+@test "memmax: 32GiB host は pct=1 でも下限 12G（doc の pct 引き下げ指針は下限に飲まれる）" {
+    # protocol.md の fleet 総量 bullet が「pct は下限より下へは下がらない」と書いている根拠の pin
+    local mi
+    mi="$(_mk_meminfo 33554432)"
+    run env CLD_MEMINFO_FILE="$mi" CLD_MEMORY_MAX_PCT=1 bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "12G" ]
+}
+
+@test "memmax: infinity は受理するが防壁撤廃として loud に警告する" {
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=infinity bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "infinity" ]
+    [[ "$output" == *"防壁の撤廃"* ]]
+}
+
+@test "memmax: 既定 seam（/proc/meminfo）を踏む経路が壊れていない（seam typo の silent fallback 検知）" {
+    [[ -r /proc/meminfo ]] || skip "/proc/meminfo が読めない環境"
+    run env -u CLD_MEMINFO_FILE bash "$CLD"
+    [ "$status" -eq 0 ]
+    # 値は host 依存なので「auto 導出であって fallback でない」ことだけを assert する
+    [[ "$output" == *"auto: MemTotal"* ]]
+    [[ "$output" != *"fallback"* ]]
+    [[ "$output" != *"src=/"* ]]
+}
+
+@test "memmax: seam 使用時は可視化行に出所（src=<path>）が出る" {
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" bash "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"src=$MEMINFO_125G"* ]]
+}
+
+@test "memmax: stderr が書込不可でも launcher は claude 起動を妨げない" {
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" bash "$CLD" 2>&-
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CLAUDE_ARG:--dangerously-skip-permissions"* ]]
+}
+
 @test "memmax: 実効値が stderr 1 行で可視化される" {
     run env CLD_MEMINFO_FILE="$MEMINFO_125G" bash "$CLD"
     [ "$status" -eq 0 ]
@@ -192,10 +356,23 @@ _memmax() {
     [ "$(_memmax)" = "25G" ]
 }
 
-@test "memmax: --description に実効値と出所が焼かれる（起動後も systemctl show で読める）" {
+@test "memmax: CLD_MEMORY_QUIET=0 は抑制しない（真偽値解釈・非空即沈黙の footgun 回避）" {
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_QUIET=0 bash "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"cld: MemoryMax=25G"* ]]
+}
+
+@test "memmax: --description に実効値・出所・session 識別子が焼かれる（post-mortem 同定用）" {
     run env CLD_MEMINFO_FILE="$MEMINFO_125G" bash "$CLD"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"SDRUN_ARG:--description=cld claude session (MemoryMax=25G src=auto-pct20)"* ]]
+    [[ "$output" == *"SDRUN_ARG:--description=cld claude "* ]]
+    [[ "$output" == *"(MemoryMax=25G src=auto-pct20)"* ]]
+}
+
+@test "memmax: --description に tmux pane 識別子が混ざる（同時稼働 session の弁別）" {
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" TMUX_PANE="%42" bash "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"%42 (MemoryMax=25G src=auto-pct20)"* ]]
 }
 
 @test "memmax: --description を持たない systemd では付与しない（feature-detect）" {
@@ -230,6 +407,19 @@ SDRUN_OLD
     [ "$status" -eq 0 ]
     [[ "$output" != *"SDRUN_ARG:"* ]]
     [[ "$output" == *"CLAUDE_ARG:--dangerously-skip-permissions"* ]]
+    [[ "$output" == *"メモリ上限なし"* ]]
+}
+
+@test "memmax: 上限なし警告は CLD_MEMORY_QUIET でも抑制されない（保護不在を隠蔽しない）" {
+    local nosd="$SANDBOX/nosd-bin2" c p
+    mkdir -p "$nosd"
+    cp "$FAKE_BIN/claude" "$nosd/claude"
+    for c in bash awk grep sed cat printf env; do
+        p="$(command -v "$c" || true)"
+        [[ -n "$p" ]] && ln -sf "$p" "$nosd/$c"
+    done
+    run env PATH="$nosd" CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_QUIET=1 bash "$CLD"
+    [ "$status" -eq 0 ]
     [[ "$output" == *"メモリ上限なし"* ]]
 }
 
