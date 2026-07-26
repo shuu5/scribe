@@ -148,6 +148,50 @@ JSON
 ] }
 JSON
 
+  # --- sc-j8zv fixtures（実アカウント名・実残量は書かない＝本 repo は PUBLIC）-------------------
+  # incident 署名: claude-usage が live fetch に失敗して snapshot cache へ degrade した形。
+  #   ok=false/stale=true だが **pct/resets_at の実データは載っている**・rc=0（＝「直に叩くと値が返る」）。
+  #   これが「usage は正常に見えるのに適格 0」の実体（sc-j8zv 根因）。error_code=429 は一過性 rate limit。
+  DEGRADED="$BATS_TEST_TMPDIR/degraded.json"
+  cat > "$DEGRADED" <<JSON
+{ "accounts": [
+  {"label":"acctA","ok":false,"stale":true,"error":"HTTP 429","error_code":"429",
+   "five_hour_pct":10,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":20,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
+  {"label":"acctB","ok":false,"stale":true,"error":"HTTP 429","error_code":"429",
+   "five_hour_pct":30,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":40,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"}
+] }
+JSON
+
+  # 「usage は健全（ok∧非stale）と言っているのに selector が全部落とす」= 誤判定の実形（exit 4 の teeth）。
+  # ここでは shape 契約ずれ（score キー欠落）で作るが、selector 側の変異注入でも同じ状態になる。
+  HEALTHYDROP="$BATS_TEST_TMPDIR/healthydrop.json"
+  cat > "$HEALTHYDROP" <<JSON
+{ "accounts": [
+  {"label":"acctA","ok":true,"stale":false,"five_hour_pct":10,"five_hour_resets_at":null,"seven_day_resets_at":null},
+  {"label":"acctB","ok":true,"stale":false,"five_hour_pct":20,"five_hour_resets_at":null,"seven_day_resets_at":null}
+] }
+JSON
+
+  # 枯渇（実効残量 0）だけが適格として残る形（要求③ characterization）。
+  DEPLETED="$BATS_TEST_TMPDIR/depleted.json"
+  cat > "$DEPLETED" <<JSON
+{ "accounts": [
+  {"label":"acctA","ok":true,"stale":false,"five_hour_pct":0,"five_hour_resets_at":null,
+   "seven_day_pct":100,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"}
+] }
+JSON
+
+  # ok/stale 自身の型ドリフト（健全判定器も無力になる盲点）→ 上流劣化と断じず shape 疑いを併記する。
+  SHAPEDRIFT="$BATS_TEST_TMPDIR/shapedrift.json"
+  cat > "$SHAPEDRIFT" <<JSON
+{ "accounts": [
+  {"label":"acctA","ok":"true","stale":"false","five_hour_pct":10,"five_hour_resets_at":null,
+   "seven_day_pct":10,"seven_day_resets_at":null}
+] }
+JSON
+
   # usage 側は適格だが preflight 全滅を作る fixture（非 default のみ＝~/.claude へ写像されない）。
   # config dir を一切作らなければ全候補 preflight 不通過 → resolve 末尾 fail-loud を引く（facet⑤②(b)）。
   PFAIL="$BATS_TEST_TMPDIR/pfail.json"
@@ -495,6 +539,112 @@ mk_cfg() {
   [[ "$notes" == *"chosen=black4"* ]]
   [[ "$notes" == *default* ]]     # snapshot は候補全員（適格）
   [[ "$notes" == *black3* ]]      # snapshot は除外アカも含む
+}
+
+# ============================================================================
+# sc-j8zv: 「適格 0 件」の 2 種を機械弁別する teeth
+#   (A) 上流劣化（usage 側に健全 account が無い）= selector は正しい → exit 0（従来不変）
+#   (B) selector 誤判定（usage は健全と報告したのに全部落とした）→ exit 4 で fail-loud
+# 現行は (A)(B) が同じ「exit 0・eligible 0 行」に潰れ、呼出元は一律「全アカウント認証切れ」と誤帰属した。
+# ★変異注入で RED 化する teeth = 「usage 正常 → exit 0 かつ eligible≥1」の 2 本
+#   （selector が健全 account を落とす変異を入れると exit 4 になり RED・実測は selftest-sc-j8zv.local.sh）。
+# ============================================================================
+
+@test "sc-j8zv teeth(B): usage 健全なのに適格0件 → exit 4（誤判定として fail-loud・上流劣化と別コード）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$HEALTHYDROP")" python3 "$SEL"
+  [ "$status" -eq 4 ]
+  [[ "$stderr" == *"selector 誤判定"* ]]
+  [[ "$stderr" == *acctA* ]] && [[ "$stderr" == *acctB* ]]   # 犯人ラベルを名指しする
+  [[ "$stderr" == *"malformed:欠落"* ]]                       # 落とした理由も出す
+  # 監査を殺さない: exit 4 でも TSV は stdout に出る（呼出元 snapshot が空にならない）。
+  [ -n "$output" ]
+  [ "$(awk -F'\t' '$2=="0"' <<<"$output" | wc -l)" -eq 2 ]
+}
+
+@test "sc-j8zv teeth(A): 上流劣化(全 stale・実データ有り rc=0) → exit 0 のまま + error_code 内訳診断" {
+  # incident 署名そのもの: usage を直に叩けば値が返る（degrade は cache 実データを載せる）が全 stale。
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$DEGRADED")" python3 "$SEL"
+  [ "$status" -eq 0 ]                                  # (B) と別コード＝機械弁別できる
+  [ -z "$(awk -F'\t' '$2=="1"' <<<"$output")" ]        # 適格 0 件は従来どおり
+  [[ "$stderr" == *"上流劣化"* ]]
+  [[ "$stderr" == *"429=2"* ]]                          # error_code 内訳（一過性 rate limit と読める）
+  [[ "$stderr" == *"健全の証拠ではない"* ]]             # rc=0/値あり を健全と誤読させない注記
+  [[ "$stderr" != *"selector 誤判定"* ]]                # (B) の文言を誤って出さない
+}
+
+@test "sc-j8zv teeth: usage 正常（GOLDEN）→ exit 0 かつ eligible≥1（変異注入で exit 4 化=RED になる本体）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$GOLDEN")" python3 "$SEL"
+  [ "$status" -eq 0 ]
+  [ "$(awk -F'\t' '$2=="1"' <<<"$output" | wc -l)" -ge 1 ]
+  [[ "$stderr" != *"selector 誤判定"* ]]
+}
+
+@test "sc-j8zv teeth: usage 正常（stdin seam）→ exit 0 かつ eligible≥1（seam 別経路でも同じ不変条件）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" python3 "$SEL" --stdin < "$PCTPIN"
+  [ "$status" -eq 0 ]
+  [ "$(awk -F'\t' '$2=="1"' <<<"$output" | wc -l)" -eq 2 ]
+}
+
+@test "sc-j8zv: 部分ドリフト（健全だが 1 件だけ除外・適格は残る）→ exit 0 + warn（早期兆候）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$KEYMISS")" python3 "$SEL"
+  [ "$status" -eq 0 ]                                   # 適格が残るので fail-loud しない
+  [[ "$stderr" == *"warn: usage は健全と報告したのに selector が除外"* ]]
+  [[ "$stderr" == *"bad="* ]]
+}
+
+@test "sc-j8zv: ok/stale の型ドリフト → 上流劣化と断じず shape 契約変更の疑いを併記（判定器の盲点を告知）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$SHAPEDRIFT")" python3 "$SEL"
+  [ "$status" -eq 0 ]                                   # 健全申告が 1 件も無い＝(B) ではない
+  [[ "$stderr" == *"shape 契約変更"* ]]
+  [[ "$stderr" == *"malformed 除外が 1 件"* ]]
+}
+
+@test "sc-j8zv 要求③ characterization: 枯渇(残量0)でも eligible=1 のまま（floor 無し）+ advisory + 枯渇 warn" {
+  # ★現行 semantics（stale のみ除外・枯渇は減点）を明示的に pin する。floor を入れる/入れないは admin
+  #   裁定事項ゆえ本 cell では選定を変えない。将来 floor を入れるなら本テストを意図的に書き換えること
+  #   （黙って挙動が反転したらここが RED になる＝gap が機械可視のまま残る）。
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$DEPLETED")" python3 "$SEL"
+  [ "$status" -eq 0 ]
+  local _l _e _sc _rest
+  IFS=$'\t' read -r _l _e _sc _rest <<<"$output"
+  [ "$_e" = "1" ]                                       # 枯渇でも適格（＝floor が無い）
+  [ "$_sc" = "0" ]                                      # maximin score=0（実効残量ゼロ）
+  [[ "$output" == *"advisory:depleted(headroom=0)"* ]]  # 監査 snapshot へ durable に残る印
+  [[ "$stderr" == *"枯渇警告"* ]]                        # 最上位が枯渇なら loud に警告
+  [[ "$stderr" == *"floor が無い"* ]]
+}
+
+@test "sc-j8zv: 枯渇 advisory は col10 のみ（eligible/順位/exit を変えない＝選定 semantics 不変）" {
+  # GOLDEN の default は 7d pct=100（枯渇）だが従来どおり 3 位の適格のまま。
+  [ "$(walk "$GOLDEN" | paste -sd, -)" = "black4,black2,default" ]
+  local r; r="$(row_of default)"
+  [[ "$r" == *"advisory:depleted"* ]]
+  [ "$(awk -F'\t' '{print $2}' <<<"$r")" = "1" ]
+  # 上位が枯渇でないので枯渇 warn は出ない（happy path を騒がせない）。
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$GOLDEN")" python3 "$SEL"
+  [[ "$stderr" != *"枯渇警告"* ]]
+}
+
+@test "sc-j8zv spawn: selector 誤判定(exit 4) は呼出元でも fail-loud（『適格0件』と別メッセージ）" {
+  # 呼出元 scribe-spawn.sh は未知 exit を一律 fail-loud する（既存規約）。ゆえに本 cell が selector 側だけ
+  # を変えても spawn は silent 続行しない。かつ (A) 用の「適格アカウントが 0 件」誤帰属を出さない。
+  run env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$HEALTHYDROP")" SCRIBE_ACCOUNTS_BASE="$ABASE" \
+    BEADS_BDW="$BDW_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$NOOP" \
+    "$SPAWN" --repo "$ANCHOR" --anchor "$ANCHOR" --account auto zz-misjudge
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"想定外 exit（4）"* ]]
+  [[ "$output" == *"selector 誤判定"* ]]                 # selector の stderr が呼出元へ素通しされる
+  [[ "$output" != *"適格アカウントが 0 件"* ]]           # (A) の誤帰属メッセージへ落ちない
+}
+
+@test "sc-j8zv spawn: 上流劣化(全 stale)は従来どおり『適格0件』fail-loud（(A) の意味論を変えない）" {
+  run env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$DEGRADED")" SCRIBE_ACCOUNTS_BASE="$ABASE" \
+    BEADS_BDW="$BDW_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$NOOP" \
+    "$SPAWN" --repo "$ANCHOR" --anchor "$ANCHOR" --account auto zz-degraded
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"適格アカウントが 0 件"* ]]
+  [[ "$output" == *"上流劣化"* ]]                        # selector 診断が pane に出る
+  [[ "$output" != *"想定外 exit"* ]]
 }
 
 @test "sc-1rq: 出荷物 bash/python 構文（両 deliverable）" {
