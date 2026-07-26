@@ -18,7 +18,9 @@ ultracode（multi-agent fan-out で網羅性・確信度・スケールを買う
 |---|---|---|
 | **規模（scale）** | 触る面積・サイト数・読む量（files / 探索空間の広さ） | **fan-out の幅**（finder 数 / `pipeline()` の item 数 / 探索 sweep の modality 数） |
 | **不確実性（uncertainty）** | 解空間の未知さ・false finding の出やすさ・「これで網羅したか」の自信のなさ | **検証の深さ**（single-vote → 3〜5 票 adversarial → perspective-diverse）+ **loop-until-dry** の収束回数 |
-| **リスク（risk）** | blast radius・不可逆性・outward 性（規約変更・全ホスト配布・外部公開） | **gate の厳しさ**（read-only gate・merge gate〔`protocol.md` §5.4 二段判定〕の確認閾値・refute 多数決の閾値・completeness critic） |
+| **リスク（risk）** | blast radius・不可逆性・outward 性（規約変更・全ホスト配布・外部公開） | **gate の厳しさ**（read-only gate・merge gate〔`protocol.md` §5.4 3 クラス判定〕の **AI gate 強度**〔人間確認は 3 クラス該当時のみ〕・refute 多数決の閾値・completeness critic） |
+
+> **リスク軸の読み方（orch-vhiu 2026-07-25 裁定）**: 規約変更・全ホスト配布は**人間承認トリガーからは外れた**（§5.4 で廃止）が、**AI gate 強化トリガーとしては残る**——リスクが高い案件は「人間に聞く」ではなく「**AI 敵対 gate を厚くする**」で受ける（人間確認は 3 クラス〔消す / 出す / 使う〕該当時のみ・分類の正本は `protocol.md` §5.4）。
 
 **運用ヒューリスティック**（Workflow tool 方法論 + un-8q5 pilot 実測の統合）:
 

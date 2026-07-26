@@ -416,7 +416,7 @@ footer b{color:var(--muted)}
     <div class="vflow" style="gap:10px">
       <div class="hrow" style="width:100%;justify-content:space-between;flex-wrap:nowrap"><span class="node" style="flex:1">規模<small>触る面積・読む量</small></span><span class="arrow" style="padding:0 14px">──▶</span><span class="node hot" style="flex:1">fan-out の幅<small>finder 数 / item 数 / 角度の数</small></span></div>
       <div class="hrow" style="width:100%;justify-content:space-between;flex-wrap:nowrap"><span class="node" style="flex:1">不確実性<small>解の未知さ・誤検出の出やすさ</small></span><span class="arrow" style="padding:0 14px">──▶</span><span class="node hot" style="flex:1">検証の深さ<small>1票 → 3〜5票 反証多数決 / loop 回数</small></span></div>
-      <div class="hrow" style="width:100%;justify-content:space-between;flex-wrap:nowrap"><span class="node" style="flex:1">リスク<small>不可逆性・外部公開・波及範囲</small></span><span class="arrow" style="padding:0 14px">──▶</span><span class="node hot" style="flex:1">gate の厳しさ<small>read-only 監査 / 人間確認の閾値</small></span></div>
+      <div class="hrow" style="width:100%;justify-content:space-between;flex-wrap:nowrap"><span class="node" style="flex:1">リスク<small>不可逆性・外部公開・波及範囲</small></span><span class="arrow" style="padding:0 14px">──▶</span><span class="node hot" style="flex:1">gate の厳しさ<small>read-only 監査 / AI gate 強度（人間確認は3クラス該当時のみ）</small></span></div>
     </div>
   </div>
   <div class="co r"><b>コスト実測（verified）:</b> 2026-06-10 のパイロットでは gate review 2回で 5時間レート枠を <b>53%→80%</b> まで消費（fable 投入起因の特殊コスト。これが後述「WF から fable 全廃」の根拠になった数値）。強度選び＝レート予算の配分そのもの。「ユーザーが要求した強度」が上限で、opt-in なしに勝手に盛らない。</div>
@@ -515,7 +515,7 @@ footer b{color:var(--muted)}
     <div class="hrow" style="gap:16px">
       <span class="node hot">cell-quality WF<small>findings + verdicts + history<br>+ receivedArgs を構造化 JSON で返す</small></span>
       <span class="arrow">──▶</span>
-      <span class="node ok">admin が直読・一次監査<small>refuted 判定すら鵜呑みにせず逆監査<br>merge と不可逆操作の人間確認のみ担う<br><b style="color:var(--cyan)">再レビューはしない</b></small></span>
+      <span class="node ok">admin が直読・一次監査<small>refuted 判定すら鵜呑みにせず逆監査<br>人間確認は3クラス（消す/出す/使う）該当時のみ<br><b style="color:var(--cyan)">再レビューはしない</b></small></span>
     </div>
   </div>
 
