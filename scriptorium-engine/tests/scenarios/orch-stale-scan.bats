@@ -404,9 +404,46 @@ run_reratify() {
     [[ "$line" == *"push はしない"* ]]
 }
 
+# (RR-BELL) の negative teeth（sc-ohik m0）: 🔔 マークが needs-user 併存 bead **にだけ** 載ることを pin する。
+#   RR-BELL は positive 側（bell 行に 🔔 がある）しか見ないため、`case ",$labels," in *,needs-user,*)` の guard を
+#   外して bell を無条件付与する mutant を素通しする＝marker の load-bearing 性が空虚だった。本 test は
+#   needs-user 非併存の死角クラス 7 件に 🔔 が無いこと + 🔔 行がちょうど 1 行であることを assert し、
+#   常時付与 mutant（7 件にも 🔔・🔔 行 8 行）を RED 化する。
+@test "(RR-BELL-NEG) needs-user 非併存の死角クラスには呼び鈴マークを付けない（bell 常時付与 mutant を RED 化）" {
+    run_reratify --re-ratify
+    local id line
+    for id in orch-rr-cour orch-rr-held orch-rr-seam orch-rr-fu orch-rr-coord orch-rr-defst orch-rr-courfor; do
+        line=$(printf '%s\n' "$output" | grep "\[RERATIFY\] $id ")
+        [ -n "$line" ]                                   # surface 済（grep 空振りで vacuous に green 化しない）
+        [[ "$line" != *"🔔"* ]]
+        [[ "$line" != *"呼び鈴対象"* ]]
+    done
+    # 🔔 は候補 8 件中ちょうど 1 行（orch-rr-bell のみ）＝常時付与 mutant は 8 行になり RED。
+    [ "$(printf '%s\n' "$output" | grep -c '🔔呼び鈴対象')" -eq 1 ]
+}
+
 @test "(RR-TITLE) title 冒頭を per-bead 行へ表示" {
     run_reratify --re-ratify
     [[ "$output" == *"配送後に長期 open な courier bead"* ]]
+}
+
+# age 降順 sort の teeth（sc-ohik m1）: 既定 RR_ROWS は死角クラスの created_at が全件同日（age 全件 19d）で、
+#   順序を pin する assert も無いため `sort -t'\t' -k1,1nr` を外しても全 test が green＝sort が空虚だった。
+#   本 test は入力を **age 昇順**（9d→19d→33d）に並べた専用 fixture（同一 courier group）で出力の age 降順を
+#   pin する。RED 化する mutant: (a) sort 除去（cut のみ→入力順 9/19/33 の昇順）(b) `-r` 落ち（昇順）
+#   (c) `-n` 落ち（lexical で "9" > "33" > "19"＝1 桁×2 桁を跨ぐ fixture ゆえ numeric 性も同時に pin）。
+@test "(RR-SORT) 同一 group 内は age 降順で print（入力が昇順でも並べ替わる＝sort 非空虚）" {
+    ORCH_STALE_SKIP_SESSION_GATE=1 ORCH_STALE_SCRIPTORIUM="$ANCHOR" ORCH_STALE_BD="$BIN/bd" \
+        ORCH_STALE_NOW="$NOW" STUB_ROWS="orch-rr-young|open|courier|2026-07-11T00:00:00Z
+orch-rr-mid|open|courier|2026-07-01T00:00:00Z
+orch-rr-old|open|courier|2026-06-17T00:00:00Z" \
+        run bash "$SCRIPT" --re-ratify
+    [ "$status" -eq 0 ]
+    local ids ages
+    ids=$(printf '%s\n' "$output" | grep -o 'orch-rr-[a-z]*' | tr '\n' ' ')
+    ages=$(printf '%s\n' "$output" | grep -o 'age=[0-9]*d' | tr '\n' ' ')
+    [ "$ids" = "orch-rr-old orch-rr-mid orch-rr-young " ]   # 入力順 young→mid→old の逆＝実際に並べ替わった
+    [ "$ages" = "age=33d age=19d age=9d " ]                 # 数値降順（lexical なら 9d,33d,19d）
 }
 
 @test "(RR-EXCL-LIVE) needs-grill/needs-orch/federate-publish/reconcile-published 併存は除外（二重 surface 禁止）" {
