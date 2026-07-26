@@ -22,6 +22,18 @@
 /cc-session/.beads/scribe-heartbeat
 /cc-session/.beads/scribe-push-throttle
 
+# bats の一時ディレクトリ(sandbox 迂回時に worktree 直下へ生成される・sc-gpzj)
+# runtime 生成物ゆえ commit しない。stage 混入を構造で封鎖する(実体が無いうちに置くのが要点)。
+.bats-tmp/
+
+# session 状態(Working Memory・compaction ログ)は machine-local な runtime 生成物(sc-gpzj)
+# 本 repo は PUBLIC ゆえ、`git add -A` 一回で WM(user 裁定の文面を含む)が公開面へ載る事故を
+# 構造で封鎖する。実測 2026-07-26: 未追跡かつ公開 remote 未露出の状態で先に塞ぐ。
+/.claude-session/
+
+# playwright MCP の runtime 生成物(スクショ・trace)。同上の理由で untracked を構造固定する。
+/.playwright-mcp/
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
