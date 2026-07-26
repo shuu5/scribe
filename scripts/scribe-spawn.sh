@@ -21,7 +21,8 @@
 #     - anchor（cwd）で `cld-spawn --model <consult 既定 opus[1m]> --env-file <SCRIBE_ROLE=consult> "<consult テンプレ本文>"`。
 #       consult テンプレは read-only 規律・記憶系のみ write・サマリ保存義務のみ（bdw/selftest/cell-quality を含まない）。
 #     - SCRIBE_ROLE=consult を --env-file で注入（C2 の role 判定が最優先で読む side）。env-file は
-#       **anchor working tree の外**（/tmp）に作り spawn 後に rm する＝anchor リポを汚さない（read-only 起動器の自浄）。
+#       **anchor working tree の外**（`$TMPDIR` 追随・既定 /tmp）に作り spawn 後に rm する＝anchor リポを汚さない
+#       （read-only 起動器の自浄）。CC sandbox は /tmp を read-only にするため $TMPDIR 追随が必須（sc-kvvk）。
 #     - model は既定 opus[1m]（role-context-spec §2.3。--model 明示が優先・worker は fable 厳禁）。
 #   bd id は consult では **任意の議題参照**（read-only な `bd show` のみ・worktree/branch には焼かない）。
 #
@@ -314,6 +315,38 @@ emit_config_dir_envline() {
   else
     printf 'unset CLAUDE_CONFIG_DIR\n'
   fi
+}
+
+# --- env-file の置き場（tmpdir）解決（sc-kvvk）---
+# worker/consult の env-file は **anchor / worktree の working tree の外**へ作る（read-only 契約の起動器が
+# anchor リポを汚さない自浄・誤コミット経路の封鎖）。旧実装はこれを絶対 `/tmp` テンプレートの mktemp で
+# 実現していたが、CC sandbox（既定 on）は **/tmp を read-only にし $TMPDIR を session temp へ向ける**ため、
+# sandbox 下の worker cell では mktemp が必ず die し、tests/scribe-tools.bats の実起動系が env 要因で恒常
+# RED 化した（cell が「自分の退行か環境か」を切り分けられず偽 BLOCKED / teeth 緩和の双方へ誘導される。
+# sc-u8mu / sc-pegi の mandate-verify が独立に検出）。→ $TMPDIR に追随する。
+# ただし「anchor 外」の不変は文字列でなく **構造** で守る: 解決先が禁止 root（anchor / repo / worktree）の
+# 配下なら採用せず /tmp へ落とす（TMPDIR が anchor 内を指す環境で anchor を汚す fail-open の封鎖。単純な
+# `${TMPDIR:-/tmp}` 置換だけでは置き場が caller 制御になり、この設計契約が無牙になる）。
+# 包含判定は readlink -f で正準化してから行う（`..` / symlink 経由の迂回を塞ぐ）が、**返す値は生の $TMPDIR**
+# （正準化した値を返すと symlink された /tmp を持つ環境〔macOS/一部 CI〕で表示パスと実 mktemp が乖離する
+# ＝cleanup un-c4s と同型の配慮）。縮退（禁止 root ヒット）は silent にせず stderr へ loud warn する。
+# 引数 = 禁止 root（可変長・空要素は無視）。stdout に採用 dir（末尾スラッシュ無し）を返す。
+resolve_env_tmpdir() {
+  local d="${TMPDIR:-/tmp}" dc root rc
+  d="${d%/}"; [[ -n "$d" ]] || d="/tmp"
+  dc="$(readlink -f "$d" 2>/dev/null || true)"; [[ -n "$dc" ]] || dc="$d"
+  for root in "$@"; do
+    [[ -n "$root" ]] || continue
+    root="${root%/}"
+    [[ -n "$root" ]] || continue          # root="/" 等の退化指定は判定対象外（fallback も配下になり無意味）
+    rc="$(readlink -f "$root" 2>/dev/null || true)"; [[ -n "$rc" ]] || rc="$root"
+    if [[ "$dc" == "$rc" || "$dc" == "$rc"/* ]]; then
+      echo "scribe-spawn: warn: \$TMPDIR ($d) が working tree ($root) の配下です → env-file は /tmp へ落とします（anchor 汚染防止の設計契約・sc-kvvk）" >&2
+      printf '/tmp\n'
+      return 0
+    fi
+  done
+  printf '%s\n' "$d"
 }
 
 # dry-run 用: 注入する CLAUDE_CONFIG_DIR 行の人間可読サマリ（worker/consult 共有・監査可視化）。
@@ -669,10 +702,13 @@ PROMPT
     fi
   }
 
-  # env-file は **anchor working tree の外**（/tmp 配下）に作る。anchor は admin の cwd で
+  # env-file は **anchor working tree の外**（$TMPDIR 配下・既定 /tmp）に作る。anchor は admin の cwd で
   # あり、そこに artifact を残すと anchor リポを汚し誤コミット経路になる（道具自身が read-only 契約の
   # 起動器なのに anchor を汚す非対称を避ける）。cld-spawn は env-file を launcher へ source 済みなので
   # spawn 後に rm して消える＝anchor に何も残さない。dry-run は実ファイルを作らずパスだけ案内する。
+  # 置き場は resolve_env_tmpdir が解決する（$TMPDIR 追随＝sandbox の read-only /tmp で die しない・
+  # かつ anchor 配下なら /tmp へ落として汚染契約を構造で守る・sc-kvvk）。dry-run と実経路が同じ 1 変数を
+  # 読む（片方だけの契約ドリフトを作らない＝config-dir / SANDBOX_ON と同じ DRY 規律）。
   ENV_LINE="export SCRIBE_ROLE=consult"
   # consult は --bd-id を渡さない設計のため、放置すると cld-spawn の window 名が汎用命名（git 状態由来の
   # wt-<repo>-<branch>-…）へ落ち、fleet-monitor/人間が consult を判別できない（admin C5 live finding・un-01h）。
@@ -692,6 +728,7 @@ PROMPT
   else
     CONSULT_WINDOW="consult-$(date +%H%M%S)"   # plain consult: id 無し→時刻フォールバック
   fi
+  ENV_TMPDIR="$(resolve_env_tmpdir "$ANCHOR")"   # sc-kvvk: dry-run/実経路が共有する単一解決値
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     if [[ -n "$CONTEXT_FILE" ]]; then
@@ -703,8 +740,8 @@ PROMPT
     fi
     config_dir_plan_line
     [[ "$AUTO" -eq 1 ]] && account_select_plan
-    echo "[plan] env-file（anchor 外＝anchor リポを汚さない・spawn 後 rm）:"
-    echo "         ENV_FILE=\$(mktemp /tmp/scribe-consult-XXXXXX.env)"
+    echo "[plan] env-file（anchor 外＝anchor リポを汚さない・\$TMPDIR 追随（sandbox の read-only /tmp 回避・sc-kvvk）・spawn 後 rm）:"
+    echo "         ENV_FILE=\$(mktemp $ENV_TMPDIR/scribe-consult-XXXXXX.env)"
     echo "         printf '%s\\n' '$ENV_LINE' > \"\$ENV_FILE\""
     echo "         $(emit_config_dir_envline) >> \"\$ENV_FILE\"   # sc-rvq config-dir 追随（源=$WCFG_SOURCE）"
     echo "[plan] $CLD_SPAWN --cd $ANCHOR --model $MODEL --window-name $CONSULT_WINDOW --force-new --env-file \"\$ENV_FILE\" \"<consult テンプレ本文>\""
@@ -721,8 +758,9 @@ PROMPT
   # tmux env 剥ぎで既定 ~/.claude へ落ちる非対称は worker と同じ（consult は chain-source 無しゆえ余計に落ちる）。
   # 注入予定 config dir が set なら preflight で欠落を fail-loud にしてから起動する。
   preflight_config_dir
-  ENV_FILE="$(mktemp /tmp/scribe-consult-XXXXXX.env)" || scribe_die "env-file の作成に失敗しました（mktemp）"
-  trap 'rm -f "$ENV_FILE"' EXIT   # 異常終了でも /tmp に残さない
+  ENV_FILE="$(mktemp "$ENV_TMPDIR/scribe-consult-XXXXXX.env")" \
+    || scribe_die "env-file の作成に失敗しました（mktemp・置き場=$ENV_TMPDIR。書込不可なら \$TMPDIR を書込可能な dir へ向けてください・sc-kvvk）"
+  trap 'rm -f "$ENV_FILE"' EXIT   # 異常終了でも tmpdir に残さない
   printf '%s\n' "$ENV_LINE" > "$ENV_FILE"
   # sc-rvq: consult 分岐の env-file にも同じ config-dir 追随を注入（item2）。SCRIBE_ROLE 行の後に置く。
   emit_config_dir_envline >> "$ENV_FILE"
@@ -806,6 +844,11 @@ SCRIBE_ANCHOR="$ANCHOR" scribe_bd_id_exists "$ID" \
 BRANCH="$(scribe_branch_name "$ID")"            # spawn/<id>-HHMMSS
 WINDOW="$(scribe_window_name "$ID")"            # wt-<id>
 WORKTREE="$REPO/.worktrees/$BRANCH"             # <repo>/.worktrees/spawn/<id>-HHMMSS
+
+# worker env-file の置き場（sc-kvvk）: $TMPDIR 追随。禁止 root は anchor / repo / worktree の 3 者
+# （cross-repo では anchor≠repo ゆえ両方を渡す。worktree は repo 配下だが冗長に渡して意図を明示する）。
+# 解決はここで **一度だけ**行い、emit_plan（dry-run 可視化）と実 mktemp が同じ値を読む（DRY・契約ドリフト防止）。
+ENV_TMPDIR="$(resolve_env_tmpdir "$ANCHOR" "$REPO" "$WORKTREE")"
 
 # --- sandbox は既定 on（opt-out 化・sc-u53）---
 # 旧仕様（default off・SCRIBE_SANDBOX=1 で opt-in）から反転。worker を OS sandbox に**既定で**封じる。
@@ -994,8 +1037,8 @@ emit_plan() {
   # sandbox 節を出さない不変条件を pin する既存テストを壊さないため・そちらは別行で on 経路のみ照合している）。
   [[ "$SANDBOX_OPTOUT" == "1" ]] && echo "[plan] sandbox: OPT-OUT（SCRIBE_SANDBOX=0）→ この worker は OS sandbox の**外**で走ります（sandbox 設定を生成せず旧 byte 経路・Bash subprocess の書込みが worktree 外へ到達しうる）。⚠ SCRIBE_SANDBOX=0 は env 継承で sticky 化し、意図せず以降の全 spawn を無防備化しうる（1 回限りの opt-out でなければ環境から unset すること）。"
   echo "[plan] scribe_capture_origin $REPO $WORKTREE   # canonical origin を per-worktree marker へ捕捉（un-1n1・gate §5 verify 用）"
-  echo "[plan] worker env-file（/tmp・全 worker 無条件・worktree add より前に mktemp・spawn 後 rm。edit-write-guard の activation+境界 signal・sc-649）:"
-  echo "         WORKER_ENV_FILE=\$(mktemp /tmp/scribe-worker-XXXXXX.env)"
+  echo "[plan] worker env-file（$ENV_TMPDIR＝anchor/worktree 外・\$TMPDIR 追随（sandbox の read-only /tmp 回避・sc-kvvk）・全 worker 無条件・worktree add より前に mktemp・spawn 後 rm。edit-write-guard の activation+境界 signal・sc-649）:"
+  echo "         WORKER_ENV_FILE=\$(mktemp $ENV_TMPDIR/scribe-worker-XXXXXX.env)"
   echo "         { source '${CLD_ENV_FILE:-\$HOME/.cld-env}' ...（ホスト既定 env を chain-source＝認証/秘密を保つ・gate round4）; export SCRIBE_WORKER=1; export SCRIBE_WORKTREE=%q（$WORKTREE・%q=source-safe）; export CLAUDE_CODE_EFFORT_LEVEL=%q（$EFFORT・CC 正規名・後勝ち・sc-dc9）; $(emit_config_dir_envline)（sc-rvq config-dir 追随・chain-source 後勝ち・源=$WCFG_SOURCE） } > \"\$WORKER_ENV_FILE\""
   # sc-dc9: worker の実効 effort は CC 正規名 CLAUDE_CODE_EFFORT_LEVEL を env-file へ後勝ち注入する（settings.json の
   # xhigh 無差別波及を止める）。cld-spawn への --effort flag passthrough は feature-detect（--help に実在時のみ・un-ivb 防御）。
@@ -1215,10 +1258,12 @@ fi
 # `<worktree>/.git` を非再帰 rm して境界を anchor へ広げられる＝gate round2 の boundary escalation を排除）。
 # **sandbox on/off に依らず全 worker へ無条件注入**（opt-out でも Edit/Write は worktree に縛る＝host 依存ゼロの
 # path guard・かつ opt-out と既定の spawn 行は等しく --env-file を持ち byte 不変）。env-file は anchor/worktree を
-# 汚さない /tmp に作り spawn 後 rm（cld-spawn が wait-ready 後に返る＝launcher が source 済みゆえ安全・consult と
-# 同式）。**`git worktree add` より前**に mktemp する＝mktemp 失敗で orphan worktree を作らない（gate round2 minor）。
-WORKER_ENV_FILE="$(mktemp /tmp/scribe-worker-XXXXXX.env)" || scribe_die "worker env-file の作成に失敗しました（mktemp）"
-trap 'rm -f "$WORKER_ENV_FILE"' EXIT   # 異常終了でも /tmp に残さない
+# 汚さない $ENV_TMPDIR（$TMPDIR 追随・既定 /tmp・resolve_env_tmpdir が anchor 配下を弾く・sc-kvvk）に作り spawn 後
+# rm（cld-spawn が wait-ready 後に返る＝launcher が source 済みゆえ安全・consult と同式）。
+# **`git worktree add` より前**に mktemp する＝mktemp 失敗で orphan worktree を作らない（gate round2 minor）。
+WORKER_ENV_FILE="$(mktemp "$ENV_TMPDIR/scribe-worker-XXXXXX.env")" \
+  || scribe_die "worker env-file の作成に失敗しました（mktemp・置き場=$ENV_TMPDIR。書込不可なら \$TMPDIR を書込可能な dir へ向けてください・sc-kvvk）"
+trap 'rm -f "$WORKER_ENV_FILE"' EXIT   # 異常終了でも tmpdir に残さない
 # cld-spawn は env-file を **shell source** する（dotenv parse でない）ため、パス値は %q で source-safe に
 # エスケープする（空白/メタ文字入り worktree パスでの語分割による境界破壊・$()/backtick の source-time
 # インジェクションを防ぐ・gate round3）。%q は source 時に原値へ復元される。

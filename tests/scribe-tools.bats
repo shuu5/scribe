@@ -584,6 +584,85 @@ _mk_beads() {
   [[ "$output" == *"--also-tmp"* ]]
 }
 
+# ---------- sc-kvvk: scribe-spawn 自身の env-file も $TMPDIR 追随（sandbox read-only /tmp 互換の第3面）----------
+# sc-3lj は (A) bats 側の一時ファイルと (B) env-probe の --also-tmp を TMPDIR 互換にしたが、**道具本体**
+# （scribe-spawn の worker/consult env-file）は絶対 `/tmp` テンプレートの mktemp のままだった。sandbox 下の
+# worker cell では /tmp が read-only ゆえ実起動系テストが env 要因で恒常 RED 化し（実測 16 本）、cell が
+# 「自分の退行か環境か」を切り分けられず偽 BLOCKED / teeth 緩和の双方へ誘導された（sc-u8mu / sc-pegi）。
+# ただし単純な `${TMPDIR:-/tmp}` 置換は置き場を caller 制御にし「env-file は anchor working tree 外」という
+# 既存の設計契約（anchor リポ汚染＝誤コミット経路の封鎖）を無牙にする → 構造ガード付きで追随させ、両者を pin する。
+@test "spawn(sc-kvvk): env-file の mktemp は \$TMPDIR に追随する（consult/worker 両経路・sandbox の read-only /tmp で die しない）" {
+  local td="$BATS_TEST_TMPDIR/envtmp"; mkdir -p "$td"
+  run env TMPDIR="$td" "$SPAWN" --dry-run --consult un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mktemp $td/scribe-consult-XXXXXX.env"* ]]
+  [[ "$output" != *"mktemp /tmp/scribe-consult-"* ]]      # 絶対 /tmp 直書きへの回帰を refute（弁別可能な negative）
+  run env TMPDIR="$td" "$SPAWN" --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mktemp $td/scribe-worker-XXXXXX.env"* ]]
+  [[ "$output" != *"mktemp /tmp/scribe-worker-"* ]]
+}
+
+@test "spawn(sc-kvvk): \$TMPDIR が working tree 配下を指しても env-file は外へ落ちる（TMPDIR 追随が anchor 汚染契約を無牙にしない）" {
+  # consult 面: anchor 配下の TMPDIR は採用せず /tmp へ落とし、縮退を silent にせず loud warn する。
+  local td="$SCRIBE_TEST_CWD/inside-anchor"; mkdir -p "$td"
+  run env TMPDIR="$td" "$SPAWN" --dry-run --consult --anchor "$SCRIBE_TEST_CWD" un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"mktemp $td/"* ]]                       # anchor 配下は採用しない（汚染 fail-open の封鎖）
+  [[ "$output" == *"mktemp /tmp/scribe-consult-"* ]]       # 旧挙動（/tmp）へ fail-safe
+  [[ "$output" == *"が working tree"*"の配下です"* ]]      # 縮退は loud（silent degrade を作らない）
+  # worker 面: repo 配下の TMPDIR も同様に弾く。
+  local wd="$SCRIBE_TEST_CWD/inside-repo"; mkdir -p "$wd"
+  run env TMPDIR="$wd" "$SPAWN" --dry-run --repo "$SCRIBE_TEST_CWD" --anchor "$SCRIBE_TEST_CWD" un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"mktemp $wd/"* ]]
+  [[ "$output" == *"mktemp /tmp/scribe-worker-"* ]]
+}
+
+@test "spawn(sc-kvvk): 禁止 root の包含判定は正準化して行う（symlink / \`..\` 迂回で anchor 汚染へ fail-open しない）" {
+  # 直上の禁止 root test は anchor 直下の**実ディレクトリ**しか与えないため、resolve_env_tmpdir から
+  # readlink -f（dc/rc の正準化）を外して素の文字列 prefix 比較へ退行させても素通りする＝構造ガードの
+  # 核心（迂回綴りの封鎖）に teeth が無かった。ここでは **テキストとしては anchor 前置でないのに実体は
+  # anchor 配下** を指す 2 綴りを与える。mutation 実測: dc/rc の readlink -f を除去すると本 test の
+  # negative assert が両ケースとも落ちる（guard を素通りし anchor 配下へ env-file を置く計画が出る）。
+  mkdir -p "$SCRIBE_TEST_CWD/inside-anchor"
+
+  # (1) symlink 面: anchor 自身への symlink を経由して、その配下を指す。
+  ln -s "$SCRIBE_TEST_CWD" "$BATS_TEST_TMPDIR/anchor-lnk"
+  local td="$BATS_TEST_TMPDIR/anchor-lnk/inside-anchor"
+  run env TMPDIR="$td" "$SPAWN" --dry-run --consult --anchor "$SCRIBE_TEST_CWD" un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"mktemp $td/"* ]]                       # symlink 迂回でも anchor 配下は採用しない
+  [[ "$output" == *"mktemp /tmp/scribe-consult-"* ]]       # /tmp へ fail-safe
+  [[ "$output" == *"が working tree"*"の配下です"* ]]      # 縮退は loud
+
+  # (2) `..` 面: 親へ出て同名で降り直す綴り（anchor を前置に持たないが実体は anchor 配下）。
+  #     $SCRIBE_TEST_CWD は setup が pwd -P 済み＝全成分が実在ディレクトリゆえ readlink -f が必ず解決する。
+  local ap="${SCRIBE_TEST_CWD%/*}"
+  [ -n "$ap" ]                                             # 親が空（anchor が top-level）なら綴りが成立しない
+  local td2="$ap/../${ap##*/}/${SCRIBE_TEST_CWD##*/}/inside-anchor"
+  run env TMPDIR="$td2" "$SPAWN" --dry-run --repo "$SCRIBE_TEST_CWD" --anchor "$SCRIBE_TEST_CWD" un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"mktemp $td2/"* ]]                      # `..` 迂回でも repo/anchor 配下は採用しない
+  [[ "$output" == *"mktemp /tmp/scribe-worker-"* ]]
+  [[ "$output" == *"が working tree"*"の配下です"* ]]
+}
+
+@test "spawn(sc-kvvk): scripts/ に sandbox で die する絶対 /tmp の mktemp テンプレートが残っていない（再導入の回帰ガード）" {
+  # sc-3lj の同型ガード（bats 面）を **道具本体**へ広げる。scripts/ 配下を実 file grep し、$TMPDIR を無視する
+  # 絶対 /tmp テンプレートの再導入を封じる（本ガードは tests/ 側ゆえ自己マッチしない）。`! grep` でなく
+  # run + 空文字 assert で書く（中間位置の `!` は errexit 免除で無牙になる・sc-3lj と同規律）。
+  run bash -c 'grep -rnE "[$][(]mktemp [^)]*/tmp/" "$1"' _ "$SCRIPTS"   # GUARD-SELF-SENTINEL
+  [ "$output" = "" ]
+  # 置換が実際に入った証跡（正の確認）: 解決器が在り、両経路がその 1 変数を読む。
+  run grep -Fq -- 'resolve_env_tmpdir()' "$SPAWN"
+  [ "$status" -eq 0 ]
+  run grep -Fq -- 'mktemp "$ENV_TMPDIR/scribe-consult-XXXXXX.env"' "$SPAWN"
+  [ "$status" -eq 0 ]
+  run grep -Fq -- 'mktemp "$ENV_TMPDIR/scribe-worker-XXXXXX.env"' "$SPAWN"
+  [ "$status" -eq 0 ]
+}
+
 # ---------- zombie fallback の pane 可視 sentinel（sc-c7c・folio-nufl・dogfood 済）----------
 # 全ツール死（Bash/Read が空応答＝bdw で STATUS: blocked を書けない zombie 変種・protocol §6 第 3 変種）では
 # admin 検知網 3 信号（gate-pending / STATUS notes / 窓消失）が全て沈黙する。folio-nufl 実測で turn の
@@ -697,11 +776,18 @@ _mk_beads() {
   [[ "$output" == *"--env-file"* ]]
 }
 
-@test "spawn: consult の env-file は anchor working tree 外（/tmp・mktemp）で anchor リポを汚さない" {
+@test "spawn: consult の env-file は anchor working tree 外（mktemp・\$TMPDIR 追随）で anchor リポを汚さない" {
   # 実在する anchor（repo root）を明示し、その配下に .scribe-consult.env を作る計画が出ないことを assert。
+  # 置き場は sc-kvvk で $TMPDIR 追随になったため literal "/tmp" では pin できない（それは env の偶然に過ぎない）。
+  # 本 test が守るべき不変は「anchor working tree の**外**」＝これを構造で assert する（契約は緩めず、
+  # 過剰特定だけを外す）。$TMPDIR 追随そのものの teeth は sc-kvvk の 3 本が別に持つ。
   run "$SPAWN" --dry-run --consult --anchor "$REPO_ROOT" un-consult
   [ "$status" -eq 0 ]
-  [[ "$output" == *"mktemp /tmp/scribe-consult-"* ]]
+  local envline
+  envline="$(grep -F 'scribe-consult-' <<< "$output" | grep -F 'mktemp' | head -n1 || true)"
+  [ -n "$envline" ]                                    # env-file を mktemp で作る計画が在る
+  [[ "$envline" == *"/scribe-consult-XXXXXX.env"* ]]   # 一時ファイル名テンプレは不変
+  [[ "$envline" != *"$REPO_ROOT/"* ]]                  # ★不変: anchor working tree の配下に置かない
   # anchor 直下の .scribe-consult.env を生成する計画は出してはならない（anchor リポ汚染防御）。
   [[ "$output" != *"$REPO_ROOT/.scribe-consult.env"* ]]
   [[ "$output" != *".scribe-consult.env"* ]]
@@ -1158,12 +1244,10 @@ _mk_valid_cfgdir() {
 }
 
 @test "spawn(sc-rvq): 完全な config dir → preflight 通過し real spawn 成功（noop stub・非 sandbox）" {
-  # real-path 完遂テストは WORKER_ENV_FILE を /tmp へ mktemp する（scribe-spawn 設計）。CC worker sandbox 下では
-  # /tmp が read-only で mktemp が die するため（既存 25/33/40 と同じ env 制約）、/tmp 書込不可なら skip する
-  # （正常 env=gate では緑・worker sandbox 自己点検では false-RED にしない）。
-  local _t="/tmp/.scribe-rvq-wtest.$$"
-  : > "$_t" 2>/dev/null || skip "/tmp が read-only（worker sandbox）— real-path spawn の mktemp が非実行可"
-  rm -f "$_t"
+  # 旧注記（sc-3lj 期）: 本 test は WORKER_ENV_FILE を絶対 /tmp へ mktemp する設計ゆえ read-only /tmp の worker
+  # sandbox では die する → /tmp 書込不可なら skip、としていた。sc-kvvk で env-file が $TMPDIR 追随になり
+  # sandbox 下でも実行可能になったため **その env 条件付き skip を撤去**する（skip は環境で teeth が黙って
+  # 消える＝偽 green の温床。この real-path 完遂 test は sandbox 下の cell でも走らせる）。
   local repo cfg noop wt
   repo="$SCRIBE_TEST_CWD"
   cfg="$(_mk_valid_cfgdir)"
@@ -4179,9 +4263,10 @@ cmd=m[0]['hooks'][0]['command']; assert 'edit-write-guard.py' in cmd, 'guard 未
 # SCRIBE_CLD_SPAWN へ渡し、**行完全一致**（grep -Fxq）で新既定を pin する。dry-run 側 teeth は plan 行に
 # anchor path と時刻由来 window 名が混ざるため行完全一致が原理的に不可能で、隣接語込み literal が上限。
 # 既存 noop stub は多数テストの共有資産ゆえ書き換えず、本 stub を別に足す。
-# 注（CELL-ENV）: consult 実起動路は env-file を `mktemp /tmp/...` の絶対テンプレートで作り TMPDIR を
-# 無視するため、/tmp が read-only な CC worker sandbox 下では本 test は **環境 RED** になる（実装退行では
-# ない）。green 確認は anchor / gate 側で行う。
+# 注（CELL-ENV・sc-kvvk で解消）: かつて consult 実起動路は env-file を絶対 `/tmp` テンプレートで作り TMPDIR を
+# 無視したため、/tmp が read-only な CC worker sandbox 下では本 test 群が **環境 RED**（実装退行でない偽 RED）に
+# なり「green 確認は anchor / gate 側で」という運用回避を強いていた。sc-kvvk で env-file が $TMPDIR 追随に
+# なり、cell 内でもそのまま緑になる（この注記は歴史として残す＝回避運用へ巻き戻さないため）。
 _make_argvdump_cld_spawn() { # $1=dump file
   local stub="$BATS_TEST_TMPDIR/argvdump-cld-spawn"
   printf '#!/usr/bin/env bash\nfor a in "$@"; do printf "%%s\\n" "$a" >> "%s"; done\nexit 0\n' "$1" > "$stub"
@@ -4203,6 +4288,50 @@ _make_argvdump_cld_spawn() { # $1=dump file
   [ "$status" -ne 0 ]
   run grep -Fxq -- 'claude-fable-5' "$dump"
   [ "$status" -ne 0 ]
+}
+
+@test "spawn(sc-kvvk): consult 実起動の env-file 実パスが \$TMPDIR 配下（dry-run mirror でなく実 argv で pin）" {
+  # dry-run の plan 行は「実経路がそう振る舞う」ことの mirror に過ぎない。実 spawn の argv を捕捉し、
+  # cld-spawn へ渡る --env-file の実パスが $TMPDIR 配下（＝絶対 /tmp 直書きでない）ことを実行路で pin する。
+  local dump stub td ef
+  dump="$BATS_TEST_TMPDIR/argv-envtmp.dump"; : > "$dump"
+  stub="$(_make_argvdump_cld_spawn "$dump")"
+  td="$BATS_TEST_TMPDIR/envtmp-real"; mkdir -p "$td"
+  run env TMPDIR="$td" SCRIBE_CLD_SPAWN="$stub" "$SPAWN" --consult un-consult
+  [ "$status" -eq 0 ]
+  ef="$(grep -F '/scribe-consult-' "$dump" | head -n1 || true)"
+  [ -n "$ef" ]                                  # --env-file の実パスが argv に在る
+  [[ "$ef" == "$td/scribe-consult-"*".env" ]]   # $TMPDIR 配下（絶対 /tmp でない）
+  # spawn 後に消える（anchor/外部に artifact を残さない・trap+rm の実挙動）。
+  [ ! -e "$ef" ]
+}
+
+@test "spawn(sc-kvvk): worker 実起動の env-file 実パスが \$TMPDIR 配下（consult と対称の実 argv pin・本 fix の主消費者）" {
+  # 直上の consult 面と同じ modality を **worker 経路**にも置く（非対称を残さない）。worker は本 fix の主消費者
+  # （全 worker spawn が env-file を通る）なのに、env 非依存の teeth は dry-run plan 行と literal grep しか無かった。
+  # mutation 実測（本 test 追加前）: worker の mktemp 直前へ `ENV_TMPDIR=/tmp` を挿し **plan 行はそのまま・実経路だけ
+  # /tmp へ乖離**させても sc-kvvk 5 本は全て素通りし、落ちるのは /tmp が read-only な sandbox 下でしか RED に
+  # ならない実起動系だけだった＝anchor / gate host（/tmp writable）では黙って通る穴。本 test はその乖離を
+  # **環境非依存に**落とす（$TMPDIR 配下の完全一致ゆえ /tmp 直書きは prefix が合わない）。
+  # 実 spawn 雛形は sc-rvq real-path test と同型（BEADS_BDW present stub + SCRIBE_SANDBOX=0 + 決定論 HHMMSS）。
+  local dump stub repo td wt ef
+  dump="$BATS_TEST_TMPDIR/argv-envtmp-worker.dump"; : > "$dump"
+  stub="$(_make_argvdump_cld_spawn "$dump")"
+  repo="$SCRIBE_TEST_CWD"
+  td="$BATS_TEST_TMPDIR/envtmp-real-worker"; mkdir -p "$td"
+  wt="$repo/.worktrees/spawn/un-4nm-101010"
+  run env TMPDIR="$td" BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$stub" SCRIBE_HHMMSS=101010 \
+      "$SPAWN" --repo "$repo" --anchor "$repo" un-4nm
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || true   # 実 worktree を作る経路ゆえ後始末（assert より先）
+  [ "$status" -eq 0 ]
+  # --env-file の **直後の argv** を取る（値レベルの pin。stub は 1 引数 1 行で dump する）。
+  run grep -Fxq -- '--env-file' "$dump"
+  [ "$status" -eq 0 ]
+  ef="$(grep -A1 -Fx -- '--env-file' "$dump" | tail -n1)"
+  [ -n "$ef" ]                                 # --env-file の実パスが argv に在る
+  [[ "$ef" == "$td/scribe-worker-"*".env" ]]   # $TMPDIR 配下（絶対 /tmp 直書きでない）
+  # spawn 後に消える（worktree/外部に artifact を残さない・trap+rm の実挙動）。
+  [ ! -e "$ef" ]
 }
 
 # ---------- sc-pegi: docs teeth（改訂前は docs の model 記述を pin する assert が repo に 1 本も無く空虚だった） ----------
