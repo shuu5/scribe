@@ -330,21 +330,32 @@ emit_config_dir_envline() {
 # 包含判定は readlink -f で正準化してから行う（`..` / symlink 経由の迂回を塞ぐ）が、**返す値は生の $TMPDIR**
 # （正準化した値を返すと symlink された /tmp を持つ環境〔macOS/一部 CI〕で表示パスと実 mktemp が乖離する
 # ＝cleanup un-c4s と同型の配慮）。縮退（禁止 root ヒット）は silent にせず stderr へ loud warn する。
+# 禁止 root は渡された **ディレクトリ**に留めず、**それが属する git working tree の根**まで広げる: 契約文言は
+# 「anchor **working tree** の外」であり、ANCHOR 既定は cwd ゆえ `cd <repo>/sub && scribe-spawn` という現実的な
+# 操作だけで anchor が tree の根でなくなる。dir 比較のみだと同 tree の別 sub-dir を指す $TMPDIR が素通りし、
+# git 管理下（`git add -A` が拾う untracked 経路）へ env-file が落ちる——旧実装の絶対 /tmp には構造上無かった
+# fail-open ゆえ、$TMPDIR 追随と同時に閉じる。非 git dir / git 不在では toplevel は空文字＝無視され、
+# 「anchor が非 repo なら tree 全体を禁止しない」既存挙動のまま退化する（過剰に /tmp へ落として sandbox 下の
+# die を招かない）。anchor=repo 根という主経路では toplevel==anchor で挙動不変。
 # 引数 = 禁止 root（可変長・空要素は無視）。stdout に採用 dir（末尾スラッシュ無し）を返す。
 resolve_env_tmpdir() {
-  local d="${TMPDIR:-/tmp}" dc root rc
+  local d="${TMPDIR:-/tmp}" dc root cand cc
   d="${d%/}"; [[ -n "$d" ]] || d="/tmp"
   dc="$(readlink -f "$d" 2>/dev/null || true)"; [[ -n "$dc" ]] || dc="$d"
   for root in "$@"; do
     [[ -n "$root" ]] || continue
-    root="${root%/}"
-    [[ -n "$root" ]] || continue          # root="/" 等の退化指定は判定対象外（fallback も配下になり無意味）
-    rc="$(readlink -f "$root" 2>/dev/null || true)"; [[ -n "$rc" ]] || rc="$root"
-    if [[ "$dc" == "$rc" || "$dc" == "$rc"/* ]]; then
-      echo "scribe-spawn: warn: \$TMPDIR ($d) が working tree ($root) の配下です → env-file は /tmp へ落とします（anchor 汚染防止の設計契約・sc-kvvk）" >&2
-      printf '/tmp\n'
-      return 0
-    fi
+    # 禁止候補 = そのディレクトリ自身 + それが属する git working tree の根（非 git は空＝無視）。
+    # scribe_git は GIT_DIR/GIT_WORK_TREE を落として叩く（admin 側 env の漏れ込みで誤判定しない）。
+    for cand in "$root" "$(scribe_git -C "$root" rev-parse --show-toplevel 2>/dev/null || true)"; do
+      cand="${cand%/}"
+      [[ -n "$cand" ]] || continue        # root="/" 等の退化指定も除外（fallback も配下になり判定が無意味）
+      cc="$(readlink -f "$cand" 2>/dev/null || true)"; [[ -n "$cc" ]] || cc="$cand"
+      if [[ "$dc" == "$cc" || "$dc" == "$cc"/* ]]; then
+        echo "scribe-spawn: warn: \$TMPDIR ($d) が working tree ($cand) の配下です → env-file は /tmp へ落とします（anchor 汚染防止の設計契約・sc-kvvk）" >&2
+        printf '/tmp\n'
+        return 0
+      fi
+    done
   done
   printf '%s\n' "$d"
 }

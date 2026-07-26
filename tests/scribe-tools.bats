@@ -648,6 +648,34 @@ _mk_beads() {
   [[ "$output" == *"が working tree"*"の配下です"* ]]
 }
 
+@test "spawn(sc-kvvk): 禁止 root は属する git working tree の根まで広げる（anchor が repo の sub-dir でも tree 内へ落ちない）" {
+  # ANCHOR 既定は cwd ゆえ `cd <repo>/sub && scribe-spawn` という現実的操作だけで anchor が tree の根でなくなる。
+  # 禁止判定が「渡された dir の配下か」だけだと、同 tree の別 sub-dir を指す $TMPDIR が素通りし env-file が
+  # git 管理下（git add -A が拾う untracked 経路）へ落ちる。旧実装（絶対 /tmp）には構造上無かった fail-open で、
+  # bd acceptance の文言も「anchor **working tree** 外」＝dir でなく tree が契約の単位。
+  # mutation: resolve_env_tmpdir の toplevel 展開（cand ループの rev-parse --show-toplevel）を外すと本 test が RED。
+  local sub="$SCRIBE_TEST_CWD/sub" other="$SCRIBE_TEST_CWD/other"
+  mkdir -p "$sub" "$other"
+  # (1) consult: anchor=repo の sub-dir。同 tree の別 sub-dir を指す TMPDIR は採用しない。
+  run env TMPDIR="$other" "$SPAWN" --dry-run --consult --anchor "$sub" un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"mktemp $other/"* ]]
+  [[ "$output" == *"mktemp /tmp/scribe-consult-"* ]]
+  [[ "$output" == *"が working tree"*"の配下です"* ]]
+  # (2) worker: repo/anchor とも sub-dir でも同様（cross-repo の同型ギャップも同じ経路で閉じる）。
+  run env TMPDIR="$other" "$SPAWN" --dry-run --repo "$sub" --anchor "$sub" un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"mktemp $other/"* ]]
+  [[ "$output" == *"mktemp /tmp/scribe-worker-"* ]]
+  # (3) 過剰締め付けの refute: 非 git な anchor では tree 展開が空＝その兄弟 dir は従来どおり採用される
+  #     （全部 /tmp へ落とすと sandbox 下の read-only /tmp で die し、本 fix の目的そのものを潰すため）。
+  local ng="$BATS_TEST_TMPDIR/nongit" ngsib="$BATS_TEST_TMPDIR/nongit-sib"
+  mkdir -p "$ng" "$ngsib"
+  run env TMPDIR="$ngsib" "$SPAWN" --dry-run --consult --anchor "$ng" un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mktemp $ngsib/scribe-consult-"* ]]
+}
+
 @test "spawn(sc-kvvk): scripts/ に sandbox で die する絶対 /tmp の mktemp テンプレートが残っていない（再導入の回帰ガード）" {
   # sc-3lj の同型ガード（bats 面）を **道具本体**へ広げる。scripts/ 配下を実 file grep し、$TMPDIR を無視する
   # 絶対 /tmp テンプレートの再導入を封じる（本ガードは tests/ 側ゆえ自己マッチしない）。`! grep` でなく
