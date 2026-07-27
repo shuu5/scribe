@@ -61,6 +61,8 @@
 # workers silently skip and the next unsandboxed write refreshes the mirror).
 # This setting stays false so bd itself never duplicates that export path.
 export.auto: false
+sync:
+    remote: "git+https://github.com/shuu5/scribe-beads.git"
 
 # Integration settings (access with 'bd config get/set')
 # Non-secret keys (stored in the database):
