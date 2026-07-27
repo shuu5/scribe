@@ -15,6 +15,9 @@
 #   CLD_MEMORY_QUIET     1/true/yes/on で起動時 1 行の可視化を抑制（上限なし警告は抑制しない）
 #   CLD_MEMINFO_FILE     MemTotal 差し替えの seam（テスト専用・既定 /proc/meminfo）
 # 決定の根拠・限界・稼働中の引き上げ手順は下の「メモリ上限（cgroup 防壁）の決定」ブロックを読むこと。
+# **配布スコープ**: この cld は scribe に subtree merge された vendored copy が現行の編集先。
+#   upstream（shuu5/cc-session）へ還流するまでは、そちらから入れた host は本ファイルの上限導出・
+#   明示値の健全性チェックを受けない（＝旧・固定既定のまま）。還流の要否は運用側の判断。
 set -euo pipefail
 
 if ! command -v claude &>/dev/null; then
@@ -160,17 +163,25 @@ if [[ -n "$_mm_explicit" ]]; then
     elif [[ "$_mm_explicit" =~ ^([1-9][0-9]*)([KMGTkmgt]?)$ ]]; then
         _mm_n="${BASH_REMATCH[1]}"
         _mm_suf="${BASH_REMATCH[2]}"
+        # 倍率は変数に持つ（下の割り戻し検算で使う）
         case "$_mm_suf" in
-            K|k) _mm_b=$(( _mm_n * 1024 )) ;;
-            M|m) _mm_b=$(( _mm_n * 1048576 )) ;;
-            G|g) _mm_b=$(( _mm_n * 1073741824 )) ;;
-            T|t) _mm_b=$(( _mm_n * 1099511627776 )) ;;
-            *)   _mm_b="$_mm_n" ;;   # 単位なし = systemd はバイトと解釈する
+            K|k) _mm_f=1024 ;;
+            M|m) _mm_f=1048576 ;;
+            G|g) _mm_f=1073741824 ;;
+            T|t) _mm_f=1099511627776 ;;
+            *)   _mm_f=1 ;;          # 単位なし = systemd はバイトと解釈する
         esac
+        _mm_b=$(( _mm_n * _mm_f ))
         # 桁溢れの検出: bash の算術は 64bit signed で**黙って wrap する**ため、巨大な値は
         # 負数や小さな正数に化けて健全性チェックを素通りしうる（systemd 側では parse error に
-        # なって claude が起動しない）。桁数と符号の 2 面で弾いて自動導出へ倒す。
-        if (( ${#_mm_n} > 18 )) || (( _mm_b <= 0 )); then
+        # なって claude が起動しない）。3 面で弾いて自動導出へ倒す:
+        #   ① 桁数  — 単位なしの 19-20 桁（乗算前に既に 64bit を超えうる）を先に短絡で落とす
+        #   ② 符号  — 負へ wrap した積
+        #   ③ 割り戻し — **接尾辞の乗算で 2^64 を跨いで「正の値」へ wrap した積**。①② はどちらも
+        #      これを捕まえられない（例: 16777217T は 8 桁・積は正の 2^40 ちょうど / 20000000T・
+        #      1000000000000G も同型）。積 ÷ 倍率が元の mantissa に戻らなければ wrap＝溢れと判定する
+        #      （倍率は常に正の 2 冪ゆえ exact。② を先に短絡させるので 0 除算・負数除算にはならない）。
+        if (( ${#_mm_n} > 18 )) || (( _mm_b <= 0 )) || (( _mm_b / _mm_f != _mm_n )); then
             echo "Warning: CLD_MEMORY_MAX='${_mm_explicit}' は桁が大きすぎて解釈できません（64bit 桁溢れ）。自動導出へ倒します" >&2 || true
             _mm_explicit=""
         elif (( _mm_b < 1073741824 )); then
@@ -220,6 +231,12 @@ else
         if (( _gib < _floor )); then _gib="$_floor"; fi
         if (( _gib > CLD_MEMORY_MAX_CEIL_GIB )); then _gib="$CLD_MEMORY_MAX_CEIL_GIB"; fi
         if (( _gib < CLD_MEMORY_MAX_MIN_GIB )); then _gib="$CLD_MEMORY_MAX_MIN_GIB"; fi
+        # 下限 1G に張り付く帯（MemTotal ≦ 2GiB）は CC の平常 peak（約 1.1GiB・実測）を割る。
+        # 「防壁を効かせる」と「起動を妨げない」が原理的に両立しない帯なので防壁側を採るが、
+        # **黙って採らない**（起動直後に OOM kill されて痕跡が残らないのが本 bead の失敗様式）。
+        if (( _gib <= CLD_MEMORY_MAX_MIN_GIB )); then
+            echo "Warning: 導出された MemoryMax=${_gib}G は CC の平常 peak（約 1.1GiB）に届きません（MemTotal ${_total_gib}GiB）。起動直後に OOM kill されうる帯です — CLD_MEMORY_MAX で明示するか host を増強してください" >&2 || true
+        fi
         MEM_MAX="${_gib}G"
         MEM_MAX_SRC="auto-pct${_pct}"
         MEM_MAX_NOTE="auto: MemTotal ${_total_gib}GiB x ${_pct}% / floor ${_floor}G / ceil ${CLD_MEMORY_MAX_CEIL_GIB}G"

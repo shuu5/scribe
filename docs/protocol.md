@@ -443,6 +443,7 @@ journalctl --user --since "<消えた時刻>" | grep -i oom-kill
   - **下限より下が必要なら `CLD_MEMORY_MAX=<N>G` で明示値を与える**（明示値は下限/上限クランプを迂回する。1GiB 未満・100% 超・64bit 桁溢れ・不正形式は warn して自動導出へ倒れるので escape hatch の typo で起動が壊れることはない。**ただし実 RAM 以上の明示値は「受理したうえで loud に警告」**＝倒さない。警告が出たら防壁は bind していない）か、**同時本数を絞る**（総和が MemTotal を超える構成のまま運用しない）。
   - **下げたら効いたことを実効値で確認する**: 起動時 1 行（`cld: MemoryMax=… [auto: MemTotal …]`）に導出内訳が出る。総和超過は per-scope 上限では防げず、上の対偶（dmesg に OOM 行＝host OOM）として現れる。
 - **再発防止は WF 設計側**: 無界出力（巨大 grep 結果・全文 `cat`）を agent context へ流さず機械 cap を課す＝ `methodology.md` §2「WF agent への出力 cap 規律」が SSOT。
+- **既定値の較正データを取る（推測で上げ下げしない）**: 重い WF を**完走させた直後**に自 scope の `cat /sys/fs/cgroup/$(cut -d: -f3 /proc/self/cgroup)/memory.peak` を読み、実効上限と並べて記録する。これが「今の既定でその WF が入り切るか」の唯一の実測値になる（平常時 peak 約 1.1GiB に対し OOM を起こした WF は 12GiB を焼いた＝**焼き代は WF 設計で 1 桁変わる**ので、host ではなく WF 種別ごとに測る）。scope は死ぬと消えるため**完走直後**に読むこと（死後は journal の oom-kill 行しか残らない）。
 - **猶予の実効値に注意**: `MemoryMax` は anon+file の上限で **swap を含まない**（swap 側は `MemorySwapMax`・scope 既定は `max`）。実効的な猶予は `MemoryMax` + 利用可能 swap になる。
 
 **証拠種別（本 §6 凡例）**: oom-kill 行・時刻一致・`memory.max` / `memory.peak` の実測はいずれも **observable（admin 検証済み）**。本節の手順は observable のみに立脚し、mechanism 診断に依存しない。

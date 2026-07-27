@@ -361,11 +361,62 @@ _memmax() {
 }
 
 @test "memmax: 64bit 桁溢れの明示値は warn して自動導出へ倒れる（wrap で検証を素通りさせない）" {
-    # bash の算術は 64bit signed で黙って wrap するため、桁数と符号の 2 面で弾く必要がある
+    # bash の算術は 64bit signed で黙って wrap する。この入力は mantissa 20 桁＝桁数検査の枝
     run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=99999999999999999999G bash "$CLD"
     [ "$status" -eq 0 ]
     [ "$(_memmax)" = "25G" ]
     [[ "$output" == *"桁が大きすぎて"* ]]
+}
+
+@test "memmax: 負へ wrap する桁溢れ（符号検査の枝）も自動導出へ倒れる" {
+    # 9999999T = 1.1e19 > 2^63 で積が負に化ける。桁数は 7 桁ゆえ長さ検査では捕まらない
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=9999999T bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "25G" ]
+    [[ "$output" == *"桁が大きすぎて"* ]]
+}
+
+@test "memmax: 正へ wrap する桁溢れ（接尾辞乗算で 2^64 を跨ぐ）も自動導出へ倒れる" {
+    # 桁溢れの第 3 の形: mantissa が 18 桁以下でも K/M/G/T 倍率で 2^64 を跨ぎ、wrap 結果が
+    # 0 < x < 2^63 に着地すると桁数検査も符号検査も素通りする（割り戻し検算で捕まえる枝）。
+    # 素通りすると原文字列が systemd へ渡り parse error ＝ claude が一切起動しなくなる。
+    local v
+    for v in 16777217T 20000000T 1000000000000G; do    # 積はいずれも正の値へ wrap する
+        run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX="$v" bash "$CLD"
+        [ "$status" -eq 0 ]
+        [ "$(_memmax)" = "25G" ]
+        [[ "$output" == *"桁が大きすぎて"* ]]
+    done
+}
+
+@test "memmax: 桁溢れ検査は正当な大きい値を巻き込まない（割り戻しの偽陽性なし）" {
+    # 検算は「積 ÷ 倍率 == mantissa」。溢れていない値は必ず一致するので受理側は動かない
+    local mi
+    mi="$(_mk_meminfo 268435456)"    # 256GiB host（bind 警告を混ぜない）
+    run env CLD_MEMINFO_FILE="$mi" CLD_MEMORY_MAX=8T bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "8T" ]
+    [[ "$output" != *"桁が大きすぎて"* ]]
+}
+
+@test "memmax: 導出値が下限 1G に張り付く帯は「CC の平常 peak に届かない」と警告する" {
+    # MemTotal 2GiB: 比例 20%=0G → 下限 min(12G, 50%)=1G。防壁は効くが CC の平常 peak(約1.1GiB)を
+    # 割る＝起動直後に OOM kill されうる。黙って採らない（痕跡が残らないのが本 bead の失敗様式）
+    local mi
+    mi="$(_mk_meminfo 2097152)"
+    run env CLD_MEMINFO_FILE="$mi" bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "1G" ]
+    [[ "$output" == *"平常 peak"* ]]
+}
+
+@test "memmax: 下限に張り付かない帯では peak 警告を出さない（誤警告なし）" {
+    local mi
+    mi="$(_mk_meminfo 4194304)"      # 4GiB → 50% クランプで 2G
+    run env CLD_MEMINFO_FILE="$mi" bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "2G" ]
+    [[ "$output" != *"平常 peak"* ]]
 }
 
 @test "memmax: CLD_MEMORY_QUIET の真値は 1 以外（true/yes/on）も受理される" {
