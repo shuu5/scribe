@@ -72,4 +72,17 @@ export.auto: false
 # - linear.api_key  → use LINEAR_API_KEY env var instead
 # - github.token    → use GITHUB_TOKEN env var instead
 
-sync.remote: "git+https://github.com/shuu5/scribe.git"
+# 台帳 remote はコード repo と分離する（fleet 標準・orchestrator 裁定 orch-jot0 / bd sc-zkof）。
+#
+# なぜ: bd の既定は台帳（refs/dolt/data）をコード repo と同じ remote へ push する。本リポは PUBLIC ゆえ、
+# 台帳本文が公開読み取り可能な面に出ていた（実測: .beads/issues.jsonl に他プロジェクト名・ホスト名・
+# メールアドレスが実在）。repo 単位ではなく「情報単位」で判定すると核となる private 保証が破れていた。
+# 露出していた ref は 2026-07-27 に削除済み（復元点 SHA は sc-zkof / orch-jot0 の notes に記録）。
+#
+# 不変条件（変更するときはこの 2 本を必ず再確認する）:
+#   1. git ls-remote <このコード repo> 'refs/dolt/*' が 0 件であること
+#   2. sync.remote が当該コード repo を指さないこと
+#
+# 台帳 1 つにつき private repo 1 つが必要（dolt の push 先 ref 名は refs/dolt/data 固定で、
+# 複数台帳を 1 repo に集約すると ref が衝突するため）。
+# sync.remote: "git+https://github.com/shuu5/scribe-beads.git"
