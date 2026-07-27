@@ -15,7 +15,9 @@ setup() {
 
     # --- tmux モック（環境変数駆動・export -f で子プロセスへ伝播） ---
     # TMUX_MOCK_CAPTURE_FILE : capture-pane が返す内容
-    # TMUX_MOCK_HAS_SESSION  : has-session の exit（1=成功 / 0=失敗）
+    # TMUX_MOCK_HAS_SESSION  : has-session の exit を固定（1=成功 / 0=失敗・旧互換）
+    # TMUX_MOCK_SESSIONS     : 実在 session 名の空白区切り（既定 'sc'。HAS_SESSION
+    #                          未設定時に '=name'=exact / 裸 name=prefix で判定）
     # TMUX_MOCK_LIST_WINDOWS : list-windows -F '#{session_name}:#{window_index} #{window_name}'
     # TMUX_MOCK_LIST_PANES   : list-panes の 4 カラム行（session-state 系互換）
     # TMUX_MOCK_SESSION_PANES: list-panes -s -F '#{pane_id}'（bare session 列挙・%b 展開）
@@ -31,7 +33,26 @@ setup() {
         { printf '%s\n' "$sub" "$@"; echo '--'; } >> "${TMUX_MOCK_ARGV_LOG:-/dev/null}"
         case "$sub" in
             has-session)
-                [ "${TMUX_MOCK_HAS_SESSION:-1}" = "1" ]
+                # 実 tmux の解決意味論を再現する: '=name' は exact・裸 name は
+                # prefix 一致（R3 gate finding: colon 経路の prefix false attribution
+                # を検知するため）。TMUX_MOCK_HAS_SESSION 明示時はそれを優先（旧互換）。
+                local hs_tgt=""
+                while [ $# -gt 0 ]; do
+                    case "$1" in -t) hs_tgt="$2"; shift 2 ;; *) shift ;; esac
+                done
+                if [ -n "${TMUX_MOCK_HAS_SESSION:-}" ]; then
+                    [ "$TMUX_MOCK_HAS_SESSION" = "1" ]
+                else
+                    local hs_name="${hs_tgt#=}" hs_s
+                    for hs_s in ${TMUX_MOCK_SESSIONS:-sc}; do
+                        if [ "${hs_tgt:0:1}" = "=" ]; then
+                            [ "$hs_s" = "$hs_name" ] && return 0
+                        else
+                            case "$hs_s" in "$hs_name"*) return 0 ;; esac
+                        fi
+                    done
+                    return 1
+                fi
                 ;;
             list-windows)
                 printf '%s\n' "${TMUX_MOCK_LIST_WINDOWS:-sc:1 admin}"
@@ -110,7 +131,25 @@ EOF
 @test "pane: statusline line2 を parse して 3 値を返す（session:window target）" {
     run "$METER" --target sc:admin
     [ "$status" -eq 0 ]
-    [ "$output" = "used_pct=32 used_tokens=320000 window_tokens=1000000 source=pane sid=- target=sc:1" ]
+    # target= は解決後の pane id（gate/capture/監査痕跡を単一 pane に固定 = R3）
+    [ "$output" = "used_pct=32 used_tokens=320000 window_tokens=1000000 source=pane sid=- target=%7" ]
+}
+
+@test "契約: session 名の prefix 一致で別 session を測らない（colon 経路も exact）" {
+    # 実在 session は 'paper' のみ。要求 'pap' は tmux の裸 -t なら prefix で
+    # paper に解決されてしまう（R3 gate CONFIRMED の再現形）→ exact 検証で exit 3
+    export TMUX_MOCK_SESSIONS='paper'
+    export TMUX_MOCK_LIST_WINDOWS='paper:1 admin'
+    run "$METER" --target pap:admin
+    [ "$status" -eq 3 ]
+    [ -z "$("$METER" --target pap:admin 2>/dev/null || true)" ]
+}
+
+@test "契約: --source pane は決して jsonl を出さない（解決不能 + --sid 併用でも exit 3）" {
+    export TMUX_MOCK_LIST_WINDOWS='sc:1 other'
+    run "$METER" --target sc:admin --sid aaaa-bbbb-cccc --source pane
+    [ "$status" -eq 3 ]
+    [[ "$output" != *"source=jsonl"* ]]
 }
 
 @test "pane: %N pane-id target は resolve を経由せず直接 capture する" {
@@ -170,12 +209,47 @@ EOF
     [ "$status" -eq 4 ]
 }
 
-@test "pane: 末尾 3 非空行より上に埋もれた同形状の本文行は拾わない" {
+@test "pane: 入力ボックスより上の本文 decoy 行は拾わない（❯ anchor）" {
     cat > "$TMPD/capture.txt" <<'EOF'
 88% 880k/1M 本文へ貼られた他 session の statusline
-行1
-行2
-行3
+❯
+EOF
+    run "$METER" --target %7 --source pane
+    [ "$status" -eq 4 ]
+}
+
+@test "pane: live 形（statusline の下に trailing UI 2 行 + 空行）を parse できる" {
+    # R3 gate CONFIRMED: 旧 tail -3 は workflow 進捗行で margin 0 だった。
+    # ❯ anchor により footer が増えても statusline を見失わないことを pin する。
+    cat > "$TMPD/capture.txt" <<'EOF'
+❯
+  shuu5@host (user@example.com)  cc-session  main*
+  44% 440k/1M Fable 5 [xhigh] 5h:24%(4h3m) 7d:70%(4d12h)
+  ⏵⏵ bypass permissions on · 1 shell · ← 5 agents
+
+  ◯ cell-quality  … 4/11 agents done · 19m 18s · ↓ 1.0m tokens
+  ◯ p08-mv-gate  … 2/10 agents done · 3m 2s
+EOF
+    run "$METER" --target %7 --source pane
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"used_pct=44 used_tokens=440000"* ]]
+}
+
+@test "pane: ❯ 不在画面は末尾 6 非空行 fallback（空行除去が効く形で pin）" {
+    { echo '30% 300k/1M Opus 5'; printf '\n\n\n\n\n\n'; echo 'trailing note'; } > "$TMPD/capture.txt"
+    run "$METER" --target %7 --source pane
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"used_pct=30"* ]]
+}
+
+@test "pane: 健全性 bound は各条件が独立に効く（pct>100 単独 / window<100k 単独）" {
+    cat > "$TMPD/capture.txt" <<'EOF'
+101% 10k/1M Opus 5
+EOF
+    run "$METER" --target %7 --source pane
+    [ "$status" -eq 4 ]
+    cat > "$TMPD/capture.txt" <<'EOF'
+50% 30k/50k done
 EOF
     run "$METER" --target %7 --source pane
     [ "$status" -eq 4 ]
@@ -244,6 +318,30 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"source=pane"* ]]
     [[ "$output" == *"used_pct=32"* ]]
+}
+
+@test "gate: pgid はあるが group 内に claude が居なければ pane を信頼しない" {
+    export TMUX_MOCK_PANE_STATE='0 4242 bash'
+    ps() { case "$*" in *pgid*) echo ' 4242' ;; esac; }
+    pgrep() { return 1; }
+    export -f ps pgrep
+    run "$METER" --target %7
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"source=jsonl"* ]]
+}
+
+@test "gate: pgrep は pgid スコープ + 完全一致で問い合わせる（argv pin）" {
+    export TMUX_MOCK_PANE_STATE='0 4242 bash'
+    export PGREP_ARGV_LOG="$TMPD/pgrep-argv.log"
+    : > "$PGREP_ARGV_LOG"
+    ps() { case "$*" in *pgid*) echo ' 4242' ;; esac; }
+    pgrep() { printf '%s\n' "$*" >> "$PGREP_ARGV_LOG"; return 0; }
+    export -f ps pgrep
+    run "$METER" --target %7
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"source=pane"* ]]
+    grep -q -- '-g 4242' "$PGREP_ARGV_LOG"
+    grep -q -- '-x claude' "$PGREP_ARGV_LOG"
 }
 
 # =============================================================================
@@ -412,10 +510,12 @@ EOF
     [[ "$output" == *"source=pane"* ]]
     # 測定した pane を出力へ明示する（bare 入力の echo にしない＝事後監査可能）
     [[ "$output" == *"target=%7"* ]]
-    # 計測対象の同一性を argv で pin する（R2 gate finding: -s 除去 / exact-match
-    # 除去 / 別 pane capture の 3 変異を RED 化する）
+    # 計測対象の同一性を argv で pin する（R2/R3 gate finding: -s 除去 /
+    # list-panes の exact-match 除去 / 別 pane capture の 3 変異を RED 化する。
+    # '=sc' は呼び出し境界つきで list-panes 側に限定して見る＝has-session 側の
+    # '=sc' で偽 green にならない）
     grep -qx -- '-s' "$TMPD/tmux-argv.log"
-    grep -qx -- '=sc' "$TMPD/tmux-argv.log"
+    awk '/^list-panes$/{f=1;next} f&&/^=sc$/{ok=1} /^--$/{f=0} END{exit !ok}' "$TMPD/tmux-argv.log"
     awk '/^capture-pane$/{f=1;next} f&&/^%7$/{found=1} /^--$/{f=0} END{exit !found}' "$TMPD/tmux-argv.log"
 }
 
@@ -539,4 +639,8 @@ EOF
     [ -z "$("$METER" --target nosuch:x 2>/dev/null || true)" ]
     printf '❯ \n' > "$TMPD/capture.txt"
     [ -z "$("$METER" --target %7 --source pane 2>/dev/null || true)" ]
+    # bare session ambiguous（claude pane 複数 → exit 3）経路も pin（R3 gate finding）
+    export TMUX_MOCK_LIST_WINDOWS="sc:1 other-window"
+    export TMUX_MOCK_SESSION_PANES='%7\n%9'
+    [ -z "$("$METER" --target sc 2>/dev/null || true)" ]
 }

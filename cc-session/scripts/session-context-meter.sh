@@ -45,7 +45,8 @@
 #           claude 非稼働 pane では画面に残った stale statusline を「現在値」と
 #           誤読しうるため pane source を信頼せず jsonl へ fallback する（判定は
 #           計測対象 pane 厳密の pane_alive_claude・jsonl は「最終観測値」として
-#           意味論が正直）。parse は誤爆対策として末尾 3 非空行のみ探索・window
+#           意味論が正直）。parse は誤爆対策として「入力ボックス（最後の '❯'
+#           行）より下」のみ探索（無ければ末尾 6 非空行へ fallback）・window
 #           token は k/M 必須・健全性 bound（pct<=100 ∧ used<=window ∧
 #           window>=100k）外は不成立として扱う（捏造値を出さない側へ倒す）。
 #   jsonl = transcript jsonl の最新の非 sidechain assistant message の
@@ -109,9 +110,12 @@ tok2int() {
 # 成功: グローバル P_PCT / P_USED / P_WINDOW を設定し 0。失敗: 非 0。
 # 実 TUI は statusline を先頭空白付きで render する（live 実測 2026-07-24:
 # 『  19% 190k/1M Fable 5 [xhigh] …』）ため先頭空白は許容し trim する。
-# 誤爆対策（R2 gate finding）:
-#   (1) 探索範囲を capture の末尾 3 非空行に限定する（statusline は最下部
-#       ブロック。本文/dialog に紛れた同形状行を「現在値」として拾わない）
+# 誤爆対策（R2/R3 gate finding）:
+#   (1) 探索域は「入力ボックス（最後の '❯' を含む行）より下」の非空行に限定する。
+#       本文/dialog の decoy 行は常に入力ボックスより上に居るため構造的に除外
+#       される。'❯' が無い画面（dialog・特殊状態）は末尾 6 非空行へ fallback
+#       （有界窓・R3 実測: 旧 tail -3 は workflow 進捗行等の trailing UI で
+#       live margin 0 になり、footer 1 行増で恒久 exit 4 化した）
 #   (2) window token は k/M suffix 必須（SSOT の fmt_tokens 上、実在する
 #       window が suffix 無しになることはない＝『3/4 done』等の prose を弾く）
 #   (3) 健全性 bound: pct<=100 ∧ used<=window ∧ window>=100k。外れたら
@@ -119,10 +123,12 @@ tok2int() {
 # 複数一致時は最終行（= pane 最下部の statusline 側）を採る。
 P_PCT="" P_USED="" P_WINDOW=""
 parse_pane() {
-    local target="$1" captured line used_tok win_tok
+    local target="$1" captured nonempty anchored line used_tok win_tok
     captured=$(tmux capture-pane -p -t "$target" 2>/dev/null) || return 1
-    line=$(sed '/^[[:space:]]*$/d' <<<"$captured" | tail -n 3 \
-        | grep -E '^[[:space:]]*[0-9]+% [0-9]+[kM]?/[0-9]+[kM]( |$)' | tail -n 1)
+    nonempty=$(sed '/^[[:space:]]*$/d' <<<"$captured")
+    anchored=$(awk 'index($0,"❯"){n=NR} {a[NR]=$0}
+        END{s = n ? n+1 : (NR>6 ? NR-5 : 1); for(i=s;i<=NR;i++) print a[i]}' <<<"$nonempty")
+    line=$(grep -E '^[[:space:]]*[0-9]+% [0-9]+[kM]?/[0-9]+[kM]( |$)' <<<"$anchored" | tail -n 1)
     [ -n "$line" ] || return 1
     line="${line#"${line%%[![:space:]]*}"}"   # 先頭空白 trim（TUI render の indent）
     P_PCT="${line%%\%*}"
@@ -273,6 +279,15 @@ if [ -n "$TARGET" ]; then
     if [[ "$TARGET" =~ ^%[0-9]+$ ]]; then
         RESOLVED="$TARGET"
     else
+        # colon 形（session:window）は session 部を exact 検証してから resolve する。
+        # resolve_target 内部の has-session/list-windows は '=' を付けない＝tmux の
+        # prefix 一致に乗るため、存在しない session 名（例 'pap'）が別 session
+        # （'paper'）へ解決され「他 session の実測値を exit 0 で返す」false
+        # attribution が起きる（R3 gate CONFIRMED・bare 経路の exact 規律と統一）。
+        if [[ "$TARGET" == *:* ]] && ! tmux has-session -t "=${TARGET%%:*}" 2>/dev/null; then
+            echo "Error: session '${TARGET%%:*}' not found (exact match)" >&2
+            exit 3
+        fi
         # window 解決（SSOT = session-state.sh resolve_target）→ 失敗時のみ
         # bare session 名として fallback。fallback は「session 内で claude が走る
         # 唯一の pane」を対象に据える — tmux の -t <session> 既定解決（active
@@ -308,15 +323,25 @@ if [ -n "$TARGET" ]; then
     fi
 fi
 
+# --source pane は pane 以外を決して出さない（source 固定契約）。target 解決が
+# 不成立のまま --sid 併用で jsonl へ落ちる経路を塞ぐ（R3 gate finding）。
+if [ "$SOURCE" = "pane" ] && [ -z "$RESOLVED" ]; then
+    echo "Error: pane source has no resolved target" >&2
+    exit 3
+fi
+
 # --- primary: pane ---
 if [ -n "$RESOLVED" ] && { [ "$SOURCE" = "auto" ] || [ "$SOURCE" = "pane" ]; }; then
     # stale-screen gate: claude 非稼働 pane の画面残渣を現在値として読まない。
     # 判定は計測対象 pane に厳密化する（display-message で対象 pane を確定し
     # pane_alive_claude で判定。旧 detect_state 直用は window 先頭 pane を見る
     # ため multi-pane window で gate と capture が乖離した = R2 gate finding）。
+    # gate / capture / 監査痕跡（target field）を単一の pane id に固定する
+    # （window target のまま capture すると gate と capture の間で active pane が
+    # 変わる TOCTOU が残る = R3 gate finding。%N へ確定してから全操作を行う）
     GATE_PANE=$(tmux display-message -p -t "$RESOLVED" '#{pane_id}' 2>/dev/null) || GATE_PANE=""
-    if [ -n "$GATE_PANE" ] && pane_alive_claude "$GATE_PANE" && parse_pane "$RESOLVED"; then
-        emit "$P_PCT" "$P_USED" "$P_WINDOW" "pane" "${SID:--}" "$(safe_field "$RESOLVED")"
+    if [ -n "$GATE_PANE" ] && pane_alive_claude "$GATE_PANE" && parse_pane "$GATE_PANE"; then
+        emit "$P_PCT" "$P_USED" "$P_WINDOW" "pane" "${SID:--}" "$(safe_field "$GATE_PANE")"
         exit 0
     fi
     if [ "$SOURCE" = "pane" ]; then
