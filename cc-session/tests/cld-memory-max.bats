@@ -399,6 +399,59 @@ _memmax() {
     [[ "$output" != *"桁が大きすぎて"* ]]
 }
 
+@test "memmax: % 指定の 64bit wrap（2^64+100）は 100% に化けず自動導出へ倒れる" {
+    # byte 枝と同型の bypass: `(( n > 100 ))` は 2^63 超で黙って wrap する。18446744073709551716%
+    # は wrap して 100 に化け、原文字列のまま systemd へ渡って property parse error＝claude 不起動
+    # になっていた。桁数の前置判定で比較前に落とす（値域 1-100 ゆえ 4 桁以上は無条件に範囲外）
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=18446744073709551716% bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "25G" ]
+    [[ "$output" == *"100% を超えます"* ]]
+    [[ "$output" != *"bind しません"* ]]   # 100% として受理されていない（wrap 誤判定の逆 pin）
+}
+
+@test "memmax: % の桁数前置判定は正当な 1〜100% を巻き込まない" {
+    local p
+    for p in 1 20 50 99 100; do
+        run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX="${p}%" bash "$CLD"
+        [ "$status" -eq 0 ]
+        [ "$(_memmax)" = "${p}%" ]
+        [[ "$output" != *"100% を超えます"* ]]
+    done
+}
+
+@test "memmax: 明示値が平常 peak を割る（1G＝12G の 1 文字欠落）と警告する" {
+    # 上振れ（実 RAM 以上）を明示でも警告する以上、下振れだけ沈黙させるのは非対称。しかも
+    # 下振れの失敗様式（SIGKILL で痕跡なく消える）の方が悪い＝本 bead が潰そうとした失敗そのもの
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=1G bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "1G" ]              # 受理は据え置く（意図的選択は殺さない）
+    [[ "$output" == *"平常 peak"* ]]
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=1024M bash "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"平常 peak"* ]]     # 単位が違っても同じ実効値なら同じ判定
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=2G bash "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"平常 peak"* ]]     # 誤警告なし
+}
+
+@test "memmax: 明示値の peak 警告も CLD_MEMORY_QUIET で抑制されない（保護不在は一律に出す）" {
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_QUIET=1 CLD_MEMORY_MAX=1G bash "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"平常 peak"* ]]
+    [[ "$output" != *"cld: MemoryMax="* ]]
+}
+
+@test "memmax: peak 警告の帯は MemTotal < 4GiB（3GiB は警告・4GiB は出ない）" {
+    # コメントが「≦ 2GiB」と書いていたが実際は floor が 1G に留まる帯＝ MemTotal < 4GiB
+    local mi
+    mi="$(_mk_meminfo 3145728)"      # 3GiB → 比例 0G / floor min(12, 1)=1G
+    run env CLD_MEMINFO_FILE="$mi" bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "1G" ]
+    [[ "$output" == *"平常 peak"* ]]
+}
+
 @test "memmax: MemTotal 不読 × 100% でも警告するが「MemTotal 0GiB」と騙らない" {
     # % 指定の bind 判定は MemTotal 非依存（100% = 実 RAM 全量）。ただし文面に実測値を混ぜると
     # 空文字の算術評価で「MemTotal 0GiB」という偽の実測値が出る＝観測していない数字を出さない

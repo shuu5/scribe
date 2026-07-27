@@ -12,7 +12,8 @@
 #                        して自動導出へ倒す。単位の小文字は systemd 受理形の大文字へ正規化して渡す。
 #                        **実 RAM 以上の値は受理するが loud に警告する**＝防壁が bind しないため）
 #   CLD_MEMORY_MAX_PCT   比例値の割合（1-100・不正値は既定 20 へ倒す）
-#   CLD_MEMORY_QUIET     1/true/yes/on で起動時 1 行の可視化を抑制（上限なし警告は抑制しない）
+#   CLD_MEMORY_QUIET     1/true/yes/on で起動時 1 行の可視化を抑制。**保護不在に関する警告は
+#                        一律抑制しない**（規則で書く＝個別列挙は必ず drift する）
 #   CLD_MEMINFO_FILE     MemTotal 差し替えの seam（テスト専用・既定 /proc/meminfo）
 # 決定の根拠・限界・稼働中の引き上げ手順は下の「メモリ上限（cgroup 防壁）の決定」ブロックを読むこと。
 # **配布スコープ**: この cld は scribe に subtree merge された vendored copy が現行の編集先。
@@ -96,7 +97,7 @@ fi
 #       同時に「MemTotal の 50% を超えない」を課すのは、**上限が実 RAM に迫ると防壁として bind
 #       しない**ため（旧 12G が 16GiB host で 75%・8GiB host で実 RAM 超だったのがまさにこれ）。
 #       結果: 32GiB→12G（旧と同値）/ 16GiB→8G（旧 12G=75% は防壁にならないので意図的に下げる）/
-#       8GiB→4G / 4GiB→2G。**MemTotal ≤ 2GiB 帯では下限 1G が CC の平常 peak（約 1.1GiB）を割る
+#       8GiB→4G / 4GiB→2G。**MemTotal < 4GiB 帯では下限 1G が CC の平常 peak（約 1.1GiB）を割る
 #       ——その帯では「防壁を効かせる」と「起動を妨げない」は原理的に両立せず、防壁側を採る。**
 #   (3) 上限 = 32GiB（巨大 RAM host でも 1 プロセスの焼き代を有界化する）。
 # 効く範囲の限界（明示）: per-scope 上限は「単一セッションの暴走」への防壁であって、同時稼働
@@ -146,6 +147,13 @@ fi
 # claude が一切起動しない（ファイル冒頭の不変条件「何であれ claude の起動は妨げない」の破れ）。
 _mm_explicit="${CLD_MEMORY_MAX:-}"
 _mm_nonbinding=0    # 明示値が実 RAM 以上＝防壁が bind しない（受理はするが loud に警告する）
+# 明示値が CC の平常 peak を割る＝起動直後に OOM kill されうる（同じく受理して loud に警告する）。
+# **明示経路にも出す理由**（設計判断・bd sc-von0 errata）: 上振れ側（実 RAM 以上）は既に明示でも
+# 警告している。同じ escape hatch 論で下振れ側だけ沈黙させるのは非対称であり、しかも下振れの失敗
+# 様式の方が悪い——上振れは「防壁が無いだけ」だが、下振れは **SIGKILL で痕跡なく消える**（本 bead
+# が潰そうとした失敗そのもの）。`12G` の 1 文字欠落 `1G` は現実的な typo で、しかも「set-property で
+# 引き上げよ」という運用手順の直後に踏まれうる。受理は据え置く（利用者の意図的選択は殺さない）。
+_mm_below_peak=0
 if [[ -n "$_mm_explicit" ]]; then
     if [[ "$_mm_explicit" == "infinity" ]]; then
         echo "Warning: CLD_MEMORY_MAX=infinity ＝ cgroup 防壁の撤廃です（暴走した dynamic workflow が host を巻き込みます）" >&2 || true
@@ -154,11 +162,18 @@ if [[ -n "$_mm_explicit" ]]; then
         # 弾く（割合 parse が範囲外・バイト数としても解釈できない）ため素通しすると起動失敗になる。
         # 自動導出側の pct が 1-100 を検査するのと平仄を取る（20%→200% の打ち間違い対策）。
         _mm_pct_n="${BASH_REMATCH[1]}"
-        if (( _mm_pct_n > 100 )); then
+        # 桁数を先に見る（byte 枝と同型の 64bit wrap bypass を塞ぐ）: `(( n > 100 ))` は bash の
+        # 算術評価ゆえ、n が 2^63 を超えると**黙って wrap** して比較が誤る。実測: 18446744073709551716%
+        # （= 2^64 + 100）は wrap して 100 に化け、「正当な 100%」として原文字列のまま systemd へ
+        # 渡っていた（→ property parse error で claude が一切起動しない）。割合の値域は 1-100 なので
+        # **4 桁以上は無条件に範囲外**＝比較の前に落とせば wrap の余地が消える。
+        if (( ${#_mm_pct_n} > 3 )) || (( _mm_pct_n > 100 )); then
             echo "Warning: CLD_MEMORY_MAX='${_mm_explicit}' は 100% を超えます（systemd が受理せず起動に失敗します）。自動導出へ倒します" >&2 || true
             _mm_explicit=""
         elif (( _mm_pct_n == 100 )); then
             _mm_nonbinding=1   # 100% = MemTotal ＝ 上限が実 RAM に一致し防壁として bind しない
+        elif [[ -n "$_total_kb" ]] && (( _total_kb * 1024 / 100 * _mm_pct_n <= CLD_MEMORY_MAX_MIN_GIB * 1073741824 )); then
+            _mm_below_peak=1   # 小さな割合 × 小さな host ＝ 実効値が CC の平常 peak を割る
         fi
     elif [[ "$_mm_explicit" =~ ^([1-9][0-9]*)([KMGTkmgt]?)$ ]]; then
         _mm_n="${BASH_REMATCH[1]}"
@@ -190,6 +205,9 @@ if [[ -n "$_mm_explicit" ]]; then
         else
             # 実 RAM 以上なら上限があっても bind しない（下の共通警告で loud に出す）
             if [[ -n "$_total_kb" ]] && (( _mm_b >= _total_kb * 1024 )); then _mm_nonbinding=1; fi
+            # 逆側: 1GiB ちょうど（`12G` の 1 文字欠落 typo）は 1GiB 未満検査を通るが CC の平常 peak
+            # （約 1.1GiB）を割る＝自動導出側の同名警告と同じ閾値で loud に出す（MemTotal 非依存）
+            if (( _mm_b <= CLD_MEMORY_MAX_MIN_GIB * 1073741824 )); then _mm_below_peak=1; fi
             # systemd の接尾辞は**大小文字を区別**する（man systemd.resource-control は K/M/G/T と
             # 大文字で規定）。`docker run -m 2g` / `free -g` の筋肉記憶から来る小文字 typo（8g）を
             # そのまま渡すと systemd-run が落ちて claude が起動しない。受理はしたまま大文字へ
@@ -217,6 +235,9 @@ if [[ -n "$_mm_explicit" ]] && (( _mm_nonbinding )); then
     fi
     echo "Warning: CLD_MEMORY_MAX='${_mm_explicit}' は${_mm_bind_why}＝cgroup 防壁が bind しません（暴走 WF は host ごと巻き込みます）" >&2 || true
 fi
+if [[ -n "$_mm_explicit" ]] && (( _mm_below_peak )); then
+    echo "Warning: CLD_MEMORY_MAX='${_mm_explicit}' は CC の平常 peak（約 1.1GiB）に届きません。起動直後に OOM kill されうる値です（'12G' の打ち間違いではありませんか）" >&2 || true
+fi
 
 if [[ -n "$_mm_explicit" ]]; then
     MEM_MAX="$_mm_explicit"
@@ -239,7 +260,8 @@ else
         if (( _gib < _floor )); then _gib="$_floor"; fi
         if (( _gib > CLD_MEMORY_MAX_CEIL_GIB )); then _gib="$CLD_MEMORY_MAX_CEIL_GIB"; fi
         if (( _gib < CLD_MEMORY_MAX_MIN_GIB )); then _gib="$CLD_MEMORY_MAX_MIN_GIB"; fi
-        # 下限 1G に張り付く帯（MemTotal ≦ 2GiB）は CC の平常 peak（約 1.1GiB・実測）を割る。
+        # 下限 1G に張り付く帯（MemTotal < 4GiB＝比例値 0G・floor が 1G に留まる帯）は CC の平常
+        # peak（約 1.1GiB・実測）を割る。
         # 「防壁を効かせる」と「起動を妨げない」が原理的に両立しない帯なので防壁側を採るが、
         # **黙って採らない**（起動直後に OOM kill されて痕跡が残らないのが本 bead の失敗様式）。
         if (( _gib <= CLD_MEMORY_MAX_MIN_GIB )); then
