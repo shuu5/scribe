@@ -32,8 +32,51 @@
 #   存在すれば pass」は禁止（false-green）。照合は open slate 群の members 和集合に対して行う。
 #
 # lifecycle = bundle 完了で close ───────────────────────────────────────────────
-#   slate bead は open=活動 bundle / bundle 完了（gate→close+cleanup）で close する（orchestrator 責務）。
-#   open 放置は orch-stale-scan の母集団を汚染するため既定は close 運用（top-spec slate 節に明記）。
+#   slate bead は **活動中（列挙 4 status）=活動 bundle** / bundle 完了（gate→close+cleanup）で close する
+#   （orchestrator 責務）。dispatch した slate bead が worker cell の `--claim` で in_progress 化しても
+#   slate は生きる（bd orch-1dcd＝status で bundle の生死を決めるのは close だけ）。open 放置は
+#   orch-stale-scan の母集団を汚染するため既定は close 運用（top-spec slate 節に明記）。
+#
+# 既知限界（status 集合を広げた代償・bd orch-1dcd）───────────────────────────────
+#   - **列挙 4 値は「全非 closed」ではない（実 bd 照会 verified 2026-07-25・bd v1.1.0）**: `bd statuses` の
+#     built-in は **7 値**（open / in_progress / blocked / deferred / closed に加え **pinned**〔frozen・
+#     "Persistent, stays open indefinitely"〕と **hooked**〔wip・"Attached to an agent's hook"〕）で、両者は
+#     filter token として実在する（pinned / hooked とも list filter に渡すと rc=0・不存在 token は rc=1）。
+#     一方 `bd list --help` の `--status` 説明は 5 値しか挙げず bd 自身の doc が不整合。本 file が列挙するのは
+#     **help の 5 値のうち非 closed の 4 値**であって全非 closed ではない＝**pinned / hooked へ遷移した slate は
+#     列挙外に落ち、本 filter が解消した bundle 自殺（自分の slate を自分で殺し以降の dispatch/spawn が全て
+#     fail-closed 拒否）が同型で再発する**。とくに hooked は「agent の hook に attach」＝worker `--claim`→
+#     in_progress と同じ agent 起因遷移クラスで、この filter 拡張の根拠がそのまま当てはまる modality。
+#     採用時点の実測分布は pinned・hooked とも 0 件ゆえ **latent**（live 破壊ではない）。filter 集合の 4 値は
+#     bd orch-1dcd 契約で確定（再議しない）ゆえ **pinned / hooked の採否は follow-up**。
+#   - bundle 完了後に close し忘れた slate は members を permit し続ける（歯止めは bundle-close 規律のみ）。
+#   - orch-stale-scan の母集団は open,deferred ゆえ in_progress の slate は age 検知線から構造的に外れる。
+#     clean-state-probe 核(a) も snapshot 付き in_progress のみ RED（snapshot 無しは info 止まり）＝
+#     close 忘れ slate を機械検知する線は現状ない。検知線の新設（surface への status 表示 / tripwire 内訳 /
+#     stale-scan 母集団拡張）は follow-up。
+#   - **2 コピー同期義務（本 file は engine copy＝boot path 側・bd sc-xy9n）**: 同一機構は private 配備層の
+#     local copy（配備層 repo の scripts/lib/orch_slate.sh）にも在り、SessionStart 第5節の slate surface は
+#     **engine copy 単独**が担う（engine hook scripts/hooks/session-start-workinprogress.sh が
+#     `$PLUGIN_ROOT/scripts/lib/orch_slate.sh --surface` を実行＝workinprogress は engine 一本化）。片方だけ
+#     直すと「interlock は通るが人間には見えない／逆」の非対称が deployment に残る（実発生: bd orch-1dcd が
+#     local のみ status-aware 化し boot path が status-blind のまま残り、活動中 bundle でも毎起動
+#     `[SLATE-NONE]` を表示し続けた＝bd sc-xy9n が本 file を同期）。status 意味論を変えるときは **両 copy を
+#     同一便で動かす**。この drift を RED にする機械検知線は現状無い（keep-set parity の対象 script に
+#     orch_slate.sh は含まれない）＝運用義務。**本 bullet が主張するのは status 意味論の同期（bd sc-xy9n）だけ**
+#     であり両 copy の parity 達成ではない＝**直下の項を必ず併読**すること。
+#   - **status filter 以外の未同期 drift が本 file に残存する（bd orch-3d07・over-permit＝fail-open）**:
+#     members 抽出の **行頭 sentinel アンカー / co-location 要件**（private 配備層の local copy には land 済み）は
+#     本 file へ **未同期**で、下の `_orch_slate_members_of` は sentinel を **行中 search** で拾う。ゆえに散文が
+#     sentinel を **行内引用** した行の `members:` まで harvest し、**計画外の bead-id / project が interlock を
+#     通る**（over-permit＝interlock が計画適合性 gate として空虚化する。engine は PUBLIC 配布物ゆえ、他 adopter に
+#     とっては本 file が唯一の copy）。hermetic 実測（2026-07-26・本便 worktree）: notes が canonical 行
+#     `[ORCH-SLATE v1] members: orch-aaa` と散文行 `note: previously [ORCH-SLATE v1] members: orch-evil was burned`
+#     の 2 行のとき、本 file は和集合へ引用行の token を混入させ `_orch_slate_has_member orch-evil` が rc=0（pass）
+#     ／行頭アンカー済みの local copy は同 fixture で `orch-aaa` のみ返し reject する。**本項は「片方の drift
+#     （status filter）を直しただけでは parity ではない」ことの SSOT** で、上の 2 コピー同期義務を parity 達成と
+#     読んではならない。本 file への port は follow-up（配備層側 keep-set parity teeth へ本 file を編入する leg =
+#     bd orch-da33。その再開 trigger が bd orch-3d07 の land＝land 済みゆえ実行可能）＝本便（bd sc-xy9n）の契約
+#     scope 外（本便の契約は status filter 同期のみ）。
 #
 # 検証: 本 file の `--self-test`（直接実行時のみ・hermetic・fail-closed）+ consumer の bats
 #   （tests/scenarios/orch-slate.bats・orch-dispatch.bats・orch-spawn-admin.bats）。
@@ -46,12 +89,31 @@ ORCH_SLATE_SENTINEL="[ORCH-SLATE v1]"
 # caller が別値を必要とするなら export で上書き可（既定 orch）。
 : "${ORCH_SLATE_SELF_PREFIX:=orch}"
 
-# open slate bead の id を列挙（read-only）。$1=bd 実体, $2=anchor（bd graph 所在）。
-#   `bd -C <anchor> list --label slate --status open --json` を読み、id が自台帳 prefix（orch-）で始まる
-#   bead のみ返す（連結 substrate hydrate で混在する foreign copy を排除）。bd read 失敗は rc=1（fail-closed）。
+# 活動中 slate bead の id を列挙（read-only）。$1=bd 実体, $2=anchor（bd graph 所在）。
+#   `bd -C <anchor> list --label slate --status <活動中 4 値> --limit 0 --json` を読み、id が自台帳
+#   prefix（orch-）で始まる bead のみ返す（連結 substrate hydrate で混在する foreign copy を排除）。
+#   bd read 失敗は rc=1（fail-closed）。
+#   ★status 集合＝**`bd list --help` が列挙する 5 値のうち非 closed の 4 値**を明示列挙
+#     （open / in_progress / blocked / deferred・bd orch-1dcd）。**全非 closed ではない**（`bd statuses` の
+#     built-in は pinned / hooked を含む 7 値＝上の 既知限界 を必ず併読すること）:
+#     slate bead は dispatch 後に worker cell の `--claim` で in_progress 化するため、open 固定だと自分の
+#     bundle の slate を自分で殺し、以降の dispatch/spawn が全て fail-closed 拒否される（実運用停止を実測）。
+#     blocked（human ratify 待ち）/ deferred へ落ちた slate も同型 brick ゆえ同時に列挙する。**bd が status を
+#     増やしたら（あるいは pinned / hooked を採用したら）この 1 行を更新する**（closed のみ除外＝bd 既定 filter
+#     に依存する形は採らない＝明示列挙。運用義務に機械検知線は無い＝既知限界）。
+#     禁止形: 同じ status flag を 2 回渡す形（bd は repeat を silently overwrite し先の値が消える）／
+#     全件取得（`--all`）+ reader 側で closed を落とす形（bd 既定 limit 50 の截断が filter より前に起き
+#     活動中 slate が silent に落ちる＝この filter が直している brick の再発）。
+#     status リテラルは**コード中 1 箇所（直下の query 行）のみ**に置く＝surface path と interlock path が
+#     同一 filter を共有する（片方だけ効く「見えるが通らない/通るが見えない」非対称を構造的に作らない）。
+#     ★この「同一 filter 共有」が成り立つのは**本 file を source する経路の中だけ**である（engine copy 内では
+#       boot path〔hook の --surface〕と interlock path〔dispatch / spawn-admin〕の双方が本 file を source
+#       するため両者は常に同一 filter）。**copy 境界を越える parity は機械保証されない**＝上の 既知限界
+#       （2 コピー同期義務）を必ず併読すること。
+#   名前の注記: helper 名の `open` は歴史的名称（rename しない・consumer 契約）。意味は「活動中 slate」。
 _orch_slate_open_ids() {
     local bd="$1" anchor="$2" json
-    json="$("$bd" -C "$anchor" list --label "$ORCH_SLATE_LABEL" --status open --json 2>/dev/null)" || return 1
+    json="$("$bd" -C "$anchor" list --label "$ORCH_SLATE_LABEL" --status open,in_progress,blocked,deferred --limit 0 --json 2>/dev/null)" || return 1
     [ -n "$json" ] || return 0
     printf '%s' "$json" | python3 -c '
 import json,sys
@@ -95,6 +157,10 @@ if not any(re.match(r"\s*"+re.escape(sent), ln) for ln in notes.splitlines()):
 # ★members 抽出を sentinel 行へ束縛する（writer は sentinel と members を co-located canonical form で焼く）。
 #   sentinel を含まない行の prose `members:`（既存 bead の前歴 notes 由来）を拾うと interlock を false-green 化
 #   しうる（over-permit＝計画外 dispatch/spawn を pass させる）ため、sentinel を含む行のみ対象にする。
+# ★既知限界（本 file 未同期・bd orch-3d07）: この束縛は **行中 search** ゆえ「散文が sentinel を **行内引用** した
+#   行」も sentinel 行と看做し、その行の members: を harvest する（over-permit＝fail-open・hermetic 実測で確認）。
+#   private 配備層の local copy は行頭アンカー（re.match）済み＝本 file への port は follow-up（file 冒頭の
+#   既知限界 節を参照）。
 # \b で "remembers:" 等の誤ヒットを防ぐ（word boundary）。
 for ln in notes.splitlines():
     if not re.search(re.escape(sent), ln): continue   # sentinel 行のみ（stray prose members: を排除）
@@ -247,14 +313,50 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 
     mkdir -p "$st_tmp/bin" "$st_tmp/anchor"
 
-    # hermetic bd stub: `list --label slate --status open --json` → $SLATE_LIST_JSON,
+    # hermetic bd stub: `list --label slate ... --json` → $SLATE_LIST_JSON,
     #   `show <id> --json` → $SLATE_SHOW_JSON（未 set は []）。`-C <anchor>` は剥がす。BD_FAIL=1 で非0。
+    # ★status-aware（bd orch-1dcd）: 実 bd の `--status <csv>` filter を模す＝指定 status の行のみ返す。
+    #   status を無視する stub だと「open 固定 query でも in_progress slate が返る」偽環境になり、本 filter の
+    #   teeth も mutation も空虚化する（status-blind stub では未修正コードでも緑）。契約:
+    #     - `--status` / `-s` の csv を解析し行 status で filter（行に status field が無ければ open 扱い）
+    #     - `--status` 未指定は実 bd 既定＝closed 以外を返す
+    #     - flag が複数回来たら **最後の値のみ**採用（実 bd の documented な silently-overwrite 挙動）
+    #     - 未知 status token は rc=1（実 bd と同じく失敗させる＝typo を緑にしない）
+    #   KNOWN は `bd statuses` の built-in **実 7 値**（pinned / hooked を含む・実 bd 照会 verified 2026-07-25）で、
+    #   `bd list --help` の 5 値ではない。実集合に揃えるのは (a) 未知 token 判定を実 bd と同義にするため
+    #   (b) 将来 filter へ pinned / hooked を足したとき stub が rc=1 を返して正しい拡張を封鎖する逆流を消すため。
     cat > "$st_tmp/bin/bd" <<'STUB'
 #!/usr/bin/env bash
 [ -n "${BD_FAIL:-}" ] && exit 1
 while [ "${1:-}" = "-C" ] || [ "${1:-}" = "--directory" ]; do shift 2; done
+_status=""; _prev=""
+for _a in "$@"; do
+  case "$_prev" in --status|-s) _status="$_a" ;; esac   # repeat は最後の値のみ採用
+  _prev="$_a"
+done
 case "$1" in
-  list) printf '%s' "${SLATE_LIST_JSON:-[]}" ;;
+  list)
+    ORCH_SLATE_STUB_STATUS="$_status" python3 - "${SLATE_LIST_JSON:-[]}" <<'PY'
+import json, os, sys
+KNOWN = {"open", "in_progress", "blocked", "deferred", "closed", "pinned", "hooked"}  # bd statuses 実 7 値
+raw = os.environ.get("ORCH_SLATE_STUB_STATUS", "")
+if raw:
+    allowed = {t for t in raw.split(",") if t}
+    bad = allowed - KNOWN
+    if bad:
+        sys.stderr.write("stub bd: unknown status: %s\n" % ",".join(sorted(bad)))
+        sys.exit(1)
+else:
+    allowed = KNOWN - {"closed"}          # 実 bd 既定＝closed 以外
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    sys.stdout.write("[]"); sys.exit(0)
+rows = data if isinstance(data, list) else []
+out = [r for r in rows if (not isinstance(r, dict)) or r.get("status", "open") in allowed]
+sys.stdout.write(json.dumps(out))
+PY
+    exit $? ;;
   show) printf '%s' "${SLATE_SHOW_JSON:-[]}" ;;
   *)    printf '%s' "[]" ;;
 esac
@@ -338,6 +440,36 @@ STUB
     if _orch_slate_record "$BDW" "$ANC" "orch-bundle1"; then
         _fail "record: member ゼロで成功した（空虚 slate を許容）"
     else _ok "record: member ゼロは rc≠0（空虚 slate を焼かない）"; fi
+
+    # (9) status 集合（bd orch-1dcd）: dispatch 後に worker の --claim で in_progress 化した slate は**生きる**。
+    #     status-aware stub ゆえ open 固定 query の実装ではこの fixture は返らず members 空＝reject へ倒れる。
+    export SLATE_LIST_JSON='[{"id":"orch-slate1","status":"in_progress"}]'
+    export SLATE_SHOW_JSON='[{"id":"orch-slate1","notes":"[ORCH-SLATE v1] members: orch-aaa, folio"}]'
+    if _orch_slate_has_member "orch-aaa" "$BD" "$ANC"; then
+        _ok "status: in_progress slate は生存（dispatch 後も interlock を通す・orch-1dcd）"
+    else _fail "status: in_progress slate が reject された（open 固定 filter＝bundle 自殺の退行）"; fi
+    if [ -n "$(_orch_slate_open_members "$BD" "$ANC")" ]; then
+        _ok "status: in_progress slate の members が surface path でも返る（同一 filter）"
+    else _fail "status: in_progress slate の members が空（surface/interlock の非対称 or open 固定）"; fi
+
+    # (9b) blocked / deferred も同型 brick ゆえ活動中として扱う（human ratify 待ち slate で bundle を殺さない）。
+    export SLATE_LIST_JSON='[{"id":"orch-slate1","status":"blocked"}]'
+    if _orch_slate_has_member "orch-aaa" "$BD" "$ANC"; then _ok "status: blocked slate も活動中扱い（pass）"
+    else _fail "status: blocked slate が reject された（非 closed 明示列挙の破れ）"; fi
+    export SLATE_LIST_JSON='[{"id":"orch-slate1","status":"deferred"}]'
+    if _orch_slate_has_member "orch-aaa" "$BD" "$ANC"; then _ok "status: deferred slate も活動中扱い（pass）"
+    else _fail "status: deferred slate が reject された（非 closed 明示列挙の破れ）"; fi
+
+    # (10) 除外の対: 同一 members のまま status だけ closed にすると reject（bundle 完了後の旧 slate は通さない）。
+    #      (9) と (10) は status だけが違う positive/negative 対＝over-permit（closed 混入）と under-permit
+    #      （open 固定）の両方を同時に RED 化する。
+    export SLATE_LIST_JSON='[{"id":"orch-slate1","status":"closed"}]'
+    if _orch_slate_has_member "orch-aaa" "$BD" "$ANC"; then
+        _fail "status: closed slate が pass した（bundle 完了後の旧 slate が interlock を通す over-permit）"
+    else _ok "status: closed slate は reject（bundle 完了後は interlock を通さない）"; fi
+    if [ -z "$(_orch_slate_open_members "$BD" "$ANC")" ]; then
+        _ok "status: closed slate は members 和集合からも除外（surface path も同一 filter）"
+    else _fail "status: closed slate の members が surface path に残った"; fi
 
     # ── leak battery（F3・orch-cqf4 Leg-A public-safe hardening）────────────────────────
     # engine は PUBLIC 配布物ゆえ、本 diff で追加した --surface 関数（declare -f で live 抽出＝hermetic・base 非依存）
