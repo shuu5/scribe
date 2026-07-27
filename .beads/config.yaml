@@ -87,4 +87,9 @@ sync:
 #
 # 台帳 1 つにつき private repo 1 つが必要（dolt の push 先 ref 名は refs/dolt/data 固定で、
 # 複数台帳を 1 repo に集約すると ref が衝突するため）。
-# sync.remote: "git+https://github.com/shuu5/scribe-beads.git"
+#
+# ★実効値は上の sync: ブロック（bd dolt remote add が書く正準形）。ここには重複して書かない。
+# ★最重要の落とし穴（2026-07-27 に実際に踏んだ）: **このファイルを編集しても push 先は切り替わらない**。
+#   dolt エンジンは自前の remote レジストリを持ち、切替には `bd dolt remote remove/add` が要る。
+#   config だけ書き換えて push すると**旧 remote（＝コード repo）へ出て露出が復活する**。
+#   ゆえに push の前に必ず `bd dolt remote list` で実際の push 先を実測し、private 先を指していなければ push しない。
