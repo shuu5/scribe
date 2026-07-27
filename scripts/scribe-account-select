@@ -69,6 +69,23 @@
 #         契約の defect。**exit 4 で fail-loud**。
 #   判定は `ok is True ∧ stale is False`（= usage 自身の健全申告）だけで行い、**本体のパース経路と共有しない**
 #   （共有すると本体のバグが判定器も道連れにして (B) を握り潰す＝teeth が teeth でなくなる）。
+#   ▼根因確定の対照実験（実測 2026-07-27・incident の 1 日後）: **同一の selector コード**を実 claude-usage の
+#     exec 経路で走らせると exit 0・適格複数件で正常にランキングした（一部 account は stale のまま混在＝
+#     全件 stale ではない）。コードを 1 行も変えずに結果が反転した以上、incident の原因は selector の parse
+#     ドリフトではなく **上流の一過性 429 による全 account 同時 degrade** で確定する（時間差の対照＝上の (A)）。
+#
+# ★適格（eligible）の意味（sc-j8zv・実測 2026-07-27）: **eligible は「usage 上の残量的適格」であって
+#   「spawn 先として使える」ではない**。本 selector は fs 非接触が契約（facet⑦）ゆえ config dir の実在・
+#   login・onboarding・plugin enable を一切見ない。実運用の spawn 可能集合は呼出元 scribe-spawn.sh の
+#   preflight lazy walk（probe_config_dir）との**交差**で初めて決まる。
+#   実測された非対称（usage の列挙 ⊋ spawn 可能集合）:
+#     ① 予約ラベル `default` は accounts-base に実体を持たず、呼出元の写像（default → ~/.claude・unset 意味論）
+#        でのみ到達する＝**`--account default` の明示指定経路は存在しない**。監査 snapshot に chosen=default と
+#        出ても、人間が同じ形で再現できない（再現は --account auto 経由）。
+#     ② その写像先 ~/.claude 自体が onboarding 未完了でありうる（実測: `.claude.json` 不在）。auto の lazy walk は
+#        ~/.claude に対しても probe を実施するので**正しく skip して下位へ降りる**（fail-open ではない）。
+#   ∴ 監査 snapshot の `eligible=N` を「N 個すぐ使える」と読まないこと。N は preflight 前の上限であって
+#     可用数ではない（この読み替えを怠ると、preflight 全滅の fail-loud が「selector が嘘をついた」に誤帰属される）。
 #
 # ★VERIFIED セマンティクス（sc-1rq 契約・admin が uns ソース直読で確認）:
 #   ・five_hour_pct/seven_day_pct = utilization(使用率%・int or null)。**残量% = 100 − pct**。
