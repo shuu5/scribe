@@ -19,7 +19,10 @@
 #                                          （session 内で claude が走る唯一の pane を
 #                                          対象に採る。0 件は解決失敗・複数件は曖昧
 #                                          ＝pane では計測しない fail-closed。--sid
-#                                          併用時はいずれも jsonl へ落ちる）
+#                                          併用時はいずれも jsonl へ落ちる。claude
+#                                          判定は cmd==claude ∨ pgid 内 comm=claude
+#                                          の 2 経路〔detect_state と同 SSOT・
+#                                          cld-spawn の wrapper bash pane 対応〕）
 #
 # 出力（機械可読・1 行・固定順 key=value・不明値は '-'）:
 #   used_pct=<int|-> used_tokens=<int|-> window_tokens=<int|-> source=<pane|jsonl> sid=<sid|-> target=<target|->
@@ -39,9 +42,12 @@
 #           フォーマット SSOT は
 #           ubuntu-note-system/claude/statusline-command.sh line2（cross-repo
 #           coupling: 同 script の表示形式変更時は本 parser の追随が必要）。
-#           claude 非稼働 pane（detect_state = idle/exited）では画面に残った
-#           stale statusline を「現在値」と誤読しうるため pane source を信頼せず
-#           jsonl へ fallback する（jsonl は「最終観測値」として意味論が正直）。
+#           claude 非稼働 pane では画面に残った stale statusline を「現在値」と
+#           誤読しうるため pane source を信頼せず jsonl へ fallback する（判定は
+#           計測対象 pane 厳密の pane_alive_claude・jsonl は「最終観測値」として
+#           意味論が正直）。parse は誤爆対策として末尾 3 非空行のみ探索・window
+#           token は k/M 必須・健全性 bound（pct<=100 ∧ used<=window ∧
+#           window>=100k）外は不成立として扱う（捏造値を出さない側へ倒す）。
 #   jsonl = transcript jsonl の最新の非 sidechain assistant message の
 #           input_tokens + cache_creation_input_tokens + cache_read_input_tokens 和。
 #           絶対 tokens は正確・/clear / compact 後も最新 1 turn 読みで自然追随。
@@ -54,11 +60,16 @@
 #                 --sid のみ: jsonl。
 #
 # 消費者契約（orch-fleet-cap.sh 等）: 非 0 exit・出力不成立は fail-open
-# （cap 未達扱い）にすること。本 script は誤検知側（偽の高値）へ倒れない:
-# 値が取れないときは必ず非 0 exit し、捏造値を出力しない。stdout に出るのは
-# 成功時の 1 行 key=value のみ（usage/診断は stderr）。orch-fleet-cap の seam
-# （単一 word command + 位置引数 1 個・stdout「<pct> <abs>」）へは同 dir の
-# session-context-meter-capfmt.sh（cap 形式 adapter）を指すこと。
+# （cap 未達扱い＝no-action。「制限を開放する」の意ではない）にすること。
+# 誠実性の主張は source 別: pane source は値が取れないとき必ず非 0 exit し
+# 捏造値を出力しない。jsonl source は「最終観測値」であり session の生存・
+# 鮮度は保証しない（現在値としての解釈は consumer 側の判断）。stdout に出る
+# のは成功時の 1 行 key=value のみ（usage/診断は stderr・target field は
+# 空白等を '_' に無害化して emit する）。orch-fleet-cap の seam（単一 word
+# command + 位置引数 1 個・stdout「<pct> <abs>」）へは同 dir の
+# session-context-meter-capfmt.sh を指すこと（consumer が action する
+# <session>:<window>〔既定 admin・SESSION_METER_WINDOW で上書き〕を
+# --source pane 固定で計測する adapter）。
 #
 # 環境変数 seam（すべて test 用 override 可）:
 #   SESSION_METER_PANE_MAP      pane_id→sid map の明示 path（設定時はこれのみ使用）
@@ -69,7 +80,7 @@
 # =============================================================================
 set -euo pipefail
 
-_SCM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_SCM_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=lib/session-env.sh
 source "$_SCM_DIR/lib/session-env.sh"
 # resolve_target（session:window / bare window 名の解決 SSOT）を再利用する。
@@ -98,14 +109,20 @@ tok2int() {
 # 成功: グローバル P_PCT / P_USED / P_WINDOW を設定し 0。失敗: 非 0。
 # 実 TUI は statusline を先頭空白付きで render する（live 実測 2026-07-24:
 # 『  19% 190k/1M Fable 5 [xhigh] …』）ため先頭空白は許容し trim する。
-# 『NN% <tok>/<tok>』の複合形状で誤爆を抑え、複数一致時は最終行
-# （= pane 最下部の statusline 側）を採る。transcript 本文が同形状の行を
-# 含む場合の誤読は理論上残る（read-only 外形観測の既知限界・header 参照）。
+# 誤爆対策（R2 gate finding）:
+#   (1) 探索範囲を capture の末尾 3 非空行に限定する（statusline は最下部
+#       ブロック。本文/dialog に紛れた同形状行を「現在値」として拾わない）
+#   (2) window token は k/M suffix 必須（SSOT の fmt_tokens 上、実在する
+#       window が suffix 無しになることはない＝『3/4 done』等の prose を弾く）
+#   (3) 健全性 bound: pct<=100 ∧ used<=window ∧ window>=100k。外れたら
+#       parse 失敗（fail-closed・捏造値を consumer へ流さない）
+# 複数一致時は最終行（= pane 最下部の statusline 側）を採る。
 P_PCT="" P_USED="" P_WINDOW=""
 parse_pane() {
     local target="$1" captured line used_tok win_tok
     captured=$(tmux capture-pane -p -t "$target" 2>/dev/null) || return 1
-    line=$(grep -E '^[[:space:]]*[0-9]+% [0-9]+[kM]?/[0-9]+[kM]?( |$)' <<<"$captured" | tail -n 1)
+    line=$(sed '/^[[:space:]]*$/d' <<<"$captured" | tail -n 3 \
+        | grep -E '^[[:space:]]*[0-9]+% [0-9]+[kM]?/[0-9]+[kM]( |$)' | tail -n 1)
     [ -n "$line" ] || return 1
     line="${line#"${line%%[![:space:]]*}"}"   # 先頭空白 trim（TUI render の indent）
     P_PCT="${line%%\%*}"
@@ -114,7 +131,41 @@ parse_pane() {
     P_USED=$(tok2int "$used_tok") || return 1
     P_WINDOW=$(tok2int "$win_tok") || return 1
     [[ "$P_PCT" =~ ^[0-9]+$ ]] || return 1
+    [ "$P_PCT" -le 100 ] || return 1
+    [ "$P_USED" -le "$P_WINDOW" ] || return 1
+    [ "$P_WINDOW" -ge 100000 ] || return 1
     return 0
+}
+
+# --- claude 稼働 pane 判定（pane 単位・fail-closed） -------------------------
+# SSOT = session-state.sh detect_state の 2 経路判定と同一手法:
+#   pane_current_command == claude、または pane_pid の process group 内に
+#   comm=claude が存在する。cld-spawn 由来 pane は wrapper bash が foreground
+#   leader に残り pane_current_command=bash になる（R2 gate CONFIRMED）ため、
+#   文字列一致だけでは本番 spawn 経路の claude を構造的に見落とす。
+# detect_state 自体を使わないのは、同関数の list-panes が window 先頭 pane を
+# 判定する（pane 指定でも window スコープ）ため、gate 対象と計測対象が
+# multi-pane window で乖離するから（本関数は display-message で pane 厳密）。
+pane_alive_claude() {
+    local pane="$1" info dead pid cmd pgid
+    info=$(tmux display-message -p -t "$pane" '#{pane_dead} #{pane_pid} #{pane_current_command}' 2>/dev/null) || return 1
+    read -r dead pid cmd <<< "$info" || true
+    [ "$dead" = "0" ] || return 1
+    [ "$cmd" = "claude" ] && return 0
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ') || return 1
+    [ -n "$pgid" ] || return 1
+    # detect_state の「pgid 内に claude」判定と同じ意味論を pgrep 単発で行う
+    # （pgrep|xargs ps 連鎖は xargs が外部 ps を exec するため bats の関数 mock が
+    # 効かず、hermetic に検証できない）
+    pgrep -g "$pgid" -x claude >/dev/null 2>&1
+}
+
+# --- 出力 field の無害化 -----------------------------------------------------
+# 未検証の TARGET 文字列が emit 行へ素通りすると、空白入り値で後置の偽
+# key=value token を注入できる（R2 gate finding）。許可文字以外を '_' へ潰す。
+safe_field() {
+    printf '%s' "$1" | tr -c 'A-Za-z0-9_.:/%-' '_'
 }
 
 # --- pane_id → sid（pane-map 逆引き） ---------------------------------------
@@ -227,17 +278,23 @@ if [ -n "$TARGET" ]; then
         # 唯一の pane」を対象に据える — tmux の -t <session> 既定解決（active
         # window の active pane）は、worker spawn（cld-spawn の new-window は
         # -d 無し）で active が移った瞬間に測定対象がすり替わるため採らない
-        # （consumer は bare session 名を渡す契約 = orch-fleet-cap。gate CONFIRMED）。
-        # claude pane 0 件は解決失敗・複数件は曖昧＝どれを測るか推測しない
-        # fail-closed（いずれも --sid 併用時のみ jsonl へ落ちる）。
+        # （consumer は bare session 名を渡す契約 = orch-fleet-cap。R1 gate CONFIRMED）。
+        # claude 判定は pane_alive_claude（cmd 一致 ∨ pgid 内 comm=claude）＝
+        # cld-spawn 由来 pane（pane_current_command=bash）も正しく拾う（R2 gate
+        # CONFIRMED の修正）。claude pane 0 件は解決失敗・複数件は曖昧＝どれを
+        # 測るか推測しない fail-closed（いずれも --sid 併用時のみ jsonl へ落ちる）。
+        # なお fleet-cap 経由は capfmt が <session>:<window> 形を組むため本
+        # fallback を通らない（consumer の action 対象との一致は capfmt 側で担保）。
         RESOLVED=$(resolve_target "$TARGET" 2>/dev/null) || RESOLVED=""
         if [ -z "$RESOLVED" ] && [[ "$TARGET" != *:* ]] \
             && [[ "$TARGET" =~ ^[A-Za-z0-9_./-]+$ ]] \
             && tmux has-session -t "=$TARGET" 2>/dev/null; then
-            mapfile -t _claude_panes < <(tmux list-panes -s -t "=$TARGET" \
-                -F '#{pane_id} #{pane_current_command}' 2>/dev/null \
-                | awk '$2 == "claude" { print $1 }')
-            if [ "${#_claude_panes[@]}" -eq 1 ] && [ -n "${_claude_panes[0]}" ]; then
+            _claude_panes=()
+            while IFS= read -r _p; do
+                [ -n "$_p" ] || continue
+                if pane_alive_claude "$_p"; then _claude_panes+=("$_p"); fi
+            done < <(tmux list-panes -s -t "=$TARGET" -F '#{pane_id}' 2>/dev/null)
+            if [ "${#_claude_panes[@]}" -eq 1 ]; then
                 RESOLVED="${_claude_panes[0]}"
             elif [ "${#_claude_panes[@]}" -gt 1 ] && [ -z "$SID" ]; then
                 echo "Error: ambiguous bare session target '$TARGET' (${#_claude_panes[@]} claude panes)" >&2
@@ -253,15 +310,17 @@ fi
 
 # --- primary: pane ---
 if [ -n "$RESOLVED" ] && { [ "$SOURCE" = "auto" ] || [ "$SOURCE" = "pane" ]; }; then
-    # stale-screen gate: claude 非稼働 pane の画面残渣を現在値として読まない
-    # （判定 SSOT = session-state.sh detect_state。idle/exited のみ不信頼化）
-    STATE=$(detect_state "$RESOLVED" 2>/dev/null) || STATE=""
-    if [ "$STATE" != "idle" ] && [ "$STATE" != "exited" ] && parse_pane "$RESOLVED"; then
-        emit "$P_PCT" "$P_USED" "$P_WINDOW" "pane" "${SID:--}" "$RESOLVED"
+    # stale-screen gate: claude 非稼働 pane の画面残渣を現在値として読まない。
+    # 判定は計測対象 pane に厳密化する（display-message で対象 pane を確定し
+    # pane_alive_claude で判定。旧 detect_state 直用は window 先頭 pane を見る
+    # ため multi-pane window で gate と capture が乖離した = R2 gate finding）。
+    GATE_PANE=$(tmux display-message -p -t "$RESOLVED" '#{pane_id}' 2>/dev/null) || GATE_PANE=""
+    if [ -n "$GATE_PANE" ] && pane_alive_claude "$GATE_PANE" && parse_pane "$RESOLVED"; then
+        emit "$P_PCT" "$P_USED" "$P_WINDOW" "pane" "${SID:--}" "$(safe_field "$RESOLVED")"
         exit 0
     fi
     if [ "$SOURCE" = "pane" ]; then
-        echo "Error: no live statusline context line in pane '$RESOLVED' (state=${STATE:-unknown})" >&2
+        echo "Error: pane source not usable for '$RESOLVED' (no live claude statusline)" >&2
         exit 4
     fi
 fi
@@ -292,5 +351,5 @@ SUM=$(extract_jsonl "$TRANSCRIPT") || {
     echo "Error: no usable assistant usage entry in '$TRANSCRIPT'" >&2
     exit 4
 }
-emit "-" "$SUM" "-" "jsonl" "$SID" "${RESOLVED:-${TARGET:--}}"
+emit "-" "$SUM" "-" "jsonl" "$SID" "$(safe_field "${RESOLVED:-${TARGET:--}}")"
 exit 0

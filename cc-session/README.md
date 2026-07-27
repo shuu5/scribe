@@ -22,7 +22,7 @@ $ scripts/session-context-meter.sh --target <tmux-target>   # 例: sc / sc:admin
 used_pct=22 used_tokens=220000 window_tokens=1000000 source=pane sid=- target=%3
 ```
 
-「`<pct> <abs>` 2 値 1 行」形式を要求する consumer（scriptorium orch-fleet-cap の `ORCH_FLEETCAP_METER_CMD` seam 等）へは adapter `scripts/session-context-meter-capfmt.sh <target>` を指す。詳細契約・exit code・env seam は各 script header が SSOT。
+「`<pct> <abs>` 2 値 1 行」形式を要求する consumer（scriptorium orch-fleet-cap の `ORCH_FLEETCAP_METER_CMD` seam 等）へは adapter `scripts/session-context-meter-capfmt.sh <session>` を指す。adapter は consumer が action する window と計測対象を一致させるため `<session>:$SESSION_METER_WINDOW`（既定 `admin`）を pane source 固定で測る。fail-open の意味は「非 0 exit・出力不成立 → cap unknown として **no-action**（cap 未達扱い）」であって、制限を開放する意ではない。詳細契約・exit code・env seam は各 script header が SSOT。
 
 ## インストール
 
