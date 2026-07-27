@@ -8,8 +8,9 @@
 #
 # メモリ上限（cgroup 防壁）は host の MemTotal から自動導出する（比例 20% / 下限 min(12G, 50%) /
 # 上限 32G。MemTotal を読めなければ 12G へ fallback）。上書き・可視化の env:
-#   CLD_MEMORY_MAX       値を直接指定（最優先。1GiB 未満・100% 超・形式不明は warn して自動導出へ
-#                        倒す。単位の小文字は systemd 受理形の大文字へ正規化して渡す）
+#   CLD_MEMORY_MAX       値を直接指定（最優先。1GiB 未満・100% 超・64bit 桁溢れ・形式不明は warn
+#                        して自動導出へ倒す。単位の小文字は systemd 受理形の大文字へ正規化して渡す。
+#                        **実 RAM 以上の値は受理するが loud に警告する**＝防壁が bind しないため）
 #   CLD_MEMORY_MAX_PCT   比例値の割合（1-100・不正値は既定 20 へ倒す）
 #   CLD_MEMORY_QUIET     1/true/yes/on で起動時 1 行の可視化を抑制（上限なし警告は抑制しない）
 #   CLD_MEMINFO_FILE     MemTotal 差し替えの seam（テスト専用・既定 /proc/meminfo）
@@ -103,6 +104,11 @@ fi
 #   no-op）。pct レバーだけで総和を MemTotal 以下に収められるのは N ≦ MemTotal / min(12GiB,
 #   MemTotal/2) まで（32GiB→N≦2 / 125GiB→N≦10）。それを超える構成では (a) CLD_MEMORY_MAX で
 #   明示値を与える（明示値は下限/上限クランプを迂回する）か (b) 同時本数を絞る、の 2 択。
+#   **総和の分母は MemTotal とは限らない**: scope の上位に user-<uid>.slice（systemd の user slice）が
+#   居て、そちらに MemoryMax/MemoryHigh が設定されていれば実効の天井はその小さい方になる（observable・
+#   2026-07-27 ipatho-server-2 実測: MemTotal 125GiB に対し user slice は max 110GiB / high 100GiB で
+#   memory.peak が既に high へ到達していた）。fleet を数えるときは
+#   `cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/memory.{max,high,current,peak}` を先に読むこと。
 # swap は別軸: MemoryMax は anon+file の上限で swap を含まない（swap 側は MemorySwapMax）。
 #   scope の memory.swap.max は既定 max ゆえ、実効的な猶予は MemoryMax + 利用可能 swap になる。
 # 既定変更が効くのは**次回 cld 起動から**。稼働中の scope は再起動なしに引き上げられる（実測済）:
@@ -120,6 +126,15 @@ CLD_MEMORY_MAX_FALLBACK="12G"
 MEM_MAX=""
 MEM_MAX_SRC=""
 MEM_MAX_NOTE=""
+# MemTotal は自動導出だけでなく**明示値が防壁として bind するかの判定**にも要るので先に読む。
+# CLD_MEMINFO_FILE は MemTotal 差し替えの seam（テスト専用・既定は /proc/meminfo）。
+# 正規ファイル限定で読む（FIFO を read すると writer 待ちで launcher が hang する）。
+_meminfo="${CLD_MEMINFO_FILE:-/proc/meminfo}"
+_total_kb=""
+if [[ -f "$_meminfo" && -r "$_meminfo" ]]; then
+    _total_kb="$(awk '/^MemTotal:/ { print $2; exit }' "$_meminfo" 2>/dev/null || true)"
+fi
+[[ "$_total_kb" =~ ^[1-9][0-9]*$ ]] || _total_kb=""   # 読めなければ空＝以降は fallback 扱い
 # 明示指定は最優先だが、無検証で通すと `CLD_MEMORY_MAX=25`（`25G` の打ち間違い）が systemd に
 # 25 バイトと解釈され、CC が起動直後に OOM kill される＝本 bead が潰そうとした「痕跡なく消える」
 # 失敗を escape hatch の typo で再生産する。1GiB 未満・形式不明は warn して自動導出へ倒す。
@@ -127,6 +142,7 @@ MEM_MAX_NOTE=""
 # systemd-run へ渡るため、systemd が解釈できない値は property parse error で exec 自体を失敗させ、
 # claude が一切起動しない（ファイル冒頭の不変条件「何であれ claude の起動は妨げない」の破れ）。
 _mm_explicit="${CLD_MEMORY_MAX:-}"
+_mm_nonbinding=0    # 明示値が実 RAM 以上＝防壁が bind しない（受理はするが loud に警告する）
 if [[ -n "$_mm_explicit" ]]; then
     if [[ "$_mm_explicit" == "infinity" ]]; then
         echo "Warning: CLD_MEMORY_MAX=infinity ＝ cgroup 防壁の撤廃です（暴走した dynamic workflow が host を巻き込みます）" >&2 || true
@@ -134,9 +150,12 @@ if [[ -n "$_mm_explicit" ]]; then
         # 割合指定は systemd が MemTotal 比で解釈する（受理）。ただし 100% 超は systemd 側が
         # 弾く（割合 parse が範囲外・バイト数としても解釈できない）ため素通しすると起動失敗になる。
         # 自動導出側の pct が 1-100 を検査するのと平仄を取る（20%→200% の打ち間違い対策）。
-        if (( BASH_REMATCH[1] > 100 )); then
+        _mm_pct_n="${BASH_REMATCH[1]}"
+        if (( _mm_pct_n > 100 )); then
             echo "Warning: CLD_MEMORY_MAX='${_mm_explicit}' は 100% を超えます（systemd が受理せず起動に失敗します）。自動導出へ倒します" >&2 || true
             _mm_explicit=""
+        elif (( _mm_pct_n == 100 )); then
+            _mm_nonbinding=1   # 100% = MemTotal ＝ 上限が実 RAM に一致し防壁として bind しない
         fi
     elif [[ "$_mm_explicit" =~ ^([1-9][0-9]*)([KMGTkmgt]?)$ ]]; then
         _mm_n="${BASH_REMATCH[1]}"
@@ -148,10 +167,18 @@ if [[ -n "$_mm_explicit" ]]; then
             T|t) _mm_b=$(( _mm_n * 1099511627776 )) ;;
             *)   _mm_b="$_mm_n" ;;   # 単位なし = systemd はバイトと解釈する
         esac
-        if (( _mm_b < 1073741824 )); then
+        # 桁溢れの検出: bash の算術は 64bit signed で**黙って wrap する**ため、巨大な値は
+        # 負数や小さな正数に化けて健全性チェックを素通りしうる（systemd 側では parse error に
+        # なって claude が起動しない）。桁数と符号の 2 面で弾いて自動導出へ倒す。
+        if (( ${#_mm_n} > 18 )) || (( _mm_b <= 0 )); then
+            echo "Warning: CLD_MEMORY_MAX='${_mm_explicit}' は桁が大きすぎて解釈できません（64bit 桁溢れ）。自動導出へ倒します" >&2 || true
+            _mm_explicit=""
+        elif (( _mm_b < 1073741824 )); then
             echo "Warning: CLD_MEMORY_MAX='${_mm_explicit}' は 1GiB 未満（systemd は単位なしをバイトと解釈します）。自動導出へ倒します" >&2 || true
             _mm_explicit=""
         else
+            # 実 RAM 以上なら上限があっても bind しない（下の共通警告で loud に出す）
+            if [[ -n "$_total_kb" ]] && (( _mm_b >= _total_kb * 1024 )); then _mm_nonbinding=1; fi
             # systemd の接尾辞は**大小文字を区別**する（man systemd.resource-control は K/M/G/T と
             # 大文字で規定）。`docker run -m 2g` / `free -g` の筋肉記憶から来る小文字 typo（8g）を
             # そのまま渡すと systemd-run が落ちて claude が起動しない。受理はしたまま大文字へ
@@ -163,20 +190,21 @@ if [[ -n "$_mm_explicit" ]]; then
         _mm_explicit=""
     fi
 fi
+# 明示値は下限/上限クランプを**迂回する**（それが escape hatch の役目）。その裏面として、実 RAM
+# 以上の明示値は「上限があるのに無いのと同じ」＝防壁が bind しない状態を silent に作る。自動導出
+# 側は 50% クランプでこれを構造的に防いでいるので、明示経路だけが穴になる。infinity を loud に
+# 警告するのと同じ理由でここも警告する（**受理はする**＝escape hatch は殺さない）。CLD_MEMORY_QUIET
+# は可視化行だけの抑制設定ゆえこの警告には効かせない（保護不在の隠蔽を作らない・「上限なし」警告と同じ扱い）。
+if [[ -n "$_mm_explicit" ]] && (( _mm_nonbinding )); then
+    echo "Warning: CLD_MEMORY_MAX='${_mm_explicit}' は実 RAM（MemTotal $(( _total_kb / 1048576 ))GiB）以上です＝cgroup 防壁が bind しません（暴走 WF は host ごと巻き込みます）" >&2 || true
+fi
 
 if [[ -n "$_mm_explicit" ]]; then
     MEM_MAX="$_mm_explicit"
     MEM_MAX_SRC="explicit"
     MEM_MAX_NOTE="CLD_MEMORY_MAX 明示"
 else
-    # CLD_MEMINFO_FILE は MemTotal 差し替えの seam（テスト専用・既定は /proc/meminfo）。
-    # 正規ファイル限定で読む（FIFO を read すると writer 待ちで launcher が hang する）。
-    _meminfo="${CLD_MEMINFO_FILE:-/proc/meminfo}"
-    _total_kb=""
-    if [[ -f "$_meminfo" && -r "$_meminfo" ]]; then
-        _total_kb="$(awk '/^MemTotal:/ { print $2; exit }' "$_meminfo" 2>/dev/null || true)"
-    fi
-    if [[ "$_total_kb" =~ ^[1-9][0-9]*$ ]]; then
+    if [[ -n "$_total_kb" ]]; then
         _pct="${CLD_MEMORY_MAX_PCT:-$CLD_MEMORY_MAX_PCT_DEFAULT}"
         # 不正値は die でなく既定へ倒す（不変条件: 何であれ claude の起動は妨げない）
         if [[ ! "$_pct" =~ ^[1-9][0-9]*$ ]] || (( _pct > 100 )); then

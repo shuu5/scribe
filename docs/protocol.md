@@ -408,7 +408,7 @@ worker が稼働中（busy = 入力受付不可）かを pane 下部行で判定
 
 上の salvage 群は **worker の env / tool 層が壊れる**系統。本節は**別系統**——**CC プロセス自体が cgroup OOM killer に SIGKILL される**（admin / worker を問わず起きる）。`cld` launcher は CC を `systemd-run --user --scope -p MemoryMax=…` で起動するため、**通常の session は上限付き scope の中に居る**。
 
-**本節の適用前提（2 つの例外を先に潰す）**: ① **systemd-run 不在 host では cld は上限なしで直接起動する**（起動時 stderr に `cld: メモリ上限なし` が出る＝この行が出た session に本節は適用されない。上限が無いので user journal の oom-kill 行は原理的に出ず、OOM が起きるなら **host OOM＝dmesg / kern.log 側**）。② **`--transport bg` の native background agent は独立 scope を持たず親 session の scope 予算を共有する**（deduced: cgroup は fork 継承）＝bg worker の暴走は**親 admin scope の oom-kill として現れる**。
+**本節の適用前提（3 つの例外を先に潰す）**: ① **systemd-run 不在 host では cld は上限なしで直接起動する**（起動時 stderr に `cld: メモリ上限なし` が出る＝この行が出た session に本節は適用されない。上限が無いので user journal の oom-kill 行は原理的に出ず、OOM が起きるなら **host OOM＝dmesg / kern.log 側**）。② **`--transport bg` の native background agent は独立 scope を持たず親 session の scope 予算を共有する**（deduced: cgroup は fork 継承）＝bg worker の暴走は**親 admin scope の oom-kill として現れる**。③ **cld を経由しない起動（素の `claude` 直起動・IDE 統合・cron 等）は scope を持たない**——`cat /proc/self/cgroup` の末尾が `run-<id>.scope` でなければこの session に per-scope 上限は無く、本節の oracle も一次対処（`set-property`）も当たらない（上位 slice 側の OOM か host OOM を見る）。**「cld で起動した＝上限が効いている」とも限らない**: `CLD_MEMORY_MAX` が env に居る session は自動導出（下限/上限クランプ）を**丸ごと迂回**しているので、まず起動時 1 行が `[CLD_MEMORY_MAX 明示]` か `[auto: MemTotal …]` かを見る（`env | grep CLD_MEMORY` でも可）。**明示値を fleet へ配るなら carrier は env-file**（`cld-spawn` が `--env-file` > `CLD_ENV_FILE` > `~/.cld-env` の順で source する）——呼出元 shell の `export` が spawn 先へ届くかは tmux server の環境に依存する（deduced・本 sandbox では socket を作れず未実測）ので、そこに依存した手順を書かないこと。
 
 **症状（この形なら本節を疑う）**:
 
@@ -423,6 +423,11 @@ journalctl --user --since "<消えた時刻>" | grep -i oom-kill
 
 決定的な 2 行が出る — `run-<id>.scope: A process of this unit has been killed by the OOM killer.` と `run-<id>.scope: Failed with result 'oom-kill'.`。**死んだ WF の agent 最終書込時刻と oom-kill 行の時刻が一致すれば確定**（実測: 2026-07-26 の 00:45:32 / 00:51:18 が調査 WF 2 試行の最終書込と一致）。
 
+**oracle を読むときの 2 点（層と同定）**:
+
+- **どの unit が殺されたかを読む＝層の弁別**。`run-<id>.scope` なら per-scope 上限に当たったので下の `set-property` が効く。だが **scope の上位には user slice が居る**（`/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/run-<id>.scope`）。oom-kill 行が **slice / `user@<uid>.service` 側**を名指しているなら、**per-scope 上限を上げても無駄**（上位が binding なら子の上限を緩めても天井は動かない）。上位の実効天井は `cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/memory.{max,high,current,peak}` で直読する（observable・2026-07-27 ipatho-server-2 実測: MemTotal 125GiB に対し **max 110GiB / high 100GiB** が設定済で、**peak が既に high へ到達**していた）。**`memory.high` は kill でなく throttle**（reclaim 圧で遅くなるだけ）なので、**oom-kill 行が出ないまま session が異様に遅い**ときは high 到達を疑う——これは「窓は生きたまま idle」に見えるため **zombie 系と誤診しやすい**（分岐の第 3 枝）。
+- **死んだ scope から session を逆引きする**: 死後は `systemctl --user show` が引けないので journal の起動行を読む — `journalctl --user | grep "Started run-<id>"`。`cld` が Description に **cwd / pane / 実効値と出所**を焼いているので、`run-<id>` から「どの worktree のどの窓だったか」を同定できる。
+
 **空振りする調査経路（過去の誤診・再びここへ人手を流さない）**:
 
 - **`dmesg` / `journalctl -k` は本 fleet では読めない**（observable・2026-07-27 実測: `kernel.dmesg_restrict = 1` かつ実行 user が `adm` / `systemd-journal` 非所属＝`dmesg: read kernel buffer failed: Operation not permitted`）。**理由を「cgroup OOM は kernel log に出ないから」と書かないこと**——それは誤りで、memcg OOM も `Memory cgroup out of memory: Killed process …` を kernel ring buffer へ出す（＝権限のある host では補助 oracle になりうる）。本 fleet で空振りするのは**権限**であって kernel 挙動ではない（mechanism を verified 扱いで焼かない＝本 §6 の証拠種別規律）。なお **host が潤沢でも cgroup OOM は起きる**（実測時 125GiB 中 69GiB free で発生）——「host に空きがあるから OOM ではない」は**誤った消去法**。**対偶も重要**: 逆に dmesg / kern.log に OOM 行が出ているなら、それは **host OOM＝別系統**（per-scope 上限では防げず、tmux server 等 scope 外プロセスも巻き込む）。その場合は同時稼働本数を減らすか `CLD_MEMORY_MAX_PCT` を下げる。
@@ -433,16 +438,16 @@ journalctl --user --since "<消えた時刻>" | grep -i oom-kill
 
 - **稼働中の scope を再起動なしに引き上げる**（実測で反映を確認済み）: `systemctl --user set-property run-<id>.scope MemoryMax=<N>G`。自分の scope id は `cat /proc/self/cgroup` 末尾の `run-<id>.scope`。実効値の確認は `systemctl --user show <scope> -p MemoryMax -p Description`（`cld` が Description へ実効値と出所を焼く）か cgroup 直読（`/sys/fs/cgroup/…/memory.max`・`memory.current`・`memory.peak`）。
 - **恒久既定は launcher が持つ**: `cc-session/scripts/cld` が **MemTotal 比例 + 下限 / 上限クランプ**で導出し（**具体値の SSOT は cld の定数ブロック**——ここへ数値を転記すると必ず drift するので書かない）、起動時に stderr 1 行（`cld: MemoryMax=… [auto: MemTotal …]`）で実効値と出所を可視化する。上書きは `CLD_MEMORY_MAX`（値）/ `CLD_MEMORY_MAX_PCT`（割合）、抑制は `CLD_MEMORY_QUIET`（真偽値・ただし「上限なし」警告は抑制されない）。**既定変更が効くのは次回 cld 起動から**で、**いま走っている session は旧上限のまま**＝重い WF を回す前に上の `set-property` で個別に引き上げるか、実効値を起動時 1 行 / cgroup 直読で確認すること。**上限の撤廃はしない**——暴走 WF が host を巻き込むのを防ぐ防壁でもあるため。
-- **per-scope 上限は fleet 総量を縛らない（運用側の手当てが要る）**: 単一 session の暴走への防壁であって、**同時稼働セッション数 × 上限の総和**は制約しない。scribe の常態（admin + N worker + consult）で総和が MemTotal を超える構成になるなら手当てが要るが、**レバーは 2 本あり効く範囲が違う**（片方は混雑域で無効になるので、下げたつもりで放置しないこと）:
+- **per-scope 上限は fleet 総量を縛らない（運用側の手当てが要る）**: 単一 session の暴走への防壁であって、**同時稼働セッション数 × 上限の総和**は制約しない。**総和を比べる相手（分母）は MemTotal とは限らず `min(MemTotal, 上位 user slice の memory.max)`**（上の「層の弁別」で直読する。実測 host では MemTotal より 15GiB 低く、`memory.high` はさらに低い）——MemTotal を分母に数えると混雑を過小評価する。scribe の常態（admin + N worker + consult）で総和が MemTotal を超える構成になるなら手当てが要るが、**レバーは 2 本あり効く範囲が違う**（片方は混雑域で無効になるので、下げたつもりで放置しないこと）:
   - **`CLD_MEMORY_MAX_PCT` を下げる（目安 `100/(2N)` 以下）——ただし launcher の下限クランプより下へは下がらない**。cld は比例値が下限を割れば必ず引き上げるため（**下限の具体値の SSOT は cld の定数ブロック**・ここへ転記しない）、下限が binding な帯では pct をいくら下げても実効値は変わらず **silent に no-op** になる。pct レバーだけで総和を MemTotal 以下に収められるのは概ね `N ≦ MemTotal / 下限` までで、それを超える構成では pct は効かない（例: 常態 4 session を回す中規模 host は pct では到達できない）。
-  - **下限より下が必要なら `CLD_MEMORY_MAX=<N>G` で明示値を与える**（明示値は下限/上限クランプを迂回する。1GiB 未満・100% 超・不正形式は warn して自動導出へ倒れるので escape hatch の typo で起動が壊れることはない）か、**同時本数を絞る**（総和が MemTotal を超える構成のまま運用しない）。
+  - **下限より下が必要なら `CLD_MEMORY_MAX=<N>G` で明示値を与える**（明示値は下限/上限クランプを迂回する。1GiB 未満・100% 超・64bit 桁溢れ・不正形式は warn して自動導出へ倒れるので escape hatch の typo で起動が壊れることはない。**ただし実 RAM 以上の明示値は「受理したうえで loud に警告」**＝倒さない。警告が出たら防壁は bind していない）か、**同時本数を絞る**（総和が MemTotal を超える構成のまま運用しない）。
   - **下げたら効いたことを実効値で確認する**: 起動時 1 行（`cld: MemoryMax=… [auto: MemTotal …]`）に導出内訳が出る。総和超過は per-scope 上限では防げず、上の対偶（dmesg に OOM 行＝host OOM）として現れる。
 - **再発防止は WF 設計側**: 無界出力（巨大 grep 結果・全文 `cat`）を agent context へ流さず機械 cap を課す＝ `methodology.md` §2「WF agent への出力 cap 規律」が SSOT。
 - **猶予の実効値に注意**: `MemoryMax` は anon+file の上限で **swap を含まない**（swap 側は `MemorySwapMax`・scope 既定は `max`）。実効的な猶予は `MemoryMax` + 利用可能 swap になる。
 
 **証拠種別（本 §6 凡例）**: oom-kill 行・時刻一致・`memory.max` / `memory.peak` の実測はいずれも **observable（admin 検証済み）**。本節の手順は observable のみに立脚し、mechanism 診断に依存しない。
 
-> 一次出典: bd `sc-von0`（admin 実測 2026-07-26: journal の oom-kill 2 行と WF 2 試行の最終書込時刻の一致／平常時 scope は memory.current 約 0.9GB・peak 約 1.1GB に対し上限 12GiB／host 125GiB 中 69GiB free ＝ host OOM ではない／`/var/crash` dump は codex 由来で CC 無関係／CC は native binary）／ `cc-session/scripts/cld`（MemoryMax 既定の導出・可視化の実装と根拠コメント）／ `methodology.md` §2「WF agent への出力 cap 規律」（再発防止側）。
+> 一次出典: bd `sc-von0`（admin 実測 2026-07-26: journal の oom-kill 2 行と WF 2 試行の最終書込時刻の一致／平常時 scope は memory.current 約 0.9GB・peak 約 1.1GB に対し上限 12GiB／host 125GiB 中 69GiB free ＝ host OOM ではない／`/var/crash` dump は codex 由来で CC 無関係／CC は native binary）／ **worker 実測 2026-07-27（ipatho-server-2・worktree `sc-von0-090632`）: `/proc/self/cgroup` = `…/user-1001.slice/user@1001.service/app.slice/run-<id>.scope` ／ `user-1001.slice` は `memory.max` 118111600640（110GiB）・`memory.high` 107374182400（100GiB）・`memory.peak` 107377606656（high 到達済）・`memory.current` 約 70GiB に対し MemTotal 125GiB ＝ 上位 slice が実効天井**／ `cc-session/scripts/cld`（MemoryMax 既定の導出・可視化の実装と根拠コメント）／ `methodology.md` §2「WF agent への出力 cap 規律」（再発防止側）。
 
 ### native 監視への段階移行方針（暫定・PoC 完了までの橋・sc-pp9 論点6）
 

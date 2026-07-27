@@ -96,6 +96,16 @@ _memmax() {
     [[ "$output" == *"CLD_MEMORY_MAX 明示"* ]]
 }
 
+@test "memmax: 上限は -p の直後に渡る（値だけ見る _memmax の盲点を塞ぐ）" {
+    # _memmax は 'SDRUN_ARG:MemoryMax=' 行を拾うだけなので `-p` 脱落を検出できない。
+    # systemd-run は `-p KEY=VALUE` の形でしか property を受けないため隣接まで pin する。
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" bash "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'SDRUN_ARG:-p\nSDRUN_ARG:MemoryMax='* ]]
+    [[ "$output" == *"SDRUN_ARG:--user"* ]]
+    [[ "$output" == *"SDRUN_ARG:--scope"* ]]
+}
+
 @test "memmax: 明示指定は pct 指定より優先される" {
     run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=3G CLD_MEMORY_MAX_PCT=50 bash "$CLD"
     [ "$status" -eq 0 ]
@@ -305,6 +315,69 @@ _memmax() {
     [[ "$output" == *"1GiB 未満"* ]]
 }
 
+@test "memmax: 実 RAM 以上の明示値は受理するが「防壁が bind しない」と警告する" {
+    # 明示値は下限/上限クランプを迂回する＝自動導出側の 50% クランプが効かない。実 RAM 以上を
+    # 指定すると「上限があるのに無いのと同じ」状態が silent に出来上がるので loud に警告する。
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=200G bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "200G" ]        # 受理する（escape hatch は殺さない）
+    [[ "$output" == *"bind しません"* ]]
+    [[ "$output" == *"MemTotal 125GiB"* ]]
+}
+
+@test "memmax: 境界 — 実 RAM ちょうどは警告し、1G 下は警告しない" {
+    local mi
+    mi="$(_mk_meminfo 8388608)"      # ちょうど 8GiB
+    run env CLD_MEMINFO_FILE="$mi" CLD_MEMORY_MAX=8G bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "8G" ]
+    [[ "$output" == *"bind しません"* ]]
+    run env CLD_MEMINFO_FILE="$mi" CLD_MEMORY_MAX=7G bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "7G" ]
+    [[ "$output" != *"bind しません"* ]]
+}
+
+@test "memmax: 100%（= MemTotal）も「bind しない」警告の対象（受理は据え置き）" {
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=100% bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "100%" ]
+    [[ "$output" == *"bind しません"* ]]
+}
+
+@test "memmax: 「bind しない」警告は CLD_MEMORY_QUIET でも抑制されない（保護不在を隠蔽しない）" {
+    # QUIET は可視化行だけの抑制設定。上限なし警告と同じ扱いで、保護が効いていない事実は必ず出す。
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_QUIET=1 CLD_MEMORY_MAX=200G bash "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"bind しません"* ]]
+    [[ "$output" != *"cld: MemoryMax="* ]]   # 可視化行の方は抑制されている
+}
+
+@test "memmax: MemTotal を読めなければ bind 判定はせず明示値をそのまま通す（誤警告を出さない）" {
+    run env CLD_MEMINFO_FILE="$SANDBOX/does-not-exist" CLD_MEMORY_MAX=200G bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "200G" ]
+    [[ "$output" != *"bind しません"* ]]
+}
+
+@test "memmax: 64bit 桁溢れの明示値は warn して自動導出へ倒れる（wrap で検証を素通りさせない）" {
+    # bash の算術は 64bit signed で黙って wrap するため、桁数と符号の 2 面で弾く必要がある
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=99999999999999999999G bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "25G" ]
+    [[ "$output" == *"桁が大きすぎて"* ]]
+}
+
+@test "memmax: CLD_MEMORY_QUIET の真値は 1 以外（true/yes/on）も受理される" {
+    local w
+    for w in true yes on; do
+        run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_QUIET="$w" bash "$CLD"
+        [ "$status" -eq 0 ]
+        [[ "$output" != *"cld: MemoryMax="* ]]
+        [ "$(_memmax)" = "25G" ]
+    done
+}
+
 @test "memmax: 32GiB host は pct=1 でも下限 12G（doc の pct 引き下げ指針は下限に飲まれる）" {
     # protocol.md の fleet 総量 bullet が「pct は下限より下へは下がらない」と書いている根拠の pin
     local mi
@@ -338,7 +411,16 @@ _memmax() {
 }
 
 @test "memmax: stderr が書込不可でも launcher は claude 起動を妨げない" {
-    run env CLD_MEMINFO_FILE="$MEMINFO_125G" bash "$CLD" 2>&-
+    # `run ... 2>&-` では bats が run の内側で fd2 を張り直すため閉じた stderr を再現できない
+    # （空虚なテストになる）。子プロセスの中で閉じてから exec することで実際に EBADF 経路を踏む。
+    run bash -c 'exec 2>&-; exec env CLD_MEMINFO_FILE="$1" bash "$2"' _ "$MEMINFO_125G" "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CLAUDE_ARG:--dangerously-skip-permissions"* ]]
+}
+
+@test "memmax: stderr が ENOSPC（/dev/full）でも launcher は claude 起動を妨げない" {
+    # 書込が失敗する（閉じてはいない）経路。set -e 下で echo の失敗が abort を招かないことの pin
+    run bash -c 'exec 2>/dev/full; exec env CLD_MEMINFO_FILE="$1" bash "$2"' _ "$MEMINFO_125G" "$CLD"
     [ "$status" -eq 0 ]
     [[ "$output" == *"CLAUDE_ARG:--dangerously-skip-permissions"* ]]
 }

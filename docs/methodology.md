@@ -201,5 +201,6 @@ dynamic workflow の各 agent への model/effort 割り当ては **本書 §1.1
 | `~/.claude/workflows/cell-quality.workflow.js` | 凍結された適用形（task-type routing → review → adversarial verify → gated autoFix → loop-until-dry）。**戦術層骨格の一次 SSOT** |
 | 本書 §1.1「effort ルーティング」 | WF agent 段別 model/effort 割り当ての**一次 SSOT**（sc-41b で確定・global 配布物側の縮退も land 済〔uns main `3b31bd0`〕・§4 はここへの内部 pointer） |
 | scribe-design.md §18 | D1-D7 の設計 why（本書は運用 how を担う） |
+| bd `sc-von0` / `protocol.md` §6 / `cc-session/scripts/cld` | §2「WF agent への出力 cap 規律」の出所（cgroup OOM で WF が痕跡なく消えた admin 実測・oom-kill oracle の**一次 SSOT は protocol §6**・上限導出の**実装 SSOT は cld の定数ブロック**） |
 
 > 方法論の細部に疑義が出たら、本書ではなく上記の一次 SSOT（doobidoo 原典・Workflow tool・cell-quality.workflow.js・WF agent 段別 model/effort は本書 §1.1）を確認すること（本書は判断の方法論を蓄積する庫であって、実体の複製ではない）。
