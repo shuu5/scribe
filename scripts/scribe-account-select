@@ -37,13 +37,22 @@
 #   呼出元は **rc を open set として扱う**こと＝「選定経路（--account auto 相当）」だけでなく
 #   「残量 probe 経路（--account <label> / 既定アカウントの残量表示）」でも、**既知 rc の if/elif を
 #   閉じたまま else を欠かさない**。exit 4 のような後から増えた rc が既知分岐のどれにも入らないと、
-#   probe 側の loud 警告（⚠ 枯渇/認証劣化）と監査 snapshot が**丸ごと沈黙**して preflight/spawn へ
-#   進む＝loud→silent の回帰になる（「異常時にこそ監査が死ぬ」形）。未知 rc は必ず
-#   (a) loud に warn し (b) TSV による監査 snapshot を **rc に関わらず** 出力すること
+#   呼出元が組み立てる loud 警告（⚠ 枯渇/認証劣化）と機械可読な `account-select:` 監査 snapshot が
+#   沈黙して preflight/spawn へ進む＝loud→silent の回帰になる（「異常時にこそ監査が死ぬ」形）。
+#   ※ 沈黙するのは **呼出元側の 2 つ**（⚠ 警告 + account-select: ブロック）であって、本 script 自身の
+#     stderr 診断（★selector 誤判定 …）は pane へ素通しされる。「全部消える」ではない（過大表現を訂正）。
+#   未知 rc は必ず (a) loud に warn し (b) TSV による監査 snapshot を **rc に関わらず** 出力すること
 #   （本 script は exit 4 でも stdout へ TSV を出し切る＝command substitution は rc に関わらず
 #   stdout を捕捉するので、呼出元は rc で分岐する前に TSV を確保できる）。
-#   ※ 既知の未対応 consumer: scriptorium-engine の orch-spawn-admin.sh の label/default probe 分岐
-#     （auto 経路は rc≠0 を fail-loud 化済みで問題なし）。修正は本 cell の scope fence 外ゆえ別 bead。
+#   ※ 既知の未対応 consumer（実測 2026-07-27・**live plugin root 2 本に同型コードが存在する**）:
+#       ① ~/.claude/plugins/scriptorium-engine → 本 repo の scriptorium-engine/scripts/orch-spawn-admin.sh
+#       ② ~/.claude/plugins/scriptorium        → 私有 scriptorium repo の scripts/orch-spawn-admin.sh
+#     いずれも label probe / 未指定 default probe の 2 分岐が if rc==3 … elif rc==0 … fi で else 欠落。
+#     **片方だけ直すと live にもう片方の回帰が残る**（consumer を 1 本と記すのは影響面の過小記述）。
+#     auto 経路は rc≠0 を fail-loud 化済みで問題なし。修正は本 cell の scope fence 外ゆえ別 bead。
+#   ※ 配備形態の注意: ~/.claude/plugins/scribe は anchor repo への symlink（各 account config dir も同様）
+#     ＝**merge した瞬間に新 selector が live 化する**（別 deploy 段が無い）。consumer 側の else 追加は
+#     selector merge と同時か先行させるのが望ましい（admin 裁定事項）。
 #
 # ★sc-j8zv 根因ノート（「適格 0 件」の 2 種を混同しない・実測 2026-07-27）:
 #   本 selector が全 account を el=0 / reason=stale と出す事象は **parse ドリフトではない**。claude-usage は
