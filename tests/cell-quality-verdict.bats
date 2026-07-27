@@ -28,12 +28,65 @@ setup() {
   SKILL_CONSULT="$REPO_ROOT/skills/consult/SKILL.md"
   SKILL_SETUP="$REPO_ROOT/skills/setup/SKILL.md"
   SKILL_REBRIEF="$REPO_ROOT/skills/rebrief/SKILL.md"
+  PRIME_TEMPLATE="$REPO_ROOT/skills/setup/PRIME.template.md"
+  # canonical 3-クラス block v2 の正本 sha256（18 行・末尾改行を含まない形）。
+  # 版 pin の本体（sc-8ak7）: carrier から block を抽出 → 定数接頭辞を除去 → この値と一致することを要求する。
+  # 語の grep だけでは reflow・行結合・一部欠落を見逃す（v1 の埋込は実際に折り返されており byte-verbatim
+  # ではなかった）。ゆえに「語の pin」ではなく「byte の pin」を teeth の本体に据える。
+  CANON_SHA256='9f21616439b00259d99cdac1103b6b83fc1923672ad7752753bbf2f914e21c7d'
+  # v1 の廃止済み文言（負論理側の版 pin）。v2 本文は (c) 行が旧文言を引用しつつ廃止を宣言するため、
+  # 単純な 0 hit は要求できない。ただし「同一行に『廃止した』を含めば素通り」という行単位の緩い除外は
+  # fail-open（任意の v1 復活行が『…廃止した。』を添えるだけで通る）。ゆえに除外は
+  # **正本 (c) 行との完全一致（carrier の定数接頭辞込み）** に狭める。
+  BANNED_V1='大きな金銭コスト'
+  # 正本 (c) 行の逐語（canonical block v2 の 4 行目）。v1 文言の出現が許されるのはこの 1 行だけ。
+  CANON_C_LINE='(c) 使う — 追加課金が発生する操作（従量課金 API 呼出 / 有料サービスの新規契約 / クラウド資源の課金発生）。定額プラン内は対象外＝token 消費それ自体は非該当（Workflow を何 M token 回しても (c) に当たらない）。旧文言「大きな金銭コスト（承認でなく予算上限で制御）」は観測できず死文化するため廃止した。〔裁定 R-B・2026-07-26〕'
+  # canonical block の見出し行（occurrence 一意性 pin の第 3 の錨）。
+  CANON_HEAD='【人間確認が要るのは「取り消せない」3 クラスのみ】'
   # 収束（CONVERGED）へ倒れる最小充足 args（review findings 既定 = 空 = clean）。
   ARGS_WORKER='{"taskTitle":"cell","worktree":"/tmp/wt","goal":"do x","selfTestCmd":"bats tests/x.bats","autoFix":true,"taskType":"testable"}'
   # 禁止トークン（旧カテゴリの実体）。「人間 ratify」単独は禁止トークンにしない
   # ＝新文面「人間 ratify が要るのは 3 クラス該当時のみ」と衝突するため。
   BANNED_A='outward/risk'
   BANNED_B='boot-path/全ホスト/破壊的'
+}
+
+# canonical block を carrier から抽出し、定数接頭辞を厳密に剥がして stdout へ出す（sc-8ak7）。
+#   $1=file / $2=begin sentinel（固定文字列）/ $3=end sentinel（固定文字列）/ $4=定数接頭辞
+# 空行に対応する行は「接頭辞から末尾スペース 1 個を落とした形」（= trailing space を作らない）で受ける。
+# 接頭辞に一致しない行・sentinel 欠落は stderr へ吐いて rc=9（silent に部分抽出して pin を空虚化させない）。
+extract_canonical_block() {
+  awk -v b="$2" -v e="$3" -v p="$4" '
+    !s && index($0, b) { s = 1; next }
+    s && index($0, e)  { found = 1; exit }
+    s {
+      pl = length(p); pt = p; sub(/ $/, "", pt); ptl = length(pt)
+      if (substr($0, 1, pl) == p)                            { print substr($0, pl + 1) }
+      else if (length($0) == ptl && substr($0, 1, ptl) == pt) { print "" }
+      else { printf("PREFIX-MISMATCH: %s\n", $0) > "/dev/stderr"; bad = 1; exit }
+    }
+    END {
+      if (bad)    exit 9
+      if (!s)     { print "BEGIN-SENTINEL-NOT-FOUND" > "/dev/stderr"; exit 9 }
+      if (!found) { print "END-SENTINEL-NOT-FOUND"   > "/dev/stderr"; exit 9 }
+    }
+  ' "$1"
+}
+
+# 抽出結果の sha256（正本は末尾改行を含まない 18 行ゆえ最終 1 byte を落として比較する）。
+canonical_block_sha256() {
+  extract_canonical_block "$@" | head -c -1 | sha256sum | cut -d' ' -f1
+}
+
+# v1 廃止文言の「許されない出現」だけを stdout へ出す（sc-8ak7）。$1=file / $2=carrier の定数接頭辞（無いなら空）。
+# 許されるのは正本 (c) 行の完全一致 1 形のみ。行単位の `grep -v 廃止した` 除外だと、v1 文言を戻す行が
+# 同一行に「廃止した」を書き添えるだけで素通りする（負論理 pin の fail-open）ため完全一致に狭めている。
+v1_leftover_lines() {
+  local f="$1" p="$2" line
+  while IFS= read -r line; do
+    [ "$line" = "${p}${CANON_C_LINE}" ] && continue
+    printf '%s\n' "$line"
+  done < <(grep -F -- "$BANNED_V1" "$f" || true)
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -58,7 +111,7 @@ setup() {
   [ "$status" -eq 0 ]
   run grep -F -q -- '出す — public 化・外部公開・外部サービスへの送信' "$WF"
   [ "$status" -eq 0 ]
-  run grep -F -q -- '使う — 大きな金銭コスト' "$WF"
+  run grep -F -q -- '使う — 追加課金が発生する操作' "$WF"
   [ "$status" -eq 0 ]
   for tok in '3 クラス' '収束証跡'; do
     run grep -F -q -- "$tok" "$WF"
@@ -101,17 +154,230 @@ setup() {
 }
 
 @test "sc-tx8s (2-a): canonical 3-クラス block が設計コメントへ verbatim 転記されている（誤読防止句 3 つ込み）" {
+  # v2 では誤読防止句の ** 強調が本文から外れている（v1 の埋込側で付いていた記号は正本に無い）。
+  # 記号付加は v2 の搬送規律が禁じるため、pin も正本どおりの素の語で張る（sc-8ak7）。
   for tok in \
     '【人間確認が要るのは「取り消せない」3 クラスのみ】' \
     'AI 敵対 gate 通過をもって AI 判断で merge する。' \
     '【聞かないこと】' \
     '【上げること】' \
     '【本裁定で緩めないもの（fence）】' \
-    '人間承認を外しても **gate は外さない**' \
+    '人間承認を外しても gate は外さない' \
     '「worker が自己 merge してよい」ではない' \
     '廃止でなく scope 縮小'; do
     run grep -F -q -- "$tok" "$WF"
     [ "$status" -eq 0 ]
+  done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (2-a′) 版 pin（sc-8ak7）: canonical 3-クラス block **v2** の byte-verbatim 搬送
+#   何を守るか: この block は cell-quality WF の agent が「人間承認が要るか」を判定するときに読む文面。
+#   v1 のまま放置すると旧規範で判定される（方向は over-block = fail-safe 側だが誤りは誤り）。さらに
+#   本 file は以前 v1 文字列を positively assert しており、直した側が RED になる＝**v1 を lock** していた。
+#   ここでは語の pin ではなく **byte の pin**（抽出 → 接頭辞除去 → sha256）を teeth の本体に据える。
+# ─────────────────────────────────────────────────────────────────────────────
+
+@test "sc-8ak7: canonical block v2 が carrier 2 件へ byte-verbatim で搬送されている（sha256 版 pin）" {
+  # carrier ごとに「begin sentinel|end sentinel|定数接頭辞」を明示する（carrier 形は file 種で異なる）。
+  # WF は設計コメントの枠線、PRIME.template.md は HTML コメント sentinel + blockquote 接頭辞。
+  for spec in \
+    "$WF|┌──── canonical 3-クラス block v2|└────|//      │ " \
+    "$PRIME_TEMPLATE|canonical-3class-block-v2:begin|canonical-3class-block-v2:end|> "; do
+    f="${spec%%|*}"; rest="${spec#*|}"
+    b="${rest%%|*}"; rest="${rest#*|}"
+    e="${rest%%|*}"; p="${rest#*|}"
+    [ -f "$f" ]
+    # occurrence 一意性（sc-8ak7 self-review）: 抽出器は「最初の begin → 最初の end」しか見ないため、
+    # carrier に 2 個目の block を追記されると sha256 / 行数 pin は GREEN のまま素通りする（実証済 fail-open）。
+    # carrier は agent が「人間承認が要るか」を判定するために読む文面ゆえ、矛盾する permissive な第 2 block が
+    # 同居できてはならない。begin / end / 見出し行が各 1 個であることを pin の一部として要求する。
+    [ "$(grep -Fc -- "$b" "$f")" -eq 1 ]
+    [ "$(grep -Fc -- "$e" "$f")" -eq 1 ]
+    [ "$(grep -Fc -- "$CANON_HEAD" "$f")" -eq 1 ]
+    # 抽出そのものが成功する（sentinel 欠落 / 接頭辞 drift は rc=9 で fail-loud）。
+    run extract_canonical_block "$f" "$b" "$e" "$p"
+    [ "$status" -eq 0 ]
+    # 行数 drift（行の折り返し・結合・欠落）を独立に捕える。
+    n="$(extract_canonical_block "$f" "$b" "$e" "$p" | wc -l)"
+    [ "$n" -eq 18 ]
+    # byte 同一性の本体。
+    got="$(canonical_block_sha256 "$f" "$b" "$e" "$p")"
+    [ "$got" = "$CANON_SHA256" ]
+  done
+}
+
+@test "sc-8ak7: v2 の必須語（追加課金 / 機械 2 条件 / 判定単位は repo でなく「情報」）が carrier 2 件に載る" {
+  # sha256 pin と重複するが、RED になったとき「どの語が落ちたか」を人間が読める形にするための補助 pin。
+  for f in "$WF" "$PRIME_TEMPLATE"; do
+    for tok in \
+      '(c) 使う — 追加課金が発生する操作' \
+      '定額プラン内は対象外＝token 消費それ自体は非該当' \
+      '判定単位は repo でなく「情報」' \
+      '機械 2 条件〔① 配備層 file を touch しない ② private 実名 DATA literal が 0 hit〕' \
+      '〔裁定 R-A・2026-07-26〕' \
+      '〔裁定 R-B・2026-07-26〕'; do
+      run grep -F -q -- "$tok" "$f"
+      [ "$status" -eq 0 ]
+    done
+  done
+}
+
+@test "sc-8ak7: 本便が触った file に v1 の廃止済み文言が正本 (c) 行以外の形で残っていない" {
+  # v2 本文は (c) 行で旧文言を引用しつつ「…は観測できず死文化するため廃止した。」と宣言する。ゆえに
+  # 単純 0 hit は要求できないが、除外を「同一行に『廃止した』を含む」に置くと v1 復活行が 1 語添えるだけで
+  # 通る（fail-open）。除外は正本 (c) 行の完全一致（carrier の定数接頭辞込み）だけに狭める。
+  for spec in "$WF|//      │ " "$PRIME_TEMPLATE|> " "$SKILL_CONSULT|"; do
+    f="${spec%%|*}"; p="${spec#*|}"
+    [ -f "$f" ]
+    [ -z "$(v1_leftover_lines "$f" "$p")" ]
+  done
+}
+
+@test "sc-8ak7: skills/consult の 3 クラス非該当の根拠語が v2（追加課金）になっている" {
+  run grep -F -q -- '追加課金も発生しない' "$SKILL_CONSULT"
+  [ "$status" -eq 0 ]
+  # 結論（3 クラス非該当ゆえ AI 判断で起動）は v2 でも不変＝根拠語だけが差し替わったことを示す。
+  run grep -F -q -- '3 クラス（消す/出す/使う）**非該当**' "$SKILL_CONSULT"
+  [ "$status" -eq 0 ]
+}
+
+@test "sc-8ak7: PRIME.template.md が承認体制の節を持ち、role 中立 marker の版番号は据え置き" {
+  run grep -F -q -- '## 承認体制（人間確認の発火条件）' "$PRIME_TEMPLATE"
+  [ "$status" -eq 0 ]
+  # marker 版番号は setup skill の MIN_ROLE_NEUTRAL_VERSION（=1）と対で意味を持つ。block 追加は本文の
+  # 追補であって role 中立性を変えないため v:1 のまま据え置く（bump すると既存 v:1 の PRIME.md が
+  # 一斉に「要同期」判定へ倒れ、skills/setup/SKILL.md 側の定数改訂も要る＝本便の scope 外）。
+  run grep -F -q -- 'beads-init-template v:1' "$PRIME_TEMPLATE"
+  [ "$status" -eq 0 ]
+}
+
+# ── mutation probe: 版 pin が非空虚であること（変異が実際に入ったことを確認してから RED を読む）──
+
+@test "sc-8ak7 (mutation): block の 1 行を折り返すと sha256 版 pin が RED へ flip する" {
+  for spec in \
+    "$WF|┌──── canonical 3-クラス block v2|└────|//      │ |^\(//      │ AI 敵対 gate\) \(/ write-isolation.*\)$|\1\n//      │ \2" \
+    "$PRIME_TEMPLATE|canonical-3class-block-v2:begin|canonical-3class-block-v2:end|> |^\(> AI 敵対 gate\) \(/ write-isolation.*\)$|\1\n> \2"; do
+    f="${spec%%|*}"; rest="${spec#*|}"
+    b="${rest%%|*}"; rest="${rest#*|}"
+    e="${rest%%|*}"; rest="${rest#*|}"
+    p="${rest%%|*}"; rest="${rest#*|}"
+    pat="${rest%%|*}"; rep="${rest#*|}"
+
+    mut="$BATS_TEST_TMPDIR/reflow-$(basename "$f")"
+    cp "$f" "$mut"
+    sed -i "s|${pat}|${rep}|" "$mut"
+
+    # 変異が実際に入った（no-op sed でない）ことを 2 経路で確認する。
+    run cmp -s "$f" "$mut"
+    [ "$status" -ne 0 ]
+    n="$(extract_canonical_block "$mut" "$b" "$e" "$p" | wc -l)"
+    [ "$n" -eq 19 ]
+
+    # 版 pin が RED へ flip する（語の grep は全て素通りする＝reflow は byte pin でしか捕まらない）。
+    got="$(canonical_block_sha256 "$mut" "$b" "$e" "$p")"
+    [ "$got" != "$CANON_SHA256" ]
+    run grep -F -q -- 'AI 敵対 gate / write-isolation（foreign 台帳 write 禁止）' "$mut"
+    [ "$status" -ne 0 ]
+  done
+}
+
+@test "sc-8ak7 (mutation): block の 1 語（追加課金）を書き換えると sha256 版 pin が RED へ flip する" {
+  for spec in \
+    "$WF|┌──── canonical 3-クラス block v2|└────|//      │ " \
+    "$PRIME_TEMPLATE|canonical-3class-block-v2:begin|canonical-3class-block-v2:end|> "; do
+    f="${spec%%|*}"; rest="${spec#*|}"
+    b="${rest%%|*}"; rest="${rest#*|}"
+    e="${rest%%|*}"; p="${rest#*|}"
+
+    mut="$BATS_TEST_TMPDIR/word-$(basename "$f")"
+    cp "$f" "$mut"
+    sed -i 's|追加課金が発生する操作|多額の課金が発生する操作|' "$mut"
+
+    # 変異が実際に入った（no-op sed でない）ことを 2 経路で確認する。
+    run cmp -s "$f" "$mut"
+    [ "$status" -ne 0 ]
+    run grep -F -q -- '多額の課金が発生する操作' "$mut"
+    [ "$status" -eq 0 ]
+
+    # 行数は 18 のまま＝行数 pin では捕まらず、byte pin だけが捕える。
+    n="$(extract_canonical_block "$mut" "$b" "$e" "$p" | wc -l)"
+    [ "$n" -eq 18 ]
+    got="$(canonical_block_sha256 "$mut" "$b" "$e" "$p")"
+    [ "$got" != "$CANON_SHA256" ]
+  done
+}
+
+@test "sc-8ak7 (mutation): 2 個目の canonical block を追記すると occurrence 一意性 pin が RED へ flip する" {
+  # 実証済みの fail-open（sc-8ak7 self-review）: 抽出器は最初の block で exit するため、carrier 末尾へ
+  # 規範を反転させた第 2 block を追記しても sha256 / 行数 pin は GREEN のままだった。ここでは
+  # 「sha256 pin は素通りする」ことと「occurrence 一意性 pin だけが捕える」ことを同時に示す。
+  # spec: file|begin sentinel|end sentinel|定数接頭辞|追記する begin 行|追記する end 行
+  for spec in \
+    "$WF|┌──── canonical 3-クラス block v2|└────|//      │ |//      ┌──── canonical 3-クラス block v2(verbatim) ────|//      └────────────────────────────────────────────" \
+    "$PRIME_TEMPLATE|canonical-3class-block-v2:begin|canonical-3class-block-v2:end|> |<!-- canonical-3class-block-v2:begin prefix=\"> \" -->|<!-- canonical-3class-block-v2:end -->"; do
+    f="${spec%%|*}"; rest="${spec#*|}"
+    b="${rest%%|*}"; rest="${rest#*|}"
+    e="${rest%%|*}"; rest="${rest#*|}"
+    p="${rest%%|*}"; rest="${rest#*|}"
+    bl="${rest%%|*}"; el="${rest#*|}"
+
+    mut="$BATS_TEST_TMPDIR/dup-$(basename "$f")"
+    cp "$f" "$mut"
+    {
+      printf '%s\n' "$bl"
+      printf '%s%s\n' "$p" "$CANON_HEAD"
+      printf '%s%s\n' "$p" '(a) 消す — 破壊は自由（第一防衛線は無い）'
+      printf '%s%s\n' "$p" '(c) 使う — 何をしても人間確認は不要'
+      printf '%s\n' "$el"
+    } >> "$mut"
+
+    # 変異が実際に入った（no-op でない）ことを確認する。
+    run cmp -s "$f" "$mut"
+    [ "$status" -ne 0 ]
+
+    # 既存の byte pin は「最初の 1 block」しか見ないため GREEN のまま＝この変異を捕えない。
+    n="$(extract_canonical_block "$mut" "$b" "$e" "$p" | wc -l)"
+    [ "$n" -eq 18 ]
+    got="$(canonical_block_sha256 "$mut" "$b" "$e" "$p")"
+    [ "$got" = "$CANON_SHA256" ]
+
+    # occurrence 一意性 pin だけが RED へ flip する。
+    [ "$(grep -Fc -- "$b" "$mut")" -eq 2 ]
+    [ "$(grep -Fc -- "$e" "$mut")" -eq 2 ]
+    [ "$(grep -Fc -- "$CANON_HEAD" "$mut")" -eq 2 ]
+  done
+}
+
+@test "sc-8ak7 (mutation): block 外へ v1 文言を戻すと負論理 pin（BANNED_V1）が RED へ flip する" {
+  # acceptance 3 の変異「v1 語を 1 つ戻す」。sha256 pin は block 内しか見ないため、block 外の散文へ
+  # v1 文言が戻る経路を守るのは負論理 pin だけ。その pin 自体が非空虚であることをここで実証する。
+  # 併せて「同一行に『廃止した』を添えても素通りしない」＝除外が正本 (c) 行の完全一致に狭まっていることも示す。
+  for spec in \
+    "$WF|┌──── canonical 3-クラス block v2|└────|//      │ |// (c) 使う — 大きな金銭コスト（承認でなく予算上限で制御）。旧規定は廃止した。" \
+    "$PRIME_TEMPLATE|canonical-3class-block-v2:begin|canonical-3class-block-v2:end|> |(c) 使う — 大きな金銭コスト（承認でなく予算上限で制御）。旧規定は廃止した。"; do
+    f="${spec%%|*}"; rest="${spec#*|}"
+    b="${rest%%|*}"; rest="${rest#*|}"
+    e="${rest%%|*}"; rest="${rest#*|}"
+    p="${rest%%|*}"; inject="${rest#*|}"
+
+    mut="$BATS_TEST_TMPDIR/v1-$(basename "$f")"
+    cp "$f" "$mut"
+    printf '%s\n' "$inject" >> "$mut"
+
+    # 変異が実際に入った（no-op でない）ことを 2 経路で確認する。
+    run cmp -s "$f" "$mut"
+    [ "$status" -ne 0 ]
+    run grep -F -q -- "$inject" "$mut"
+    [ "$status" -eq 0 ]
+
+    # 負論理 pin: clean 側は空 / 変異側は非空（＝pin は非空虚）。
+    [ -z "$(v1_leftover_lines "$f" "$p")" ]
+    [ -n "$(v1_leftover_lines "$mut" "$p")" ]
+
+    # sha256 版 pin は block 外の変異を捕えない＝この領域を守るのは負論理 pin だけであることを示す。
+    got="$(canonical_block_sha256 "$mut" "$b" "$e" "$p")"
+    [ "$got" = "$CANON_SHA256" ]
   done
 }
 
