@@ -56,7 +56,9 @@
 #           entry（API error 等）は計測情報を持たないため skip し最新の非 0 値を
 #           採る（全 entry が 0 なら exit 4＝捏造 0 を出さない。実測: 234/5472
 #           transcript で最終 entry が全 0）。jsonl は「最終観測値」であり session
-#           の生存・鮮度は保証しない（pane-map 経由の sid 解決は map の鮮度に依存）。
+#           の生存・鮮度は保証しない（pane-map 経由の sid 解決は map の鮮度に
+#           依存し、pane id は tmux server 内で再利用されるため stale entry は
+#           その pane に現存しない session を指しうる）。
 #   auto（既定）= --target あり: pane → 失敗時 pane-map(pane_id→sid) 経由で jsonl。
 #                 --sid のみ: jsonl。
 #
@@ -288,9 +290,19 @@ if [ -n "$TARGET" ]; then
         # prefix 一致に乗るため、存在しない session 名（例 'pap'）が別 session
         # （'paper'）へ解決され「他 session の実測値を exit 0 で返す」false
         # attribution が起きる（R3 gate CONFIRMED・bare 経路の exact 規律と統一）。
-        if [[ "$TARGET" == *:* ]] && ! tmux has-session -t "=${TARGET%%:*}" 2>/dev/null; then
-            echo "Error: session '${TARGET%%:*}' not found (exact match)" >&2
-            exit 3
+        if [[ "$TARGET" == *:* ]]; then
+            # session 名の構造検証: tmux は session 名に '.' ':' を許さないため
+            # 英数と _- のみを受ける。'.' 等の tmux 特殊 token（「現在の
+            # session」参照）が exact 検査をすり抜けて別 session を測るのを塞ぐ
+            # （R5 gate CONFIRMED）。
+            if ! [[ "${TARGET%%:*}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+                echo "Error: invalid session name in target '$TARGET'" >&2
+                exit 3
+            fi
+            if ! tmux has-session -t "=${TARGET%%:*}" 2>/dev/null; then
+                echo "Error: session '${TARGET%%:*}' not found (exact match)" >&2
+                exit 3
+            fi
         fi
         # window 解決（SSOT = session-state.sh resolve_target）→ 失敗時のみ
         # bare session 名として fallback。fallback は「session 内で claude が走る
@@ -306,7 +318,7 @@ if [ -n "$TARGET" ]; then
         # fallback を通らない（consumer の action 対象との一致は capfmt 側で担保）。
         RESOLVED=$(resolve_target "$TARGET" 2>/dev/null) || RESOLVED=""
         if [ -z "$RESOLVED" ] && [[ "$TARGET" != *:* ]] \
-            && [[ "$TARGET" =~ ^[A-Za-z0-9_./-]+$ ]] \
+            && [[ "$TARGET" =~ ^[A-Za-z0-9_-]+$ ]] \
             && tmux has-session -t "=$TARGET" 2>/dev/null; then
             _claude_panes=()
             while IFS= read -r _p; do
@@ -339,6 +351,15 @@ RESOLVED_PANE=""
 if [ -n "$RESOLVED" ]; then
     _rinfo=$(tmux display-message -p -t "$RESOLVED" '#{pane_id} #{session_name}:#{window_index}' 2>/dev/null) || _rinfo=""
     read -r RESOLVED_PANE _actual_win <<< "$_rinfo" || true
+    # 不在 pane id の -t に対し tmux は rc=0 で「空 pane_id + ':'」を返し、語
+    # 分割で第 1 field が ':' になる（R5 gate CONFIRMED・':' は tmux で「現
+    # session の current window」を指すため素通りすると別 session の値を掴む）。
+    # 構造検証（^%N$）+ %N 直指定の同一性（問い合わせた pane がそのまま返る）
+    # を単一条件で fail-closed に倒す（pre-fix4 の意味論に復帰）。
+    if ! [[ "$RESOLVED_PANE" =~ ^%[0-9]+$ ]] \
+        || { [[ "$RESOLVED" =~ ^%[0-9]+$ ]] && [ "$RESOLVED_PANE" != "$RESOLVED" ]; }; then
+        RESOLVED_PANE=""
+    fi
     if [[ "$RESOLVED" == *:* ]] && [ "${_actual_win:-}" != "$RESOLVED" ]; then
         if [ -z "$SID" ]; then
             echo "Error: window '$RESOLVED' not found (exact match)" >&2
@@ -351,8 +372,9 @@ fi
 
 # --source pane は pane 以外を決して出さない（source 固定契約）。target 解決が
 # 不成立のまま --sid 併用で jsonl へ落ちる経路を塞ぐ（R3 gate finding）。
-if [ "$SOURCE" = "pane" ] && [ -z "$RESOLVED" ]; then
-    echo "Error: pane source has no resolved target" >&2
+# pane id が確定できない（不在 %N 等）も解決失敗＝exit 3（R5 gate finding）。
+if [ "$SOURCE" = "pane" ] && { [ -z "$RESOLVED" ] || [ -z "$RESOLVED_PANE" ]; }; then
+    echo "Error: pane source has no resolved target pane" >&2
     exit 3
 fi
 

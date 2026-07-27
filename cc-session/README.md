@@ -39,6 +39,7 @@ private repo の場合は `gh auth login` 済み、または `GITHUB_TOKEN` / `G
 - `claude`（Claude Code CLI）
 - `jq`
 - `systemd-run`（任意。あればメモリ制限付き scope で起動、無ければ直接起動）
+- context meter の pane source を使う場合: 対象ホストに context 使用量を line2 へ `NN% XXXk/YM` 形式で出す statusline（本 fleet では ubuntu-note-system の `statusline-command.sh`）が導入されていること。無いホストでは pane source は不成立（非 0 exit）となり jsonl fallback のみになる
 
 ## namespace（環境変数で上書き可能）
 

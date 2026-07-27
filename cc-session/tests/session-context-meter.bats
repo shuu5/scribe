@@ -44,6 +44,9 @@ setup() {
                     [ "$TMUX_MOCK_HAS_SESSION" = "1" ]
                 else
                     local hs_name="${hs_tgt#=}" hs_s
+                    # 実 tmux: '.' は '=' exact 付きでも「現在の session」へ解決され
+                    # rc=0 になる（R5 live 実測）。この特殊 token を再現する
+                    if [ "$hs_name" = "." ]; then return 0; fi
                     for hs_s in ${TMUX_MOCK_SESSIONS:-sc}; do
                         if [ "${hs_tgt:0:1}" = "=" ]; then
                             [ "$hs_s" = "$hs_name" ] && return 0
@@ -88,9 +91,15 @@ setup() {
                     printf '%s\n' "${!var:-${TMUX_MOCK_PANE_STATE:-0 1 claude}}"
                 elif [[ "$fmt" == *session_name* ]]; then
                     # '#{pane_id} #{session_name}:#{window_index}'（window 実在照合）。
-                    # 実 tmux の silent fallback を再現: どの -t にも
-                    # TMUX_MOCK_ACTUAL_WIN（既定 sc:1）の pane/window を返す
-                    printf '%s %s\n' "${TMUX_MOCK_PANE_ID:-%7}" "${TMUX_MOCK_ACTUAL_WIN:-sc:1}"
+                    # 実 tmux の意味論を再現（R5 gate finding）:
+                    #   - 不在 %N の -t → rc=0 で「空 pane_id + ':'」（' :'）
+                    #   - それ以外 → TMUX_MOCK_PANE_ID/ACTUAL_WIN（silent fallback 込み）
+                    if [[ "$tgt" =~ ^%[0-9]+$ ]] \
+                        && ! [[ " ${TMUX_MOCK_KNOWN_PANES:-%7 %9 %12} " == *" $tgt "* ]]; then
+                        printf ' :\n'
+                    else
+                        printf '%s %s\n' "${TMUX_MOCK_PANE_ID:-%7}" "${TMUX_MOCK_ACTUAL_WIN:-sc:1}"
+                    fi
                 else
                     # plain '#{pane_id}'（再解決経路）。TMUX_MOCK_PANE_ID_PLAIN で
                     # 「照合済み pane と再解決結果が食い違う」TOCTOU を表現できる
@@ -145,6 +154,50 @@ EOF
     # parse_pane "$RESOLVED" への revert を検知できない）
     awk '/^capture-pane$/{f=1;next} f&&/^%7$/{ok=1} /^--$/{f=0} END{exit !ok}' "$TMPD/tmux-argv.log"
     awk '/^display-message$/{f=1;t=0;d=0;next} f&&/^%7$/{t=1} f&&/pane_dead/{d=1} /^--$/{if(f&&t&&d)ok=1;f=0} END{exit !ok}' "$TMPD/tmux-argv.log"
+}
+
+@test "契約: 不在 pane id（%N）は別 pane の値を返さない（' :' 応答の遮断）" {
+    # 実 tmux は不在 %N の display-message を rc=0 + 「空 pane_id + ':'」で返し、
+    # ':' は「現 session の current window」を指す（R5 gate CONFIRMED の再現形）。
+    run "$METER" --target %9999 --source pane
+    [ "$status" -eq 3 ]
+    run "$METER" --target %9999
+    [ "$status" -eq 3 ]
+    [ -z "$("$METER" --target %9999 2>/dev/null || true)" ]
+}
+
+@test "契約: %N 直指定で別 pane が返る（すり替わり）場合も測らない" {
+    # mock: known な %9 への問い合わせに %7（既定 PANE_ID）が返る＝要求と実解決の
+    # 不一致。%N 同一性条件が fail-closed に倒すことを pin（条件の operand 削除を kill）
+    run "$METER" --target %9 --source pane
+    [ "$status" -eq 3 ]
+}
+
+@test "契約: 不在 pane id + --sid は jsonl 直行（pane を測らない）" {
+    run "$METER" --target %9999 --sid aaaa-bbbb-cccc
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"source=jsonl"* ]]
+    [[ "$output" != *"source=pane"* ]]
+}
+
+@test "契約: tmux 特殊 token '.' は session 名として拒否する（現 session への解決を塞ぐ）" {
+    run "$METER" --target .:admin
+    [ "$status" -eq 3 ]
+    run "$METER" --target .
+    [ "$status" -eq 3 ]
+    [ -z "$("$METER" --target .:admin 2>/dev/null || true)" ]
+}
+
+@test "契約: bare window 名は全 session 横断で最初の一致（文書化済み modality の pin）" {
+    run "$METER" --target admin
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"source=pane"* ]]
+    [[ "$output" == *"target=%7"* ]]
+}
+
+@test "契約: --source jsonl でも window 実在照合が効く（sc:999 → exit 3）" {
+    run "$METER" --target sc:999 --source jsonl
+    [ "$status" -eq 3 ]
 }
 
 @test "契約: 実在しない window index は別 window の値を返さない（silent fallback 遮断）" {
