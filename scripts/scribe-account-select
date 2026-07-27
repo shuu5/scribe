@@ -20,13 +20,102 @@
 #     1 label   2 eligible(1|0)  3 score  4 h5  5 h7  6 pct5  7 pct7  8 resets5  9 resets7  10 reason
 #   ・h5/h7 = 積極解釈込みの実効残量%（=maximin が使った値。resets_at が null/過去なら 100）。
 #   ・score = min(h5, h7)。除外行は 3-5 空・reason に除外理由。
+#   ・reason は eligible=0 では**除外理由**、eligible=1 では **advisory マーカー**（sc-j8zv・接頭辞
+#     `advisory:`＝選定にも順位にも影響しない注記。呼出元の監査 snapshot に載って横断 grep できる）。
 #   ・呼出元の lazy walk は `awk -F'\t' '$2=="1"{print $1}'` で上位順ラベル列を得る（jq 不要）。
+#   ・★不変条件（sc-j8zv self-review）: **1 account = 1 行 × 10 列**。外部（claude-usage）由来の
+#     label / reason / 生 pct・resets_at は _tsv で `\n` `\r` `\t` `\\` を**可逆 escape** してから
+#     join する。素通しすると上の lazy walk は行と TAB しか信じないので、data だけで偽の適格行を
+#     挿入したり除外行の col2 を "1" に見せたりでき、**呼出元が使う config dir を外部データが
+#     決められる**（stderr の監査面だけ塞ぐのは片側防御）。well-formed な入力では no-op。
 #
 # exit code:
 #   0 = 正常（適格 0 件でも 0。適格 0 件の fail-loud 判断は呼出元 spawn の責務・facet⑤②）。
 #   3 = **API 故障**（claude-usage 不在/非0/JSON 不正/accounts 不在 or 非 list/空）。stdout 空 +
 #       stderr に理由（呼出元は loud-warn + 主アカ fallback・facet⑤①）。
+#   4 = **selector 誤判定**（sc-j8zv teeth）= usage 自身が健全（ok∧非stale）と報告した account が 1 件以上
+#       あるのに適格 0 件。stdout は通常どおり TSV（監査を殺さない）+ stderr に犯人ラベルと除外理由。
+#       上流劣化（exit 0 の適格 0 件）と**別コードで機械弁別できる**のが本コードの存在理由（下記 sc-j8zv 節）。
 #   2 = 使い方エラー（引数不正）。
+#
+# ★呼出元契約（exit code の open-set 規約・sc-j8zv）:
+#   呼出元は **rc を open set として扱う**こと＝「選定経路（--account auto 相当）」だけでなく
+#   「残量 probe 経路（--account <label> / 既定アカウントの残量表示）」でも、**既知 rc の if/elif を
+#   閉じたまま else を欠かさない**。exit 4 のような後から増えた rc が既知分岐のどれにも入らないと、
+#   呼出元が組み立てる loud 警告（⚠ 枯渇/認証劣化）と機械可読な `account-select:` 監査 snapshot が
+#   沈黙して preflight/spawn へ進む＝loud→silent の回帰になる（「異常時にこそ監査が死ぬ」形）。
+#   ※ 沈黙するのは **呼出元側の 2 つ**（⚠ 警告 + account-select: ブロック）であって、本 script 自身の
+#     stderr 診断（★selector 誤判定 …）は pane へ素通しされる。「全部消える」ではない（過大表現を訂正）。
+#   未知 rc は必ず (a) loud に warn し (b) TSV による監査 snapshot を **rc に関わらず** 出力すること
+#   （本 script は exit 4 でも stdout へ TSV を出し切る＝command substitution は rc に関わらず
+#   stdout を捕捉するので、呼出元は rc で分岐する前に TSV を確保できる）。
+#   ★ただし現行の呼出元は 3 経路とも (b) を満たさない（実測 2026-07-27・**契約は理想であって現状ではない**）:
+#       ① ~/.claude/plugins/scriptorium-engine → 本 repo の scriptorium-engine/scripts/orch-spawn-admin.sh
+#       ② ~/.claude/plugins/scriptorium        → 私有 scriptorium repo の scripts/orch-spawn-admin.sh
+#     ①② の label probe / 未指定 default probe の 2 分岐が if rc==3 … elif rc==0 … fi で **else 欠落**
+#     ＝rc=4 がどの分岐にも入らず ⚠ 警告も `account-select:` 監査ブロックも出ない。**片方だけ直すと live に
+#     もう片方の回帰が残る**（consumer を 1 本と記すのは影響面の過小記述）。
+#       ③ auto 経路（scribe-spawn.sh:515 / orch-spawn-admin.sh の auto 分岐）は **(a) loud warn は満たすが
+#          (b) は満たさない**: die が `emit_account_select_note`（scribe-spawn.sh:650）より前に走るため
+#          `account-select:` note が 1 行も残らない。旧記述「auto 経路は問題なし」は (b) について事実に反した
+#          ため訂正した（過大な安心の除去。別 bead が probe 2 分岐だけを直すと、最も頻繁に踏む auto 経路の
+#          監査欠落が live に残る）。修正は本 cell の scope fence 外ゆえ別 bead（起票候補は bd notes）。
+#   ∴ 上記が直るまでの緩和として、**本 script 自身が exit 4 のとき同じ `account-select:` 接頭辞で監査
+#     ブロックを stderr へ出す**（_emit_audit_snapshot）。呼出元の rc 分岐に一切依存せず trail が残る＝
+#     「異常時にこそ監査が死ぬ」形を selector 側だけで塞ぐ。呼出元由来の行とは `origin=selector` の有無で
+#     機械弁別でき、正常時（exit 0）は出さないので二重記録にならない。
+#   ※ この弁別は **data で破れてはならない**（self-review 2026-07-27・実測で破れた）: 監査セルには
+#     claude-usage 由来の文字列（label / reason 内の `not-ok:<error>`）が載るため、改行を素通しすると
+#     `account-select: chosen=…` で始まる**偽の呼出元行**を注入でき、「呼出元が選んでもいない account を
+#     呼出元が選んだ」と読める監査行を外部データだけで作れてしまう（横断 grep 集計と incident 再構成の
+#     汚染）。∴ 監査面・診断面へ載る外部由来文字列は _flat/_cell で 1 行へ畳む（不変条件: **1 account =
+#     1 行**・`account-select: chosen=` で始まる行を selector は決して出さない）。escape は可逆表記
+#     （\n / \r / \\ / \|）ゆえ情報は落とさず行だけを潰す。
+#   ※ 配備形態の注意: ~/.claude/plugins/scribe は anchor repo への symlink（各 account config dir も同様）
+#     ＝**merge した瞬間に新 selector が live 化する**（別 deploy 段が無い）。consumer 側の else 追加は
+#     selector merge と同時か先行させるのが望ましい（admin 裁定事項）。
+#
+# ★sc-j8zv 根因ノート（「適格 0 件」の 2 種を混同しない・実測 2026-07-27）:
+#   本 selector が全 account を el=0 / reason=stale と出す事象は **parse ドリフトではない**。claude-usage は
+#   live fetch に失敗すると snapshot cache へ graceful degrade し、`ok=false / stale=true` のまま **pct 等の
+#   実データを載せて rc=0 で返す**（upstream 実装 gather() の degrade 節）。ゆえに「usage を直に叩いたら
+#   rc=0 で実データが返る」ことは **usage 健全の証拠ではない**（degrade の見え方そのもの）。実測 2026-07-26 の
+#   一過性 HTTP 429（upstream 計測: probe 36 req 中 429=29 / 200=7）で全 account が同時に degrade し、
+#   eligible=0 → spawn fail-loud に至ったのが incident の実体（upstream ヘッダ un-qfht も同じ因果を明記）。
+#   ∴ 「適格 0 件」には性質の違う 2 種がある:
+#     (A) 上流劣化（usage 側に健全 account が 1 件も無い）= selector は正しい。exit 0 のまま + stderr に
+#         error_code 内訳を出して「429=一過性 / 401 等=要 re-login」を弁別可能にする（誤って「全アカウント
+#         認証切れ」と断ずるのを防ぐ）。
+#     (B) selector 誤判定（usage は健全と言っているのに selector が全部落とした）= 本 script か上流 shape
+#         契約の defect。**exit 4 で fail-loud**。
+#     (B') 健全 × 上流 utilization 欠落（self-review 2026-07-27 で追加）= usage は ok∧非stale と言うが
+#         **窓あり（resets_at 未来）× pct=null** で残量を判定できず fail-closed 除外した形。上流
+#         claude-usage の norm_pct は utilization が欠落/非数値なら null を返す（verified・upstream
+#         :580-584）ので、これは健全申告のまま起こりうる **上流契約上ありうる形**であり **selector の
+#         欠陥ではない**。選定不能ゆえ exit 4（fail-loud）は維持するが、(B) と同じ文言で「selector の
+#         欠陥」と断ずると犯人を取り違える。∴ (B)/(B') は **除外理由（`malformed:` か `indeterminate:`）と
+#         生値（pct が載っているか）**で層別し、別文言・別 reason（misjudge / upstream-utilization-missing）
+#         で報告する。層別しないと、健全 account が 1 件 indeterminate なだけで「shape 契約ドリフトの
+#         早期兆候」warn が出続けて loud チャネルが摩耗する（誤った犯人を名指しする診断は診断でない）。
+#   判定は `ok is True ∧ stale is False`（= usage 自身の健全申告）だけで行い、**本体のパース経路と共有しない**
+#   （共有すると本体のバグが判定器も道連れにして (B) を握り潰す＝teeth が teeth でなくなる）。
+#   ▼根因確定の対照実験（実測 2026-07-27・incident の 1 日後）: **同一の selector コード**を実 claude-usage の
+#     exec 経路で走らせると exit 0・適格複数件で正常にランキングした（一部 account は stale のまま混在＝
+#     全件 stale ではない）。コードを 1 行も変えずに結果が反転した以上、incident の原因は selector の parse
+#     ドリフトではなく **上流の一過性 429 による全 account 同時 degrade** で確定する（時間差の対照＝上の (A)）。
+#
+# ★適格（eligible）の意味（sc-j8zv・実測 2026-07-27）: **eligible は「usage 上の残量的適格」であって
+#   「spawn 先として使える」ではない**。本 selector は fs 非接触が契約（facet⑦）ゆえ config dir の実在・
+#   login・onboarding・plugin enable を一切見ない。実運用の spawn 可能集合は呼出元 scribe-spawn.sh の
+#   preflight lazy walk（probe_config_dir）との**交差**で初めて決まる。
+#   実測された非対称（usage の列挙 ⊋ spawn 可能集合）:
+#     ① 予約ラベル `default` は accounts-base に実体を持たず、呼出元の写像（default → ~/.claude・unset 意味論）
+#        でのみ到達する＝**`--account default` の明示指定経路は存在しない**。監査 snapshot に chosen=default と
+#        出ても、人間が同じ形で再現できない（再現は --account auto 経由）。
+#     ② その写像先 ~/.claude 自体が onboarding 未完了でありうる（実測: `.claude.json` 不在）。auto の lazy walk は
+#        ~/.claude に対しても probe を実施するので**正しく skip して下位へ降りる**（fail-open ではない）。
+#   ∴ 監査 snapshot の `eligible=N` を「N 個すぐ使える」と読まないこと。N は preflight 前の上限であって
+#     可用数ではない（この読み替えを怠ると、preflight 全滅の fail-loud が「selector が嘘をついた」に誤帰属される）。
 #
 # ★VERIFIED セマンティクス（sc-1rq 契約・admin が uns ソース直読で確認）:
 #   ・five_hour_pct/seven_day_pct = utilization(使用率%・int or null)。**残量% = 100 − pct**。
@@ -55,10 +144,59 @@ _SCORE_KEYS = (
 )
 
 
+# sc-j8zv: 「枯渇（残量が尽きた）」と見なす実効残量%の境界（advisory 専用・**選定は変えない**）。
+# 0 = 100% 消費済み＝その窓では確実に使えない、という事実だけを線にする（「0 に近い」の閾値化＝どこから
+# 避けるかは availability と safety のトレードオフで、既定 semantics「stale のみ除外・枯渇は減点」を
+# 動かす設計判断ゆえ本 cell では踏み込まない＝admin 起票候補として notes へ回す）。
+DEPLETED_HEADROOM = 0.0
+
+# stderr 診断へ載せる error_code の受理文字集合（closed vocabulary の想定だが外部プロセス由来ゆえ
+# 防御的に allowlist する。upstream 契約は net/nosrc/shape/nologin/credbad/credfmt/notoken/err と
+# HTTP status の 10 進表記）。
+_CODE_OK_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+
+
 def _api_failure(reason):
     """API 故障で終了（exit 3・stdout は空のまま）。"""
     sys.stderr.write("scribe-account-select: API 故障: %s\n" % reason)
     sys.exit(3)
+
+
+def _usage_healthy(acct):
+    """usage **自身**が健全と申告した account か（ok is True ∧ stale is False）。
+
+    ★sc-j8zv teeth の判定器。本体の適格判定（main のループ）と**意図的に独立**な最小述語にする:
+      本体の型検査・残量算出を通さないので、本体側のバグ（変異注入・shape 契約ずれ）で全 account が
+      落ちても、この述語だけは「usage は健全と言っていた」という上流の事実を保持する。
+    上流契約: ok=live fetch 成功 / stale=live 失敗で snapshot へ fallback（claude-usage gather()）。
+    """
+    if not isinstance(acct, dict):
+        return False
+    return acct.get("ok") is True and acct.get("stale") is False
+
+
+def _sanitize_code(v):
+    """error_code を診断表示用に無害化（allowlist 外文字・非文字列・長すぎは None）。"""
+    if not isinstance(v, str) or not v:
+        return None
+    if len(v) > 16 or any(c not in _CODE_OK_CHARS for c in v):
+        return None
+    return v
+
+
+def _degradation_codes(accounts):
+    """健全でない account の error_code 内訳を "code=n,..." へ整形（不明は '?' へ畳む）。
+
+    (A) 上流劣化の diagnosis 用。429 が並べば一過性の rate limit、401/403 が並べば要 re-login と
+    読める＝「全アカウント認証切れ」という誤帰属を機械的に防ぐ材料（sc-j8zv・upstream un-qfht）。
+    """
+    hist = {}
+    for acct in accounts:
+        if not isinstance(acct, dict) or _usage_healthy(acct):
+            continue
+        code = _sanitize_code(acct.get("error_code")) or "?"
+        hist[code] = hist.get(code, 0) + 1
+    return ",".join("%s=%d" % (k, hist[k]) for k in sorted(hist))
 
 
 def _load_input(argv):
@@ -159,6 +297,200 @@ def _fmt_raw(v):
     return "" if v is None else str(v)
 
 
+def _flat(s):
+    """外部プロセス由来の文字列を **1 行**へ畳む（sc-j8zv self-review・行注入対策）。
+
+    label / error は claude-usage 由来のまま stderr の監査面・診断面へ載る。改行を素通しすると
+    本 script が宣言した弁別規約（呼出元の 1 行目は `chosen=` / selector 側は `origin=selector`）を
+    **data だけで破れる**＝呼出元が選んでもいない account を「呼出元が選んだ」と読める監査行を
+    偽造でき、横断 grep 集計と incident 再構成が汚染される（実測で再現）。
+    可逆表記へ畳むので情報は落とさず、潰すのは行区切りだけ（'\\' を先に escape する順序が必須）。
+    """
+    return str(s).replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _tsv(s):
+    """stdout TSV の 1 セルを無害化（**行注入と列注入の両方**を塞ぐ・self-review 4 巡目）。
+
+    ★塞ぐ先は stderr ではなく **stdout**＝実際に account を決めるチャネル。呼出元の lazy walk
+      `awk -F'\\t' '$2=="1"{print $1}'`（scribe-spawn.sh / orch-spawn-admin.sh）は行と TAB だけを
+      信じるので、外部由来の label / reason を素通しすると data だけで
+        (i) 改行 → 偽の行を挿入し **存在しない label を最上位候補**にできる（本物の行は分断されて消える）
+        (ii) TAB  → 除外行（ok=false/stale=true）の col2 を "1" に見せて **使えない account を適格**にできる
+      ＝認証情報 dir の選定を外部データが乗っ取れる fail-open になる（実測で再現）。
+      stderr 面（_flat/_cell）だけ塞ぐのは自コメントが批判している片側防御なので、契約面の stdout も同じ
+      規約で塞ぐ。不変条件: **1 account = 1 行 × 10 列**（well-formed な入力では no-op）。
+    ★無害化はここ 1 箇所（TSV 組立）で行い、監査面 _cell は separator '|' だけを足す。escape は
+      非冪等（'\\' を escape するため）ゆえ **二重適用しない**のが可逆表記を保つ条件。
+    """
+    return _flat(s).replace("\t", "\\t")
+
+
+def _cell(c):
+    """監査 snapshot の 1 セルへ separator escape を足す（空は '-' へ畳む）。
+
+    入力は **_tsv で無害化済みの TSV セル**（_emit_audit_snapshot は out の行を split して渡す）ゆえ、
+    ここで _flat を再適用しない（非冪等な escape の二重適用は '\\n' → '\\\\n' となり可逆表記を壊す）。
+    """
+    return c.replace("|", "\\|") or "-"
+
+
+def _join_drops(drops):
+    """(label, reason) 列を診断 1 行へ（外部由来ゆえ両方 _flat する）。"""
+    return "; ".join("%s=%s" % (_flat(lab), _flat(why)) for lab, why in drops)
+
+
+def _label_of(acct):
+    """診断表示用の label（欠落/型不正は '?'）。"""
+    v = acct.get("label") if isinstance(acct, dict) else None
+    return v if (isinstance(v, str) and v) else "?"
+
+
+def _warn(msg):
+    sys.stderr.write("scribe-account-select: %s\n" % msg)
+
+
+def _indeterminate_is_upstream(row):
+    """`indeterminate:` 除外が「上流が utilization を返していない」由来かを **生値**で判定する。
+
+    上流 claude-usage の norm_pct は utilization が欠落/非数値なら null を返す（verified・upstream
+    :580-584）。ゆえに ok=true ∧ stale=false のまま「窓あり（resets_at 非 null）× pct=null」は
+    **上流契約上ありうる形**で、本 selector はそれを設計どおり fail-closed 除外しているだけ＝
+    selector の欠陥でも shape 契約変更でもない（(B')）。逆に pct が載っているのに判定不能なら
+    残量算出（headroom）側を疑うべきなので False（＝(B) の欠陥証拠として数える）。
+    ★判定は excluded 行が保持する **生値**だけで行い、本体の算出結果（h5/h7）に依存しない
+      （依存すると本体のバグが分類器を道連れにする＝健全判定器を本体と分離したのと同じ理由）。
+    """
+    _, _, p5, p7, r5, r7 = row
+    return any(pct is None and resets is not None for pct, resets in ((p5, r5), (p7, r7)))
+
+
+def _diagnose(accounts, eligible, excluded):
+    """sc-j8zv teeth: 「適格 0 件」の種別を機械弁別して (exit code, reason) を返す。
+
+    不変条件（本 selector が自ら検査する）: **eligible ⊆ healthy**（適格判定は ok∧非stale を含む）ゆえ
+      healthy > 0 かつ eligible == 0 なら、健全と申告された account を残らず本体が落としたことになる。
+      これは上流劣化 (A) では起こりえないので exit 4 で fail-loud。
+    ただし exit 4 の**犯人は 1 種類ではない**（self-review 2026-07-27）: 除外理由で層別し、
+      (B)  `malformed:` 等 = 本 selector の欠陥 or shape 契約変更 → reason=misjudge
+      (B') `indeterminate:` × 窓あり×pct=null = 上流が utilization を返していない（設計どおりの
+           fail-closed 除外・selector の欠陥ではない）→ reason=upstream-utilization-missing
+      を別文言で報告する（層別せずに一括で「selector の欠陥」と断ずると犯人を取り違える）。
+    副次: 適格が残っていても健全 account が落ちていれば warn。ここでも (B)=shape ドリフトの早期兆候 /
+      (B')=上流の utilization 欠落 を分け、後者を「ドリフトの兆候」と数えない（loud チャネルの摩耗防止）。
+      最上位候補が枯渇していれば warn（選定は変えない・要求③の可視化）。
+    """
+    healthy_labels = [_label_of(a) for a in accounts if _usage_healthy(a)]
+    elig_labels = [e[1] for e in eligible]
+    elig_set = set(elig_labels)
+    row_by_label = {}
+    for row in excluded:
+        row_by_label.setdefault(row[0], row)
+    defect_drops, upstream_drops = [], []
+    for lab in healthy_labels:
+        if lab in elig_set:
+            continue
+        row = row_by_label.get(lab)
+        why = row[1] if row is not None else "(除外理由不明)"
+        if row is not None and str(why).startswith("indeterminate:") \
+                and _indeterminate_is_upstream(row):
+            upstream_drops.append((lab, why))
+        else:
+            defect_drops.append((lab, why))
+
+    if not eligible:
+        if healthy_labels:
+            if not defect_drops:
+                _warn("★適格 0 件・上流 utilization 欠落（sc-j8zv teeth・exit 4）: usage が健全（ok∧非"
+                      "stale）と報告した account が %d 件ありますが、いずれも **窓ありなのに "
+                      "utilization(pct) が null** で残量を判定できず fail-closed 除外しました。"
+                      % len(healthy_labels))
+                # ★文言規約: 犯人弁別の grep token「selector 誤判定」は (B) 専用に予約する（本 (B') の
+                #   文面へ「…と混同しない」の形でも書かない＝横断 grep が誤 hit して弁別が壊れるため。
+                #   機械弁別は reason=upstream-utilization-missing / exit 4 の組で行う）。
+                _warn("  = **selector の欠陥ではありません**（上流 claude-usage の norm_pct は "
+                      "utilization が欠落/非数値なら null を返す＝健全申告のまま起こりうる形）。選定は"
+                      "できないので exit 4 で fail-loud にしますが、見るべきは上流の utilization であって "
+                      "本 selector のパース/型検査/残量算出ではない（reason=upstream-utilization-missing）。")
+                _warn("  判定不能だった健全 account: %s" % _join_drops(upstream_drops))
+                return 4, "upstream-utilization-missing"
+            _warn("★selector 誤判定（sc-j8zv teeth・exit 4）: usage が健全（ok∧非stale）と報告した "
+                  "account が %d 件あるのに適格 0 件です。" % len(healthy_labels))
+            _warn("  = 上流劣化ではなく本 selector 側の欠陥（パース/型検査/残量算出）か claude-usage の "
+                  "shape 契約変更です。上流劣化による正当な適格 0 件は exit 0 で返る（両者を混同しない）。")
+            _warn("  落とされた健全 account: %s" % _join_drops(defect_drops))
+            if upstream_drops:
+                _warn("  （参考・欠陥の証拠には数えない）上流が utilization を返さず判定不能だった "
+                      "account: %s" % _join_drops(upstream_drops))
+            return 4, "misjudge"
+        codes = _degradation_codes(accounts)
+        _warn("適格 0 件（上流劣化・exit 0）: usage 側に健全（ok∧非stale）な account が 1 件もありません "
+              "（accounts=%d）。selector の判定は正しく、原因は claude-usage 側です。" % len(accounts))
+        if codes:
+            _warn("  error_code 内訳: %s（429 主体=一過性 rate limit ゆえ時間をおいて再試行 / "
+                  "401・403 主体=当該 account の再 login / nosrc・net=取得元不達）" % codes)
+        _warn("  ★注意（sc-j8zv）: claude-usage は live fetch 失敗時も snapshot cache の実データを "
+              "stale=true・rc=0 で返す。『usage を直に叩いたら値が出る』ことは健全の証拠ではない。")
+        # 健全 0 件でも malformed 除外が混ざっていれば「上流劣化」と断じきれない（ok/stale 自体の型
+        # ドリフトなら健全判定器も無力＝本 script の盲点）。疑いを明示して生 JSON 確認へ誘導する。
+        malformed = sum(1 for row in excluded if str(row[1]).startswith("malformed:"))
+        if malformed:
+            _warn("  ★ただし malformed 除外が %d 件あります＝claude-usage の shape 契約変更（ok/stale の"
+                  "型ドリフト等）の疑い。上流劣化と断ずる前に生 JSON を確認せよ。" % malformed)
+        return 0, ""
+
+    if defect_drops:
+        _warn("warn: usage は健全と報告したのに selector が除外した account があります"
+              "（適格は %d 件あるので継続・shape 契約ドリフトの早期兆候・sc-j8zv）: %s"
+              % (len(elig_labels), _join_drops(defect_drops)))
+    if upstream_drops:
+        # (B') は設計どおりの fail-closed 除外＝ドリフトの兆候として数えない（数えると健全 account が
+        # 1 件 indeterminate なだけで毎回 warn が出続け、loud チャネルが摩耗して本物の兆候が埋もれる）。
+        _warn("info: 上流が窓ありなのに utilization を返しておらず、残量判定不能で fail-closed 除外した "
+              "account があります（適格は %d 件あるので継続・**selector の欠陥ではない**・shape ドリフト"
+              "としても数えない・sc-j8zv）: %s" % (len(elig_labels), _join_drops(upstream_drops)))
+    top_score, top_label = eligible[0][0], eligible[0][1]
+    if top_score <= DEPLETED_HEADROOM:
+        # label は claude-usage 由来ゆえ **必ず _flat**（_join_drops / _cell と同じ扱い）。ここは exit 4 の
+        # 異常系ではなく **exit 0 の happy path**（floor が無い現行 semantics では枯渇が最上位になりうる）
+        # なので、素通しすると平常運転のまま `account-select: chosen=…` の偽行を data で注入でき、
+        # 「selector は chosen= 行を決して出さない」という自己宣言が最も踏まれる経路で破れる。
+        _warn("warn: 枯渇警告（sc-j8zv・要求③）: 最上位候補 '%s' の実効残量（maximin score）が %s です"
+              "＝その窓では実質使えません。" % (_flat(top_label), _fmt_num(top_score)))
+        _warn("  現行 semantics は『stale のみ除外・枯渇は減点』で **floor が無い**ため枯渇 account も "
+              "選定されます（選定は本 warn では変えない）。floor 導入の可否は admin 裁定事項。")
+    return 0, ""
+
+
+def _emit_audit_snapshot(rows, reason):
+    """rc に依存しない監査 trail を stderr へ 1 ブロック出す（sc-j8zv・exit 4 のときだけ）。
+
+    なぜ selector 側で出すか（実測 2026-07-27）: 呼出元の `account-select:` 監査ブロックは、rc が既知分岐
+    （rc==3 / rc==0）に落ちたときにしか組み立てられない。probe 経路は else 欠落で rc=4 が素通りし、auto
+    経路は die が emit より前に走る＝**どちらも rc=4 では監査が 1 行も残らない**。exit 4 は「selector 側の
+    欠陥 or 上流 shape ドリフト」という異常時にだけ発火するので、まさに異常時にこそ incident 再構成の材料が
+    消える形になる（本 selector が撲滅対象にしている失敗形と同型）。worktree/pane は消えるが呼出元が拾える
+    stderr は残るため、最後の砦として selector 自身が出す。
+    形式は呼出元 format_account_select_snapshot と同型（tab→'|'・空→'-'）にして横断 grep を 1 本にまとめる。
+    弁別: 1 行目に `origin=selector` を必ず置く（呼出元の 1 行目は `chosen=` で始まる）。
+    ★この弁別を data で破らせない（self-review 2026-07-27・実測で破れた）: セルには claude-usage 由来の
+      label / `not-ok:<error>` が載るので、_cell で改行・'|' を可逆 escape してから join する。
+      不変条件: **1 account = 1 行**（監査行数 == rows 件数）かつ `account-select: chosen=` で始まる行を
+      selector は決して出さない（出せると「呼出元が選んでもいない account を呼出元が選んだ」と読める
+      偽の監査行を外部データだけで作れる）。error_code だけ allowlist して他を素通しするのは片側防御。
+    不変条件: **exit 0 では出さない**（正常時に呼出元 snapshot と二重記録しない）。stdout の TSV 契約・
+    exit code・選定順位は一切変えない（監査面だけを増やす片側追加）。
+    """
+    sys.stderr.write(
+        "account-select: origin=selector rc=4 reason=%s"
+        "（呼出元の rc 分岐に依存しない fallback 監査・sc-j8zv）\n" % reason)
+    sys.stderr.write(
+        "account-select: cols=label|eligible|score|h5|h7|pct5|pct7|resets5|resets7|reason\n")
+    for row in rows:
+        sys.stderr.write(
+            "account-select:   %s\n" % "|".join(_cell(c) for c in row.split("\t")))
+
+
 def main(argv):
     text = _load_input(argv)
     try:
@@ -228,18 +560,39 @@ def main(argv):
 
     out = []
     for score, label, h5, h7, p5, p7, r5, r7 in eligible:
-        out.append("\t".join([
+        # sc-j8zv（要求③）: 枯渇（実効残量 0）でも適格のままだが、その事実を col10 の advisory として
+        # 残す。呼出元の監査 snapshot（bd notes / stderr）にそのまま載る＝worktree 消滅後も横断 grep で
+        # 「枯渇アカが選ばれていた」ことを追える（pane 頼みにしない）。eligible フラグ・順位・exit code は
+        # 一切変えない（選定 semantics は admin 裁定事項ゆえ本 cell では動かさない）。
+        advisory = ""
+        if score <= DEPLETED_HEADROOM:
+            advisory = "advisory:depleted(headroom=%s)" % _fmt_num(score)
+        # 外部由来セル（label / 除外行の生 pct・resets_at / reason）は _tsv で無害化してから join する
+        # （行注入・列注入の両方を塞ぐ・well-formed な入力では no-op）。
+        out.append("\t".join(_tsv(c) for c in [
             label, "1", _fmt_num(score), _fmt_num(h5), _fmt_num(h7),
-            _fmt_raw(p5), _fmt_raw(p7), _fmt_raw(r5), _fmt_raw(r7), "",
+            _fmt_raw(p5), _fmt_raw(p7), _fmt_raw(r5), _fmt_raw(r7), advisory,
         ]))
     for label, reason, p5, p7, r5, r7 in excluded:
-        out.append("\t".join([
+        # 除外行は pct/resets_at を**型検査前の生値**のまま載せる経路（not-ok / stale）があるため、
+        # label / reason だけでなく全セルを _tsv に通す（型検査を通った適格行と同じ規約に揃える）。
+        out.append("\t".join(_tsv(c) for c in [
             label, "0", "", "", "",
             _fmt_raw(p5), _fmt_raw(p7), _fmt_raw(r5), _fmt_raw(r7), reason,
         ]))
     if out:
         sys.stdout.write("\n".join(out) + "\n")
-    return 0
+    sys.stdout.flush()  # pipe 時に stdout がブロックバッファされ診断 stderr と前後するのを避ける
+    # 診断は TSV を出し切った**後**に行う（exit 4 でも呼出元の監査 snapshot を殺さない＝
+    # command substitution は exit code に関わらず stdout を捕捉する）。
+    rc, why = _diagnose(accounts, eligible, excluded)
+    if rc == 4:
+        # 呼出元が rc=4 を既知分岐で受けられない（probe は else 欠落 / auto は die が emit より前）ため、
+        # selector 自身が durable な監査 trail を残す。診断文の**後**に置き、犯人説明→snapshot の順にする。
+        # reason は _diagnose の層別結果をそのまま載せる（misjudge / upstream-utilization-missing）＝
+        # 監査行だけを横断 grep しても犯人の種別が分かる（一律 misjudge だと誤帰属が trail に焼き付く）。
+        _emit_audit_snapshot(out, why)
+    return rc
 
 
 if __name__ == "__main__":

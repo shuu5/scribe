@@ -148,6 +148,118 @@ JSON
 ] }
 JSON
 
+  # --- sc-j8zv fixtures（実アカウント名・実残量は書かない＝本 repo は PUBLIC）-------------------
+  # incident 署名: claude-usage が live fetch に失敗して snapshot cache へ degrade した形。
+  #   ok=false/stale=true だが **pct/resets_at の実データは載っている**・rc=0（＝「直に叩くと値が返る」）。
+  #   これが「usage は正常に見えるのに適格 0」の実体（sc-j8zv 根因）。error_code=429 は一過性 rate limit。
+  DEGRADED="$BATS_TEST_TMPDIR/degraded.json"
+  cat > "$DEGRADED" <<JSON
+{ "accounts": [
+  {"label":"acctA","ok":false,"stale":true,"error":"HTTP 429","error_code":"429",
+   "five_hour_pct":10,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":20,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
+  {"label":"acctB","ok":false,"stale":true,"error":"HTTP 429","error_code":"429",
+   "five_hour_pct":30,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":40,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"}
+] }
+JSON
+
+  # 「usage は健全（ok∧非stale）と言っているのに selector が全部落とす」= 誤判定の実形（exit 4 の teeth）。
+  # ここでは shape 契約ずれ（score キー欠落）で作るが、selector 側の変異注入でも同じ状態になる。
+  HEALTHYDROP="$BATS_TEST_TMPDIR/healthydrop.json"
+  cat > "$HEALTHYDROP" <<JSON
+{ "accounts": [
+  {"label":"acctA","ok":true,"stale":false,"five_hour_pct":10,"five_hour_resets_at":null,"seven_day_resets_at":null},
+  {"label":"acctB","ok":true,"stale":false,"five_hour_pct":20,"five_hour_resets_at":null,"seven_day_resets_at":null}
+] }
+JSON
+
+  # 枯渇（実効残量 0）だけが適格として残る形（要求③ characterization）。
+  DEPLETED="$BATS_TEST_TMPDIR/depleted.json"
+  cat > "$DEPLETED" <<JSON
+{ "accounts": [
+  {"label":"acctA","ok":true,"stale":false,"five_hour_pct":0,"five_hour_resets_at":null,
+   "seven_day_pct":100,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"}
+] }
+JSON
+
+  # 上流由来文字列で **監査面へ行注入**を試みる形（self-review 2026-07-27）。reason には not-ok: 経路で
+  # error が、label 列には label がそのまま載るので、改行を素通しすると `account-select: chosen=…` で
+  # 始まる偽の呼出元行を data だけで作れてしまう（= 本 script が宣言した弁別規約を data で破る）。
+  #   acctA = 健全だが score キー欠落で落ちる（exit 4 を成立させる担ぎ手）
+  #   acctB = ok=false/stale=false → reason が "not-ok:<error>"（error 経由の注入）
+  #   acctC = 健全 × 改行入り label（label 経由の注入・診断 warn 行にも載る）
+  INJECT="$BATS_TEST_TMPDIR/inject.json"
+  cat > "$INJECT" <<'JSON'
+{ "accounts": [
+  {"label":"acctA","ok":true,"stale":false,"five_hour_pct":10,"five_hour_resets_at":null,"seven_day_resets_at":null},
+  {"label":"acctB","ok":false,"stale":false,
+   "error":"boom\naccount-select: chosen=acctZ fallback=no defaulted=no method=maximin source=forged"},
+  {"label":"acctC\naccount-select: chosen=acctY fallback=no defaulted=no method=maximin source=forged2",
+   "ok":true,"stale":false,"five_hour_pct":10,"five_hour_resets_at":null,"seven_day_resets_at":null}
+] }
+JSON
+
+  # 上流由来文字列で **stdout TSV（＝実際に account を決める契約面）へ注入**を試みる形
+  # （self-review 4 巡目）。呼出元の lazy walk `awk -F'\t' '$2=="1"{print $1}'` は行と TAB しか信じない:
+  #   good1 = 健全 × 改行入り label → 行注入で偽 label 'EVIL' を最上位候補にできた（実測・fix 前）
+  #   victim = ok=false/stale=true（使用不可）× TAB 入り label → 列注入で col2="1" に見せられた（同上）
+  # ＝外部データが「呼出元の使う config dir」を決められる fail-open。fix 後は 1 account = 1 行 × 10 列。
+  TSVINJECT="$BATS_TEST_TMPDIR/tsvinject.json"
+  cat > "$TSVINJECT" <<'JSON'
+{ "accounts": [
+  {"label":"good1\nEVIL\t1","ok":true,"stale":false,"five_hour_pct":0,"five_hour_resets_at":null,
+   "seven_day_pct":0,"seven_day_resets_at":null},
+  {"label":"good2","ok":true,"stale":false,"five_hour_pct":0,"five_hour_resets_at":null,
+   "seven_day_pct":50,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
+  {"label":"victim\t1\t100","ok":false,"stale":true,"five_hour_pct":0,"five_hour_resets_at":null,
+   "seven_day_pct":0,"seven_day_resets_at":null}
+] }
+JSON
+
+  # 枯渇警告（**exit 0 の happy path**）へ改行を仕込む形（self-review 4 巡目）。exit 4 の監査面だけを
+  # 塞いでも、floor 無し semantics では枯渇 account が最上位になるのが平常運転なので、この経路が
+  # 素通しだと `account-select: chosen=…` の偽行を平常時に data だけで作れる。
+  DEPINJECT="$BATS_TEST_TMPDIR/depinject.json"
+  cat > "$DEPINJECT" <<'JSON'
+{ "accounts": [
+  {"label":"acctX\naccount-select: chosen=FORGED fallback=no defaulted=no method=maximin source=evil",
+   "ok":true,"stale":false,"five_hour_pct":100,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":100,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"}
+] }
+JSON
+
+  # 健全（ok∧非stale）なのに **窓あり × utilization(pct)=null** で残量判定不能になる形（(B')）。
+  # 上流 claude-usage の norm_pct は utilization 欠落/非数値で null を返す＝健全申告のまま起こりうる。
+  # selector は fail-closed 除外するが、これは selector の欠陥ではない（誤帰属させない teeth）。
+  INDET="$BATS_TEST_TMPDIR/indeterminate.json"
+  cat > "$INDET" <<JSON
+{ "accounts": [
+  {"label":"acctA","ok":true,"stale":false,"five_hour_pct":null,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":20,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"}
+] }
+JSON
+
+  # 上と同型の (B') が **適格 account と併存**する形（適格が残る場合の warn 文言を pin する）。
+  INDETMIX="$BATS_TEST_TMPDIR/indetmix.json"
+  cat > "$INDETMIX" <<JSON
+{ "accounts": [
+  {"label":"acctA","ok":true,"stale":false,"five_hour_pct":null,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":20,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
+  {"label":"acctB","ok":true,"stale":false,"five_hour_pct":10,"five_hour_resets_at":null,
+   "seven_day_pct":20,"seven_day_resets_at":null}
+] }
+JSON
+
+  # ok/stale 自身の型ドリフト（健全判定器も無力になる盲点）→ 上流劣化と断じず shape 疑いを併記する。
+  SHAPEDRIFT="$BATS_TEST_TMPDIR/shapedrift.json"
+  cat > "$SHAPEDRIFT" <<JSON
+{ "accounts": [
+  {"label":"acctA","ok":"true","stale":"false","five_hour_pct":10,"five_hour_resets_at":null,
+   "seven_day_pct":10,"seven_day_resets_at":null}
+] }
+JSON
+
   # usage 側は適格だが preflight 全滅を作る fixture（非 default のみ＝~/.claude へ写像されない）。
   # config dir を一切作らなければ全候補 preflight 不通過 → resolve 末尾 fail-loud を引く（facet⑤②(b)）。
   PFAIL="$BATS_TEST_TMPDIR/pfail.json"
@@ -495,6 +607,237 @@ mk_cfg() {
   [[ "$notes" == *"chosen=black4"* ]]
   [[ "$notes" == *default* ]]     # snapshot は候補全員（適格）
   [[ "$notes" == *black3* ]]      # snapshot は除外アカも含む
+}
+
+# ============================================================================
+# sc-j8zv: 「適格 0 件」の 2 種を機械弁別する teeth
+#   (A) 上流劣化（usage 側に健全 account が無い）= selector は正しい → exit 0（従来不変）
+#   (B) selector 誤判定（usage は健全と報告したのに全部落とした）→ exit 4 で fail-loud
+# 現行は (A)(B) が同じ「exit 0・eligible 0 行」に潰れ、呼出元は一律「全アカウント認証切れ」と誤帰属した。
+# ★変異注入で RED 化する teeth = 「usage 正常 → exit 0 かつ eligible≥1」の 2 本
+#   （selector が健全 account を落とす変異を入れると exit 4 になり RED・実測は selftest-sc-j8zv.local.sh）。
+# ============================================================================
+
+@test "sc-j8zv teeth(B): usage 健全なのに適格0件 → exit 4（誤判定として fail-loud・上流劣化と別コード）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$HEALTHYDROP")" python3 "$SEL"
+  [ "$status" -eq 4 ]
+  [[ "$stderr" == *"selector 誤判定"* ]]
+  # ★1 行 1 assert（`[[ A ]] && [[ B ]]` と書かない）: 中間行の AND-OR リストは左辺が false でも
+  #   set -e が発火せず bats が pass する＝assert が沈黙する（実測 2026-07-27・self-review）。
+  [[ "$stderr" == *acctA* ]]                                 # 犯人ラベルを名指しする
+  [[ "$stderr" == *acctB* ]]
+  [[ "$stderr" == *"malformed:欠落"* ]]                       # 落とした理由も出す
+  # 監査を殺さない: exit 4 でも TSV は stdout に出る（呼出元 snapshot が空にならない）。
+  [ -n "$output" ]
+  [ "$(awk -F'\t' '$2=="0"' <<<"$output" | wc -l)" -eq 2 ]
+}
+
+@test "sc-j8zv teeth(A): 上流劣化(全 stale・実データ有り rc=0) → exit 0 のまま + error_code 内訳診断" {
+  # incident 署名そのもの: usage を直に叩けば値が返る（degrade は cache 実データを載せる）が全 stale。
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$DEGRADED")" python3 "$SEL"
+  [ "$status" -eq 0 ]                                  # (B) と別コード＝機械弁別できる
+  [ -z "$(awk -F'\t' '$2=="1"' <<<"$output")" ]        # 適格 0 件は従来どおり
+  [[ "$stderr" == *"上流劣化"* ]]
+  [[ "$stderr" == *"429=2"* ]]                          # error_code 内訳（一過性 rate limit と読める）
+  [[ "$stderr" == *"健全の証拠ではない"* ]]             # rc=0/値あり を健全と誤読させない注記
+  [[ "$stderr" != *"selector 誤判定"* ]]                # (B) の文言を誤って出さない
+}
+
+@test "sc-j8zv teeth: usage 正常（GOLDEN）→ exit 0 かつ eligible≥1（変異注入で exit 4 化=RED になる本体）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$GOLDEN")" python3 "$SEL"
+  [ "$status" -eq 0 ]
+  [ "$(awk -F'\t' '$2=="1"' <<<"$output" | wc -l)" -ge 1 ]
+  [[ "$stderr" != *"selector 誤判定"* ]]
+}
+
+@test "sc-j8zv teeth: usage 正常（stdin seam）→ exit 0 かつ eligible≥1（seam 別経路でも同じ不変条件）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" python3 "$SEL" --stdin < "$PCTPIN"
+  [ "$status" -eq 0 ]
+  [ "$(awk -F'\t' '$2=="1"' <<<"$output" | wc -l)" -eq 2 ]
+}
+
+@test "sc-j8zv: 部分ドリフト（健全だが 1 件だけ除外・適格は残る）→ exit 0 + warn（早期兆候）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$KEYMISS")" python3 "$SEL"
+  [ "$status" -eq 0 ]                                   # 適格が残るので fail-loud しない
+  [[ "$stderr" == *"warn: usage は健全と報告したのに selector が除外"* ]]
+  [[ "$stderr" == *"bad="* ]]
+}
+
+@test "sc-j8zv: ok/stale の型ドリフト → 上流劣化と断じず shape 契約変更の疑いを併記（判定器の盲点を告知）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$SHAPEDRIFT")" python3 "$SEL"
+  [ "$status" -eq 0 ]                                   # 健全申告が 1 件も無い＝(B) ではない
+  [[ "$stderr" == *"shape 契約変更"* ]]
+  [[ "$stderr" == *"malformed 除外が 1 件"* ]]
+}
+
+@test "sc-j8zv 要求③ characterization: 枯渇(残量0)でも eligible=1 のまま（floor 無し）+ advisory + 枯渇 warn" {
+  # ★現行 semantics（stale のみ除外・枯渇は減点）を明示的に pin する。floor を入れる/入れないは admin
+  #   裁定事項ゆえ本 cell では選定を変えない。将来 floor を入れるなら本テストを意図的に書き換えること
+  #   （黙って挙動が反転したらここが RED になる＝gap が機械可視のまま残る）。
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$DEPLETED")" python3 "$SEL"
+  [ "$status" -eq 0 ]
+  local _l _e _sc _rest
+  IFS=$'\t' read -r _l _e _sc _rest <<<"$output"
+  [ "$_e" = "1" ]                                       # 枯渇でも適格（＝floor が無い）
+  [ "$_sc" = "0" ]                                      # maximin score=0（実効残量ゼロ）
+  [[ "$output" == *"advisory:depleted(headroom=0)"* ]]  # 監査 snapshot へ durable に残る印
+  [[ "$stderr" == *"枯渇警告"* ]]                        # 最上位が枯渇なら loud に警告
+  [[ "$stderr" == *"floor が無い"* ]]
+}
+
+@test "sc-j8zv: 枯渇 advisory は col10 のみ（eligible/順位/exit を変えない＝選定 semantics 不変）" {
+  # GOLDEN の default は 7d pct=100（枯渇）だが従来どおり 3 位の適格のまま。
+  [ "$(walk "$GOLDEN" | paste -sd, -)" = "black4,black2,default" ]
+  local r; r="$(row_of default)"
+  [[ "$r" == *"advisory:depleted"* ]]
+  [ "$(awk -F'\t' '{print $2}' <<<"$r")" = "1" ]
+  # 上位が枯渇でないので枯渇 warn は出ない（happy path を騒がせない）。
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$GOLDEN")" python3 "$SEL"
+  [[ "$stderr" != *"枯渇警告"* ]]
+}
+
+@test "sc-j8zv spawn: selector 誤判定(exit 4) は呼出元でも fail-loud（『適格0件』と別メッセージ）" {
+  # 呼出元 scribe-spawn.sh は未知 exit を一律 fail-loud する（既存規約）。ゆえに本 cell が selector 側だけ
+  # を変えても spawn は silent 続行しない。かつ (A) 用の「適格アカウントが 0 件」誤帰属を出さない。
+  run env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$HEALTHYDROP")" SCRIBE_ACCOUNTS_BASE="$ABASE" \
+    BEADS_BDW="$BDW_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$NOOP" \
+    "$SPAWN" --repo "$ANCHOR" --anchor "$ANCHOR" --account auto zz-misjudge
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"想定外 exit（4）"* ]]
+  [[ "$output" == *"selector 誤判定"* ]]                 # selector の stderr が呼出元へ素通しされる
+  [[ "$output" != *"適格アカウントが 0 件"* ]]           # (A) の誤帰属メッセージへ落ちない
+}
+
+@test "sc-j8zv spawn: 上流劣化(全 stale)は従来どおり『適格0件』fail-loud（(A) の意味論を変えない）" {
+  run env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$DEGRADED")" SCRIBE_ACCOUNTS_BASE="$ABASE" \
+    BEADS_BDW="$BDW_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$NOOP" \
+    "$SPAWN" --repo "$ANCHOR" --anchor "$ANCHOR" --account auto zz-degraded
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"適格アカウントが 0 件"* ]]
+  [[ "$output" == *"上流劣化"* ]]                        # selector 診断が pane に出る
+  [[ "$output" != *"想定外 exit"* ]]
+}
+
+@test "sc-j8zv teeth: exit 4 では selector 自身が rc 非依存の監査ブロックを stderr へ出す（呼出元の else 欠落を迂回）" {
+  # 実測 2026-07-27: 呼出元の `account-select:` snapshot は rc=4 では 1 行も出ない（probe 分岐は else 欠落 /
+  # auto 経路は die が emit より前）。異常時にこそ監査が消える形ゆえ、selector 自身を最後の砦にする。
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$HEALTHYDROP")" python3 "$SEL"
+  [ "$status" -eq 4 ]
+  [[ "$stderr" == *"account-select: origin=selector rc=4"* ]]           # 呼出元由来と機械弁別できる印
+  [[ "$stderr" == *"account-select: cols=label|eligible|score"* ]]
+  # stdout の TSV 全行が '|' 区切りで stderr にも載る（監査の等価性＝stdout を捨てる呼出元でも再構成できる）
+  [ "$(awk '/^account-select:   /' <<<"$stderr" | wc -l)" -eq "$(grep -c . <<<"$output")" ]
+  [[ "$stderr" == *"acctA|0|-|-|-"* ]]                                  # 空欄は '-'（呼出元 snapshot と同形式）
+}
+
+@test "sc-j8zv teeth: 正常時(exit 0)は selector 監査ブロックを出さない（呼出元 snapshot と二重記録しない）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$GOLDEN")" python3 "$SEL"
+  [ "$status" -eq 0 ]
+  [[ "$stderr" != *"account-select: origin=selector"* ]]
+  # (A) 上流劣化（適格 0 件だが exit 0）でも出さない＝出すのは exit 4 のときだけ、が不変条件。
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$DEGRADED")" python3 "$SEL"
+  [ "$status" -eq 0 ]
+  [[ "$stderr" != *"account-select: origin=selector"* ]]
+}
+
+@test "sc-j8zv teeth: 監査ブロックは 1 account = 1 行（上流由来の改行で行注入できない＝弁別規約を data で破らせない）" {
+  # ★self-review 2026-07-27 の実測 blocking: `origin=selector` / `chosen=` による呼出元弁別は、セルへ
+  #   claude-usage 由来の改行が素通しできると **data だけで偽造できた**（呼出元が選んでもいない account を
+  #   「呼出元が選んだ」と読める監査行を注入でき、横断 grep 集計と incident 再構成が汚染される）。
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$INJECT")" python3 "$SEL"
+  [ "$status" -eq 4 ]
+  # 不変条件: 監査行は accounts 件数ちょうど（見出し 2 行は prefix が違うので別枠）。
+  [ "$(awk '/^account-select:   /' <<<"$stderr" | wc -l)" -eq 3 ]
+  [ "$(grep -c '^account-select: [^ ]' <<<"$stderr")" -eq 2 ]   # 見出しは 2 行のみ（origin / cols）
+  # 不変条件: selector は `account-select: chosen=` で始まる行を決して出さない（呼出元行の偽造不能）。
+  [ "$(grep -c '^account-select: chosen=' <<<"$stderr" || true)" -eq 0 ]
+  [ "$(grep -c 'source=forged' <<<"$stderr" || true)" -eq 3 ]   # 情報は消さず同じ行へ畳む（3 hit）
+  # 無害化は可逆表記（\n）＝監査価値を落とさない。error 経路・label 経路の両方を塞ぐ。
+  [[ "$stderr" == *'not-ok:boom\naccount-select: chosen=acctZ'* ]]
+  [[ "$stderr" == *'acctC\naccount-select: chosen=acctY'* ]]
+  # 診断 warn 行（label 経由）も 1 行に畳む＝stderr のどの面からも偽造できない。
+  [ "$(awk '/^scribe-account-select:/' <<<"$stderr" | wc -l)" -eq 3 ]
+}
+
+@test "sc-j8zv teeth: stdout TSV も行注入/列注入を塞ぐ（呼出元 lazy walk が偽 label・使用不可 account を選ばない）" {
+  # ★self-review 4 巡目の実測 blocking: 前巡は stderr（監査面）だけを塞いだが、**config dir を実際に
+  #   決めるのは stdout**。素通しだと (i) 改行で偽の行を挿し込み存在しない label を最上位候補にでき、
+  #   (ii) TAB で ok=false/stale=true の除外行を col2="1" に見せて使用不可 account を適格にできた。
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$TSVINJECT")" python3 "$SEL"
+  [ "$status" -eq 0 ]
+  # 不変条件: 1 account = 1 行 × 10 列（行注入・列注入のどちらでも形が崩れない）。
+  [ "$(grep -c . <<<"$output")" -eq 3 ]
+  [ "$(awk -F'\t' '{print NF}' <<<"$output" | sort -u | paste -sd, -)" = "10" ]
+  # 呼出元 lazy walk（scribe-spawn.sh:517 / orch-spawn-admin.sh:635 と同型）の候補集合を直接 pin する。
+  local picks; picks="$(awk -F'\t' '$2=="1"{print $1}' <<<"$output")"
+  [ "$(grep -c . <<<"$picks")" -eq 2 ]
+  [ "$(grep -cx 'EVIL' <<<"$picks" || true)" -eq 0 ]      # (i) 行注入: 偽 label が候補に現れない
+  [ "$(grep -c 'victim' <<<"$picks" || true)" -eq 0 ]     # (ii) 列注入: 使用不可 account が適格化しない
+  [ "$(head -1 <<<"$picks")" = 'good1\nEVIL\t1' ]         # 最上位は実在 account のまま（分断もされない）
+  # 無害化は可逆表記＝監査価値を落とさない（label の中身は消さず 1 セルへ畳むだけ）。
+  [[ "$output" == *'victim\t1\t100'* ]]
+}
+
+@test "sc-j8zv teeth: exit 4 の注入入力でも stdout は 1 account = 1 行 × 10 列（stderr だけの片側防御にしない）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$INJECT")" python3 "$SEL"
+  [ "$status" -eq 4 ]
+  [ "$(grep -c . <<<"$output")" -eq 3 ]
+  [ "$(awk -F'\t' '{print NF}' <<<"$output" | sort -u | paste -sd, -)" = "10" ]
+  # 全件除外の入力なので、呼出元の候補集合は空でなければならない（data で適格を捏造できない）。
+  [ -z "$(awk -F'\t' '$2=="1"' <<<"$output")" ]
+}
+
+@test "sc-j8zv teeth: 枯渇 warn(exit 0) も label を畳む＝selector は chosen= 行を『正常経路でも』決して出さない" {
+  # ★self-review 4 巡目の実測 blocking: 前巡の行注入 fix は片面（exit 4 の監査面）だけで、floor 無し
+  #   semantics では**平常運転**で踏む枯渇 warn が label を生のまま出していた。
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$DEPINJECT")" python3 "$SEL"
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"枯渇警告"* ]]
+  # 不変条件: selector は `account-select:` で始まる行を exit 0 では 1 行も出さない（偽の呼出元行の否定）。
+  [ "$(grep -c '^account-select:' <<<"$stderr" || true)" -eq 0 ]
+  [ "$(grep -c '^account-select: chosen=' <<<"$stderr" || true)" -eq 0 ]
+  # 枯渇 warn は 2 行ちょうど（改行注入で行が増えない）＝stderr のどの面からも偽造できない。
+  [ "$(grep -c '^scribe-account-select:' <<<"$stderr" || true)" -eq 2 ]
+  [ "$(grep -c . <<<"$stderr")" -eq 2 ]
+  [[ "$stderr" == *'acctX\naccount-select: chosen=FORGED'* ]]   # 可逆表記（情報は落とさない）
+  [ "$(grep -c . <<<"$output")" -eq 1 ]                          # stdout も 1 account = 1 行
+}
+
+@test "sc-j8zv teeth(B'): 健全 × 上流 utilization 欠落 は exit 4 でも『selector 誤判定』と誤帰属しない" {
+  # ★self-review 2026-07-27 の実測 blocking: 窓あり × pct=null は上流 norm_pct が null を返す形＝
+  #   健全申告のまま起こりうる。旧実装は (B) と一括りにして「本 selector 側の欠陥」と断じていた。
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$INDET")" python3 "$SEL"
+  [ "$status" -eq 4 ]                                   # 選定不能なので fail-loud 自体は維持
+  [[ "$stderr" == *"上流 utilization 欠落"* ]]
+  [[ "$stderr" == *"selector の欠陥ではありません"* ]]
+  [[ "$stderr" != *"selector 誤判定"* ]]                # 犯人を取り違えない（誤帰属の teeth）
+  [[ "$stderr" == *"acctA=indeterminate:残量判定不能"* ]]
+  # 監査 trail は exit 4 の不変条件どおり出るが、reason は層別結果を載せる（trail に誤帰属を焼かない）。
+  [[ "$stderr" == *"account-select: origin=selector rc=4 reason=upstream-utilization-missing"* ]]
+}
+
+@test "sc-j8zv 層別: (B') は適格が残る場合『shape ドリフトの早期兆候』warn に数えない（loud チャネルを摩耗させない）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$INDETMIX")" python3 "$SEL"
+  [ "$status" -eq 0 ]
+  [ "$(awk -F'\t' '$2=="1"' <<<"$output" | wc -l)" -eq 1 ]
+  [[ "$stderr" != *"shape 契約ドリフトの早期兆候"* ]]   # malformed でないものを欠陥の兆候と数えない
+  [[ "$stderr" == *"utilization を返しておらず"* ]]     # 事実としては可視化する（黙らせない）
+  [[ "$stderr" != *"selector 誤判定"* ]]
+}
+
+@test "sc-j8zv characterization: exit 4 の spawn は bd notes へ snapshot を書かない（die が emit より前）— pane には selector 監査が残る" {
+  # ★呼出元契約 (b)「監査 snapshot を rc に関わらず出力」の **未達を現状 pin** する（別 bead の対象）。
+  #   auto 経路は fail-loud はする（(a) 充足）が emit_account_select_note へ到達しないため notes が空になる。
+  #   別 bead で emit 順序が直ったらここが RED になり、gap が閉じたことが機械可視になる（黙って直らない）。
+  : > "$NOTE_LOG"
+  run env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$HEALTHYDROP")" SCRIBE_ACCOUNTS_BASE="$ABASE" \
+    BEADS_BDW="$BDW_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$NOOP" \
+    "$SPAWN" --repo "$ANCHOR" --anchor "$ANCHOR" --account auto zz-misjudge-note
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"想定外 exit（4）"* ]]                # account 解決の段で die したことを確定させる
+  local notes; notes="$(cat "$NOTE_LOG" 2>/dev/null || true)"
+  [[ "$notes" != *"account-select: chosen="* ]]          # 呼出元 snapshot は notes に無い（現状）
+  [[ "$output" == *"account-select: origin=selector rc=4"* ]]  # selector 側の監査は pane へ素通しで残る
 }
 
 @test "sc-1rq: 出荷物 bash/python 構文（両 deliverable）" {
