@@ -399,6 +399,23 @@ _memmax() {
     [[ "$output" != *"桁が大きすぎて"* ]]
 }
 
+@test "memmax: MemTotal 不読 × 100% でも警告するが「MemTotal 0GiB」と騙らない" {
+    # % 指定の bind 判定は MemTotal 非依存（100% = 実 RAM 全量）。ただし文面に実測値を混ぜると
+    # 空文字の算術評価で「MemTotal 0GiB」という偽の実測値が出る＝観測していない数字を出さない
+    run env CLD_MEMINFO_FILE="$SANDBOX/no-such-meminfo" CLD_MEMORY_MAX=100% bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "100%" ]
+    [[ "$output" == *"bind しません"* ]]
+    [[ "$output" != *"MemTotal 0GiB"* ]]
+}
+
+@test "memmax: bind 警告の書込が失敗しても launcher は claude 起動を妨げない（|| true の回帰 pin）" {
+    # 新設した警告も set -e 下の echo。fd2 が ENOSPC でも abort しないことを pin する
+    run bash -c 'exec 2>/dev/full; exec env CLD_MEMINFO_FILE="$1" CLD_MEMORY_MAX=200G bash "$2"' _ "$MEMINFO_125G" "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CLAUDE_ARG:--dangerously-skip-permissions"* ]]
+}
+
 @test "memmax: 導出値が下限 1G に張り付く帯は「CC の平常 peak に届かない」と警告する" {
     # MemTotal 2GiB: 比例 20%=0G → 下限 min(12G, 50%)=1G。防壁は効くが CC の平常 peak(約1.1GiB)を
     # 割る＝起動直後に OOM kill されうる。黙って採らない（痕跡が残らないのが本 bead の失敗様式）

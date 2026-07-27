@@ -207,7 +207,15 @@ fi
 # 警告するのと同じ理由でここも警告する（**受理はする**＝escape hatch は殺さない）。CLD_MEMORY_QUIET
 # は可視化行だけの抑制設定ゆえこの警告には効かせない（保護不在の隠蔽を作らない・「上限なし」警告と同じ扱い）。
 if [[ -n "$_mm_explicit" ]] && (( _mm_nonbinding )); then
-    echo "Warning: CLD_MEMORY_MAX='${_mm_explicit}' は実 RAM（MemTotal $(( _total_kb / 1048576 ))GiB）以上です＝cgroup 防壁が bind しません（暴走 WF は host ごと巻き込みます）" >&2 || true
+    # MemTotal が読めない host でも % 指定は bind 判定できる（100% = 実 RAM 全量は MemTotal 非依存）。
+    # その場合に実測値を騙らないよう文面を分岐する（`$(( "" / 1048576 ))` は 0 になり「MemTotal 0GiB」
+    # という偽の実測値を出してしまう）。byte 指定側は _total_kb 非空でしか nonbinding にならない。
+    if [[ -n "$_total_kb" ]]; then
+        _mm_bind_why="実 RAM（MemTotal $(( _total_kb / 1048576 ))GiB）以上です"
+    else
+        _mm_bind_why="実 RAM 全量の指定です（MemTotal は読めていません）"
+    fi
+    echo "Warning: CLD_MEMORY_MAX='${_mm_explicit}' は${_mm_bind_why}＝cgroup 防壁が bind しません（暴走 WF は host ごと巻き込みます）" >&2 || true
 fi
 
 if [[ -n "$_mm_explicit" ]]; then
