@@ -18,6 +18,8 @@ setup() {
     # TMUX_MOCK_HAS_SESSION  : has-session の exit（1=成功 / 0=失敗）
     # TMUX_MOCK_LIST_WINDOWS : list-windows -F '#{session_name}:#{window_index} #{window_name}'
     # TMUX_MOCK_LIST_PANES   : list-panes の 4 カラム行（detect_state 用）
+    # TMUX_MOCK_SESSION_PANES: list-panes -F '#{pane_id} #{pane_current_command}'
+    #                          （bare session 名の claude pane 特定用・%b 展開）
     # TMUX_MOCK_PANE_ID      : display-message '#{pane_id}'
     tmux() {
         local sub="$1"; shift || true
@@ -35,6 +37,8 @@ setup() {
                 done
                 if [ "$fmt" = '#{pane_pid}' ]; then
                     printf '%s\n' "${TMUX_MOCK_PANE_PID:-1}"
+                elif [ "$fmt" = '#{pane_id} #{pane_current_command}' ]; then
+                    printf '%b\n' "${TMUX_MOCK_SESSION_PANES:-%7 claude}"
                 else
                     printf '%b\n' "${TMUX_MOCK_LIST_PANES:-claude\t0\t%7\t/home/test}"
                 fi
@@ -312,9 +316,64 @@ EOF
     [[ "$output" == *"sid=aaaa-bbbb-cccc"* ]]
 }
 
-@test "契約: bare session 名 fallback（window 解決失敗 → has-session 成功）" {
+@test "契約: bare session 名 fallback は claude が走る唯一の pane を測る（active window 基準にしない）" {
     export TMUX_MOCK_LIST_WINDOWS="sc:1 other-window"
+    export TMUX_MOCK_SESSION_PANES='%7 claude\n%9 bash'
     run "$METER" --target sc
     [ "$status" -eq 0 ]
-    [[ "$output" == *"target=sc"* ]]
+    [[ "$output" == *"source=pane"* ]]
+    # 測定した pane を出力へ明示する（bare 入力の echo にしない＝事後監査可能）
+    [[ "$output" == *"target=%7"* ]]
+}
+
+@test "契約: bare session 名は claude pane 複数で exit 3（曖昧・どれを測るか推測しない）" {
+    export TMUX_MOCK_LIST_WINDOWS="sc:1 other-window"
+    export TMUX_MOCK_SESSION_PANES='%7 claude\n%9 claude'
+    run "$METER" --target sc
+    [ "$status" -eq 3 ]
+}
+
+@test "契約: bare session 名は claude pane 0 件で exit 3（stale 画面を掴まない）" {
+    export TMUX_MOCK_LIST_WINDOWS="sc:1 other-window"
+    export TMUX_MOCK_SESSION_PANES='%7 bash'
+    run "$METER" --target sc
+    [ "$status" -eq 3 ]
+}
+
+@test "契約: bare session 曖昧（claude pane 複数）でも --sid 併用なら jsonl へ落ちる" {
+    export TMUX_MOCK_LIST_WINDOWS="sc:1 other-window"
+    export TMUX_MOCK_SESSION_PANES='%7 claude\n%9 claude'
+    run "$METER" --target sc --sid aaaa-bbbb-cccc
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"source=jsonl"* ]]
+    [[ "$output" == *"sid=aaaa-bbbb-cccc"* ]]
+}
+
+@test "jsonl: 末尾の usage 全 0 entry（synthetic API error）は skip し直近の非 0 を採る" {
+    cat > "$TMPD/projects/-home-test-proj/aaaa-bbbb-cccc.jsonl" <<'EOF'
+{"type":"assistant","isSidechain":false,"message":{"usage":{"input_tokens":2,"cache_creation_input_tokens":8,"cache_read_input_tokens":190000,"output_tokens":50}}}
+{"type":"assistant","isSidechain":false,"message":{"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}
+EOF
+    run "$METER" --sid aaaa-bbbb-cccc
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"used_tokens=190010"* ]]
+}
+
+@test "jsonl: 全 entry が usage 0 なら exit 4（捏造 0 を出さない）" {
+    cat > "$TMPD/projects/-home-test-proj/aaaa-bbbb-cccc.jsonl" <<'EOF'
+{"type":"assistant","isSidechain":false,"message":{"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}
+EOF
+    run "$METER" --sid aaaa-bbbb-cccc
+    [ "$status" -eq 4 ]
+}
+
+@test "exit 2: --source に値が無い（set -e の shift 落ちで契約外 exit 1 にしない）" {
+    run "$METER" --target %7 --source
+    [ "$status" -eq 2 ]
+}
+
+@test "契約: usage/診断は stderr のみ・stdout は成功時 1 行専用" {
+    [ -z "$("$METER" 2>/dev/null || true)" ]
+    [ -z "$("$METER" --target %7 --source 2>/dev/null || true)" ]
+    [ -z "$("$METER" --bogus 2>/dev/null || true)" ]
 }

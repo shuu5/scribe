@@ -13,6 +13,17 @@
 
 spawn/fork は起動後、spawn 元セッションが Claude Code の Monitor / `run_in_background` で完了を監視し報告する（「投げっぱなし」で省略、「監視して」で途中経過も報告）。長時間・常駐の監視やマルチウィンドウ統括はこのプラグインの範囲外。
 
+### session context meter（外部 consumer 向け read-only primitive）
+
+`scripts/session-context-meter.sh` が対象 session の context 使用量（used%・絶対 tokens・window size）を外形から read-only 取得する（機械可読 1 行 key=value・非 0 exit は consumer 側 fail-open の契約）:
+
+```
+$ scripts/session-context-meter.sh --target <tmux-target>   # 例: sc / sc:admin / %7
+used_pct=22 used_tokens=220000 window_tokens=1000000 source=pane sid=- target=%3
+```
+
+「`<pct> <abs>` 2 値 1 行」形式を要求する consumer（scriptorium orch-fleet-cap の `ORCH_FLEETCAP_METER_CMD` seam 等）へは adapter `scripts/session-context-meter-capfmt.sh <target>` を指す。詳細契約・exit code・env seam は各 script header が SSOT。
+
 ## インストール
 
 ```

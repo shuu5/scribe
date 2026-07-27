@@ -16,7 +16,10 @@
 #     - session:window（名前 or index）  … session-state.sh resolve_target で解決
 #     - bare window 名                   … 同上（全 session 横断で最初の一致）
 #     - bare session 名                  … window 解決に失敗した場合の fallback
-#                                          （session の active pane を capture）
+#                                          （session 内で claude が走る唯一の pane を
+#                                          対象に採る。0 件は解決失敗・複数件は曖昧
+#                                          ＝pane では計測しない fail-closed。--sid
+#                                          併用時はいずれも jsonl へ落ちる）
 #
 # 出力（機械可読・1 行・固定順 key=value・不明値は '-'）:
 #   used_pct=<int|-> used_tokens=<int|-> window_tokens=<int|-> source=<pane|jsonl> sid=<sid|-> target=<target|->
@@ -31,7 +34,9 @@
 #   pane  = tmux capture-pane の statusline line2『NN% XXXk/YM …』を parse。
 #           attached/detached/processing すべてで render される（orch-h1nc prebake
 #           3 session 実測）。粒度: % は整数 floor・tokens は fmt_tokens の k/M 丸め
-#           （1M 窓の実用域では ~1k）。フォーマット SSOT は
+#           （表示丸め自体は 1k 単位だが、上流の報告粒度によりさらに粗くなりうる
+#           〔live 実測で 10k 単位の量子化を観測〕。精密値が要るなら jsonl source）。
+#           フォーマット SSOT は
 #           ubuntu-note-system/claude/statusline-command.sh line2（cross-repo
 #           coupling: 同 script の表示形式変更時は本 parser の追随が必要）。
 #           claude 非稼働 pane（detect_state = idle/exited）では画面に残った
@@ -40,13 +45,20 @@
 #   jsonl = transcript jsonl の最新の非 sidechain assistant message の
 #           input_tokens + cache_creation_input_tokens + cache_read_input_tokens 和。
 #           絶対 tokens は正確・/clear / compact 後も最新 1 turn 読みで自然追随。
-#           % と窓サイズは jsonl から算出不能 → '-'。
+#           % と窓サイズは jsonl から算出不能 → '-'。usage 全 0 の synthetic
+#           entry（API error 等）は計測情報を持たないため skip し最新の非 0 値を
+#           採る（全 entry が 0 なら exit 4＝捏造 0 を出さない。実測: 234/5472
+#           transcript で最終 entry が全 0）。jsonl は「最終観測値」であり session
+#           の生存・鮮度は保証しない（pane-map 経由の sid 解決は map の鮮度に依存）。
 #   auto（既定）= --target あり: pane → 失敗時 pane-map(pane_id→sid) 経由で jsonl。
 #                 --sid のみ: jsonl。
 #
 # 消費者契約（orch-fleet-cap.sh 等）: 非 0 exit・出力不成立は fail-open
 # （cap 未達扱い）にすること。本 script は誤検知側（偽の高値）へ倒れない:
-# 値が取れないときは必ず非 0 exit し、捏造値を出力しない。
+# 値が取れないときは必ず非 0 exit し、捏造値を出力しない。stdout に出るのは
+# 成功時の 1 行 key=value のみ（usage/診断は stderr）。orch-fleet-cap の seam
+# （単一 word command + 位置引数 1 個・stdout「<pct> <abs>」）へは同 dir の
+# session-context-meter-capfmt.sh（cap 形式 adapter）を指すこと。
 #
 # 環境変数 seam（すべて test 用 override 可）:
 #   SESSION_METER_PANE_MAP      pane_id→sid map の明示 path（設定時はこれのみ使用）
@@ -66,7 +78,8 @@ source "$_SCM_DIR/lib/session-env.sh"
 source "$_SCM_DIR/session-state.sh"
 
 usage() {
-    sed -n '/^# Usage:/,/^# Exit codes:/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    # stderr へ出す: stdout は成功時の 1 行 key=value 専用（機械可読契約を汚さない）
+    sed -n '/^# Usage:/,/^# Exit codes:/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
     exit 2
 }
 
@@ -154,10 +167,14 @@ find_transcript() {
 # ある）。chunk 先頭の行断片は fromjson? が黙って捨てる。chunk 内に対象が
 # 無ければ全量走査へ 1 回だけ fallback。pipeline は全 stream を消費し切る形
 # （早期 exit なし）なので pipefail 下でも SIGPIPE 偽失敗しない。
+# usage 全 0 の entry（API error 等の synthetic）は計測情報を持たないため
+# select(. > 0) で skip する。skip しないと「直前まで数十万 tokens だった session」
+# へ used_tokens=0 を exit 0 で返す（実測: 234/5472 transcript で最終 entry が全 0）。
 JSONL_FILTER='fromjson?
   | select(.type == "assistant" and .isSidechain != true)
   | .message.usage | select(. != null)
-  | ((.input_tokens // 0) + (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0))'
+  | ((.input_tokens // 0) + (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0))
+  | select(. > 0)'
 extract_jsonl() {
     local file="$1" tail_bytes="${SESSION_METER_TAIL_BYTES:-10485760}" sum
     sum=$(tail -c "$tail_bytes" "$file" 2>/dev/null | jq -R -r "$JSONL_FILTER" | tail -n 1)
@@ -184,7 +201,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --target) TARGET="${2:-}"; [ -n "$TARGET" ] || usage; shift 2 ;;
         --sid)    SID="${2:-}";    [ -n "$SID" ]    || usage; shift 2 ;;
-        --source) SOURCE="${2:-}"; shift 2 ;;
+        --source) SOURCE="${2:-}"; [ -n "$SOURCE" ] || usage; shift 2 ;;
         -h|--help) usage ;;
         *) echo "Error: unknown option '$1'" >&2; usage ;;
     esac
@@ -206,12 +223,26 @@ if [ -n "$TARGET" ]; then
         RESOLVED="$TARGET"
     else
         # window 解決（SSOT = session-state.sh resolve_target）→ 失敗時のみ
-        # bare session 名として fallback（active pane を capture 対象にする）
+        # bare session 名として fallback。fallback は「session 内で claude が走る
+        # 唯一の pane」を対象に据える — tmux の -t <session> 既定解決（active
+        # window の active pane）は、worker spawn（cld-spawn の new-window は
+        # -d 無し）で active が移った瞬間に測定対象がすり替わるため採らない
+        # （consumer は bare session 名を渡す契約 = orch-fleet-cap。gate CONFIRMED）。
+        # claude pane 0 件は解決失敗・複数件は曖昧＝どれを測るか推測しない
+        # fail-closed（いずれも --sid 併用時のみ jsonl へ落ちる）。
         RESOLVED=$(resolve_target "$TARGET" 2>/dev/null) || RESOLVED=""
         if [ -z "$RESOLVED" ] && [[ "$TARGET" != *:* ]] \
             && [[ "$TARGET" =~ ^[A-Za-z0-9_./-]+$ ]] \
             && tmux has-session -t "=$TARGET" 2>/dev/null; then
-            RESOLVED="$TARGET"
+            mapfile -t _claude_panes < <(tmux list-panes -s -t "=$TARGET" \
+                -F '#{pane_id} #{pane_current_command}' 2>/dev/null \
+                | awk '$2 == "claude" { print $1 }')
+            if [ "${#_claude_panes[@]}" -eq 1 ] && [ -n "${_claude_panes[0]}" ]; then
+                RESOLVED="${_claude_panes[0]}"
+            elif [ "${#_claude_panes[@]}" -gt 1 ] && [ -z "$SID" ]; then
+                echo "Error: ambiguous bare session target '$TARGET' (${#_claude_panes[@]} claude panes)" >&2
+                exit 3
+            fi
         fi
         if [ -z "$RESOLVED" ] && [ -z "$SID" ]; then
             echo "Error: cannot resolve tmux target '$TARGET'" >&2
