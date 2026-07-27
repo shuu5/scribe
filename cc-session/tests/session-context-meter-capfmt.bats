@@ -92,6 +92,8 @@ pane" ]
     run "$CAPFMT" ccs
     [ "$status" -eq 0 ]
     [ "$("$CAPFMT" ccs 2>/dev/null)" = "13 130000" ]
+    # 監査痕跡も 1 行目のみ（2 行目が echo されないことで防御を識別可能にする）
+    [ "$("$CAPFMT" ccs 2>&1 >/dev/null | wc -l)" -eq 1 ]
 }
 
 @test "capfmt: 監査痕跡（meter の key=value 行）を stderr へ出し stdout は 2 値のみ" {
@@ -218,6 +220,8 @@ pane" ]
                 done
                 if [[ "$fmt" == *pane_dead* ]]; then
                     printf '%s\n' "${TMUX_MOCK_PANE_STATE:-0 1 claude}"
+                elif [[ "$fmt" == *session_name* ]]; then
+                    printf '%s %s\n' "${TMUX_MOCK_PANE_ID:-%7}" "${TMUX_MOCK_ACTUAL_WIN:-sc:1}"
                 else
                     printf '%s\n' "${TMUX_MOCK_PANE_ID:-%7}"
                 fi

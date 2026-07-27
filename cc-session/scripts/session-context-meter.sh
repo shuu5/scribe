@@ -128,7 +128,9 @@ parse_pane() {
     nonempty=$(sed '/^[[:space:]]*$/d' <<<"$captured")
     anchored=$(awk 'index($0,"❯"){n=NR} {a[NR]=$0}
         END{s = n ? n+1 : (NR>6 ? NR-5 : 1); for(i=s;i<=NR;i++) print a[i]}' <<<"$nonempty")
-    line=$(grep -E '^[[:space:]]*[0-9]+% [0-9]+[kM]?/[0-9]+[kM]( |$)' <<<"$anchored" | tail -n 1)
+    # 桁数上限つき ERE: tok2int の bash 算術 overflow（負値 emit）を入力段で遮断
+    # （R4 gate finding。pct<=3 桁・tokens<=9 桁で実在域を全て覆う）
+    line=$(grep -E '^[[:space:]]*[0-9]{1,3}% [0-9]{1,9}[kM]?/[0-9]{1,9}[kM]( |$)' <<<"$anchored" | tail -n 1)
     [ -n "$line" ] || return 1
     line="${line#"${line%%[![:space:]]*}"}"   # 先頭空白 trim（TUI render の indent）
     P_PCT="${line%%\%*}"
@@ -138,6 +140,8 @@ parse_pane() {
     P_WINDOW=$(tok2int "$win_tok") || return 1
     [[ "$P_PCT" =~ ^[0-9]+$ ]] || return 1
     [ "$P_PCT" -le 100 ] || return 1
+    [ "$P_USED" -ge 0 ] || return 1
+    [ "$P_WINDOW" -gt 0 ] || return 1
     [ "$P_USED" -le "$P_WINDOW" ] || return 1
     [ "$P_WINDOW" -ge 100000 ] || return 1
     return 0
@@ -323,6 +327,28 @@ if [ -n "$TARGET" ]; then
     fi
 fi
 
+# --- 解決済み target の pane 確定と window 実在照合 --------------------------
+# tmux の display-message は「実在 session : 不在の数値 window index」の -t を
+# session の active window へ silent fallback させる（R4 gate CONFIRMED・例:
+# sc:999 → sc:1 の pane）。resolve_target の numeric 分岐は index の実在を検証
+# しないため、要求 window と実解決 window の同一性をここで照合する。不一致は
+# 解決失敗（--sid 併用時のみ jsonl へ・それ以外は exit 3）。pane id はここで
+# 一度だけ確定し、gate / capture / 監査痕跡 / pane-map 逆引きの全てで同じ id
+# を使う（source に依らない照合＝--source jsonl でも誤 pane を掴まない）。
+RESOLVED_PANE=""
+if [ -n "$RESOLVED" ]; then
+    _rinfo=$(tmux display-message -p -t "$RESOLVED" '#{pane_id} #{session_name}:#{window_index}' 2>/dev/null) || _rinfo=""
+    read -r RESOLVED_PANE _actual_win <<< "$_rinfo" || true
+    if [[ "$RESOLVED" == *:* ]] && [ "${_actual_win:-}" != "$RESOLVED" ]; then
+        if [ -z "$SID" ]; then
+            echo "Error: window '$RESOLVED' not found (exact match)" >&2
+            exit 3
+        fi
+        RESOLVED=""
+        RESOLVED_PANE=""
+    fi
+fi
+
 # --source pane は pane 以外を決して出さない（source 固定契約）。target 解決が
 # 不成立のまま --sid 併用で jsonl へ落ちる経路を塞ぐ（R3 gate finding）。
 if [ "$SOURCE" = "pane" ] && [ -z "$RESOLVED" ]; then
@@ -338,8 +364,8 @@ if [ -n "$RESOLVED" ] && { [ "$SOURCE" = "auto" ] || [ "$SOURCE" = "pane" ]; }; 
     # ため multi-pane window で gate と capture が乖離した = R2 gate finding）。
     # gate / capture / 監査痕跡（target field）を単一の pane id に固定する
     # （window target のまま capture すると gate と capture の間で active pane が
-    # 変わる TOCTOU が残る = R3 gate finding。%N へ確定してから全操作を行う）
-    GATE_PANE=$(tmux display-message -p -t "$RESOLVED" '#{pane_id}' 2>/dev/null) || GATE_PANE=""
+    # 変わる TOCTOU が残る = R3 gate finding。%N は上の照合節で確定済み）
+    GATE_PANE="$RESOLVED_PANE"
     if [ -n "$GATE_PANE" ] && pane_alive_claude "$GATE_PANE" && parse_pane "$GATE_PANE"; then
         emit "$P_PCT" "$P_USED" "$P_WINDOW" "pane" "${SID:--}" "$(safe_field "$GATE_PANE")"
         exit 0
@@ -352,8 +378,9 @@ fi
 
 # --- fallback / direct: jsonl ---
 if [ -z "$SID" ]; then
-    # target 経由: pane_id → pane-map → sid
-    PANE_ID=$(tmux display-message -p -t "$RESOLVED" '#{pane_id}' 2>/dev/null) || PANE_ID=""
+    # target 経由: pane_id → pane-map → sid（pane id は照合節で確定済みの
+    # RESOLVED_PANE を再利用＝再解決による TOCTOU・silent fallback を作らない）
+    PANE_ID="$RESOLVED_PANE"
     if [ -z "$PANE_ID" ]; then
         echo "Error: cannot resolve pane id for '$RESOLVED'" >&2
         exit 3

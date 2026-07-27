@@ -86,8 +86,15 @@ setup() {
                     local key="${tgt#%}"; key="${key//[^A-Za-z0-9]/_}"
                     local var="TMUX_MOCK_PANE_STATE_$key"
                     printf '%s\n' "${!var:-${TMUX_MOCK_PANE_STATE:-0 1 claude}}"
+                elif [[ "$fmt" == *session_name* ]]; then
+                    # '#{pane_id} #{session_name}:#{window_index}'（window 実在照合）。
+                    # 実 tmux の silent fallback を再現: どの -t にも
+                    # TMUX_MOCK_ACTUAL_WIN（既定 sc:1）の pane/window を返す
+                    printf '%s %s\n' "${TMUX_MOCK_PANE_ID:-%7}" "${TMUX_MOCK_ACTUAL_WIN:-sc:1}"
                 else
-                    printf '%s\n' "${TMUX_MOCK_PANE_ID:-%7}"
+                    # plain '#{pane_id}'（再解決経路）。TMUX_MOCK_PANE_ID_PLAIN で
+                    # 「照合済み pane と再解決結果が食い違う」TOCTOU を表現できる
+                    printf '%s\n' "${TMUX_MOCK_PANE_ID_PLAIN:-${TMUX_MOCK_PANE_ID:-%7}}"
                 fi
                 ;;
             *)
@@ -133,6 +140,27 @@ EOF
     [ "$status" -eq 0 ]
     # target= は解決後の pane id（gate/capture/監査痕跡を単一 pane に固定 = R3）
     [ "$output" = "used_pct=32 used_tokens=320000 window_tokens=1000000 source=pane sid=- target=%7" ]
+    # TOCTOU pin（R4 gate finding）: gate（pane_dead 照会）と capture が同一の
+    # 確定 pane %7 に対して行われたことを argv で検証する（emit だけの pin では
+    # parse_pane "$RESOLVED" への revert を検知できない）
+    awk '/^capture-pane$/{f=1;next} f&&/^%7$/{ok=1} /^--$/{f=0} END{exit !ok}' "$TMPD/tmux-argv.log"
+    awk '/^display-message$/{f=1;t=0;d=0;next} f&&/^%7$/{t=1} f&&/pane_dead/{d=1} /^--$/{if(f&&t&&d)ok=1;f=0} END{exit !ok}' "$TMPD/tmux-argv.log"
+}
+
+@test "契約: 実在しない window index は別 window の値を返さない（silent fallback 遮断）" {
+    # 実 tmux は不在 index の -t を active window の pane へ silent fallback する
+    # （R4 gate CONFIRMED・mock は TMUX_MOCK_ACTUAL_WIN=sc:1 で再現）。
+    # 要求 sc:999 ≠ 実解決 sc:1 の照合で exit 3 に倒す。
+    run "$METER" --target sc:999
+    [ "$status" -eq 3 ]
+    [ -z "$("$METER" --target sc:999 2>/dev/null || true)" ]
+}
+
+@test "契約: 不在 window index + --sid は jsonl へ落ちる（誤 pane を掴まない）" {
+    run "$METER" --target sc:999 --sid aaaa-bbbb-cccc
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"source=jsonl"* ]]
+    [[ "$output" == *"sid=aaaa-bbbb-cccc"* ]]
 }
 
 @test "契約: session 名の prefix 一致で別 session を測らない（colon 経路も exact）" {
@@ -240,6 +268,83 @@ EOF
     run "$METER" --target %7 --source pane
     [ "$status" -eq 0 ]
     [[ "$output" == *"used_pct=30"* ]]
+}
+
+@test "pane: ❯ 不在 fallback は末尾 6 非空行が境界（内側は拾い・外側は拾わない）" {
+    # 内側: 7 非空行中、statusline は位置 2（末尾 6 の窓内）
+    cat > "$TMPD/capture.txt" <<'EOF'
+junk line
+25% 250k/1M Opus 5
+j1
+j2
+j3
+j4
+j5
+EOF
+    run "$METER" --target %7 --source pane
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"used_pct=25"* ]]
+    # 外側: 8 非空行中、statusline は位置 2（末尾 6 の窓外）= exit 4
+    cat > "$TMPD/capture.txt" <<'EOF'
+junk line
+26% 260k/1M Opus 5
+j1
+j2
+j3
+j4
+j5
+j6
+EOF
+    run "$METER" --target %7 --source pane
+    [ "$status" -eq 4 ]
+}
+
+@test "pane: 桁数上限で bash 算術 overflow を遮断する（wrap がもっともらしい値域に着地する形）" {
+    # 2305843009213694952 * 1000 ≡ 1000000 (mod 2^64) — 桁上限が無いと window が
+    # ちょうど 1M に wrap し、全 bound を通過して捏造値を exit 0 で emit してしまう
+    # 精密入力（bound の重複防御では捕まらない唯一のクラス）。桁上限が入口で弾く。
+    cat > "$TMPD/capture.txt" <<'EOF'
+1% 500k/2305843009213694952k Opus 5
+EOF
+    run "$METER" --target %7 --source pane
+    [ "$status" -eq 4 ]
+}
+
+@test "jsonl: pane-map 逆引きは照合済み pane id を再利用する（再解決 TOCTOU pin）" {
+    printf '❯ \n' > "$TMPD/capture.txt"   # pane parse 不成立 → jsonl fallback
+    # 「再解決すると別 pane に化ける」状況を再現: 照合節（combined fmt）は %7 を
+    # 返すが、plain '#{pane_id}' の再解決は %99 を返す。正実装は照合済み %7 を
+    # 再利用して pane-map hit・再解決 revert だと %99 で map miss → exit 3。
+    export TMUX_MOCK_PANE_ID_PLAIN='%99'
+    run "$METER" --target sc:admin
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"source=jsonl"* ]]
+    [[ "$output" == *"sid=aaaa-bbbb-cccc"* ]]
+}
+
+@test "jsonl: pane-map 既定候補チェーン（SESSION_MAP_DIR → legacy）を解決する" {
+    printf '❯ \n' > "$TMPD/capture.txt"
+    unset SESSION_METER_PANE_MAP
+    export SESSION_MAP_DIR="$TMPD/mapdir"
+    export HOME="$TMPD/home"
+    mkdir -p "$TMPD/mapdir" "$TMPD/home/.local/state/claude"
+    # (1) 一次候補（SESSION_MAP_DIR）hit
+    printf '%%7\taaaa-bbbb-cccc\n' > "$TMPD/mapdir/tmux-pane-map.tsv"
+    run "$METER" --target %7
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"sid=aaaa-bbbb-cccc"* ]]
+    # (2) 一次 miss → legacy hit
+    rm "$TMPD/mapdir/tmux-pane-map.tsv"
+    printf '%%7\taaaa-bbbb-cccc\n' > "$TMPD/home/.local/state/claude/tmux-pane-map.tsv"
+    run "$METER" --target %7
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"source=jsonl"* ]]
+    # (3) 両方に在るときは一次候補（SESSION_MAP_DIR）が勝つ
+    printf '%%7\tzzzz-not-this\n' > "$TMPD/home/.local/state/claude/tmux-pane-map.tsv"
+    printf '%%7\taaaa-bbbb-cccc\n' > "$TMPD/mapdir/tmux-pane-map.tsv"
+    run "$METER" --target %7
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"sid=aaaa-bbbb-cccc"* ]]
 }
 
 @test "pane: 健全性 bound は各条件が独立に効く（pct>100 単独 / window<100k 単独）" {
