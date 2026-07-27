@@ -146,7 +146,7 @@ multi-agent で「網羅性・確信度・スケール」を買うための組�
 - **cap したことは `log()` で出す（上表 no silent caps と併用）**: cap と誠実性は両立させる——何を落としたかを出さない cap は「全部見た」と誤読される。
 - **大きい入力は args inline でなく参照で渡す**: `contextFile`（readable な path を渡し各段 agent が Read）／ `baseRef`（diff は WF 側が worktree で合成）。args 経路は全体約 4KB で切り詰められる実測（un-cw0z）もあり、**切り詰めと memory の両方の理由で inline は小さく保つ**。
 - **上限そのものは撤廃しない**: cgroup 上限は暴走 WF が host を巻き込むのを防ぐ防壁でもある。既定値の決定と可視化は launcher（`cc-session/scripts/cld`＝MemTotal 比例・floor/ceil・起動時 1 行の可視化）が持ち、**稼働中の scope は再起動なしに `systemctl --user set-property run-<id>.scope MemoryMax=<N>G` で引き上げられる**（実測で反映を確認済み）。
-- **死んだ WF の一次診断は journal**: `journalctl --user --since "<時刻>" | grep -i oom-kill`。`dmesg` / `/var/crash` / 起動時 stderr は**原理的に空振り**する（理由と手順の SSOT = `protocol.md` §6「CC プロセス突然死（cgroup OOM）の oracle」）。
+- **死んだ WF の一次診断は journal**: `journalctl --user --since "<時刻>" | grep -iE 'oom-kill|OOM killer'`（**2 系統の文言は排他**で、`grep -i oom-kill` だけだと slice を名指す incident が丸ごと見えない＝実測）。`dmesg` / `/var/crash` / 起動時 stderr は**原理的に空振り**する（理由と手順の SSOT = `protocol.md` §6「CC プロセス突然死（cgroup OOM）の oracle」）。
 
 **selfTest 設計の落とし穴（scope-assert は commit-stable に・bd un-w11g）**: `selfTestCmd` へ渡す worker 手書き selftest に scope-assert（変更が契約スコープ内かの検査）を含めるとき、working tree 比較（`git diff HEAD` 系）で書くと両面欠陥になる——gate は必ず post-commit に走るため、commit 着地で恒久 false-FAIL（fail-closed 面）になり、かつ commit 済みの scope 違反を素通し（fail-open 面）にする。正しい測り方（BASE=merge-base の `base...HEAD` ∪ working tree・BASE 解決失敗 fail-closed・commit 後の再実行 green＝commit-stable）の規律本文・根拠・実証の SSOT = `protocol.md` §2「selftest の scope-assert は commit-stable に測る」bullet（WF snapshot 合成の `baseRef...HEAD` diff は既に正しく本項の対象外）。
 
