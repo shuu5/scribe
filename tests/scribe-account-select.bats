@@ -622,7 +622,10 @@ mk_cfg() {
   run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$HEALTHYDROP")" python3 "$SEL"
   [ "$status" -eq 4 ]
   [[ "$stderr" == *"selector 誤判定"* ]]
-  [[ "$stderr" == *acctA* ]] && [[ "$stderr" == *acctB* ]]   # 犯人ラベルを名指しする
+  # ★1 行 1 assert（`[[ A ]] && [[ B ]]` と書かない）: 中間行の AND-OR リストは左辺が false でも
+  #   set -e が発火せず bats が pass する＝assert が沈黙する（実測 2026-07-27・self-review）。
+  [[ "$stderr" == *acctA* ]]                                 # 犯人ラベルを名指しする
+  [[ "$stderr" == *acctB* ]]
   [[ "$stderr" == *"malformed:欠落"* ]]                       # 落とした理由も出す
   # 監査を殺さない: exit 4 でも TSV は stdout に出る（呼出元 snapshot が空にならない）。
   [ -n "$output" ]
