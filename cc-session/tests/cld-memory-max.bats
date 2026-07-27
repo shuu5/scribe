@@ -452,6 +452,80 @@ _memmax() {
     [[ "$output" == *"平常 peak"* ]]
 }
 
+@test "memmax: % 経路の下振れ警告は小 host で発火する（125GiB 固定 seam では原理的に踏めない枝）" {
+    # この枝は「MemTotal x pct <= 1GiB」でしか立たないので、既定 seam(125GiB)のテストでは
+    # どの pct でも発火しない＝小さい MemTotal の seam を使わないと teeth が空虚になる
+    local mi
+    mi="$(_mk_meminfo 2097152)"          # 2GiB
+    run env CLD_MEMINFO_FILE="$mi" CLD_MEMORY_MAX=20% bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "20%" ]             # 受理は据え置き
+    [[ "$output" == *"平常 peak"* ]]
+    run env CLD_MEMINFO_FILE="$mi" CLD_MEMORY_MAX=50% bash "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"平常 peak"* ]]
+}
+
+@test "memmax: % 経路の下振れ警告に偽陽性が無い（4GiB×50% と 125GiB×20% は黙る）" {
+    # 「常時真」変異を殺す teeth: 実効 2GiB / 25GiB はどちらも平常 peak を上回るので出してはならない
+    local mi
+    mi="$(_mk_meminfo 4194304)"          # 4GiB x 50% = 2GiB
+    run env CLD_MEMINFO_FILE="$mi" CLD_MEMORY_MAX=50% bash "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"平常 peak"* ]]
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=20% bash "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"平常 peak"* ]]
+    # MemTotal が読めなければ % の実効値は判定できない＝黙る（観測していない判断をしない）
+    run env CLD_MEMINFO_FILE="$SANDBOX/no-such-meminfo" CLD_MEMORY_MAX=1% bash "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"平常 peak"* ]]
+}
+
+@test "memmax: 上振れ判定と下振れ判定は独立（1GiB host × 100% は 2 本とも出る）" {
+    # % 枝を elif 連鎖にすると排他になり、byte 枝（独立 if で 2 本出る）と挙動が食い違う
+    local mi
+    mi="$(_mk_meminfo 1048576)"          # 1GiB: 100% は「bind しない」かつ「peak を割る」
+    run env CLD_MEMINFO_FILE="$mi" CLD_MEMORY_MAX=100% bash "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"bind しません"* ]]
+    [[ "$output" == *"平常 peak"* ]]
+    run env CLD_MEMINFO_FILE="$mi" CLD_MEMORY_MAX=1G bash "$CLD"   # byte 枝も同じく 2 本
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"bind しません"* ]]
+    [[ "$output" == *"平常 peak"* ]]
+}
+
+@test "memmax: 下振れ警告の文面は入力形に噛み合う（% は実効値・byte は 12G ヒント）" {
+    local mi
+    mi="$(_mk_meminfo 2097152)"
+    run env CLD_MEMINFO_FILE="$mi" CLD_MEMORY_MAX=20% bash "$CLD"
+    [[ "$output" == *"実効 409MiB"* ]]        # 2GiB の 20%
+    [[ "$output" != *"'12G' の打ち間違い"* ]]  # % 入力に byte 向けヒントを出さない
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX=1G bash "$CLD"
+    [[ "$output" == *"'12G' の打ち間違い"* ]]
+}
+
+@test "memmax: 下振れ警告の書込が失敗しても claude 起動を妨げない（|| true の boot path pin）" {
+    # 警告行の `|| true` を外すと set -e 下で launcher ごと abort する＝claude が一切起動しない。
+    # 本 cell の最重量不変条件なので、閉じた fd2 と ENOSPC の両方で pin する
+    run bash -c 'exec 2>&-; exec env CLD_MEMINFO_FILE="$1" CLD_MEMORY_MAX=1G bash "$2"' _ "$MEMINFO_125G" "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CLAUDE_ARG:--dangerously-skip-permissions"* ]]
+    run bash -c 'exec 2>/dev/full; exec env CLD_MEMINFO_FILE="$1" CLD_MEMORY_MAX=1G bash "$2"' _ "$MEMINFO_125G" "$CLD"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CLAUDE_ARG:--dangerously-skip-permissions"* ]]
+}
+
+@test "memmax: CLD_MEMORY_MAX_PCT の 64bit wrap も既定へ倒れる（明示 % 枝と同型）" {
+    # 18446744073709551716 は wrap して 100 に化け、警告なしで実効上限だけが変わっていた
+    run env CLD_MEMINFO_FILE="$MEMINFO_125G" CLD_MEMORY_MAX_PCT=18446744073709551716 bash "$CLD"
+    [ "$status" -eq 0 ]
+    [ "$(_memmax)" = "25G" ]                       # 既定 20% へ倒れる（100% 相当の 32G ではない）
+    [[ "$output" == *"1-100 の整数でない"* ]]
+    [[ "$output" != *"x 18446744073709551716%"* ]]  # 導出内訳に化けた値を出さない
+}
+
 @test "memmax: MemTotal 不読 × 100% でも警告するが「MemTotal 0GiB」と騙らない" {
     # % 指定の bind 判定は MemTotal 非依存（100% = 実 RAM 全量）。ただし文面に実測値を混ぜると
     # 空文字の算術評価で「MemTotal 0GiB」という偽の実測値が出る＝観測していない数字を出さない
