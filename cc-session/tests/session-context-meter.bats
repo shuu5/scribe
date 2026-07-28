@@ -221,9 +221,25 @@ EOF
     # paper に解決されてしまう（R3 gate CONFIRMED の再現形）→ exact 検証で exit 3
     export TMUX_MOCK_SESSIONS='paper'
     export TMUX_MOCK_LIST_WINDOWS='paper:1 admin'
+    # window 実在照合を通過させ、exact 検査だけがこの入力を止める構図にする
+    # （R6 gate CONFIRMED: 既定 ACTUAL_WIN=sc:1 だと照合が先に exit 3 を出し
+    #   has-session の '=' を落とす mutation が全 green で生存していた）
+    export TMUX_MOCK_ACTUAL_WIN='paper:1'
     run "$METER" --target pap:admin
     [ "$status" -eq 3 ]
     [ -z "$("$METER" --target pap:admin 2>/dev/null || true)" ]
+}
+
+@test "契約: bare 経路も session 名 prefix 一致で別 session を測らない（has-session exact）" {
+    # 実在 session は 'paper' のみ。実 tmux 3.6b は list-panes -s -t '=pap' の
+    # '=' を尊重せず prefix 解決するため、bare 経路の exact 性は has-session の
+    # '=' 付き検査ただ一点に依存する（R6 gate CONFIRMED）→ その退行を pin
+    export TMUX_MOCK_SESSIONS='paper'
+    export TMUX_MOCK_LIST_WINDOWS='paper:1 admin'
+    export TMUX_MOCK_SESSION_PANES='%7'
+    run "$METER" --target pap
+    [ "$status" -eq 3 ]
+    [ -z "$("$METER" --target pap 2>/dev/null || true)" ]
 }
 
 @test "契約: --source pane は決して jsonl を出さない（解決不能 + --sid 併用でも exit 3）" {
