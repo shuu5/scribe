@@ -335,8 +335,7 @@ if command -v systemd-run &>/dev/null; then
         "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
 else
     # 「防壁が存在しない」は日常の実効値行と重要度が違うため CLD_MEMORY_QUIET では抑止しない
-    # （出力ノイズを消す設定が保護不在の隠蔽になってはならない）。この行が出る host では
-    # journalctl --user の oom-kill 行は原理的に出ず、OOM は host 側＝dmesg / kern.log に現れる。
+    # （出力ノイズを消す設定が保護不在の隠蔽になってはならない）。
     echo "cld: メモリ上限なし（systemd-run 不在のため直接起動＝暴走時の cgroup 防壁が無い）" >&2 || true
     exec claude --dangerously-skip-permissions \
         "${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"}" \
