@@ -29,7 +29,7 @@ ultracode（multi-agent fan-out で網羅性・確信度・スケールを買う
 - **research / review / audit 系は thoroughness 寄り、quick check 系は brevity 寄り**に倒すのが既定。迷ったら規模×不確実性×リスクのどれが効いているかに戻る。
 - **「ユーザーが要求した強度に合わせる」が上限**: ultracode はユーザーの明示 opt-in（"ultracode" キーワード / 直接依頼 / それを呼ぶ skill）がある時だけ。opt-in なしで強度を勝手に盛らない（コスト事故になる）。
 
-**コスト現実（verified・un-8q5 pilot 2026-06-10）**: **fable を verify 段に投入した（≤2 cap 遵守）gate review/verify ×2** で **5h rate を 53%→80% まで消費**した実測がある（doobidoo `c06ab15b` milestone / `6d11f667` GOTCHA）。この 53→80% は **fable 起因のコスト**（fable は実コストが 2×Opus 超 = tokenizer 差）で、≤2 cap でも重かったことが **dynamic WF からの fable 全廃（§4）の根拠**になった数値である — **現在の opus 経路の gate コストとは別物**として読むこと（27pt をそのまま opus gate×2 のコストと誤読しない）。いずれにせよ **fan-out の本数・票数・loop 回数はすべて rate を食う**ので、**強度キャリブレーション = rate 予算の配分**である。token 予算を loop 条件に使う dynamic scaling（Workflow tool の `budget` 機能＝loop-until-budget・§2）がその制御点（**具体 API シグネチャは Workflow tool が SSOT・本書は転記しない**）。
+**コスト現実（verified・un-8q5 pilot 2026-06-10）**: **fable を verify 段に投入した（≤2 cap 遵守）gate review/verify ×2** で **5h rate を 53%→80% まで消費**した実測がある（doobidoo `c06ab15b` milestone / `6d11f667` GOTCHA）。この 53→80% は **fable 起因のコスト**（fable は実コストが 2×Opus 超 = tokenizer 差）で、≤2 cap でも重かったことが **dynamic WF からの fable 全廃（§4）の根拠**になった数値である — **現在の opus 経路の gate コストとは別物**として読むこと（27pt をそのまま opus gate×2 のコストと誤読しない）。いずれにせよ **fan-out の本数・票数・loop 回数はすべて rate を食う**ので、**強度キャリブレーション = rate 予算の配分**である。**実消費はもう一軸ある——memory（cgroup 予算）**: 並列 agent へ無界出力を流す設計は scope の memory 上限を焼いて **CC プロセスごと OOM kill** され WF が丸ごと消える（実測・§2「WF agent への出力 cap 規律」が SSOT）。rate を配分するのと同じ意識で **1 agent あたりの読み込み量にも cap を置く**こと。token 予算を loop 条件に使う dynamic scaling（Workflow tool の `budget` 機能＝loop-until-budget・§2）がその制御点（**具体 API シグネチャは Workflow tool が SSOT・本書は転記しない**）。
 
 > 一次出典: Workflow tool 方法論（"Scale to what the user asked for"・quality patterns）/ doobidoo `c06ab15b`（un-8q5 pilot milestone・rate 53→80%）・`6d11f667`（un-8q5 GOTCHA）/ doobidoo `e5d79cc9`（2026-06-15 grill: 強度キャリブレーション = 規模×不確実性×リスク）。
 
@@ -135,8 +135,18 @@ multi-agent で「網羅性・確信度・スケール」を買うための組�
 | **multi-modal sweep** | 規模（探索の広さ） | 一つの検索角度では拾えないとき、by-container / by-content / by-entity / by-time 等**互いに盲目な複数角度**を並列に。 |
 | **completeness critic** | リスク（見落とし） | 最終段で「何が欠けているか — 走らせていない modality・未検証の主張・未読のソース」を問う agent。出たものが次ラウンドの作業。 |
 | **no silent caps** | リスク（誠実性） | top-N / no-retry / sampling で網羅を切ったら必ず `log()` で**何を落としたか**を出す。silent truncation は「全部見た」と誤読される。 |
+| **bounded agent input（出力 cap）** | リスク（プロセス死・WF 全損） | agent に読ませる出力へ**機械 cap**（`head -c` / `--name-only` / 件数化 / 抜粋 + パス参照）を課す。無界出力を context へ流す設計は cgroup memory 上限を数分で焼き、**CC プロセスごと OOM kill**（＝WF は journal に result 0 のまま消える）。詳細は下記「WF agent への出力 cap 規律」。 |
 
 **合成の既定形**（cell-quality WF が体現する shape）: `task-type routing → [Plan] → [Implement] → perspective-diverse review → 各 finding を独立 agent が adversarial refute-verify → gated autoFix（confirmed のみ + self-test fail-closed + amend）→ loop-until-dry 収束`。これは「find → verify を pipeline で、dimension ごとに review が終わり次第 verify が走る（barrier を置かない）」の典型で、barrier（`parallel()` で全段同期）は**全 finding を一度に必要とする時だけ**（dedup・0 件 early-exit・相互参照）正当化される。
+
+**WF agent への出力 cap 規律（無界出力は cgroup 予算を焼いて CC ごと殺す・bd sc-von0・verified）**: fan-out は rate と token だけでなく **memory（cgroup 予算）も実消費する**。dynamic workflow の agent へ**無界の出力**（巨大 grep 結果・全文 `cat`・長大ログ）を流し込む設計は **scope の memory 上限を数分で焼き切り、cgroup OOM killer が CC プロセスごと SIGKILL する**——`Workflow` / `Monitor` は CC プロセスに載っているため**道連れで消え、journal には result 0 のまま残る**（＝「失敗した」痕跡すら残らない最悪の失われ方で、session を `-c` で復帰させても WF は戻らない）。実測（2026-07-26）: **4 並列 opus agent へ巨大 grep 結果を読ませる調査 WF が 12GiB の scope 上限を数分で焼き、2 試行とも同じ形で死んだ**（平常時の CC scope peak は 0.6-1.1GiB ＝ 10-20 倍の余裕があってなお焼けた）。規律:
+
+- **agent が読む出力には機械 cap を課す**: `head -c <N>` のバイト cap ／ `grep -l`・`--name-only` でパスだけ渡す ／ `wc -l` で件数化 ／ 抜粋 + パス参照（必要箇所は agent 側が Read する）。**「全部渡して agent に選ばせる」は最も高くつく設計**で、規模が読めない入力ほど cap を先に決める。
+- **並列度 × 1 agent あたりの読み込み量 = memory 予算**: fan-out の幅を上げるなら 1 agent あたりの cap を下げる（**両方を同時に上げない**）。§1 の 3 軸キャリブレーションに対する**実消費軸として rate / token に memory を足して数える**。
+- **cap したことは `log()` で出す（上表 no silent caps と併用）**: cap と誠実性は両立させる——何を落としたかを出さない cap は「全部見た」と誤読される。
+- **大きい入力は args inline でなく参照で渡す**: `contextFile`（readable な path を渡し各段 agent が Read）／ `baseRef`（diff は WF 側が worktree で合成）。args 経路は全体約 4KB で切り詰められる実測（un-cw0z）もあり、**切り詰めと memory の両方の理由で inline は小さく保つ**。
+- **上限そのものは撤廃しない**: cgroup 上限は暴走 WF が host を巻き込むのを防ぐ防壁でもある。既定値の決定と可視化は launcher（`cc-session/scripts/cld`＝MemTotal 比例・floor/ceil・起動時 1 行の可視化）が持ち、**稼働中の scope は再起動なしに `systemctl --user set-property run-<id>.scope MemoryMax=<N>G` で引き上げられる**（実測で反映を確認済み）。
+- **死んだ WF の一次診断は journal**: `journalctl --user --since "<時刻>" | grep -iE 'oom-kill|OOM killer'`（**2 系統の文言は排他**＝行数は実測。`grep -i oom-kill` だけだと KILLER 行を全数落とす。落ちた行が独立 incident かは**未確定**なので併記形で拾う。理由の SSOT = `protocol.md` §6）。`dmesg` / `/var/crash` / 起動時 stderr は本 fleet では空振りする（理由と手順の SSOT = `protocol.md` §6「CC プロセス突然死（cgroup OOM）の oracle」）。
 
 **selfTest 設計の落とし穴（scope-assert は commit-stable に・bd un-w11g）**: `selfTestCmd` へ渡す worker 手書き selftest に scope-assert（変更が契約スコープ内かの検査）を含めるとき、working tree 比較（`git diff HEAD` 系）で書くと両面欠陥になる——gate は必ず post-commit に走るため、commit 着地で恒久 false-FAIL（fail-closed 面）になり、かつ commit 済みの scope 違反を素通し（fail-open 面）にする。正しい測り方（BASE=merge-base の `base...HEAD` ∪ working tree・BASE 解決失敗 fail-closed・commit 後の再実行 green＝commit-stable）の規律本文・根拠・実証の SSOT = `protocol.md` §2「selftest の scope-assert は commit-stable に測る」bullet（WF snapshot 合成の `baseRef...HEAD` diff は既に正しく本項の対象外）。
 
@@ -191,5 +201,6 @@ dynamic workflow の各 agent への model/effort 割り当ては **本書 §1.1
 | `~/.claude/workflows/cell-quality.workflow.js` | 凍結された適用形（task-type routing → review → adversarial verify → gated autoFix → loop-until-dry）。**戦術層骨格の一次 SSOT** |
 | 本書 §1.1「effort ルーティング」 | WF agent 段別 model/effort 割り当ての**一次 SSOT**（sc-41b で確定・global 配布物側の縮退も land 済〔uns main `3b31bd0`〕・§4 はここへの内部 pointer） |
 | scribe-design.md §18 | D1-D7 の設計 why（本書は運用 how を担う） |
+| bd `sc-von0` / `protocol.md` §6 / `cc-session/scripts/cld` | §2「WF agent への出力 cap 規律」の出所（cgroup OOM で WF が痕跡なく消えた admin 実測・oom-kill oracle の**一次 SSOT は protocol §6**・上限導出の**実装 SSOT は cld の定数ブロック**） |
 
 > 方法論の細部に疑義が出たら、本書ではなく上記の一次 SSOT（doobidoo 原典・Workflow tool・cell-quality.workflow.js・WF agent 段別 model/effort は本書 §1.1）を確認すること（本書は判断の方法論を蓄積する庫であって、実体の複製ではない）。
