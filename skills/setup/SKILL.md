@@ -28,7 +28,7 @@ SessionStart 注入が opt-in で発火する状態**にする。各次元を独
 1. `bd` が **導入済み**（バージョンは pin しない・upgrade 前検証は人間ポリシー＝PRIME §バージョン管理。reconciler は特定バージョンを強制/ダウングレードしない）
 2. `.beads/` が存在（embedded Dolt）
 3. `bd config` の `backup.git-push = false`
-4. Dolt remote `origin = git+https://...`（マルチPC同期）
+4. Dolt remote `origin = git+https://...` が**コード repo とは別の「台帳専用 private repo」**を指す（マルチPC同期は維持したまま台帳本文をコード repo の公開面から分離する。fleet 標準・全 repo 既定＝PUBLIC repo に限らない。orchestrator 裁定 orch-jot0 / bd sc-zkof）
 5. `.beads/PRIME.md` が**我々の役割中立版**（役割分担・bd remember 禁止・役割規約は scribe role 注入へ委譲）
 6. CLAUDE.md/AGENTS.md に **bd 既定の汚染ブロックが無い**（`bd remember` 推奨/`git push` MANDATORY 等）
 7. project-local `.claude/settings.json` に **bd の `bd prime` hook が無い**（グローバル hook と二重発火しない）
@@ -37,6 +37,15 @@ SessionStart 注入が opt-in で発火する状態**にする。各次元を独
 10. **scribe role 注入が opt-in 成立**: `.beads/` が在り（= scribe で管理する意思表示）、PRIME が role 中立版で
     scribe role 別 SessionStart 注入（admin/worker/consult）と矛盾しない。scribe plugin 登録済みなら、これで
     worktree=worker / `SCRIBE_ROLE=consult`=consult / anchor=admin の注入が矛盾なく発火する状態になる。
+11. **機械条件 1（台帳分離）**: `git ls-remote <このコード repo> 'refs/dolt/*'` が **0 件**（台帳がコード repo の面に出ていない）
+12. **機械条件 2（台帳分離）**: `sync.remote` が当該コード repo を**指さない**。判定は 3 経路を OR で見る
+    ——(2a) col0 平坦の `sync.remote:` 行 / (2b) nested `sync:` ブロックの `remote:` / (2c) `bd dolt remote list` の
+    **実 push 先**（← 真の決定点。config.yaml を編集しても push 先は変わらない）。
+
+> **#11 / #12 の判定は散文でなく実行可能な checker が持つ**: `${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh`
+> （rc **0**=clean / **1**=違反 / **2**=判定不能）。**rc 2（判定不能）を rc 0 に畳まない**——到達不能・認証不能・timeout を
+> 「OK」と読み替えると、検査が在るのに露出を見逃す（fail-open）。本 skill は Step 0（検出）・Dolt remote 収束 step・
+> Step 末（push 前ゲート）の **3 箇所すべて**でこの checker を呼ぶ。
 
 ## Step 0: 状態検出（read-only。まず現状を一覧化して報告）
 
@@ -67,8 +76,16 @@ for f in CLAUDE.md AGENTS.md; do grep -qE 'Use `bd remember`|do NOT use MEMORY\.
 test -f .claude/settings.json && grep -q 'bd prime' .claude/settings.json && echo "DOUBLEFIRE:yes" || echo "DOUBLEFIRE:no"
 # gitignore は必要行の全充足で yes（issues.jsonl のみの粗判定だと runtime marker 未収束でも yes になり #8 が skip される）
 { grep -q 'issues.jsonl' .gitignore && grep -q 'scribe-heartbeat' .gitignore && grep -q 'scribe-push-throttle' .gitignore; } 2>/dev/null && echo "GITIGNORE:yes" || echo "GITIGNORE:no"
+# 台帳分離の機械条件 2 本（#11 / #12）。判定は checker が持つ（散文 grep で代替しない）。
+# rc を**必ず捕捉**する（`| grep -q` へ流して rc を捨てると判定不能が OK に化ける＝fail-open）。
+"${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh"; echo "LEDGER-SEP:rc=$?"   # 0=clean / 1=違反 / 2=判定不能
 ```
 結果を「✅正しい / ⚠️要修正 / ➕要追加」で表にして報告してから収束に進む。**変更が一切不要なら「既に正しい構成」と報告して終了**。
+
+`LEDGER-SEP:rc=1`（違反）なら**この run で `bd dolt push` を一切しない**。既にコード repo へ push 済みの
+`refs/dolt/*` の削除は破壊操作（人間承認事案）なので reconciler は自動で消さず、事実と手順を報告して止める。
+`LEDGER-SEP:rc=2`（判定不能）も **OK として扱わない**——原因（network 不達・認証・`bd` 実行不能）を解消して
+再検査するまで push しない。
 
 ## Step 1〜: 各次元を収束（必要な次元だけ実行）
 
@@ -82,14 +99,35 @@ bd init --prefix <PREFIX> --non-interactive --skip-agents --skip-hooks
 `--skip-agents`(CLAUDE.md/AGENTS.md/settings 生成抑止) と `--skip-hooks` は**必須**。
 **既に `.beads/` が有れば re-init しない**（`bd init --force/--reinit-local/--destroy-token` は PreToolUse guard がブロック＝データ消失防止）。prefix はプロジェクト名から導出しユーザー確認。
 
-### backup.git-push（#3）/ Dolt remote（#4）
+### backup.git-push（#3）/ Dolt remote（#4 / #11 / #12）
 ```bash
 bd config get backup.git-push 2>/dev/null | grep -qx false || bd config set backup.git-push false
-bd dolt remote list 2>/dev/null | grep -q '://' || {
-  url=$(git remote get-url origin); case "$url" in git@github.com:*) url="https://github.com/${url#git@github.com:}";; /*) url="file://$url";; esac  # ssh→https / ローカル絶対パス→file://（git+ は URL scheme 必須。scheme 無しは bd が拒否）
-  bd dolt remote add origin "git+${url%.git}.git"; }
 ```
-origin remote が無い場合もスキップし「後で `bd dolt remote add origin git+<url>` を」と案内（安全・再 init はしない）。
+
+**Dolt remote は「台帳専用 private repo」の URL を人間から受け取ったときだけ wire する。コード repo へは
+絶対に wire しない**（`git remote get-url origin` 由来の自動 wire は撤去済み＝これが台帳をコード repo の面へ
+出す唯一の機構だった）。未提供なら **wire せず fail-loud で停止**する。reconciler は private repo を
+**自動作成しない**（`gh repo create` 等の外部 write を skill へ埋め込まない）。
+
+```bash
+if bd dolt remote list 2>/dev/null | grep -q '://'; then
+  echo "Dolt remote: 設定済み（ここでは触らない。実 push 先の正しさは下の checker が判定する）"
+elif [ -n "${LEDGER_REMOTE_URL:-}" ]; then
+  # 台帳専用 private repo の URL。ssh→https / ローカル絶対パス→file://（git+ は URL scheme 必須）
+  url="$LEDGER_REMOTE_URL"
+  case "$url" in git@github.com:*) url="https://github.com/${url#git@github.com:}";; /*) url="file://$url";; esac
+  bd dolt remote add origin "git+${url%.git}.git"
+else
+  echo "⛔ 台帳専用 private repo の URL が未提供のため Dolt remote を wire しない（コード repo へは wire しない）"
+  echo "   1. private repo を用意する（候補名: <project>-beads。先例: scribe-beads / cc-session-beads）"
+  echo "      台帳 1 つにつき private repo 1 つ（dolt の push 先 ref 名は refs/dolt/data 固定で複数台帳は衝突する）"
+  echo "   2. LEDGER_REMOTE_URL=<url> を与えて本 step を再実行する（または bd dolt remote add origin git+<url>）"
+  exit 1   # 未 wire のまま先へ進めない（自動作成もコード repo への wire もしない）
+fi
+# wire 直後に機械条件 2 本を再検査する（config.yaml だけでなく dolt レジストリの実 push 先も見る）
+"${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh"; echo "LEDGER-SEP:rc=$?"   # 0=clean / 1=違反 / 2=判定不能
+```
+rc が 0 以外なら収束を続けず、違反内容（どの経路がコード repo を指しているか）を報告して止める。
 
 ### PRIME.md（#5）— missing/wrong または旧版（marker 旧/無し・role-laden）のときだけ配置
 テンプレ（**この skill に同梱** `${CLAUDE_PLUGIN_ROOT}/skills/setup/PRIME.template.md`）を置換コピー:
@@ -186,8 +224,23 @@ surface するため取りこぼさない（intent 路と backstop の対）。�
 書かない。
 
 ## Step 末: 同期＋検証＋コミット
+
+**`bd dolt push` の前に実 push 先を実測するゲートを置く**（2026-07-27 incident の恒久対策）。`config.yaml` を
+編集しても push 先は切り替わらない——dolt エンジンは自前の remote レジストリを持ち、切替には
+`bd dolt remote remove/add` が要る。ゆえに**実測と push を別の実行単位に分け、実測結果で分岐**させる。
+
 ```bash
-bd dolt push          # remote 設定済みなら
+# ゲート（実測）: 実 push 先そのものを目で見る + 機械条件 2 本を checker で判定
+bd dolt remote list                                                        # 実 push 先の一次観測
+"${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh"; sep_rc=$?  # 0=clean / 1=違反 / 2=判定不能
+```
+```bash
+# push（別の実行単位。rc=0 のときだけ実行する。rc=2 を rc=0 に畳まない）
+if [ "${sep_rc:-2}" -eq 0 ]; then
+  bd dolt push        # remote 設定済みなら
+else
+  echo "⛔ 台帳分離が未確認（LEDGER-SEP:rc=${sep_rc:-2}）につき bd dolt push を実行しない"
+fi
 bd ready              # 動作確認
 grep -L 'BEGIN BEADS INTEGRATION' CLAUDE.md AGENTS.md   # 汚染が消えたか
 # 二重発火是正の確認（#7）: project-local settings.json に bd prime hook が残っていないか fail-loud 再 grep
@@ -205,6 +258,11 @@ git status --short
 - 既存 `.beads/` への `bd init --force`/`--reinit-local`/`--destroy-token`（guard がブロック、データ消失）。
 - 既存の「正しい」次元への不要な再書き込み（冪等性を壊す）。
 - `bd remember`/`bd recall`/`bd memories` の使用、v1.0.5+ の導入。
+- **コード repo への `bd dolt remote add`**（`git remote get-url origin` 由来の自動 wire を含む）。台帳は
+  コード repo と分離する（#4 / #11 / #12）。台帳専用 private repo の URL が無いなら wire せず止める。
+- **`check-ledger-separation.sh` の rc を捨てる呼び方**（`| grep -q` 等）と、rc 2（判定不能）を OK 扱いすること。
+- **既にコード repo へ push 済みの `refs/dolt/*` を reconciler が削除すること**（破壊操作＝人間承認事案。
+  検出して報告するに留める）。
 
 ## 注意
 - グローバル hook（SessionStart `bd prime` / SessionEnd 自動 push / 破壊的 bd guard）は machine 全体で有効。本スキルは**プロジェクト側**のみ収束させる。
