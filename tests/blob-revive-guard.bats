@@ -823,6 +823,104 @@ real_commit_or_skip() { # <rev>...
   grep -q 'clobber-suspect=1' <<< "$output"
 }
 
+# ---------- ERRATA-2 minor: 宣言表記の非対称を明文化・branch 削除の痕跡・leg B の allowlist ----------
+
+@test "MINOR legB: --allowlist file 経由の宣言でも declared-restore になり rc=0（leg B 側の宣言 teeth）" {
+  # acceptance 4 の「宣言 2 経路」は leg A だけでなく leg B-2 でも実証が要る（従来 0 本だった）。
+  local br
+  br="$(fx_commit_on feat-clobber "$C4" a.txt 'v2
+')"
+  printf '# 意図的な再 land\na.txt %s PR#999 で意図的に戻した\n' "${BLOB_V2:0:7}" > "$FX/allow-b.txt"
+  run "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main --allowlist "$FX/allow-b.txt"
+  [ "$status" -eq 0 ]
+  grep -q 'declared-restore=1' <<< "$output"
+  grep -q 'clobber-suspect=0' <<< "$output"
+}
+
+@test "MINOR legB: --allowlist の根拠列が無い行は harness-fail(2)（leg B 側も説明責任を持たせる）" {
+  local br
+  br="$(fx_commit_on feat-clobber "$C4" a.txt 'v2
+')"
+  printf 'a.txt %s\n' "${BLOB_V2:0:7}" > "$FX/allow-b-bad.txt"
+  run "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main --allowlist "$FX/allow-b-bad.txt"
+  [ "$status" -eq 2 ]
+}
+
+@test "MINOR: 宣言 path の表記が 2 leg で異なることを teeth で pin する（無言の非対称にしない）" {
+  # leg A は C-quote 形・leg B-2 は生 path。方向は fail-closed（表記違いは declared にならず rc=1）。
+  # usage / ヘッダにその旨を明記してあることも同時に確かめる。
+  local r c1 c2 feat tp blob
+  tp=$'q\tb.txt'
+  r="$(new_repo)"
+  c1="$(xcommit "$r" refs/heads/main ""    "+$tp=v1" '+plain.txt=p')"
+  c2="$(xcommit "$r" refs/heads/main "$c1" "+$tp=v2")"
+  git -C "$r" update-ref refs/remotes/origin/main "$c2"
+  feat="$(xcommit "$r" refs/heads/feat "$c2" "+$tp=v1")"
+  blob="$(git -C "$r" rev-parse "$c1:$tp")"
+
+  # leg A: C-quote 形の宣言だけが効く
+  run "$SCAN" --repo "$r" --range "$c1..$feat" --expect-restore "\"q\\tb.txt\"=${blob:0:7}"
+  [ "$status" -eq 0 ]
+  grep -q 'declared-restore=1' <<< "$output"
+  run "$SCAN" --repo "$r" --range "$c1..$feat" --expect-restore "$tp=${blob:0:7}"
+  [ "$status" -eq 1 ]                       # 生 path では効かない（fail-closed）
+
+  # leg B-2: 生 path の宣言だけが効く
+  run "$FRESH" --repo "$r" --branch feat --base-ref origin/main --expect-restore "$tp=${blob:0:7}"
+  [ "$status" -eq 0 ]
+  grep -q 'declared-restore=1' <<< "$output"
+  run "$FRESH" --repo "$r" --branch feat --base-ref origin/main --expect-restore "\"q\\tb.txt\"=${blob:0:7}"
+  rm -rf "$r"
+  [ "$status" -eq 1 ]                       # C-quote 形では効かない（fail-closed）
+
+  # 非対称が文書化されていること（無言の罠にしない）
+  grep -q 'C-quote 形' "$SCAN"
+  grep -q '生 path' "$FRESH"
+}
+
+@test "MINOR legB: branch が削除した path は集計行へ br-deleted-paths として痕跡を残す" {
+  # branch 側の削除による clobber は本検査の射程外。射程外であることを沈黙させない（rc は変えない）。
+  local r c1 c2
+  r="$(new_repo)"
+  c1="$(xcommit "$r" refs/heads/main ""    '+a.txt=x' '+doomed.txt=d')"
+  c2="$(xcommit "$r" refs/heads/main "$c1" '+a.txt=y')"
+  git -C "$r" update-ref refs/remotes/origin/main "$c2"
+  xcommit "$r" refs/heads/feat "$c2" '-doomed.txt' '+new.txt=n' > /dev/null
+  run "$FRESH" --repo "$r" --branch feat --base-ref origin/main
+  rm -rf "$r"
+  [ "$status" -eq 0 ]
+  grep -q 'br-deleted-paths=1' <<< "$output"
+  grep -q 'clobber-suspect=0' <<< "$output"
+}
+
+@test "MINOR legB: 通常の branch では br-deleted-paths=0（件数が常時 1 になっていない）" {
+  local br
+  br="$(fx_commit_on feat-clean "$C4" newfile.txt 'fresh content')"
+  run "$FRESH" --repo "$FX" --branch feat-clean --base-ref origin/main
+  [ "$status" -eq 0 ]
+  grep -q 'br-deleted-paths=0' <<< "$output"
+}
+
+@test "MINOR legB: 外部コマンド失敗は rc=1（検知）でなく harness-fail(2) へ写像する" {
+  # `set -e` 下で comm / sort / tr を素で実行すると harness 失敗が rc=1 に化け、集計行も出ない
+  # silent RED になる。comm を必ず失敗する shim に差し替えた「壊れた harness」で rc=2 を要求する。
+  # ★branch に**実際の clobber を積んでから**回すこと。積まないと「走査対象 file が 0 件」という
+  #   別理由で rc=2 になり teeth が空虚になる（rc 写像を撤回しても green のまま＝実測）。
+  local br shim
+  br="$(fx_commit_on feat-clobber "$C4" a.txt 'v2
+')"
+  shim="$(cd "$(mktemp -d)" && pwd -P)"
+  printf '#!/bin/sh\nexit 3\n' > "$shim/comm"
+  chmod +x "$shim/comm"
+  run env PATH="$shim:$PATH" "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main
+  rm -rf "$shim"
+  [ "$status" -eq 2 ]
+  grep -q 'harness-fail' <<< "$output"
+  # rc=1（検知）へ化けていないこと＝この branch は本来 rc=1 になる clobber を持っている。
+  run "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main
+  [ "$status" -eq 1 ]
+}
+
 @test "実データ legA: 本リポ走査でも HEAD と working tree を変更しない" {
   real_commit_or_skip 0c7ce5c 9a319ac
   local head_before head_after st_before st_after

@@ -22,9 +22,14 @@
 # 再 commit した」形の事故では、merge 時点の tip に対して leg B（is-ancestor）も comm 交差も **green**
 # になる。捕捉責任は leg B-2 側にある。leg B は「真に遅れた base」という別 class を塞ぐ安価な検査。
 #
-# 3 分類（leg A と対称。意図的復元は rc に載せない）:
+# 3 分類（区分は leg A と同じ。意図的復元は rc に載せない）:
 #   clobber-suspect / declared-restore / clean。宣言経路は `--expect-restore <path>=<blob>`（主）と
 #   `--allowlist <file>`（補）の 2 つのみ。
+#   **宣言 path の表記は 2 leg で異なる**（対称ではない — 誤読すると宣言が黙って効かない）:
+#     本 script（leg B / B-2）… **生 path**（シェルがそのまま渡す形。例 $'q\tb.txt'）
+#     leg A（blob-revive-scan）… `git log --raw` 由来の **C-quote 形**（例 "q\tb.txt"）
+#   通常 path（control char・`"`・`\` を含まない）では両者は一致するので実運用の差は出ない。
+#   quote が要る path を宣言するときは、その leg の出力行に出ている path 表記をそのまま写すこと。
 #
 # rc 契約（standalone。scribe-gate-attest.sh probe の exit には載せない）:
 #   0 = clean / 1 = 検知 / 2 = harness-fail（引数不備 / 非 git dir / ref・範囲の解決不能 /
@@ -67,6 +72,8 @@ Usage:
   宣言オプション:
       --expect-restore <path>=<blob>   意図的復元の宣言（主・複数指定可・blob は 4 桁以上の前方一致）
       --allowlist <file>               意図的復元の allowlist（補・1 行 `<path> <blob> <根拠>`・# コメント可）
+      ※ path は **生 path**（本 script の出力行に出る表記）。leg A（blob-revive-scan）は C-quote 形を
+         使うため、quote が要る path では 2 leg で表記が異なる。出力の path 表記をそのまま写すこと。
   scribe-base-freshness.sh -h | --help
 
 Exit: 0=clean / 1=検知 / 2=harness-fail
@@ -157,17 +164,30 @@ git -C "$REPO" -c core.quotePath=false diff --name-only --no-renames "$MB" "$BAS
   | sort > "$TMPD/base.txt" || die2 "base 側の diff に失敗しました"
 
 # 実 path 数 = NUL の個数。2 形式の件数が食い違えば位置対応が崩れている＝判定できないので落とす。
-BR_N=$(tr -dc '\0' < "$TMPD/br.z" | wc -c); BR_N=${BR_N// /}
-BR_Q_N=$(wc -l < "$TMPD/br.q"); BR_Q_N=${BR_Q_N// /}
+# ここから下の外部コマンドは **rc を捕まえて 2 へ写像する**。素の実行だと `set -e` が script を
+# rc=1 で殺し、harness 失敗が「検知」へ化ける（集計行も出ない silent RED になる）。
+if ! BR_N="$(tr -dc '\0' < "$TMPD/br.z" | wc -c)"; then
+  die2 "branch 側 path 一覧（-z）の計数に失敗しました"
+fi
+BR_N=${BR_N// /}
+if ! BR_Q_N="$(wc -l < "$TMPD/br.q")"; then
+  die2 "branch 側 path 一覧（行表現）の計数に失敗しました"
+fi
+BR_Q_N=${BR_Q_N// /}
 [[ "$BR_N" -eq "$BR_Q_N" ]] \
   || die2 "path 一覧の 2 形式で件数が一致しません（-z=$BR_N / 行表現=$BR_Q_N）＝位置対応が取れません"
 [[ "$BR_N" -gt 0 ]] || die2 "走査対象 file が 0 件です（branch が merge-base から何も変更していない）: $BRANCH"
 
-sort "$TMPD/br.q" > "$TMPD/br.txt"
+sort "$TMPD/br.q" > "$TMPD/br.txt" || die2 "branch 側 path 一覧の sort に失敗しました"
 
-# --- comm 交差（advisory）: comm の rc は常に 0 ゆえ判定は行数で行う ---
-comm -12 "$TMPD/br.txt" "$TMPD/base.txt" > "$TMPD/overlap.txt"
-OVERLAP_N=$(wc -l < "$TMPD/overlap.txt"); OVERLAP_N=${OVERLAP_N// /}
+# --- comm 交差（advisory）: comm の rc を判定には使わない（交差の有無は行数で見る）が、
+# comm 自体の失敗は harness 失敗ゆえ 2 へ写像する（rc=1 の「検知」に化けさせない） ---
+comm -12 "$TMPD/br.txt" "$TMPD/base.txt" > "$TMPD/overlap.txt" \
+  || die2 "comm による交差算出に失敗しました"
+if ! OVERLAP_N="$(wc -l < "$TMPD/overlap.txt")"; then
+  die2 "交差 file の計数に失敗しました"
+fi
+OVERLAP_N=${OVERLAP_N// /}
 
 # --- leg B-2（rc を決める content 条件） ---
 # base 側の履歴 raw を 1 回の log で取る（pathspec は使わない — path 列を単語分割で渡すと空白入り path で
@@ -220,6 +240,7 @@ SUSPECT_LINES=(); DECLARED_LINES=()
 # 候補（branch が触った file のうち base の現行 blob と異なるもの）を先に確定させる。
 mapfile -t QPATHS < "$TMPD/br.q"
 QUOTED_N=0
+BR_DELETED_N=0
 qi=0
 : > "$TMPD/cand.txt"
 while IFS= read -r -d '' path; do
@@ -237,9 +258,14 @@ while IFS= read -r -d '' path; do
     *$'\n'*)  die2 "path が中間表現の record 区切り LF を含むため field 対応が取れません: $qpath" ;;
   esac
   [[ "$qpath" == "$path" ]] || QUOTED_N=$((QUOTED_N + 1))
-  # branch 側 blob（branch で削除されていれば clobber の対象外）
+  # branch 側 blob。branch が削除した path は本検査（content 巻き戻し）の対象外だが、**件数を集計行へ
+  # 出す**（branch が base の file を消す形の clobber は射程外＝痕跡を残さないと「見た上で 0 件」と
+  # 「そもそも見ていない」が区別できない。rc は多重化しないので advisory 件数のみ）。
   br_blob="$(git -C "$REPO" rev-parse --verify --quiet "$BR_SHA:$path" 2>/dev/null)" || br_blob=""
-  [[ -n "$br_blob" ]] || continue
+  if [[ -z "$br_blob" ]]; then
+    BR_DELETED_N=$((BR_DELETED_N + 1))
+    continue
+  fi
   # base 側の現行 blob。**base に path が無い場合も候補に載せる**（base が削除した path を branch が
   # 過去 blob で復活させる形＝base 側の削除が消える clobber。現行 blob が無いことは「新規追加だから
   # 安全」を意味しない）。照合は base 履歴中の過去 blob（want[p]）のみで行う。
@@ -281,9 +307,9 @@ while IFS="$US" read -r path br_blob base_cur prior_commit; do
   fi
 done < "$TMPD/hit.txt"
 
-printf '%s: repo=%s branch=%s@%s base-ref=%s@%s merge-base=%s is-ancestor=%s overlap-files=%s br-touched-files=%s quoted-paths=%s clobber-suspect=%s declared-restore=%s rc-leg=%s\n' \
+printf '%s: repo=%s branch=%s@%s base-ref=%s@%s merge-base=%s is-ancestor=%s overlap-files=%s br-touched-files=%s quoted-paths=%s br-deleted-paths=%s clobber-suspect=%s declared-restore=%s rc-leg=%s\n' \
   "$PROG" "$REPO" "$BRANCH" "$(short "$BR_SHA")" "$BASE_REF" "$(short "$BASE_SHA")" "$(short "$MB")" \
-  "$IS_ANC" "$OVERLAP_N" "$BR_N" "$QUOTED_N" "$SUSPECT" "$DECLARED" "$RC_LEG"
+  "$IS_ANC" "$OVERLAP_N" "$BR_N" "$QUOTED_N" "$BR_DELETED_N" "$SUSPECT" "$DECLARED" "$RC_LEG"
 
 while IFS= read -r p; do [[ -z "$p" ]] || printf 'overlap: path=%s\n' "$p"; done < "$TMPD/overlap.txt"
 [[ ${#SUSPECT_LINES[@]}  -eq 0 ]] || printf '%s\n' "${SUSPECT_LINES[@]}"

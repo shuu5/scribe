@@ -19,6 +19,12 @@
 #   clean            復活なし
 #   宣言経路は 2 つのみ: (c) 呼出しフラグ `--expect-restore <path>=<blob>`（主）/
 #   (b) allowlist データ file `--allowlist <file>`（補・`<path> <blob> <根拠1行>`）。
+#   **宣言 path の表記は 2 leg で異なる**（対称ではない — 誤読すると宣言が黙って効かない）:
+#     本 script（leg A）… `git log --raw` 由来の **C-quote 形**（例 "q\tb.txt"）
+#     leg B / B-2（base-freshness）… **生 path**（例 $'q\tb.txt'）
+#   通常 path（control char・`"`・`\` を含まない）では両者は一致するので実運用の差は出ない。
+#   quote が要る path を宣言するときは、出力行に出ている path 表記をそのまま写すこと（方向は
+#   fail-closed ＝表記違いは declared にならず clobber-suspect のまま rc=1 になる。見逃しではない）。
 #   commit message / PR 本文のトレーラ宣言方式は**採らない**（本リポは squash merge 運用で message を
 #   書くのは merge 時の admin であり、新しい運用規約の成文化を要するため）。
 #
@@ -70,6 +76,8 @@ Usage:
   宣言オプション:
       --expect-restore <path>=<blob>   意図的復元の宣言（主・複数指定可・blob は 4 桁以上の前方一致）
       --allowlist <file>               意図的復元の allowlist（補・1 行 `<path> <blob> <根拠>`・# コメント可）
+      ※ path は **C-quote 形**（本 script の出力行に出る表記）。leg B / B-2（base-freshness）は生 path を
+         使うため、quote が要る path では 2 leg で表記が異なる。出力の path 表記をそのまま写すこと。
   scribe-blob-revive-scan.sh -h | --help
 
 Exit: 0=clean / 1=clobber-suspect 検知 / 2=harness-fail
