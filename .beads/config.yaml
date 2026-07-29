@@ -64,6 +64,12 @@ export.auto: false
 sync:
     remote: "git+https://github.com/shuu5/scribe-beads.git"
 
+# ★col0 平坦行は beads-bdw guard の has_remote 用（orch-0d37・2026-07-29）: guard は col0 の
+#   `sync.remote:` 行しか読まず、nested 形だけだと「local-only」誤判定で guard が silent no-op になる。
+#   dolt の push 先は自前レジストリ由来でこの行では変わらない（追記後に `bd dolt remote list` で実測済み）。
+#   nested 実効値（上の sync: ブロック）と本行の**両方を維持する**——将来の掃除で片方だけ消さないこと。
+sync.remote: "git+https://github.com/shuu5/scribe-beads.git"
+
 # Integration settings (access with 'bd config get/set')
 # Non-secret keys (stored in the database):
 # - jira.url, jira.project
@@ -88,7 +94,8 @@ sync:
 # 台帳 1 つにつき private repo 1 つが必要（dolt の push 先 ref 名は refs/dolt/data 固定で、
 # 複数台帳を 1 repo に集約すると ref が衝突するため）。
 #
-# ★実効値は上の sync: ブロック（bd dolt remote add が書く正準形）。ここには重複して書かない。
+# ★実効値は上の sync: ブロック（bd dolt remote add が書く正準形）。例外は guard 用 col0 平坦行
+#   `sync.remote:`（同値重複・orch-0d37）のみ——それ以外にここへ重複して書かない。
 # ★最重要の落とし穴（2026-07-27 に実際に踏んだ）: **このファイルを編集しても push 先は切り替わらない**。
 #   dolt エンジンは自前の remote レジストリを持ち、切替には `bd dolt remote remove/add` が要る。
 #   config だけ書き換えて push すると**旧 remote（＝コード repo）へ出て露出が復活する**。
