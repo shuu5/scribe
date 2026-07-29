@@ -26,16 +26,22 @@ setup() {
   #     BD_STUB_RC≠0 で「bd 実行不能＝実 push 先を確認できない」を再現する。
   BDSTUB="$BATS_TEST_TMPDIR/bdstub"
   mkdir -p "$BDSTUB"
-  #     `bd where` も再現する（checker は 2c を台帳へ pin するため解決先を実測する）。既定の解決先は
-  #     cwd の .beads。`.bd-stub-where` を置くと**別台帳へ解決される ambient 状態**を再現できる。
+  #     `bd where` も再現する（checker は 2c を台帳へ pin するため解決先を実測する）。実 bd の出力形に
+  #     忠実化して **path 行 + `database:` 行**を出す（実測: 構成により `prefix:` 行は出ないことがあるので
+  #     行番号ではなくキーで拾われる前提）。既定の解決先は cwd の .beads / その配下 embeddeddolt。
+  #     `.bd-stub-where` を置くと **path は cwd の .beads だが database: だけ祖先台帳**という
+  #     ambient 解決状態（実 bd で実測された masking の型）を再現できる。
   cat > "$BDSTUB/bd" <<'STUB'
 #!/usr/bin/env bash
 rc="${BD_STUB_RC:-0}"
 if [ "$rc" -ne 0 ]; then echo "bd-stub: forced failure" >&2; exit "$rc"; fi
 case "${1:-}" in
   where)
-    if [ -f ./.bd-stub-where ]; then cat ./.bd-stub-where; else printf '%s\n' "$PWD/.beads"; fi
-    printf '  prefix: stub\n'
+    if [ -f ./.bd-stub-where ]; then
+      cat ./.bd-stub-where
+    else
+      printf '%s\n  prefix: stub\n  database: %s\n' "$PWD/.beads" "$PWD/.beads/embeddeddolt"
+    fi
     exit 0 ;;
 esac
 if [ -f ./.bd-stub-remote ]; then
@@ -53,7 +59,14 @@ STUB
 #!/usr/bin/env bash
 args=(); while [ $# -gt 0 ]; do case "$1" in -C) shift 2 ;; *) args+=("$1"); shift ;; esac; done
 case "${args[0]:-}" in
-  remote)   printf '%s\n' "${GIT_STUB_ORIGIN:-}" ;;
+  # `git remote`（引数なし）は **remote 名の列挙**、`git remote get-url <name>` は URL。
+  # 両者を同じ出力にすると checker が「URL という名前の remote」を見て origin 不在と誤認する。
+  remote)
+    case "${args[1]:-}" in
+      get-url) printf '%s\n' "${GIT_STUB_ORIGIN:-}" ;;
+      "")      printf '%s\n' "${GIT_STUB_REMOTES:-origin}" ;;
+    esac ;;
+  rev-parse) exit "${GIT_STUB_REVPARSE_RC:-0}" ;;
   ls-remote) [ -n "${GIT_STUB_LSREMOTE:-}" ] && printf '%s\n' "$GIT_STUB_LSREMOTE"
              exit "${GIT_STUB_LSREMOTE_RC:-0}" ;;
   # check-ignore の rc は「0=ignored / 1=ignored でない」。既定は 1（ignored でない）——
@@ -90,11 +103,13 @@ push_dolt_ref() {
 }
 
 # put_ledger <work> <relpath|.> <mode: flat|nested|both|none> <url>
+#   live な台帳を模すため embeddeddolt も作る（checker は `database:` が当該 .beads 配下に **実在**する
+#   ことを 2c の前提にする＝DB 不在は live な台帳ではないので 2c: UNKNOWN）。
 put_ledger() {
   local work="$1" rel="$2" mode="$3" url="${4:-}"
   local d
   if [ "$rel" = "." ]; then d="$work/.beads"; else d="$work/$rel/.beads"; fi
-  mkdir -p "$d"
+  mkdir -p "$d/embeddeddolt"
   : > "$d/config.yaml"
   case "$mode" in
     flat)   printf 'sync.remote: "%s"\n' "$url" >> "$d/config.yaml" ;;
@@ -422,6 +437,229 @@ put_dolt_remote() {
   run "$CHECKER" --repo "$w"
   [ "$status" -eq 0 ]
   [[ "$output" != *"COND1-EXTRA:"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# 4b. errata R1 — 除外規則・pin・identity・引数処理の fail-open / dead-end 封鎖
+# ---------------------------------------------------------------------------
+
+@test "E1 2c pin: path は一致しても database: が祖先台帳なら 2c: UNKNOWN（実 bd で実測された masking の型）" {
+  # 実 bd の実測: DB(embeddeddolt) を持たない .beads では `bd where` の path 行に cwd の .beads を返しつつ
+  # database: 行だけが祖先台帳を指す。path 行だけを比べる pin はこれを通し、祖先台帳の remote を
+  # 当該台帳の 2c: OK として報告する（fail-open）。
+  w="$(mk_work sep-dbpin)"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-dbpin-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-dbpin-beads.git"
+  # path は一致・database: だけ祖先台帳。
+  printf '%s\n  database: %s\n' "$w/.beads" "$BATS_TEST_TMPDIR/ancestor/.beads/embeddeddolt" \
+    > "$w/.bd-stub-where"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"COND2 .beads 2c: UNKNOWN"* ]]
+  [[ "$output" != *"COND2 .beads 2c: OK"* ]]
+  [[ "$output" != *"RESULT: CLEAN"* ]]
+}
+
+@test "E1 2c pin: database: が実在しない（live な台帳でない）なら 2c: UNKNOWN" {
+  w="$(mk_work sep-nodb)"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-nodb-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-nodb-beads.git"
+  rmdir "$w/.beads/embeddeddolt"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"COND2 .beads 2c: UNKNOWN"* ]]
+}
+
+@test "E1 2c pin: bd where が database: を出さない出力形なら 2c: UNKNOWN（行番号に依存しない）" {
+  w="$(mk_work sep-nodbkey)"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-nodbkey-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-nodbkey-beads.git"
+  printf '%s\n  prefix: stub\n' "$w/.beads" > "$w/.bd-stub-where"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"COND2 .beads 2c: UNKNOWN"* ]]
+}
+
+@test "E2 除外の安全弁1: .gitignore が .beads/ を含む repo でも root 台帳は評価する（違反は RED）" {
+  # root 台帳ごと check-ignore で落とすと候補 0＝「未導入」＝COND2: OK＝CLEAN rc=0 に化け、
+  # 違反 config を持つ repo を清浄と報告してしまう（--quiet では skip 行も見えず rc=0 だけが残る）。
+  w="$(mk_work sep-igroot)"
+  printf '.beads/\n' > "$w/.gitignore"
+  put_ledger "$w" . flat "git+file://$BATS_TEST_TMPDIR/sep-igroot.git"   # ← コード repo 自身＝違反
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-igroot-beads.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"COND2 .beads 2a: VIOLATION"* ]]
+  [[ "$output" == *"RESULT: VIOLATION"* ]]
+  # --quiet でも rc は 1（詳細行が消えても判定は変わらない）。
+  run "$CHECKER" --repo "$w" --quiet
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RESULT: VIOLATION"* ]]
+}
+
+@test "E2 除外の安全弁1: root 台帳が清浄なら .gitignore に .beads/ が在っても CLEAN（過剰赤化しない）" {
+  w="$(mk_work sep-igroot2)"
+  printf '.beads/\n' > "$w/.gitignore"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-igroot2-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-igroot2-beads.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RESULT: CLEAN"* ]]
+}
+
+@test "E2 除外の安全弁2: 候補 1 件以上で評価対象 0 件は COND2: UNKNOWN（OK に畳まない）" {
+  # root 台帳を持たず、従属台帳だけが ignored な構成。候補は在るのに全て落ちる＝除外規則が
+  # 判定を空洞化している状態。OK に畳むと「除外規則そのもの」が fail-open になる。
+  w="$(mk_work sep-allskip)"
+  printf 'vendor-cache/\n' > "$w/.gitignore"
+  put_ledger "$w" vendor-cache/x flat "git+file://$BATS_TEST_TMPDIR/sep-allskip.git"
+  put_dolt_remote "$w/vendor-cache/x" "git+file://$BATS_TEST_TMPDIR/sep-allskip.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"COND2: UNKNOWN"* ]]
+  [[ "$output" != *"COND2: OK"* ]]
+  [[ "$output" != *"RESULT: CLEAN"* ]]
+}
+
+@test "E2 除外の安全弁2: 候補 0 かつ除外 0（真の未導入）は COND2: OK のまま" {
+  w="$(mk_work sep-none)"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"COND2: OK"* ]]
+  [[ "$output" == *"RESULT: CLEAN"* ]]
+}
+
+@test "E2 symlink: --repo に symlink を渡しても台帳を見つける（候補 0＝CLEAN に化けない）" {
+  w="$(mk_work sep-link)"
+  put_ledger "$w" . flat "git+file://$BATS_TEST_TMPDIR/sep-link.git"     # ← 違反
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-link-beads.git"
+  ln -sfn "$w" "$BATS_TEST_TMPDIR/sep-link-alias"
+  run "$CHECKER" --repo "$BATS_TEST_TMPDIR/sep-link-alias"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"COND2 .beads 2a: VIOLATION"* ]]
+}
+
+@test "E3 wire ゲート: --assert-not-code-repo はコード repo URL を rc=1 で拒否し台帳 URL を rc=0 で通す" {
+  w="$(mk_work sep-assert)"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-assert-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-assert-beads.git"
+
+  # コード repo 自身（正規化前の別表記でも同一視される）
+  run "$CHECKER" --repo "$w" --assert-not-code-repo "git+file://$BATS_TEST_TMPDIR/sep-assert.git"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ASSERT-NOT-CODE-REPO: VIOLATION"* ]]
+
+  # 台帳専用 repo（接頭辞衝突する名前でも完全一致で弁別される）
+  run "$CHECKER" --repo "$w" --assert-not-code-repo "git+file://$BATS_TEST_TMPDIR/sep-assert-beads.git"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ASSERT-NOT-CODE-REPO: OK"* ]]
+}
+
+@test "E3 wire ゲート: 値欠落・空 URL は rc=2（判定不能を OK に畳まない）" {
+  w="$(mk_work sep-assert2)"
+  run "$CHECKER" --repo "$w" --assert-not-code-repo ""
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"ASSERT-NOT-CODE-REPO: UNKNOWN"* ]]
+  run "$CHECKER" --repo "$w" --assert-not-code-repo
+  [ "$status" -eq 2 ]
+}
+
+@test "E3 SKILL.md: bd dolt remote add より前に --assert-not-code-repo を呼ぶ（wire-then-check でない）" {
+  sec="$(awk '/^### backup.git-push/,/^### PRIME.md/' "$SKILL")"
+  [[ "$sec" == *"--assert-not-code-repo"* ]]
+  # 出現順: assert → add（同一 step 内）。
+  a_line="$(grep -n -- '--assert-not-code-repo' "$SKILL" | head -1 | cut -d: -f1)"
+  w_line="$(grep -n 'bd dolt remote add origin "git+' "$SKILL" | head -1 | cut -d: -f1)"
+  [ -n "$a_line" ]
+  [ -n "$w_line" ]
+  [ "$a_line" -lt "$w_line" ]
+  # rc を捕捉して分岐し、非 0 では add しない形になっている。
+  [[ "$sec" == *"assert_rc=\$?"* ]]
+  [[ "$sec" == *'if [ "$assert_rc" -ne 0 ]; then'* ]]
+  # wire 後に rc=1 だった場合の巻き戻し手順が明記されている。
+  run grep -q 'bd dolt remote remove origin' "$SKILL"
+  [ "$status" -eq 0 ]
+}
+
+@test "E4 identity: remote 0 本なら条件1 は N/A OK・条件2 は repo 自パスで判定継続（違反は RED）" {
+  w="$BATS_TEST_TMPDIR/sep-noremote"
+  git -c init.defaultBranch=main init -q "$w"
+  git -C "$w" config user.email t@e; git -C "$w" config user.name t
+  git -C "$w" commit -q --allow-empty -m init
+  put_ledger "$w" . flat "file://$w"      # ← 自リポを指す＝違反
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-noremote-beads.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"COND1: OK"* ]]
+  [[ "$output" == *"COND1-NOTE: NO-GIT-REMOTE"* ]]
+  [[ "$output" == *"COND2 .beads 2a: VIOLATION"* ]]
+}
+
+@test "E4 identity: remote 0 本で台帳が別先なら CLEAN rc=0（dead-end にしない）" {
+  w="$BATS_TEST_TMPDIR/sep-noremote2"
+  git -c init.defaultBranch=main init -q "$w"
+  git -C "$w" config user.email t@e; git -C "$w" config user.name t
+  git -C "$w" commit -q --allow-empty -m init
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-noremote2-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-noremote2-beads.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"COND1: OK"* ]]
+  [[ "$output" == *"COND1-NOTE: NO-GIT-REMOTE"* ]]
+  [[ "$output" == *"RESULT: CLEAN"* ]]
+}
+
+@test "E4 identity: remote あり origin 無しは条件1 UNKNOWN・条件2 は全 remote と比較（実違反は rc=1）" {
+  # origin 以外の名前（upstream）でコード repo を持ち、sync.remote が同じ URL を指す実違反。
+  # 「origin 不在→N/A→CLEAN」の素朴形はこれを清浄と誤報する。
+  w="$BATS_TEST_TMPDIR/sep-upstream"
+  git init -q --bare "$BATS_TEST_TMPDIR/sep-upstream-code.git"
+  git -c init.defaultBranch=main init -q "$w"
+  git -C "$w" config user.email t@e; git -C "$w" config user.name t
+  git -C "$w" commit -q --allow-empty -m init
+  git -C "$w" remote add upstream "$BATS_TEST_TMPDIR/sep-upstream-code.git"
+  put_ledger "$w" . flat "git+file://$BATS_TEST_TMPDIR/sep-upstream-code.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-upstream-beads.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"COND1: UNKNOWN"* ]]
+  [[ "$output" == *"COND2 .beads 2a: VIOLATION"* ]]
+  [[ "$output" == *"RESULT: VIOLATION"* ]]
+  [[ "$output" != *"RESULT: CLEAN"* ]]
+}
+
+@test "E4 identity: 非 git ディレクトリは UNKNOWN（origin 未設定と git 実行不能を弁別）" {
+  d="$BATS_TEST_TMPDIR/not-a-repo"
+  mkdir -p "$d"
+  run "$CHECKER" --repo "$d"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"COND1: UNKNOWN"* ]]
+  [[ "$output" == *"COND2: UNKNOWN"* ]]
+  [[ "$output" != *"RESULT: CLEAN"* ]]
+}
+
+@test "E5 引数: --repo の値欠落は rc=2 で即 fail-loud（busy loop しない）" {
+  run timeout 10 "$CHECKER" --repo
+  [ "$status" -eq 2 ]      # 124 なら busy loop（timeout）＝退行
+  [[ "$output" == *"RESULT: UNKNOWN"* ]]
+}
+
+@test "E5 引数: 未知 arg も rc=2（既存契約と整合）" {
+  run timeout 10 "$CHECKER" --bogus
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"RESULT: UNKNOWN"* ]]
+}
+
+@test "E6 ラベル: --repo 末尾スラッシュでも rel ラベルが潰れない（判定は不変）" {
+  w="$(mk_work sep-slash)"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-slash-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-slash-beads.git"
+  put_ledger "$w" sub flat "git+file://$BATS_TEST_TMPDIR/sep-slash-sub-beads.git"
+  put_dolt_remote "$w/sub" "git+file://$BATS_TEST_TMPDIR/sep-slash-sub-beads.git"
+  run "$CHECKER" --repo "$w/"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"COND2 .beads 2a: OK"* ]]
+  [[ "$output" == *"COND2 sub/.beads 2a: OK"* ]]
 }
 
 # ---------------------------------------------------------------------------

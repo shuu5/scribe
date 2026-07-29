@@ -50,6 +50,15 @@ SessionStart 注入が opt-in で発火する状態**にする。各次元を独
 > checker は `COND1-EXTRA: DOLT-REF-OUTSIDE-GLOB <ref>` 行も出す（`refs/dolt/*` の外に居る台帳由来 ref＝
 > dolt が push する `refs/heads/__dolt_remote_info__` の残存）。**rc は変わらない**——既存 ref の削除は破壊操作
 > ＝人間承認事案で reconciler の裁量外ゆえ、この行が出たら報告に載せて人間へ上げる（自動で消さない）。
+>
+> 同じ checker が **wire 前ゲート** も提供する: `--assert-not-code-repo <url>`（rc 0=コード repo でない /
+> 1=コード repo と一致 / 2=判定不能）。`bd dolt remote add` の**前**にこれを通す（下記 #4 収束 step）。
+> 正規化ロジックを SKILL.md 側へ二重実装しないための単一実装。
+>
+> **rc の適用範囲**: rc≠0 が止めるのは **台帳同期（`bd dolt push` と wire）だけ**。台帳分離と無関係な
+> 収束次元（#1 / #2 / #3 / #5〜#10）は独立に収束させる。`origin` を持たない repo でも他次元が
+> 恒久停止しないよう、checker は remote 0 本なら条件 1 を N/A（`COND1-NOTE: NO-GIT-REMOTE`）として扱い、
+> 条件 2 は repo 自身のパスを code-identity に用いて判定を続ける。
 
 ## Step 0: 状態検出（read-only。まず現状を一覧化して報告）
 
@@ -113,10 +122,24 @@ bd config get backup.git-push 2>/dev/null | grep -qx false || bd config set back
 出す唯一の機構だった）。未提供なら **wire せず fail-loud で停止**する。reconciler は private repo を
 **自動作成しない**（`gh repo create` 等の外部 write を skill へ埋め込まない）。
 
+**wire は「検査してから」行う（wire-then-check にしない）**: `bd dolt remote add` を先に実行してから
+checker で気づく形は事後検知でしかない。レジストリへ書かれた時点で以後の自動 push（`scripts/scribe-sync-push.sh`
+は remote の有無だけを見て push する）が公開面へ台帳を出しうる＝不可逆。ゆえに **与えられた URL が
+コード repo でないことを wire の前に機械で確認**し、一致したら wire せず止める。
+
 ```bash
 if bd dolt remote list 2>/dev/null | grep -q '://'; then
   echo "Dolt remote: 設定済み（ここでは触らない。実 push 先の正しさは下の checker が判定する）"
 elif [ -n "${LEDGER_REMOTE_URL:-}" ]; then
+  # ★wire 前ゲート: この URL がコード repo でないことを確認する（rc 0=コード repo でない / 1=一致 / 2=判定不能）。
+  #   判定は checker の単一実装（正規化ロジックを二重に持たない）。rc≠0 なら add せず fail-loud で止める。
+  "${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh" --assert-not-code-repo "$LEDGER_REMOTE_URL"
+  assert_rc=$?
+  if [ "$assert_rc" -ne 0 ]; then
+    echo "⛔ LEDGER_REMOTE_URL がコード repo と一致（または判定不能・rc=$assert_rc）につき wire しない"
+    echo "   台帳専用の別 private repo の URL を与えて再実行すること（コード repo へは絶対に wire しない）"
+    exit 1
+  fi
   # 台帳専用 private repo の URL。ssh→https / ローカル絶対パス→file://（git+ は URL scheme 必須）
   url="$LEDGER_REMOTE_URL"
   case "$url" in git@github.com:*) url="https://github.com/${url#git@github.com:}";; /*) url="file://$url";; esac
@@ -131,7 +154,18 @@ fi
 # wire 直後に機械条件 2 本を再検査する（config.yaml だけでなく dolt レジストリの実 push 先も見る）
 "${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh"; echo "LEDGER-SEP:rc=$?"   # 0=clean / 1=違反 / 2=判定不能
 ```
-rc が 0 以外なら収束を続けず、違反内容（どの経路がコード repo を指しているか）を報告して止める。
+rc が 0 以外のときに止めるのは **台帳同期に関わる操作だけ**（`bd dolt push` と以降の wire）。違反内容
+（どの経路がコード repo を指しているか）を報告する。
+
+- **rc=1（違反）で、直前に自分が wire した結果そうなった場合は巻き戻す**: `bd dolt remote remove origin` を
+  実行し、**`bd dolt push` はしない**。レジストリに残したままにすると、以後の自動 push
+  （`scripts/scribe-sync-push.sh` は remote の有無だけを見る）が台帳を公開面へ出す。
+- **rc=2（判定不能）も OK 扱いしない**（同じく push しない）。
+- **rc≠0 を理由に他の収束次元（#1 / #2 / #3 / #5〜#10）まで止めないこと**。PRIME 同期・汚染除去・
+  二重発火除去・gitignore・CLAUDE.md ポインタは台帳分離と独立なので、それぞれ収束させたうえで
+  「台帳分離だけが未確認/違反」と切り分けて報告する。`origin` を持たない repo は rc=2 になり得るが、
+  それは**台帳分離の判定不能**であって他次元を止める理由ではない（checker は remote 0 本の repo では
+  条件 1 を N/A として扱い、`COND1-NOTE: NO-GIT-REMOTE` を出す）。
 
 ### PRIME.md（#5）— missing/wrong または旧版（marker 旧/無し・role-laden）のときだけ配置
 テンプレ（**この skill に同梱** `${CLAUDE_PLUGIN_ROOT}/skills/setup/PRIME.template.md`）を置換コピー:
