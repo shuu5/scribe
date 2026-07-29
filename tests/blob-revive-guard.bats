@@ -79,6 +79,45 @@ fx_commit_on() {
   printf '%s' "$new"
 }
 
+# --- 特殊な履歴が要る teeth 用の使い捨て repo ヘルパ（setup の合成履歴を歪めないため別 repo に作る） ---
+
+# 使い捨て repo を作って path を返す（mktemp -d 配下・$TMPDIR 追随）。
+new_repo() {
+  local d
+  d="$(cd "$(mktemp -d)" && pwd -P)"
+  git -C "$d" -c init.defaultBranch=main init -q
+  git -C "$d" config user.email t@e
+  git -C "$d" config user.name t
+  printf '%s' "$d"
+}
+
+# 任意の使い捨て repo へ worktree 非依存で commit を積む（plumbing のみ・checkout しない）。
+#   xcommit <repo> <ref> <parent|""> ["+<path>=<内容>" | "-<path>"]...
+xcommit() {
+  local repo="$1" ref="$2" parent="$3"; shift 3
+  local ix="$repo/.ix" spec p body blob tree new
+  rm -f "$ix"
+  [[ -z "$parent" ]] || GIT_INDEX_FILE="$ix" git -C "$repo" read-tree "$parent"
+  for spec in "$@"; do
+    case "$spec" in
+      +*) spec="${spec#+}"; p="${spec%%=*}"; body="${spec#*=}"
+          blob="$(printf '%s' "$body" | git -C "$repo" hash-object -w --stdin)"
+          GIT_INDEX_FILE="$ix" git -C "$repo" update-index --add --cacheinfo 100644 "$blob" "$p" ;;
+      -*) p="${spec#-}"
+          GIT_INDEX_FILE="$ix" git -C "$repo" update-index --force-remove "$p" ;;
+    esac
+  done
+  tree="$(GIT_INDEX_FILE="$ix" git -C "$repo" write-tree)"
+  if [[ -n "$parent" ]]; then
+    new="$(git -C "$repo" commit-tree "$tree" -p "$parent" -m x)"
+  else
+    new="$(git -C "$repo" commit-tree "$tree" -m x)"
+  fi
+  git -C "$repo" update-ref "$ref" "$new"
+  rm -f "$ix"
+  printf '%s' "$new"
+}
+
 # ---------- 構文 ----------
 
 @test "blob-revive: 両 script の bash -n 構文 OK" {
@@ -220,6 +259,8 @@ fx_commit_on() {
   merged="$(git -C "$FX" commit-tree "$C4^{tree}" -p "$C4" -p "$side" -m merge-commit)"
   run "$SCAN" --repo "$FX" --range "$C4..$merged"
   # merge の first-parent diff は空（tree=C4）なので走査対象 file 0＝harness-fail(2) が正しい挙動。
+  # この run を assert 無しで捨てない（死実行にすると「何を確かめた run か」が消える）。
+  [ "$status" -eq 2 ]
   # 重要なのは「merge を数えている」ことなので、file を伴う merge で確かめ直す。
   local merged2
   merged2="$(git -C "$FX" commit-tree "$(git -C "$FX" rev-parse "$side^{tree}")" -p "$C4" -p "$side" -m merge-commit2)"
@@ -505,6 +546,10 @@ real_commit_or_skip() { # <rev>...
   grep -q 'clobber-suspect=4' <<< "$output"
   grep -q 'merges=1' <<< "$output"
   grep -q 'skipped-merges=0' <<< "$output"
+  # 走査母数も厳密一致で pin する（件数が黙って動いたら赤くする）。
+  # 内訳: blob を持つ変更のあった path 193 + 削除しか無かった path 4 = 197（＝admin 実測の touch file 数）。
+  grep -q 'touched-paths=193' <<< "$output"
+  grep -q 'deleted-only-paths=4' <<< "$output"
 }
 
 @test "実データ legA: 宣言を与えた 2 件だけ declared-restore に落ちる（3 分類が実データで効く）" {
@@ -517,6 +562,265 @@ real_commit_or_skip() { # <rev>...
   grep -q 'declared-restore=2' <<< "$output"
   grep -q 'declared-restore: path=scriptorium-engine/scripts/orch-stale-scan.sh commit=2e5a45e' <<< "$output"
   grep -q 'clobber-suspect: path=scriptorium-engine/scripts/orch-stale-scan.sh commit=7e5449d' <<< "$output"
+}
+
+# ---------- ERRATA-1 FIX-1: 空 prev field（delete → 同一 blob 再追加）で壊れない ----------
+
+@test "FIX-1 legA: delete 後に同一 blob を再追加する range を rc=1 で検知し、集計行と path を出す" {
+  # prev（直前 blob）が空になる唯一の形。field 区切りが畳まれると path が空になり配列 subscript で
+  # abort し、**stdout 完全空 + rc=1** という「検知に見えるが何も出ていない」状態になる（実測）。
+  local r c1 c2 c3 blob
+  r="$(new_repo)"
+  c1="$(xcommit "$r" refs/heads/main ""    '+dead.txt=v1' '+a.txt=x')"
+  c2="$(xcommit "$r" refs/heads/main "$c1" '-dead.txt'    '+a.txt=y')"
+  c3="$(xcommit "$r" refs/heads/main "$c2" '+dead.txt=v1')"
+  blob="$(git -C "$r" rev-parse "$c1:dead.txt")"
+  run "$SCAN" --repo "$r" --range "$c1..$c3"
+  rm -rf "$r"
+  [ "$status" -eq 1 ]
+  grep -q '^blob-revive-scan: mode=post-merge' <<< "$output"
+  grep -q 'revived=1' <<< "$output"
+  grep -q 'clobber-suspect=1' <<< "$output"
+  grep -q '^clobber-suspect: path=dead.txt' <<< "$output"
+  grep -q "revived-blob=${blob:0:7}" <<< "$output"
+  grep -q 'prev-blob=none' <<< "$output"      # 空 prev は none として表示する（field は落とさない）
+  # ※ `run !` は $output を上書きするので、この形の assert は必ず最後に置く。
+  run ! grep -q 'bad array subscript' <<< "$output"
+}
+
+@test "FIX-1 legA: 同じ形へ --expect-restore を与えると declared-restore になり rc=0" {
+  local r c1 c2 c3 blob
+  r="$(new_repo)"
+  c1="$(xcommit "$r" refs/heads/main ""    '+dead.txt=v1' '+a.txt=x')"
+  c2="$(xcommit "$r" refs/heads/main "$c1" '-dead.txt'    '+a.txt=y')"
+  c3="$(xcommit "$r" refs/heads/main "$c2" '+dead.txt=v1')"
+  blob="$(git -C "$r" rev-parse "$c1:dead.txt")"
+  run "$SCAN" --repo "$r" --range "$c1..$c3" --expect-restore "dead.txt=${blob:0:7}"
+  rm -rf "$r"
+  [ "$status" -eq 0 ]
+  grep -q 'clobber-suspect=0' <<< "$output"
+  grep -q 'declared-restore=1' <<< "$output"
+  grep -q '^declared-restore: path=dead.txt' <<< "$output"
+}
+
+# ---------- ERRATA-1 FIX-2: base が削除した path の復活を素通ししない ----------
+
+@test "FIX-2 legB-2: base が削除した path を branch が過去 blob で復活させたら rc=1" {
+  # base に現行 blob が無い＝「新規追加だから安全」ではない。base 側の削除が squash で消える形。
+  local r c1 c2 blob
+  r="$(new_repo)"
+  c1="$(xcommit "$r" refs/heads/main ""    '+dead.txt=v1' '+a.txt=x')"
+  c2="$(xcommit "$r" refs/heads/main "$c1" '-dead.txt')"
+  git -C "$r" update-ref refs/remotes/origin/main "$c2"
+  blob="$(git -C "$r" rev-parse "$c1:dead.txt")"
+  xcommit "$r" refs/heads/feat "$c2" '+dead.txt=v1' > /dev/null
+  run "$FRESH" --repo "$r" --branch feat --base-ref origin/main
+  rm -rf "$r"
+  [ "$status" -eq 1 ]
+  grep -q 'clobber-suspect=1' <<< "$output"
+  grep -q '^clobber-suspect: path=dead.txt' <<< "$output"
+  grep -q "br-blob=${blob:0:7}" <<< "$output"
+  grep -q 'base-cur-blob=absent' <<< "$output"   # 現行不在は sentinel で明示（沈黙で落とさない）
+}
+
+@test "FIX-2 legB-2: base 削除 path の復活も宣言すれば declared-restore で rc=0" {
+  local r c1 c2 blob
+  r="$(new_repo)"
+  c1="$(xcommit "$r" refs/heads/main ""    '+dead.txt=v1' '+a.txt=x')"
+  c2="$(xcommit "$r" refs/heads/main "$c1" '-dead.txt')"
+  git -C "$r" update-ref refs/remotes/origin/main "$c2"
+  blob="$(git -C "$r" rev-parse "$c1:dead.txt")"
+  xcommit "$r" refs/heads/feat "$c2" '+dead.txt=v1' > /dev/null
+  run "$FRESH" --repo "$r" --branch feat --base-ref origin/main --expect-restore "dead.txt=${blob:0:7}"
+  rm -rf "$r"
+  [ "$status" -eq 0 ]
+  grep -q 'declared-restore=1' <<< "$output"
+  grep -q 'clobber-suspect=0' <<< "$output"
+}
+
+# ---------- ERRATA-1 FIX-3: 継承した git 環境変数で別 repo を走査しない ----------
+
+@test "FIX-3 legA: GIT_DIR 汚染下でも --repo が非 git dir なら harness-fail(2)" {
+  # GIT_DIR/GIT_WORK_TREE が export されていると `git -C <非 git dir>` が環境側の repo を解決し、
+  # **走査していない repo の結果を --repo の名前で** rc=1 として報告する（実測）。
+  local nogit
+  nogit="$(cd "$(mktemp -d)" && pwd -P)"
+  run env GIT_DIR="$FX/.git" GIT_WORK_TREE="$FX" "$SCAN" --repo "$nogit" --range "$C1..$C4"
+  rm -rf "$nogit"
+  [ "$status" -eq 2 ]
+  grep -q 'harness-fail' <<< "$output"
+}
+
+@test "FIX-3 legB: GIT_DIR 汚染下でも --repo が非 git dir なら harness-fail(2)" {
+  local nogit
+  nogit="$(cd "$(mktemp -d)" && pwd -P)"
+  run env GIT_DIR="$FX/.git" GIT_WORK_TREE="$FX" "$FRESH" --repo "$nogit" --branch main --base-ref "$C2"
+  rm -rf "$nogit"
+  [ "$status" -eq 2 ]
+  grep -q 'harness-fail' <<< "$output"
+}
+
+@test "FIX-3: GIT_DIR 汚染下でも正規の --repo なら従来どおり検知する（過剰に殺していない）" {
+  run env GIT_DIR="$FX/.git" GIT_WORK_TREE="$FX" "$SCAN" --repo "$FX" --range "$C2..$C3"
+  [ "$status" -eq 1 ]
+  grep -q 'clobber-suspect=1' <<< "$output"
+}
+
+# ---------- ERRATA-1 FIX-4: shallow clone を clean と名乗らない ----------
+
+@test "FIX-4 legA: shallow clone（--depth）は harness-fail(2)（履歴照合が成立しない）" {
+  # full clone が rc=1 で検知する同一 clobber を、shallow では 0 件 clean と報告していた（実測）。
+  local sh
+  sh="$(cd "$(mktemp -d)" && pwd -P)/sh"
+  git clone -q --depth 2 "file://$FX" "$sh"
+  [ "$(git -C "$sh" rev-parse --is-shallow-repository)" = "true" ]
+  run "$SCAN" --repo "$sh" --range "$C3..$C4"
+  rm -rf "$sh"
+  [ "$status" -eq 2 ]
+  grep -q 'harness-fail' <<< "$output"
+}
+
+@test "FIX-4 legB: shallow clone（--depth）は harness-fail(2)" {
+  # base-ref を C3 に取ると、guard を外した場合に「走査は成立するが履歴が足りず clobber-suspect=0」
+  # ＝**clean を名乗る** 経路へ入る（実測 rc=0）。この引数でないと別理由の rc=2 で空虚な teeth になる。
+  local sh
+  sh="$(cd "$(mktemp -d)" && pwd -P)/sh"
+  git clone -q --depth 2 "file://$FX" "$sh"
+  [ "$(git -C "$sh" rev-parse --is-shallow-repository)" = "true" ]
+  run "$FRESH" --repo "$sh" --branch main --base-ref "$C3"
+  rm -rf "$sh"
+  [ "$status" -eq 2 ]
+  grep -q 'harness-fail' <<< "$output"
+}
+
+@test "FIX-4 legA: full clone は shallow guard に掛からず従来どおり検知する（過剰に殺していない）" {
+  local full
+  full="$(cd "$(mktemp -d)" && pwd -P)/full"
+  git clone -q "file://$FX" "$full"
+  [ "$(git -C "$full" rev-parse --is-shallow-repository)" = "false" ]
+  run "$SCAN" --repo "$full" --range "$C2..$C3"
+  rm -rf "$full"
+  [ "$status" -eq 1 ]
+  grep -q 'clobber-suspect=1' <<< "$output"
+}
+
+# ---------- ERRATA-1 minor: 削除のみ range / skipped-merges 実カウント / C-quote path ----------
+
+@test "MINOR-m1 legA: 削除しか無い range は harness-fail でなく rc=0 + deleted-only-paths を出す" {
+  # 以前は「走査対象 file が 0 件」で rc=2 になり、理由文（走査していない）が事実と食い違っていた。
+  local r c1 c2
+  r="$(new_repo)"
+  c1="$(xcommit "$r" refs/heads/main ""    '+a.txt=x' '+gone.txt=g')"
+  c2="$(xcommit "$r" refs/heads/main "$c1" '-gone.txt')"
+  run "$SCAN" --repo "$r" --range "$c1..$c2"
+  rm -rf "$r"
+  [ "$status" -eq 0 ]
+  grep -q 'touched-paths=0' <<< "$output"
+  grep -q 'deleted-only-paths=1' <<< "$output"
+  grep -q 'revived=0' <<< "$output"
+}
+
+@test "MINOR-m1 legA: 変更も削除も無い range は従来どおり harness-fail(2)（緩めすぎていない）" {
+  local r c1 e1
+  r="$(new_repo)"
+  c1="$(xcommit "$r" refs/heads/main "" '+a.txt=x')"
+  e1="$(git -C "$r" commit-tree "$c1^{tree}" -p "$c1" -m empty)"
+  run "$SCAN" --repo "$r" --range "$c1..$e1"
+  rm -rf "$r"
+  [ "$status" -eq 2 ]
+}
+
+@test "MINOR-m2 legA: skipped-merges は実カウント（走査できなかった merge を 1 と数える）" {
+  # first-parent diff が空の merge は raw 行を 1 本も生まない＝その merge については何も見ていない。
+  # literal '0' を焼いていると、この fixture でも 0 が出て assert が空虚になる。
+  local side merge_empty after
+  side="$(fx_commit_on feat-clean "$C4" side.txt 'side')"
+  merge_empty="$(git -C "$FX" commit-tree "$C4^{tree}" -p "$C4" -p "$side" -m merge-empty)"
+  git -C "$FX" update-ref refs/heads/tmp-m "$merge_empty"
+  after="$(fx_commit_on tmp-m "$merge_empty" after.txt 'after')"
+  run "$SCAN" --repo "$FX" --range "$C4..$after"
+  [ "$status" -eq 0 ]
+  grep -q 'scanned-commits=2' <<< "$output"
+  grep -q 'merges=1' <<< "$output"
+  grep -q 'skipped-merges=1' <<< "$output"
+  grep -q 'touched-paths=1' <<< "$output"
+}
+
+@test "MINOR-m3 legB-2: C-quote が要る path（TAB 入り）の clobber を無言で落とさない" {
+  # 生 path だけだと履歴側の表現（"q\tb.txt"）と一致せず、行表現だけだと rev-parse が解決できない。
+  # どちらか一方しか持たない実装では **rc=0 で素通り**する（実測）。
+  local r c1 c2 tp
+  tp=$'q\tb.txt'
+  r="$(new_repo)"
+  c1="$(xcommit "$r" refs/heads/main ""    "+$tp=v1" '+plain.txt=p')"
+  c2="$(xcommit "$r" refs/heads/main "$c1" "+$tp=v2")"
+  git -C "$r" update-ref refs/remotes/origin/main "$c2"
+  xcommit "$r" refs/heads/feat "$c2" "+$tp=v1" > /dev/null
+  run "$FRESH" --repo "$r" --branch feat --base-ref origin/main
+  rm -rf "$r"
+  [ "$status" -eq 1 ]
+  grep -q 'quoted-paths=1' <<< "$output"
+  grep -q 'clobber-suspect=1' <<< "$output"
+}
+
+@test "MINOR-m3 legB-2: 通常 path のみなら quoted-paths=0（件数が常時 1 になっていない）" {
+  local br
+  br="$(fx_commit_on feat-clobber "$C4" a.txt 'v2
+')"
+  run "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main
+  [ "$status" -eq 1 ]
+  grep -q 'quoted-paths=0' <<< "$output"
+}
+
+# ---------- ERRATA-2 FIX-5: 中間表現の区切りを含む path を無言 clean にしない（leg B-2 の fail-open） ----------
+
+@test "FIX-5 legB-2: path が US(0x1f) を含む clobber は harness-fail(2)（無言 clean にしない）" {
+  # cand.txt の第 2 field は `-z` 由来の生 path。git は control char を -z 出力では quote しないため、
+  # path が US を含むと field が右シフトし want[qpath] に blob でなく path の断片が入る
+  # → hit が出ず **clobber-suspect=0 / rc=0** で素通りしていた（実測）。
+  local r c1 c2 tp
+  tp=$'u\037s.txt'
+  r="$(new_repo)"
+  c1="$(xcommit "$r" refs/heads/main ""    "+$tp=v1" '+plain.txt=p')"
+  c2="$(xcommit "$r" refs/heads/main "$c1" "+$tp=v2")"
+  git -C "$r" update-ref refs/remotes/origin/main "$c2"
+  xcommit "$r" refs/heads/feat "$c2" "+$tp=v1" > /dev/null
+  run "$FRESH" --repo "$r" --branch feat --base-ref origin/main
+  rm -rf "$r"
+  [ "$status" -eq 2 ]
+  grep -q 'harness-fail' <<< "$output"
+  grep -q 'US(0x1f)' <<< "$output"
+  # 「clobber は無い」と名乗っていないこと（fail-open の再発検知）。
+  run ! grep -q 'clobber-suspect=0' <<< "$output"
+}
+
+@test "FIX-5 legB-2: path が LF を含む clobber も harness-fail(2)（record 区切りの同一 bug class）" {
+  local r c1 c2 tp
+  tp=$'u\ns.txt'
+  r="$(new_repo)"
+  c1="$(xcommit "$r" refs/heads/main ""    "+$tp=v1" '+plain.txt=p')"
+  c2="$(xcommit "$r" refs/heads/main "$c1" "+$tp=v2")"
+  git -C "$r" update-ref refs/remotes/origin/main "$c2"
+  xcommit "$r" refs/heads/feat "$c2" "+$tp=v1" > /dev/null
+  run "$FRESH" --repo "$r" --branch feat --base-ref origin/main
+  rm -rf "$r"
+  [ "$status" -eq 2 ]
+  grep -q 'harness-fail' <<< "$output"
+}
+
+@test "FIX-5 legA: 同じ US 入り path の clobber を leg A は従来どおり rc=1 で検知する（guard は leg B-2 側だけで足りる）" {
+  # leg A の path は `log --raw`（quotePath=false でも control char は C-quote される）由来なので
+  # 生の US が EVENT 行へ載らない＝同一 bug class を持たない。過剰に殺していないことも同時に示す。
+  local r c1 c2 feat tp
+  tp=$'u\037s.txt'
+  r="$(new_repo)"
+  c1="$(xcommit "$r" refs/heads/main ""    "+$tp=v1" '+plain.txt=p')"
+  c2="$(xcommit "$r" refs/heads/main "$c1" "+$tp=v2")"
+  feat="$(xcommit "$r" refs/heads/feat "$c2" "+$tp=v1")"
+  run "$SCAN" --repo "$r" --range "$c1..$feat"
+  rm -rf "$r"
+  [ "$status" -eq 1 ]
+  grep -q 'clobber-suspect=1' <<< "$output"
 }
 
 @test "実データ legA: 本リポ走査でも HEAD と working tree を変更しない" {

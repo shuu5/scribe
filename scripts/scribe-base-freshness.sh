@@ -14,6 +14,9 @@
 #   leg B-2 （rc を決める）: **content 条件**。branch の各 file の blob が、その path について base の
 #                         **過去** blob と一致し、かつ base の**現行** blob と不一致なら RED。
 #                         ＝branch が base の現行内容を過去の内容へ巻き戻している（clobber）。
+#                         base に現行 blob が無い path（＝base が削除した path）も対象に含める。
+#                         base 側の削除を branch が過去 blob で打ち消す形も同じ clobber であり、
+#                         「現行が無い＝新規追加だから安全」とは言えない。
 #
 # 実測（本検査の射程を誤読させないため）: 「branch を base へ reset してから stale な working tree を
 # 再 commit した」形の事故では、merge 時点の tip に対して leg B（is-ancestor）も comm 交差も **green**
@@ -44,7 +47,14 @@
 # テスト: tests/blob-revive-guard.bats
 set -euo pipefail
 
+# 継承した git 環境変数を落とす（**引数解析より前**）。これらが export されていると `git -C <PATH>` が
+# PATH でなく環境変数側の repo を解決し、走査していない repo の結果を --repo の名前で報告しうる。
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+      GIT_COMMON_DIR GIT_NAMESPACE
+
 PROG="base-freshness"
+# 中間表現（cand / hit）の field 区切り。path は TAB を含みうるので TAB を区切りに使わない。
+US=$'\037'
 
 die2() { printf '%s: harness-fail: %s\n' "$PROG" "$*" >&2; exit 2; }
 need_val() { [[ -n "${1:-}" && "$1" != -* ]] || die2 "$2 に値を指定してください（値の欠落・次フラグの誤消費を防止）"; }
@@ -94,6 +104,16 @@ case "$RC_LEG" in b2|b) ;; *) die2 "不明な --rc-leg: '$RC_LEG'（b2 / b）" ;
 [[ -d "$REPO" ]] || die2 "--repo が存在しません: $REPO"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die2 "git リポジトリではありません: $REPO"
 
+# 履歴が完全でない repo では「base の過去 blob か」を原理的に答えられない。判定できないので
+# clean(0) でなく harness-fail(2) へ倒す。
+SHALLOW="$(git -C "$REPO" rev-parse --is-shallow-repository 2>/dev/null || true)"
+[[ "$SHALLOW" == "false" ]] \
+  || die2 "履歴が完全ではありません（is-shallow-repository=${SHALLOW:-unknown}）: $REPO"
+# replace ref は object graph を差し替えるため、照合結果が黙って変わる。
+REPLACE_N="$({ git -C "$REPO" replace -l 2>/dev/null || true; } | wc -l)"; REPLACE_N=${REPLACE_N// /}
+[[ "$REPLACE_N" -eq 0 ]] \
+  || die2 "replace ref が $REPLACE_N 件あります（object graph が差し替わり照合結果が変わる）: $REPO"
+
 resolve_commit() { # <rev> <label>
   local out
   out="$(git -C "$REPO" rev-parse --verify --quiet "$1^{commit}" 2>/dev/null)" || true
@@ -124,13 +144,26 @@ cleanup() { rm -rf "$TMPD"; }
 trap cleanup EXIT
 
 # --- branch が触った file / base が触った file ---
-git -C "$REPO" -c core.quotePath=false diff --name-only --no-renames "$MB" "$BR_SHA" \
-  | sort > "$TMPD/br.txt" || die2 "branch 側の diff に失敗しました"
+# path を 2 形式で取る（**同一コマンドの同一順序**なので位置で対応が取れる）:
+#   br.z … `-z` の生 path。`rev-parse <sha>:<path>` と出力・宣言照合に使う。
+#   br.q … 行表現（C-quote 込み）。`git log --raw` 側の path 表現と同じなので履歴照合の key に使う。
+# 生 path だけだと C-quote が要る path（TAB・"・改行等）が履歴側の表現と一致せず無言で落ち、
+# 行表現だけだと `rev-parse <sha>:"q\tb.txt"` が解決できず無言で落ちる（実測）。両方持って解消する。
+git -C "$REPO" diff --name-only -z --no-renames "$MB" "$BR_SHA" > "$TMPD/br.z" \
+  || die2 "branch 側の diff（-z）に失敗しました"
+git -C "$REPO" -c core.quotePath=false diff --name-only --no-renames "$MB" "$BR_SHA" > "$TMPD/br.q" \
+  || die2 "branch 側の diff（行表現）に失敗しました"
 git -C "$REPO" -c core.quotePath=false diff --name-only --no-renames "$MB" "$BASE_SHA" \
   | sort > "$TMPD/base.txt" || die2 "base 側の diff に失敗しました"
 
-BR_N=$(wc -l < "$TMPD/br.txt"); BR_N=${BR_N// /}
+# 実 path 数 = NUL の個数。2 形式の件数が食い違えば位置対応が崩れている＝判定できないので落とす。
+BR_N=$(tr -dc '\0' < "$TMPD/br.z" | wc -c); BR_N=${BR_N// /}
+BR_Q_N=$(wc -l < "$TMPD/br.q"); BR_Q_N=${BR_Q_N// /}
+[[ "$BR_N" -eq "$BR_Q_N" ]] \
+  || die2 "path 一覧の 2 形式で件数が一致しません（-z=$BR_N / 行表現=$BR_Q_N）＝位置対応が取れません"
 [[ "$BR_N" -gt 0 ]] || die2 "走査対象 file が 0 件です（branch が merge-base から何も変更していない）: $BRANCH"
+
+sort "$TMPD/br.q" > "$TMPD/br.txt"
 
 # --- comm 交差（advisory）: comm の rc は常に 0 ゆえ判定は行数で行う ---
 comm -12 "$TMPD/br.txt" "$TMPD/base.txt" > "$TMPD/overlap.txt"
@@ -170,6 +203,8 @@ if [[ -n "$ALLOWLIST" ]]; then
 fi
 is_declared() { # <path> <blob-full>
   local p="$1" blob="${2,,}" b
+  # 空 path は連想配列の subscript にできず abort する。field 破損を緑にも検知にも倒さない。
+  [[ -n "$p" ]] || die2 "内部エラー: 空の path で宣言照合が呼ばれました（中間表現の field 破損）"
   [[ -n "${DECL[$p]:-}" ]] || return 1
   for b in ${DECL[$p]}; do
     [[ "$blob" == "$b"* ]] && return 0
@@ -183,25 +218,44 @@ SUSPECT=0; DECLARED=0
 SUSPECT_LINES=(); DECLARED_LINES=()
 
 # 候補（branch が触った file のうち base の現行 blob と異なるもの）を先に確定させる。
+mapfile -t QPATHS < "$TMPD/br.q"
+QUOTED_N=0
+qi=0
 : > "$TMPD/cand.txt"
-while IFS= read -r path; do
-  [[ -n "$path" ]] || continue
+while IFS= read -r -d '' path; do
+  qpath="${QPATHS[$qi]:-}"
+  qi=$((qi + 1))
+  [[ -n "$path" && -n "$qpath" ]] || die2 "path の 2 形式が対応しません（$qi 件目）: '$path' / '$qpath'"
+  # cand.txt の第 2 field には `-z` 由来の**生 path** を載せる。git は control char を -z 出力では
+  # quote しないため、path 自身が cand.txt の field 区切り（US）や record 区切り（LF）を含むと
+  # 行・field が右シフトし、awk 側の want[qpath] に blob でなく path の断片が入る → hit が出ず
+  # **無言で clobber-suspect=0 / rc=0** になる（実測: leg A は同じ clobber を rc=1 で検知するのに
+  # leg B-2 だけ fail-open）。中間表現の field 対応が取れない以上「巻き戻しが無い」とは言えないので、
+  # 緑にも検知にも倒さず harness-fail(2) で落とす（FIX-1 の空 path ガードと同じ fail-closed 方針）。
+  case "$path" in
+    *"$US"*)  die2 "path が中間表現の field 区切り US(0x1f) を含むため field 対応が取れません: $qpath" ;;
+    *$'\n'*)  die2 "path が中間表現の record 区切り LF を含むため field 対応が取れません: $qpath" ;;
+  esac
+  [[ "$qpath" == "$path" ]] || QUOTED_N=$((QUOTED_N + 1))
   # branch 側 blob（branch で削除されていれば clobber の対象外）
   br_blob="$(git -C "$REPO" rev-parse --verify --quiet "$BR_SHA:$path" 2>/dev/null)" || br_blob=""
   [[ -n "$br_blob" ]] || continue
-  # base 側の現行 blob（base に無い＝branch の新規追加なので過去 blob との一致はあり得ない）
+  # base 側の現行 blob。**base に path が無い場合も候補に載せる**（base が削除した path を branch が
+  # 過去 blob で復活させる形＝base 側の削除が消える clobber。現行 blob が無いことは「新規追加だから
+  # 安全」を意味しない）。照合は base 履歴中の過去 blob（want[p]）のみで行う。
   base_cur="$(git -C "$REPO" rev-parse --verify --quiet "$BASE_SHA:$path" 2>/dev/null)" || base_cur=""
-  [[ -n "$base_cur" ]] || continue
-  # 現行と一致していれば巻き戻しではない
-  [[ "$br_blob" != "$base_cur" ]] || continue
-  printf '%s\t%s\t%s\n' "$path" "$br_blob" "$base_cur" >> "$TMPD/cand.txt"
-done < "$TMPD/br.txt"
+  # 現行と一致していれば巻き戻しではない（base_cur 空なら一致しようがない）
+  [[ -z "$base_cur" || "$br_blob" != "$base_cur" ]] || continue
+  printf '%s%s%s%s%s%s%s\n' "$qpath" "$US" "$path" "$US" "$br_blob" "$US" "${base_cur:-absent}" \
+    >> "$TMPD/cand.txt"
+done < "$TMPD/br.z"
 
 # base の**過去** blob に br_blob が居るかを 1 回の awk で照合する（path ごとに log/awk を回さない）。
 : > "$TMPD/hit.txt"
 if [[ -s "$TMPD/cand.txt" ]]; then
-  awk -F'\t' '
-    FNR==NR { want[$1]=$2; cur[$1]=$3; next }
+  # cand の field: 1=履歴照合 key（行表現）/ 2=生 path（表示・宣言照合）/ 3=branch blob / 4=base 現行 blob
+  awk -v FS="$US" -v US="$US" '
+    FNR==NR { want[$1]=$3; cur[$1]=$4; raw[$1]=$2; next }
     /^__C__ / { split($0, a, " "); csha = a[2]; next }
     /^:/ {
       t = index($0, "\t"); if (t == 0) next
@@ -209,13 +263,14 @@ if [[ -s "$TMPD/cand.txt" ]]; then
       if (!(p in want) || (p in hit)) next
       split(meta, m, " ")
       # m[4]=dst blob。base 履歴のどこかで当該 path がこの blob を持っていた＝過去 blob への巻き戻し。
+      # 照合は want[p] のみで行う（base の現行 blob が無い＝base が削除した path も候補に含まれる）。
       if (m[4] == want[p]) hit[p] = csha
     }
-    END { for (p in hit) printf "%s\t%s\t%s\t%s\n", p, want[p], cur[p], hit[p] }
+    END { for (p in hit) print raw[p] US want[p] US cur[p] US hit[p] }
   ' "$TMPD/cand.txt" "$TMPD/hist.txt" | sort > "$TMPD/hit.txt" || die2 "base 履歴の照合（awk）に失敗しました"
 fi
 
-while IFS=$'\t' read -r path br_blob base_cur prior_commit; do
+while IFS="$US" read -r path br_blob base_cur prior_commit; do
   [[ -n "$path" ]] || continue
   if is_declared "$path" "$br_blob"; then
     DECLARED=$((DECLARED + 1))
@@ -226,9 +281,9 @@ while IFS=$'\t' read -r path br_blob base_cur prior_commit; do
   fi
 done < "$TMPD/hit.txt"
 
-printf '%s: repo=%s branch=%s@%s base-ref=%s@%s merge-base=%s is-ancestor=%s overlap-files=%s br-touched-files=%s clobber-suspect=%s declared-restore=%s rc-leg=%s\n' \
+printf '%s: repo=%s branch=%s@%s base-ref=%s@%s merge-base=%s is-ancestor=%s overlap-files=%s br-touched-files=%s quoted-paths=%s clobber-suspect=%s declared-restore=%s rc-leg=%s\n' \
   "$PROG" "$REPO" "$BRANCH" "$(short "$BR_SHA")" "$BASE_REF" "$(short "$BASE_SHA")" "$(short "$MB")" \
-  "$IS_ANC" "$OVERLAP_N" "$BR_N" "$SUSPECT" "$DECLARED" "$RC_LEG"
+  "$IS_ANC" "$OVERLAP_N" "$BR_N" "$QUOTED_N" "$SUSPECT" "$DECLARED" "$RC_LEG"
 
 while IFS= read -r p; do [[ -z "$p" ]] || printf 'overlap: path=%s\n' "$p"; done < "$TMPD/overlap.txt"
 [[ ${#SUSPECT_LINES[@]}  -eq 0 ]] || printf '%s\n' "${SUSPECT_LINES[@]}"

@@ -45,8 +45,16 @@
 # テスト: tests/blob-revive-guard.bats
 set -euo pipefail
 
+# 継承した git 環境変数を落とす（**引数解析より前**）。これらが export されていると `git -C <PATH>` が
+# PATH でなく環境変数側の repo を解決し、走査していない repo の結果を --repo の名前で報告しうる。
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+      GIT_COMMON_DIR GIT_NAMESPACE
+
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 PROG="blob-revive-scan"
+# EVENT / STATS 行の field 区切り。TAB は IFS-whitespace ゆえ連続区切りが 1 個に畳まれ、空 field
+# （prev 無し＝delete 後の再追加）で field が左シフトする。US(0x1f) は非 whitespace なので畳まれない。
+US=$'\037'
 
 # harness-fail 専用経路（lib の scribe_die は exit 1 固定ゆえ使わない — 1 は「検知」に予約されている）。
 die2() { printf '%s: harness-fail: %s\n' "$PROG" "$*" >&2; exit 2; }
@@ -118,6 +126,16 @@ esac
 [[ -d "$REPO" ]] || die2 "--repo が存在しません: $REPO"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die2 "git リポジトリではありません: $REPO"
 
+# 履歴が完全でない repo では prior-occurrence 照合が成立しない。判定できないので clean(0) でなく
+# harness-fail(2) へ倒す（shallow clone は「過去に既出か」を原理的に答えられない）。
+SHALLOW="$(git -C "$REPO" rev-parse --is-shallow-repository 2>/dev/null || true)"
+[[ "$SHALLOW" == "false" ]] \
+  || die2 "履歴が完全ではありません（is-shallow-repository=${SHALLOW:-unknown}）: $REPO"
+# replace ref は object graph を差し替えるため、走査結果が黙って変わる。
+REPLACE_N="$({ git -C "$REPO" replace -l 2>/dev/null || true; } | wc -l)"; REPLACE_N=${REPLACE_N// /}
+[[ "$REPLACE_N" -eq 0 ]] \
+  || die2 "replace ref が $REPLACE_N 件あります（object graph が差し替わり走査結果が変わる）: $REPO"
+
 # --- range を解決（'..' 形式のみ受ける。'...' は対称差ゆえ本検査の意味論と合わない） ---
 case "$RANGE" in
   *...*) die2 "--range は <base>..<tip> 形式のみ受け付けます（'...' は不可）: $RANGE" ;;
@@ -150,7 +168,12 @@ RANGE_N=${RANGE_N// /}
 [[ "$RANGE_N" -gt 0 ]] || die2 "走査対象 commit が 0 件です（range が空 = 指定ミス）: $RANGE"
 
 # range 内の merge 件数（無音 skip をしないことを機械で示すため必ず集計する）。
-MERGE_N=$(git -C "$REPO" rev-list --first-parent --merges "$RANGE_BASE".."$RANGE_TIP" | wc -l)
+# skipped-merges は **実カウント**（literal を焼くと bats の assert が空虚になる）。走査で raw 行を
+# 1 本も得られなかった range 内 merge ＝その merge については何も見ていない、を skipped と定義する。
+if ! git -C "$REPO" rev-list --first-parent --merges "$RANGE_BASE".."$RANGE_TIP" > "$TMPD/merges.txt"; then
+  die2 "range 内 merge の列挙に失敗しました: $RANGE"
+fi
+MERGE_N=$(wc -l < "$TMPD/merges.txt")
 MERGE_N=${MERGE_N// /}
 
 # --- 全 first-parent 履歴の raw 走査（tip から root まで 1 回） ---
@@ -161,17 +184,20 @@ if ! git -C "$REPO" -c core.quotePath=false log --first-parent -m --raw --no-ren
   die2 "履歴の走査に失敗しました（tip=$RANGE_TIP）: $(head -1 "$TMPD/err.txt")"
 fi
 
-awk '
-  FNR==NR { inrange[$0]=1; next }
+awk -v US="$US" -v rangef="$TMPD/range.txt" -v mergef="$TMPD/merges.txt" '
+  FILENAME==rangef { inrange[$0]=1; next }
+  FILENAME==mergef { ismerge[$0]=1; next }
   /^__C__ / { ci++; csha[ci]=$2; nn[ci]=0; next }
   /^:/ { if (ci>0) { nn[ci]++; raw[ci SUBSEP nn[ci]]=$0 } next }
   END {
-    scanned=0; touched=0; revived=0; delonly=0
+    scanned=0; touched=0; revived=0; delonly=0; skipped=0
     # git log は新→古なので逆順に走査して「古い順」にする（prior-occurrence の意味論はこの順序に依存）。
     for (i=ci; i>=1; i--) {
       sha = csha[i]
       inr = (sha in inrange)
       if (inr) scanned++
+      # raw 行が 1 本も無い range 内 merge ＝この merge については何も走査していない。
+      if (inr && (sha in ismerge) && nn[i] == 0) skipped++
       for (j=1; j<=nn[i]; j++) {
         line = raw[i SUBSEP j]
         t = index(line, "\t")
@@ -188,16 +214,17 @@ awk '
         key = path SUBSEP dst
         if (dst != prev && (key in seen) && inr) {
           revived++
-          printf "EVENT\t%s\t%s\t%s\t%s\n", sha, dst, prev, path
+          # 区切りは US。prev は空になりうる（delete 後の再追加）ので、畳まれる TAB は使わない。
+          print "EVENT" US sha US dst US prev US path
         }
         seen[key] = 1
         last[path] = dst
       }
     }
     for (p in dseen) if (!(p in tseen)) delonly++
-    printf "STATS\t%d\t%d\t%d\t%d\n", scanned, touched, revived, delonly
+    print "STATS" US scanned US touched US revived US delonly US skipped
   }
-' "$TMPD/range.txt" "$TMPD/log.txt" > "$TMPD/out.txt" || die2 "走査（awk）に失敗しました"
+' "$TMPD/range.txt" "$TMPD/merges.txt" "$TMPD/log.txt" > "$TMPD/out.txt" || die2 "走査（awk）に失敗しました"
 
 # --- 宣言（declared-restore）の読み込み ---
 # DECL[path] に空白区切りの blob prefix 列を積む。blob は 4 桁以上の前方一致で照合する。
@@ -228,6 +255,9 @@ fi
 
 is_declared() { # <path> <blob-full>
   local p="$1" blob="${2,,}" b
+  # 空 path は連想配列の subscript にできず abort する。呼び出し側の field 破損を緑にも検知にも
+  # 倒さず harness-fail(2) で落とす。
+  [[ -n "$p" ]] || die2 "内部エラー: 空の path で宣言照合が呼ばれました（EVENT 行の field 破損）"
   [[ -n "${DECL[$p]:-}" ]] || return 1
   # DECL[path] は空白区切りの blob prefix 列（宣言側が hex に検証済みゆえ単語分割で安全）。
   for b in ${DECL[$p]}; do
@@ -237,15 +267,15 @@ is_declared() { # <path> <blob-full>
 }
 
 # --- 集計と出力 ---
-SCANNED=0; TOUCHED=0; REVIVED=0; DELONLY=0
+SCANNED=0; TOUCHED=0; REVIVED=0; DELONLY=0; SKIPPED_MERGES=0
 SUSPECT=0; DECLARED=0
 SUSPECT_LINES=()
 DECLARED_LINES=()
 short() { printf '%s' "${1:0:7}"; }
 
-while IFS=$'\t' read -r tag f2 f3 f4 f5; do
+while IFS="$US" read -r tag f2 f3 f4 f5 f6; do
   case "$tag" in
-    STATS) SCANNED="$f2"; TOUCHED="$f3"; REVIVED="$f4"; DELONLY="$f5" ;;
+    STATS) SCANNED="$f2"; TOUCHED="$f3"; REVIVED="$f4"; DELONLY="$f5"; SKIPPED_MERGES="$f6" ;;
     EVENT)
       # f2=commit / f3=復活した blob / f4=直前 blob / f5=path
       if is_declared "$f5" "$f3"; then
@@ -259,7 +289,10 @@ while IFS=$'\t' read -r tag f2 f3 f4 f5; do
   esac
 done < "$TMPD/out.txt"
 
-[[ "$TOUCHED" -gt 0 ]] || die2 "走査対象 file が 0 件です（range 内で変更された file が無い）: $RANGE"
+# 削除しか無い range は「走査対象 0」ではない（正常に走査した結果、blob を持つ変更が無かった）。
+# deleted-only-paths を集計行へ出した上で通常の走査扱いにする（理由文と事実を食い違わせない）。
+[[ "$TOUCHED" -gt 0 || "$DELONLY" -gt 0 ]] \
+  || die2 "走査対象 file が 0 件です（range 内に file の変更も削除も無い）: $RANGE"
 
 # range 内 commit のうち tip の first-parent chain に載っていないものがあると prior-occurrence の
 # 意味論（「その commit より前の first-parent 履歴」）が保証できない。鮮度が判定できない場合は
@@ -269,9 +302,9 @@ done < "$TMPD/out.txt"
 
 # touched-paths は「blob を持つ変更があった path」（削除だけの path は deleted-only-paths へ分ける）。
 # 集計単位を沈黙で落とさないため両方出す（他実装の raw 集計と桁が合わない時の突合点になる）。
-printf '%s: mode=post-merge repo=%s range=%s..%s range-in=%s scanned-commits=%s merges=%s skipped-merges=0 touched-paths=%s deleted-only-paths=%s revived=%s clobber-suspect=%s declared-restore=%s\n' \
+printf '%s: mode=post-merge repo=%s range=%s..%s range-in=%s scanned-commits=%s merges=%s skipped-merges=%s touched-paths=%s deleted-only-paths=%s revived=%s clobber-suspect=%s declared-restore=%s\n' \
   "$PROG" "$REPO" "$(short "$RANGE_BASE")" "$(short "$RANGE_TIP")" "$RANGE" \
-  "$SCANNED" "$MERGE_N" "$TOUCHED" "$DELONLY" "$REVIVED" "$SUSPECT" "$DECLARED"
+  "$SCANNED" "$MERGE_N" "$SKIPPED_MERGES" "$TOUCHED" "$DELONLY" "$REVIVED" "$SUSPECT" "$DECLARED"
 
 [[ ${#SUSPECT_LINES[@]}  -eq 0 ]] || printf '%s\n' "${SUSPECT_LINES[@]}"
 [[ ${#DECLARED_LINES[@]} -eq 0 ]] || printf '%s\n' "${DECLARED_LINES[@]}"
