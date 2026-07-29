@@ -21,6 +21,9 @@
 #   rc=0 かつ 1 行以上        → VIOLATION（台帳が公開面に出ている）
 #   rc≠0                      → UNKNOWN（fail-loud。決して OK に畳まない）
 #   ※ `git ls-remote ... | grep -q` のようにパイプで rc を捨てる形は使わない（out/rc を必ず捕捉する）。
+#   ※ 補助検出: dolt の git-remote 実装は `refs/heads/__dolt_remote_info__` も push するため、
+#     glob の外に居る台帳由来 ref を `COND1-EXTRA: DOLT-REF-OUTSIDE-GLOB <ref>` で fail-loud に surface する
+#     （rc は変えない。既存 ref の削除は破壊操作＝人間承認事案で reconciler の裁量外ゆえ報告に留める）。
 #
 # 条件 2 の判定（部分一致禁止・3 経路 OR）:
 #   比較は「正規化後の完全一致」。1 経路でもコード repo を指したら VIOLATION（OR で赤・AND で緑にしない）。
@@ -29,8 +32,10 @@
 #     (2c) `bd dolt remote list` の実 push 先 ← **これが真の決定点**
 #   2c を欠く実装は受け入れない: dolt エンジンは config.yaml とは別の自前 remote レジストリを持つため、
 #   config だけを見る検査は 2026-07-27 incident そのものの状態（config は private・実 push 先はコード repo）を
-#   green と報告してしまう。
+#   green と報告してしまう。2c は検査対象の台帳へ **pin** する（BEADS_DIR を落とし `bd where` の解決先が
+#   当該 .beads と一致することを確認する）。一致しなければ OK に畳まず UNKNOWN。
 #   適用単位は git root の .beads ではなく **repo 内に実在する全 .beads**（本 repo は root と cc-session/ の 2 台帳）。
+#   ただし git-ignored な ephemeral コピー（worker worktree の checkout 等）は台帳ではないので走査から外す。
 #
 # 正規化仕様（sc-vbre の beads-bdw plugin 側 guard と同一契約。lib 共有は別便）:
 #   先頭 `git+` 除去 / ssh 形 `git@host:owner/repo` を `https://host/owner/repo` へ写像 /
@@ -140,6 +145,28 @@ else
   fi
 fi
 
+# --- 条件 1 の補助検出: refs/dolt/* の外に居る dolt 由来 ref ---------------------
+# dolt の git-remote 実装は台帳 push 時に `refs/heads/__dolt_remote_info__` も作る（実測 2026-07-29:
+# 台帳専用 private repo には refs/dolt/data と対で存在し、コード repo にも 1 本残存していた）。
+# glob `refs/dolt/*` はこれを拾わないため、条件 1 が OK でも台帳由来 ref が公開面に残りうる。
+# 「検査が在るのに露出を見逃す」形（fail-open）を避けるため fail-loud で surface する。
+# ただし rc の意味は変えない: 既存 ref の削除は破壊操作（人間承認事案）で reconciler の裁量外ゆえ、
+# ここで RED にすると分離済みの repo が恒久停止する。判定は報告に留め、処置は人間が決める。
+extra_out="$(git -C "$REPO" ls-remote origin '*__dolt*' 2>/dev/null)"; extra_rc=$?
+if [ "$extra_rc" -ne 0 ]; then
+  printf 'COND1-EXTRA: UNKNOWN\n'
+  say "  条件1 補助: UNKNOWN — git ls-remote が rc=$extra_rc（dolt 由来 ref の残存を確認できない）"
+elif [ -n "$extra_out" ]; then
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    ref="${line##*$'\t'}"
+    case "$ref" in refs/dolt/*) continue ;; esac
+    printf 'COND1-EXTRA: DOLT-REF-OUTSIDE-GLOB %s\n' "$ref"
+    say "  条件1 補助: 台帳由来 ref が refs/dolt/* の外に残存 — $ref"
+    say "    （削除は破壊操作＝人間承認事案。rc は変えない＝報告のみ）"
+  done <<< "$extra_out"
+fi
+
 # --- config.yaml のパース ----------------------------------------------------
 # (2a) col0 平坦の `sync.remote:` 行
 parse_flat_remote() {
@@ -168,7 +195,26 @@ parse_nested_remote() {
 }
 
 # --- 条件 2: 全 .beads について 3 経路を OR 判定 --------------------------------
-mapfile -t BEADS_DIRS < <(find "$REPO" -name .beads -type d -not -path '*/.git/*' 2>/dev/null | LC_ALL=C sort)
+# 走査は **repo 自身の working tree に実在する台帳** に限る。git-ignored な ephemeral コピー
+# （worker worktree の checkout・node_modules 配下のベンダ物）まで台帳として数えると、
+# `.worktrees/` を持つ anchor で他 cell の古い config が偽 VIOLATION を作り、reconciler が恒久停止する。
+# 恒常的な false RED は「rc を読み飛ばす」運用を誘発し、次の本物の違反を素通しさせる＝本 checker が
+# 防ごうとしている失敗様式そのもの。除外は 2 段: (1) 明示 prune（worktree 規約・vendor ディレクトリ）
+# (2) `git check-ignore`（.gitignore された生成物一般）。untracked だが ignored でない台帳は残す。
+mapfile -t BEADS_CANDIDATES < <(
+  find "$REPO" \
+    \( -name .git -o -name node_modules -o -name .worktrees -o -path '*/.claude/worktrees' \) -prune -o \
+    \( -name .beads -type d \) -print 2>/dev/null | LC_ALL=C sort
+)
+
+BEADS_DIRS=()
+for cand in ${BEADS_CANDIDATES[@]+"${BEADS_CANDIDATES[@]}"}; do
+  if git -C "$REPO" check-ignore -q -- "$cand" 2>/dev/null; then
+    say "  条件2: skip — git-ignored な ephemeral コピー（台帳ではない）: ${cand#"$REPO"/}"
+    continue
+  fi
+  BEADS_DIRS+=("$cand")
+done
 
 if [ "${#BEADS_DIRS[@]}" -eq 0 ]; then
   say "  条件2: 判定対象の .beads が無い（未導入）"
@@ -229,8 +275,29 @@ else
       done <<< "$nested"
     fi
 
-    # (2c) 真の決定点: dolt の remote レジストリ
-    dolt_out="$(cd "$parent" 2>/dev/null && bd dolt remote list 2>/dev/null)"; dolt_rc=$?
+    # (2c) 真の決定点: dolt の remote レジストリ。**検査対象の台帳へ pin する**。
+    #   bd の台帳解決は ambient（環境変数 BEADS_DIR が cwd より優先され、DB を持たない .beads では
+    #   祖先の台帳へ解決される）。pin しないと「別の（清浄な）台帳の remote」を、検査したと称する
+    #   台帳の 2c: OK として報告する＝違反台帳が masked される fail-open になる。
+    #   ゆえに (i) BEADS_DIR を落とし (ii) `bd where` で実際の解決先を実測し (iii) それが $bdir と
+    #   一致したときだけ 2c を判定する。一致しない／確認できない場合は OK に畳まず UNKNOWN。
+    # `| head -1` は使わない（pipefail 下で bd が SIGPIPE を踏むと rc が化ける）。全文を捕捉して 1 行目を取る。
+    where_out="$(cd "$parent" 2>/dev/null && env -u BEADS_DIR bd where 2>/dev/null)"; where_rc=$?
+    resolved="${where_out%%$'\n'*}"
+    resolved="${resolved%"${resolved##*[![:space:]]}"}"; resolved="${resolved%/}"
+    if [ "$where_rc" -ne 0 ] || [ -z "$resolved" ]; then
+      printf 'COND2 %s 2c: UNKNOWN\n' "$rel"
+      say "    $rel 2c bd where: rc=$where_rc → UNKNOWN（bd の解決先を確認できない＝台帳を pin できない）"
+      cond2_unknown=1
+      continue
+    fi
+    if [ "$resolved" != "${bdir%/}" ]; then
+      printf 'COND2 %s 2c: UNKNOWN\n' "$rel"
+      say "    $rel 2c bd の解決先が別台帳（$resolved）→ UNKNOWN（この台帳の実 push 先は未確認）"
+      cond2_unknown=1
+      continue
+    fi
+    dolt_out="$(cd "$parent" 2>/dev/null && env -u BEADS_DIR bd dolt remote list 2>/dev/null)"; dolt_rc=$?
     if [ "$dolt_rc" -ne 0 ]; then
       printf 'COND2 %s 2c: UNKNOWN\n' "$rel"
       say "    $rel 2c bd dolt remote list: rc=$dolt_rc → UNKNOWN（実 push 先を確認できない）"

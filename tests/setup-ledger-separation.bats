@@ -26,10 +26,18 @@ setup() {
   #     BD_STUB_RC≠0 で「bd 実行不能＝実 push 先を確認できない」を再現する。
   BDSTUB="$BATS_TEST_TMPDIR/bdstub"
   mkdir -p "$BDSTUB"
+  #     `bd where` も再現する（checker は 2c を台帳へ pin するため解決先を実測する）。既定の解決先は
+  #     cwd の .beads。`.bd-stub-where` を置くと**別台帳へ解決される ambient 状態**を再現できる。
   cat > "$BDSTUB/bd" <<'STUB'
 #!/usr/bin/env bash
 rc="${BD_STUB_RC:-0}"
 if [ "$rc" -ne 0 ]; then echo "bd-stub: forced failure" >&2; exit "$rc"; fi
+case "${1:-}" in
+  where)
+    if [ -f ./.bd-stub-where ]; then cat ./.bd-stub-where; else printf '%s\n' "$PWD/.beads"; fi
+    printf '  prefix: stub\n'
+    exit 0 ;;
+esac
 if [ -f ./.bd-stub-remote ]; then
   while IFS= read -r u; do [ -n "$u" ] && printf 'origin               %s\n' "$u"; done < ./.bd-stub-remote
 fi
@@ -48,6 +56,9 @@ case "${args[0]:-}" in
   remote)   printf '%s\n' "${GIT_STUB_ORIGIN:-}" ;;
   ls-remote) [ -n "${GIT_STUB_LSREMOTE:-}" ] && printf '%s\n' "$GIT_STUB_LSREMOTE"
              exit "${GIT_STUB_LSREMOTE_RC:-0}" ;;
+  # check-ignore の rc は「0=ignored / 1=ignored でない」。既定は 1（ignored でない）——
+  # 既定 0 にすると checker が全台帳を ephemeral 扱いで skip し、違反 fixture が緑になる。
+  check-ignore) exit "${GIT_STUB_CHECKIGNORE_RC:-1}" ;;
 esac
 exit 0
 STUB
@@ -333,6 +344,86 @@ put_dolt_remote() {
   [[ "$output" == *"RESULT: CLEAN"* ]]
 }
 
+@test "走査範囲: .worktrees 配下の stale checkout は台帳として数えない（本リポ anchor の偽 RED 回帰 pin）" {
+  # 本リポ anchor は .worktrees/spawn/<cell>/ に他 cell の checkout を持つ（.gitignore 済み・ephemeral）。
+  # 分離前 commit の config が残っているだけで anchor 全体が RESULT: VIOLATION になると、
+  # SKILL.md の規定により /scribe:setup が構造的に停止する（恒常 false RED → gate 無視の誘発）。
+  w="$(mk_work sep-wt)"
+  printf '/.worktrees/\n' > "$w/.gitignore"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-wt-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-wt-beads.git"
+  # ephemeral な worktree checkout に「分離前」の違反 config を置く。
+  put_ledger "$w" .worktrees/spawn/other-cell flat "git+file://$BATS_TEST_TMPDIR/sep-wt.git"
+  put_dolt_remote "$w/.worktrees/spawn/other-cell" "git+file://$BATS_TEST_TMPDIR/sep-wt.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RESULT: CLEAN"* ]]
+  [[ "$output" != *".worktrees/spawn/other-cell/.beads 2a: VIOLATION"* ]]
+  # 実在台帳のほうは依然として検査されている（走査ごと落としたのではない）。
+  [[ "$output" == *"COND2 .beads 2c: OK"* ]]
+}
+
+@test "走査範囲: .gitignore された生成物配下の .beads も数えない（tracked な違反は依然 RED）" {
+  w="$(mk_work sep-ign)"
+  printf 'vendor-cache/\n' > "$w/.gitignore"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-ign-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-ign-beads.git"
+  put_ledger "$w" vendor-cache/x flat "git+file://$BATS_TEST_TMPDIR/sep-ign.git"   # ignored な違反
+  put_dolt_remote "$w/vendor-cache/x" "git+file://$BATS_TEST_TMPDIR/sep-ign.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RESULT: CLEAN"* ]]
+
+  # 対照: ignored でない（untracked でも可）従属台帳の違反は今までどおり RED のまま。
+  put_ledger "$w" sub flat "git+file://$BATS_TEST_TMPDIR/sep-ign.git"
+  put_dolt_remote "$w/sub" "git+file://$BATS_TEST_TMPDIR/sep-ign-sub-beads.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"COND2 sub/.beads 2a: VIOLATION"* ]]
+  [[ "$output" == *"RESULT: VIOLATION"* ]]
+}
+
+@test "2c pin: bd の解決先が別台帳なら OK に畳まず UNKNOWN（ambient 解決による masking の封鎖）" {
+  # DB を持たない .beads では bd が祖先の台帳へ解決する（環境変数 BEADS_DIR も cwd より優先される）。
+  # pin しない実装は「別台帳の清浄な remote」をこの台帳の 2c: OK として報告してしまう。
+  w="$(mk_work sep-pin)"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-pin-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-pin-beads.git"
+  # 解決先を別台帳（祖先）に見せかける。
+  printf '%s\n' "$BATS_TEST_TMPDIR/some-other-anchor/.beads" > "$w/.bd-stub-where"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"COND2 .beads 2c: UNKNOWN"* ]]
+  [[ "$output" == *"COND2: UNKNOWN"* ]]
+  [[ "$output" != *"COND2 .beads 2c: OK"* ]]
+  [[ "$output" != *"RESULT: CLEAN"* ]]
+}
+
+@test "条件1 補助: refs/dolt/* の外に居る dolt 由来 ref を surface する（rc は変えない）" {
+  # dolt の git-remote 実装は refs/heads/__dolt_remote_info__ も push する。glob refs/dolt/* は
+  # これを拾わないため、条件1 が OK でも台帳由来 ref が公開面に残りうる（実測: 本リポのコード repo に残存）。
+  w="$(mk_work sep-extra)"
+  git -C "$w" push -q origin HEAD:refs/heads/__dolt_remote_info__
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-extra-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-extra-beads.git"
+  run "$CHECKER" --repo "$w"
+  # 検出は fail-loud に出る。
+  [[ "$output" == *"COND1-EXTRA: DOLT-REF-OUTSIDE-GLOB refs/heads/__dolt_remote_info__"* ]]
+  # rc の意味は変えない（既存 ref の削除は破壊操作＝人間承認事案ゆえ、報告に留めて reconciler は止めない）。
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"COND1: OK"* ]]
+  [[ "$output" == *"RESULT: CLEAN"* ]]
+}
+
+@test "条件1 補助: 該当 ref が無ければ COND1-EXTRA 行は出ない（安売りしない）" {
+  w="$(mk_work sep-noextra)"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-noextra-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-noextra-beads.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"COND1-EXTRA:"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # 5. acceptance 1a — 本リポ worktree の .beads/config.yaml を回帰 pin（read のみ）
 # ---------------------------------------------------------------------------
@@ -449,11 +540,75 @@ put_dolt_remote() {
   # 実測（一次観測）
   [[ "$se" == *"bd dolt remote list"* ]]
   # 実測結果で分岐してから push（実測と push が同一実行単位に無い）
-  [[ "$se" == *"sep_rc"* ]]
-  [[ "$se" == *'if [ "${sep_rc:-2}" -eq 0 ]; then'* ]]
   [[ "$se" == *"bd dolt push"* ]]
   # 未確認時は push しない旨が明記されている
   [[ "$se" == *"bd dolt push を実行しない"* ]]
+  # rc は実行単位を跨ぐ: ゲートは file へ落とし、push 側はそれを読み直す（シェル変数に依存しない）。
+  [[ "$se" == *'echo $? > "${TMPDIR:-/tmp}/ledger-sep.rc"'* ]]
+  [[ "$se" == *'gate_rc="$(cat "${TMPDIR:-/tmp}/ledger-sep.rc" 2>/dev/null || echo 2)"'* ]]
+  # push 側は checker を再実測し、ゲート rc と再実測 rc の両方 0 のときだけ push する。
+  [[ "$se" == *'if [ "${gate_rc:-2}" -eq 0 ] && [ "${now_rc:-2}" -eq 0 ]; then'* ]]
+  # 前段の**シェル変数**を跨いで読む形（実行単位を跨げず常に既定値へ畳まれる）は
+  # **実行されるコードから**消えている（散文での言及は説明ゆえ対象外＝コードブロックだけを見る）。
+  se_code="$(awk '/^## Step 末:/{s=1} /^## 禁止事項/{s=0} s' "$SKILL" \
+            | awk '/^```bash$/{inb=1;next} /^```$/{inb=0;next} inb')"
+  [ -n "$se_code" ]
+  [[ "$se_code" != *'sep_rc=$?'* ]]
+  [[ "$se_code" != *'"${sep_rc:-2}" -eq 0'* ]]
+}
+
+# --- doc-pin ではなく実走で pin する: Step 末の 2 ブロックを別プロセス（= 別の実行単位）で実行し、
+#     分離が緑なら push へ到達し、赤なら到達しないことを実証する。
+#     字面 pin だけでは「rc がシェル変数で渡らず green 経路が到達不能」という壊れ方を検出できない。
+run_step_end_blocks() {   # $1 = checker が返す rc
+  local chk_rc="$1"
+  local d="$BATS_TEST_TMPDIR/stepend"
+  rm -rf "$d"; mkdir -p "$d/plugin/skills/setup" "$d/bin" "$d/tmp" "$d/cwd"
+
+  # SKILL.md の Step 末セクションから ```bash ブロックを順に切り出す。
+  awk '/^## Step 末:/{s=1} /^## 禁止事項/{s=0} s' "$SKILL" > "$d/section.md"
+  awk -v out="$d" '
+    /^```bash$/ { inb=1; n++; next }
+    /^```$/     { inb=0; next }
+    inb         { print > (out "/block" n ".sh") }
+  ' "$d/section.md"
+  [ -s "$d/block1.sh" ]
+  [ -s "$d/block2.sh" ]
+
+  # stub checker（指定 rc を返す）と stub bd（呼ばれたサブコマンドを記録する）。
+  printf '#!/usr/bin/env bash\nexit %s\n' "$chk_rc" > "$d/plugin/skills/setup/check-ledger-separation.sh"
+  chmod +x "$d/plugin/skills/setup/check-ledger-separation.sh"
+  cat > "$d/bin/bd" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+STUB
+  chmod +x "$d/bin/bd"
+
+  export CLAUDE_PLUGIN_ROOT="$d/plugin"
+  export BD_CALL_LOG="$d/bd-calls.log"; : > "$BD_CALL_LOG"
+  export TMPDIR="$d/tmp"
+  # 別プロセスで順に実行する（シェル状態は跨がない＝実運用の Bash 呼出しと同じ条件）。
+  # ブロック末尾の `git status` 等は fixture では失敗しうるので rc は捨てる（判定は成果物で行う）。
+  ( cd "$d/cwd" && PATH="$d/bin:$PATH" bash "$d/block1.sh" ) >"$d/out1" 2>&1 || true
+  ( cd "$d/cwd" && PATH="$d/bin:$PATH" bash "$d/block2.sh" ) >"$d/out2" 2>&1 || true
+  STEP_END_DIR="$d"
+}
+
+@test "SKILL.md Step 末（実走）: 分離が緑(rc=0)なら別プロセスでも bd dolt push へ到達する" {
+  run_step_end_blocks 0
+  run grep -qx 'dolt push' "$STEP_END_DIR/bd-calls.log"
+  [ "$status" -eq 0 ]
+  run grep -q '台帳分離が未確認' "$STEP_END_DIR/out2"
+  [ "$status" -ne 0 ]
+}
+
+@test "SKILL.md Step 末（実走）: 分離が赤(rc=1)なら bd dolt push へ到達しない" {
+  run_step_end_blocks 1
+  run grep -qx 'dolt push' "$STEP_END_DIR/bd-calls.log"
+  [ "$status" -ne 0 ]
+  run grep -q '台帳分離が未確認' "$STEP_END_DIR/out2"
+  [ "$status" -eq 0 ]
 }
 
 @test "SKILL.md: rc 2（判定不能）を OK に畳まないことが明記され、禁止事項にも入っている" {

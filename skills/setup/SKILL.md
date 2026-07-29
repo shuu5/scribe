@@ -46,6 +46,10 @@ SessionStart 注入が opt-in で発火する状態**にする。各次元を独
 > （rc **0**=clean / **1**=違反 / **2**=判定不能）。**rc 2（判定不能）を rc 0 に畳まない**——到達不能・認証不能・timeout を
 > 「OK」と読み替えると、検査が在るのに露出を見逃す（fail-open）。本 skill は Step 0（検出）・Dolt remote 収束 step・
 > Step 末（push 前ゲート）の **3 箇所すべて**でこの checker を呼ぶ。
+>
+> checker は `COND1-EXTRA: DOLT-REF-OUTSIDE-GLOB <ref>` 行も出す（`refs/dolt/*` の外に居る台帳由来 ref＝
+> dolt が push する `refs/heads/__dolt_remote_info__` の残存）。**rc は変わらない**——既存 ref の削除は破壊操作
+> ＝人間承認事案で reconciler の裁量外ゆえ、この行が出たら報告に載せて人間へ上げる（自動で消さない）。
 
 ## Step 0: 状態検出（read-only。まず現状を一覧化して報告）
 
@@ -229,17 +233,27 @@ surface するため取りこぼさない（intent 路と backstop の対）。�
 編集しても push 先は切り替わらない——dolt エンジンは自前の remote レジストリを持ち、切替には
 `bd dolt remote remove/add` が要る。ゆえに**実測と push を別の実行単位に分け、実測結果で分岐**させる。
 
+**rc はシェル変数では次の実行単位へ渡らない**（Bash 呼出し間でシェル状態は保持されない）。第 2 ブロックで
+`sep_rc=$?` の値を読もうとすると常に未設定＝既定 2 に畳まれ、**分離が緑でも push へ到達しない**（fail-closed
+だが同期 step が恒久的に死ぬ）。ゆえにゲートの rc は **file 経由で持ち越し**、push 側では checker を
+**再実測**して、**ゲート rc と再実測 rc の両方が 0 のときだけ** push する（stale な rc file 単独では緑にならない）。
+
 ```bash
-# ゲート（実測）: 実 push 先そのものを目で見る + 機械条件 2 本を checker で判定
+# ゲート（実測・第 1 実行単位）: 実 push 先そのものを目で見る + 機械条件 2 本を checker で判定
+rm -f "${TMPDIR:-/tmp}/ledger-sep.rc"
 bd dolt remote list                                                        # 実 push 先の一次観測
-"${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh"; sep_rc=$?  # 0=clean / 1=違反 / 2=判定不能
+"${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh"; echo $? > "${TMPDIR:-/tmp}/ledger-sep.rc"
+echo "LEDGER-SEP:rc=$(cat "${TMPDIR:-/tmp}/ledger-sep.rc")"                 # 0=clean / 1=違反 / 2=判定不能
 ```
 ```bash
-# push（別の実行単位。rc=0 のときだけ実行する。rc=2 を rc=0 に畳まない）
-if [ "${sep_rc:-2}" -eq 0 ]; then
+# push（第 2 実行単位）。前段のシェル変数には依存しない: ゲートが残した rc を読み直し、さらに checker を
+# 再実測して、両方 0 のときだけ push する（rc=2 を rc=0 に畳まない／rc file 単独では緑にしない）
+gate_rc="$(cat "${TMPDIR:-/tmp}/ledger-sep.rc" 2>/dev/null || echo 2)"; case "$gate_rc" in ''|*[!0-9]*) gate_rc=2 ;; esac
+"${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh" --quiet; now_rc=$?
+if [ "${gate_rc:-2}" -eq 0 ] && [ "${now_rc:-2}" -eq 0 ]; then
   bd dolt push        # remote 設定済みなら
 else
-  echo "⛔ 台帳分離が未確認（LEDGER-SEP:rc=${sep_rc:-2}）につき bd dolt push を実行しない"
+  echo "⛔ 台帳分離が未確認（ゲート rc=${gate_rc:-2} / 直前実測 rc=${now_rc:-2}）につき bd dolt push を実行しない"
 fi
 bd ready              # 動作確認
 grep -L 'BEGIN BEADS INTEGRATION' CLAUDE.md AGENTS.md   # 汚染が消えたか
