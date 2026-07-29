@@ -450,7 +450,9 @@ put_dolt_remote() {
   w="$(mk_work sep-dbpin)"
   put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-dbpin-beads.git"
   put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-dbpin-beads.git"
-  # path は一致・database: だけ祖先台帳。
+  # path は一致・database: だけ祖先台帳。**祖先の DB は実在させる**（実 bd での状況を忠実に再現する）。
+  # 実在させないと「DB 不在」検査だけで UNKNOWN になり、包含判定そのものが pin されない（変異で無反応になる）。
+  mkdir -p "$BATS_TEST_TMPDIR/ancestor/.beads/embeddeddolt"
   printf '%s\n  database: %s\n' "$w/.beads" "$BATS_TEST_TMPDIR/ancestor/.beads/embeddeddolt" \
     > "$w/.bd-stub-where"
   run "$CHECKER" --repo "$w"
