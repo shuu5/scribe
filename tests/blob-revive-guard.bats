@@ -118,6 +118,29 @@ xcommit() {
   printf '%s' "$new"
 }
 
+# path に `=` を含む fixture 用（xcommit の +<path>=<内容> 形式では表現できないため位置引数で受ける）。
+#   px_commit <repo> <ref> <parent|""> <path> <内容> [<path2> <内容2>...]
+px_commit() {
+  local repo="$1" ref="$2" parent="$3"; shift 3
+  local ix="$repo/.ixp" pth body blob tree new
+  rm -f "$ix"
+  [[ -z "$parent" ]] || GIT_INDEX_FILE="$ix" git -C "$repo" read-tree "$parent"
+  while [[ $# -gt 0 ]]; do
+    pth="$1" body="$2"; shift 2
+    blob="$(printf '%s' "$body" | git -C "$repo" hash-object -w --stdin)"
+    GIT_INDEX_FILE="$ix" git -C "$repo" update-index --add --cacheinfo 100644 "$blob" "$pth"
+  done
+  tree="$(GIT_INDEX_FILE="$ix" git -C "$repo" write-tree)"
+  if [[ -n "$parent" ]]; then
+    new="$(git -C "$repo" commit-tree "$tree" -p "$parent" -m x)"
+  else
+    new="$(git -C "$repo" commit-tree "$tree" -m x)"
+  fi
+  git -C "$repo" update-ref "$ref" "$new"
+  rm -f "$ix"
+  printf '%s' "$new"
+}
+
 # ---------- 構文 ----------
 
 @test "blob-revive: 両 script の bash -n 構文 OK" {
@@ -505,6 +528,11 @@ xcommit() {
 
 real_commit_or_skip() { # <rev>...
   local r
+  # shallow clone では両 script が設計どおり harness-fail(2) を返すため、実データ teeth は
+  # 「commit が在るのに rc が期待と違う」形で RED になる。file 冒頭の「clone 差で赤くしない」
+  # 規律に合わせ、commit 不在と同様に skip する（clone の形の差で赤くしない）。
+  [[ "$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository 2>/dev/null)" == "false" ]] \
+    || skip "本 clone が shallow（両 script は設計どおり harness-fail する＝実データ teeth の対象外）"
   for r in "$@"; do
     git -C "$REPO_ROOT" rev-parse --verify --quiet "$r^{commit}" >/dev/null 2>&1 \
       || skip "実 commit $r が本 clone に無い"
@@ -670,12 +698,13 @@ real_commit_or_skip() { # <rev>...
 
 @test "FIX-4 legA: shallow clone（--depth）は harness-fail(2)（履歴照合が成立しない）" {
   # full clone が rc=1 で検知する同一 clobber を、shallow では 0 件 clean と報告していた（実測）。
-  local sh
-  sh="$(cd "$(mktemp -d)" && pwd -P)/sh"
+  local par sh
+  par="$(cd "$(mktemp -d)" && pwd -P)"   # 親ごと消す（clone 先だけ消すと親が毎回残る）
+  sh="$par/sh"
   git clone -q --depth 2 "file://$FX" "$sh"
   [ "$(git -C "$sh" rev-parse --is-shallow-repository)" = "true" ]
   run "$SCAN" --repo "$sh" --range "$C3..$C4"
-  rm -rf "$sh"
+  rm -rf "$par"
   [ "$status" -eq 2 ]
   grep -q 'harness-fail' <<< "$output"
 }
@@ -683,23 +712,25 @@ real_commit_or_skip() { # <rev>...
 @test "FIX-4 legB: shallow clone（--depth）は harness-fail(2)" {
   # base-ref を C3 に取ると、guard を外した場合に「走査は成立するが履歴が足りず clobber-suspect=0」
   # ＝**clean を名乗る** 経路へ入る（実測 rc=0）。この引数でないと別理由の rc=2 で空虚な teeth になる。
-  local sh
-  sh="$(cd "$(mktemp -d)" && pwd -P)/sh"
+  local par sh
+  par="$(cd "$(mktemp -d)" && pwd -P)"
+  sh="$par/sh"
   git clone -q --depth 2 "file://$FX" "$sh"
   [ "$(git -C "$sh" rev-parse --is-shallow-repository)" = "true" ]
   run "$FRESH" --repo "$sh" --branch main --base-ref "$C3"
-  rm -rf "$sh"
+  rm -rf "$par"
   [ "$status" -eq 2 ]
   grep -q 'harness-fail' <<< "$output"
 }
 
 @test "FIX-4 legA: full clone は shallow guard に掛からず従来どおり検知する（過剰に殺していない）" {
-  local full
-  full="$(cd "$(mktemp -d)" && pwd -P)/full"
+  local par full
+  par="$(cd "$(mktemp -d)" && pwd -P)"
+  full="$par/full"
   git clone -q "file://$FX" "$full"
   [ "$(git -C "$full" rev-parse --is-shallow-repository)" = "false" ]
   run "$SCAN" --repo "$full" --range "$C2..$C3"
-  rm -rf "$full"
+  rm -rf "$par"
   [ "$status" -eq 1 ]
   grep -q 'clobber-suspect=1' <<< "$output"
 }
@@ -919,6 +950,202 @@ real_commit_or_skip() { # <rev>...
   # rc=1（検知）へ化けていないこと＝この branch は本来 rc=1 になる clobber を持っている。
   run "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main
   [ "$status" -eq 1 ]
+}
+
+# ---------- ERRATA-3 FIX-A: wc の rc を契約 {0,1,2} の外へ漏らさない ----------
+
+@test "FIX-A legA: wc が失敗しても rc=2（契約外の rc をそのまま漏らさない）" {
+  # 実測（修正前）: wc を exit 3 の shim にすると legA も legB-2 も **rc=3 かつ stdout 0 byte**。
+  # rc 契約 {0,1,2} 違反と「沈黙を green と読ませない」不変量の同時破れ。
+  local shim
+  shim="$(cd "$(mktemp -d)" && pwd -P)"
+  printf '#!/bin/sh\nexit 3\n' > "$shim/wc"
+  chmod +x "$shim/wc"
+  run env PATH="$shim:$PATH" "$SCAN" --repo "$FX" --range "$C2..$C3"
+  rm -rf "$shim"
+  [ "$status" -eq 2 ]
+  grep -q 'harness-fail' <<< "$output"
+  # guard あり時は本来 rc=1 になる range であることを同時に示す（別理由の 2 で空虚にしない）。
+  run "$SCAN" --repo "$FX" --range "$C2..$C3"
+  [ "$status" -eq 1 ]
+}
+
+@test "FIX-A legB: wc が失敗しても rc=2（契約外の rc をそのまま漏らさない）" {
+  local br shim
+  br="$(fx_commit_on feat-clobber "$C4" a.txt 'v2
+')"
+  shim="$(cd "$(mktemp -d)" && pwd -P)"
+  printf '#!/bin/sh\nexit 3\n' > "$shim/wc"
+  chmod +x "$shim/wc"
+  run env PATH="$shim:$PATH" "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main
+  rm -rf "$shim"
+  [ "$status" -eq 2 ]
+  grep -q 'harness-fail' <<< "$output"
+  run "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main
+  [ "$status" -eq 1 ]
+}
+
+@test "FIX-A: 依存 probe が実使用コマンド（wc）の不在を rc=2 で捕まえる（rc=127 を漏らさない）" {
+  # PATH を「bash と git 等はあるが wc が無い」状態にして、127 でなく 2 で落ちることを要求する。
+  local stub c p
+  stub="$(cd "$(mktemp -d)" && pwd -P)"
+  for c in bash sh git awk comm sort mktemp tr sed head cat env printf readlink dirname chmod rm; do
+    p="$(command -v "$c" 2>/dev/null)" && ln -sf "$p" "$stub/$c"
+  done
+  run env PATH="$stub" "$SCAN" --repo "$FX" --range "$C2..$C3"
+  [ "$status" -eq 2 ]
+  grep -q '外部コマンドが見つかりません: wc' <<< "$output"
+  run env PATH="$stub" "$FRESH" --repo "$FX" --branch feat-fresh --base-ref origin/main
+  rm -rf "$stub"
+  [ "$status" -eq 2 ]
+  grep -q '外部コマンドが見つかりません: wc' <<< "$output"
+}
+
+# ---------- ERRATA-3 minor n1 / n2: 宣言の表現能力 ----------
+
+@test "MINOR-n1: path に等号を含む file も宣言できる（最後の = で分割する）" {
+  # 最短前方一致（%%=*）だと path が 'k' に切れて宣言が黙って効かなかった。
+  local r c1 c2 feat blob tp
+  tp='k=v.txt'
+  r="$(new_repo)"
+  # ※ xcommit の spec 形式（+<path>=<内容>）は最短前方一致で分割するため `=` 入り path を作れない。
+  #    この fixture だけ直 plumbing で組む（ヘルパを変えると既存 20 数箇所の呼出しに影響するため）。
+  c1="$(px_commit "$r" refs/heads/main ""    "$tp" v1 plain.txt p)"
+  c2="$(px_commit "$r" refs/heads/main "$c1" "$tp" v2)"
+  git -C "$r" update-ref refs/remotes/origin/main "$c2"
+  feat="$(px_commit "$r" refs/heads/feat "$c2" "$tp" v1)"
+  blob="$(git -C "$r" rev-parse "$c1:$tp")"
+  # leg A
+  run "$SCAN" --repo "$r" --range "$c1..$feat" --expect-restore "$tp=${blob:0:7}"
+  [ "$status" -eq 0 ]
+  grep -q 'declared-restore=1' <<< "$output"
+  # leg B-2
+  run "$FRESH" --repo "$r" --branch feat --base-ref origin/main --expect-restore "$tp=${blob:0:7}"
+  rm -rf "$r"
+  [ "$status" -eq 0 ]
+  grep -q 'declared-restore=1' <<< "$output"
+}
+
+@test "MINOR-n2: --allowlist は空白と # を含む path を表現できる（TAB 区切り・行頭のみコメント）" {
+  local r c1 c2 feat blob tp
+  tp='a b#c.txt'
+  r="$(new_repo)"
+  c1="$(xcommit "$r" refs/heads/main ""    "+$tp=v1" '+plain.txt=p')"
+  c2="$(xcommit "$r" refs/heads/main "$c1" "+$tp=v2")"
+  git -C "$r" update-ref refs/remotes/origin/main "$c2"
+  feat="$(xcommit "$r" refs/heads/feat "$c2" "+$tp=v1")"
+  blob="$(git -C "$r" rev-parse "$c1:$tp")"
+  printf '# 行頭コメントは落とす\n%s\t%s\tPR#999 で意図的に戻した\n' "$tp" "${blob:0:7}" > "$r/allow.txt"
+  run "$FRESH" --repo "$r" --branch feat --base-ref origin/main --allowlist "$r/allow.txt"
+  [ "$status" -eq 0 ]
+  grep -q 'declared-restore=1' <<< "$output"
+  run "$SCAN" --repo "$r" --range "$c1..$feat" --allowlist "$r/allow.txt"
+  rm -rf "$r"
+  [ "$status" -eq 0 ]
+  grep -q 'declared-restore=1' <<< "$output"
+}
+
+@test "MINOR-n2: 従来の空白区切り allowlist も引き続き効く（後方互換）" {
+  printf 'a.txt %s PR#999 で意図的に戻した\n' "${BLOB_V1:0:7}" > "$FX/allow-sp.txt"
+  run "$SCAN" --repo "$FX" --range "$C2..$C3" --allowlist "$FX/allow-sp.txt"
+  [ "$status" -eq 0 ]
+  grep -q 'declared-restore=1' <<< "$output"
+}
+
+# ---------- ERRATA-3 minor n3 / n6 / n7: 実装済み guard に teeth を付ける ----------
+
+@test "MINOR-n3: pre-merge の委譲先解決に必要な外部コマンド不在は rc=2（cwd へ無言 degrade しない）" {
+  # readlink / dirname が無いと $(...) が空になり `cd "" && pwd` が cwd を返す＝cwd 相対の同名
+  # script を掴みうる。fail-closed で落ちることを要求する。
+  local stub c p
+  stub="$(cd "$(mktemp -d)" && pwd -P)"
+  for c in bash sh git awk comm sort mktemp tr sed head cat env printf wc chmod rm; do
+    p="$(command -v "$c" 2>/dev/null)" && ln -sf "$p" "$stub/$c"
+  done
+  run env PATH="$stub" "$SCAN" --repo "$FX" --mode pre-merge --branch feat-clobber --base-ref origin/main
+  rm -rf "$stub"
+  [ "$status" -eq 2 ]
+  grep -q '委譲先の解決に必要な外部コマンドがありません' <<< "$output"
+}
+
+@test "MINOR-n6: replace ref が在る repo は両 leg とも harness-fail(2)" {
+  # 実装済み guard に teeth が 0 本だった面。replace ref は object graph を差し替えるため走査結果が
+  # 黙って変わる（本リポの実測は 0 件）。
+  local r c1 c2
+  r="$(new_repo)"
+  c1="$(xcommit "$r" refs/heads/main ""    '+a.txt=v1')"
+  c2="$(xcommit "$r" refs/heads/main "$c1" '+a.txt=v2')"
+  git -C "$r" update-ref refs/remotes/origin/main "$c2"
+  git -C "$r" replace -f "$c2" "$c1"
+  run "$SCAN" --repo "$r" --range "$c1..$c2"
+  [ "$status" -eq 2 ]
+  grep -q 'replace ref' <<< "$output"
+  run "$FRESH" --repo "$r" --branch main --base-ref "$c1"
+  rm -rf "$r"
+  [ "$status" -eq 2 ]
+  grep -q 'replace ref' <<< "$output"
+}
+
+@test "MINOR-n6: 不正な --expect-restore（blob が hex でない / = 無し）は両 leg とも rc=2" {
+  run "$SCAN" --repo "$FX" --range "$C2..$C3" --expect-restore 'a.txt=notahexvalue!'
+  [ "$status" -eq 2 ]
+  run "$SCAN" --repo "$FX" --range "$C2..$C3" --expect-restore 'a.txt-no-equals'
+  [ "$status" -eq 2 ]
+  run "$FRESH" --repo "$FX" --branch feat-fresh --base-ref origin/main --expect-restore 'a.txt=zz'
+  [ "$status" -eq 2 ]
+}
+
+@test "MINOR-n6: 不在の --allowlist file は両 leg とも rc=2（空 allowlist として素通ししない）" {
+  run "$SCAN" --repo "$FX" --range "$C2..$C3" --allowlist "$FX/no-such-allowlist.txt"
+  [ "$status" -eq 2 ]
+  grep -q 'allowlist' <<< "$output"
+  run "$FRESH" --repo "$FX" --branch feat-fresh --base-ref origin/main --allowlist "$FX/no-such-allowlist.txt"
+  [ "$status" -eq 2 ]
+}
+
+@test "MINOR-n6: unset 対象の git 環境変数すべてが結果を汚さない（GIT_DIR 以外も含む）" {
+  # FIX-3 teeth は GIT_DIR / GIT_WORK_TREE だけを見ていた。残りの 5 個も同時に汚して、
+  # 正規の --repo に対する結果が不変であることを要求する。
+  local other
+  other="$(new_repo)"
+  xcommit "$other" refs/heads/main "" '+zzz.txt=z' > /dev/null
+  run env GIT_DIR="$other/.git" GIT_WORK_TREE="$other" GIT_INDEX_FILE="$other/.idxpollute" \
+      GIT_OBJECT_DIRECTORY="$other/.git/objects" \
+      GIT_ALTERNATE_OBJECT_DIRECTORIES="$other/.git/objects" \
+      GIT_COMMON_DIR="$other/.git" GIT_NAMESPACE=pollute \
+      "$SCAN" --repo "$FX" --range "$C2..$C3"
+  [ "$status" -eq 1 ]
+  grep -q 'clobber-suspect=1' <<< "$output"
+  grep -q "clobber-suspect: path=a.txt" <<< "$output"
+  fx_commit_on feat-fresh "$C4" e.txt 'e' > /dev/null   # 0 file だと別理由の rc=2 になる
+  run env GIT_DIR="$other/.git" GIT_WORK_TREE="$other" GIT_NAMESPACE=pollute \
+      "$FRESH" --repo "$FX" --branch feat-fresh --base-ref origin/main --rc-leg b
+  rm -rf "$other"
+  [ "$status" -eq 0 ]
+  grep -q 'is-ancestor=fresh' <<< "$output"
+}
+
+@test "MINOR-n7: --mode pre-merge の宣言は生 path 側の規約（usage の記載と一致する）" {
+  # 同じ script・同じフラグでもモードで宣言表記が変わる（pre-merge は base-freshness へ exec 委譲）。
+  local r c1 c2 tp blob
+  tp=$'q\tb.txt'
+  r="$(new_repo)"
+  c1="$(xcommit "$r" refs/heads/main ""    "+$tp=v1" '+plain.txt=p')"
+  c2="$(xcommit "$r" refs/heads/main "$c1" "+$tp=v2")"
+  git -C "$r" update-ref refs/remotes/origin/main "$c2"
+  xcommit "$r" refs/heads/feat "$c2" "+$tp=v1" > /dev/null
+  # pre-merge は生 path で効く
+  run "$SCAN" --repo "$r" --mode pre-merge --branch feat --base-ref origin/main \
+        --expect-restore "$tp=$(git -C "$r" rev-parse "$c1:$tp" | cut -c1-7)"
+  [ "$status" -eq 0 ]
+  grep -q 'declared-restore=1' <<< "$output"
+  # C-quote 形では効かない（post-merge 側の規約）
+  run "$SCAN" --repo "$r" --mode pre-merge --branch feat --base-ref origin/main \
+        --expect-restore "\"q\\tb.txt\"=$(git -C "$r" rev-parse "$c1:$tp" | cut -c1-7)"
+  rm -rf "$r"
+  [ "$status" -eq 1 ]
+  # usage に モード別の表記規約が書かれていること
+  grep -q 'mode pre-merge' "$SCAN"
 }
 
 @test "実データ legA: 本リポ走査でも HEAD と working tree を変更しない" {

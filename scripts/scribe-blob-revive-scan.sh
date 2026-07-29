@@ -25,6 +25,8 @@
 #   通常 path（control char・`"`・`\` を含まない）では両者は一致するので実運用の差は出ない。
 #   quote が要る path を宣言するときは、出力行に出ている path 表記をそのまま写すこと（方向は
 #   fail-closed ＝表記違いは declared にならず clobber-suspect のまま rc=1 になる。見逃しではない）。
+#   **`--mode pre-merge` は base-freshness.sh へ exec 委譲するので、そのときの宣言表記は生 path 側**
+#   （同じ本 script の同じフラグでもモードで規約が変わる点に注意）。
 #   commit message / PR 本文のトレーラ宣言方式は**採らない**（本リポは squash merge 運用で message を
 #   書くのは merge 時の admin であり、新しい運用規約の成文化を要するため）。
 #
@@ -56,7 +58,6 @@ set -euo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
       GIT_COMMON_DIR GIT_NAMESPACE
 
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 PROG="blob-revive-scan"
 # EVENT / STATS 行の field 区切り。TAB は IFS-whitespace ゆえ連続区切りが 1 個に畳まれ、空 field
 # （prev 無し＝delete 後の再追加）で field が左シフトする。US(0x1f) は非 whitespace なので畳まれない。
@@ -76,8 +77,10 @@ Usage:
   宣言オプション:
       --expect-restore <path>=<blob>   意図的復元の宣言（主・複数指定可・blob は 4 桁以上の前方一致）
       --allowlist <file>               意図的復元の allowlist（補・1 行 `<path> <blob> <根拠>`・# コメント可）
-      ※ path は **C-quote 形**（本 script の出力行に出る表記）。leg B / B-2（base-freshness）は生 path を
-         使うため、quote が要る path では 2 leg で表記が異なる。出力の path 表記をそのまま写すこと。
+      ※ path 表記は **モードで異なる**（quote が要る path のときだけ差が出る）:
+         --mode post-merge（既定） … **C-quote 形**（例 "q\tb.txt"）＝本 script の出力行の表記
+         --mode pre-merge          … **生 path**（例 $'q\tb.txt'）＝委譲先 base-freshness.sh の表記
+         いずれもその実行の出力行に出ている path 表記をそのまま写せば正しい。
   scribe-blob-revive-scan.sh -h | --help
 
 Exit: 0=clean / 1=clobber-suspect 検知 / 2=harness-fail
@@ -108,7 +111,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for c in git awk mktemp; do
+# 依存 probe は**実使用する全コマンド**を列挙する（漏れると不在時に rc=127 が漏出し契約 {0,1,2} を
+# 破る。実測: wc を PATH から外すと rc=127）。
+for c in git awk mktemp wc head; do
   command -v "$c" >/dev/null 2>&1 || die2 "外部コマンドが見つかりません: $c"
 done
 
@@ -116,6 +121,15 @@ case "$MODE" in
   post-merge) ;;
   pre-merge)
     # A2 = leg B-2 と同一実装。委譲して rc を透過する（判定ロジックを二重実装しない）。
+    # 委譲先の解決は **fail-closed**。readlink / dirname が不在だと $(...) が空になり
+    # `cd "" && pwd` が cwd を返すため、cwd 相対の同名 script を掴みうる（無言の別実装実行）。
+    for c in readlink dirname; do
+      command -v "$c" >/dev/null 2>&1 || die2 "委譲先の解決に必要な外部コマンドがありません: $c"
+    done
+    SELF="$(readlink -f "$0" 2>/dev/null || true)"
+    [[ -n "$SELF" ]] || die2 "自身の実体 path を解決できません: '$0'"
+    SCRIPT_DIR="$(cd -- "$(dirname -- "$SELF")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
+    [[ "$SCRIPT_DIR" == /* ]] || die2 "自身のディレクトリを絶対 path で解決できません: '$SCRIPT_DIR'"
     BF="$SCRIPT_DIR/scribe-base-freshness.sh"
     [[ -x "$BF" ]] || die2 "pre-merge モードの委譲先が実行できません: $BF"
     [[ -n "$BRANCH" ]] || die2 "--mode pre-merge には --branch が必要です"
@@ -140,7 +154,16 @@ SHALLOW="$(git -C "$REPO" rev-parse --is-shallow-repository 2>/dev/null || true)
 [[ "$SHALLOW" == "false" ]] \
   || die2 "履歴が完全ではありません（is-shallow-repository=${SHALLOW:-unknown}）: $REPO"
 # replace ref は object graph を差し替えるため、走査結果が黙って変わる。
-REPLACE_N="$({ git -C "$REPO" replace -l 2>/dev/null || true; } | wc -l)"; REPLACE_N=${REPLACE_N// /}
+# `|| true` を判定経路に置かない（列挙自体が失敗したら「0 件」ではなく harness-fail）。件数は
+# 外部コマンドを使わず bash で数える（wc の rc を判定経路から外す）。
+if ! REPLACE_RAW="$(git -C "$REPO" replace -l 2>/dev/null)"; then
+  die2 "replace ref の列挙に失敗しました（0 件と区別できません）: $REPO"
+fi
+REPLACE_N=0
+if [[ -n "$REPLACE_RAW" ]]; then
+  mapfile -t REPLACE_LINES <<< "$REPLACE_RAW"
+  REPLACE_N=${#REPLACE_LINES[@]}
+fi
 [[ "$REPLACE_N" -eq 0 ]] \
   || die2 "replace ref が $REPLACE_N 件あります（object graph が差し替わり走査結果が変わる）: $REPO"
 
@@ -171,7 +194,11 @@ trap cleanup EXIT
 if ! git -C "$REPO" rev-list --first-parent "$RANGE_BASE".."$RANGE_TIP" > "$TMPD/range.txt" 2>"$TMPD/err.txt"; then
   die2 "range の解決に失敗しました: $RANGE（$(head -1 "$TMPD/err.txt")）"
 fi
-RANGE_N=$(wc -l < "$TMPD/range.txt")
+# 外部コマンドの rc は必ず捕まえて 2 へ写像する（素の `$(wc -l < f)` は `set -e` で script を
+# wc 自身の rc（実測: shim で 3 / 不在で 127）ごと落とし、契約 {0,1,2} の外へ漏らす）。
+if ! RANGE_N="$(wc -l < "$TMPD/range.txt")"; then
+  die2 "range 内 commit の計数に失敗しました"
+fi
 RANGE_N=${RANGE_N// /}
 [[ "$RANGE_N" -gt 0 ]] || die2 "走査対象 commit が 0 件です（range が空 = 指定ミス）: $RANGE"
 
@@ -181,7 +208,9 @@ RANGE_N=${RANGE_N// /}
 if ! git -C "$REPO" rev-list --first-parent --merges "$RANGE_BASE".."$RANGE_TIP" > "$TMPD/merges.txt"; then
   die2 "range 内 merge の列挙に失敗しました: $RANGE"
 fi
-MERGE_N=$(wc -l < "$TMPD/merges.txt")
+if ! MERGE_N="$(wc -l < "$TMPD/merges.txt")"; then
+  die2 "range 内 merge の計数に失敗しました"
+fi
 MERGE_N=${MERGE_N// /}
 
 # --- 全 first-parent 履歴の raw 走査（tip から root まで 1 回） ---
@@ -240,7 +269,9 @@ declare -A DECL=()
 add_decl() { # <path>=<blob> <出所>
   local spec="$1" src="$2" p b
   [[ "$spec" == *=* ]] || die2 "$src の形式が不正です（<path>=<blob> が必要）: '$spec'"
-  p="${spec%%=*}"; b="${spec#*=}"
+  # blob 側は hex に検証済みなので **最後の `=`** で分割する（最短前方一致だと path に `=` を
+  # 含む file を宣言できない＝宣言経路 2 つとも add_decl 経由ゆえ同根）。
+  p="${spec%=*}"; b="${spec##*=}"
   [[ -n "$p" ]] || die2 "$src の path が空です: '$spec'"
   [[ "$b" =~ ^[0-9a-fA-F]{4,40}$ ]] || die2 "$src の blob が不正です（16 進 4-40 桁）: '$spec'"
   DECL["$p"]="${DECL[$p]:-} ${b,,}"
@@ -251,10 +282,17 @@ if [[ -n "$ALLOWLIST" ]]; then
   lineno=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     lineno=$((lineno + 1))
-    line="${line%%#*}"
-    [[ -n "${line// /}" ]] || continue
+    # コメントは**行頭（先頭空白を除く）が # の行だけ**（行中 # を落とすと path に # を含められない）。
+    case "${line#"${line%%[![:space:]]*}"}" in '#'*) continue ;; esac
+    [[ -n "${line//[[:space:]]/}" ]] || continue
     # `<path> <blob> <根拠1行>`。根拠は照合に使わないが省略は不可（宣言に説明責任を持たせる）。
-    read -r a_path a_blob a_rest <<< "$line"
+    # TAB 区切りが在れば TAB で分割する（path に**空白**を含められる）。無ければ従来の空白区切り。
+    # ＝--expect-restore との表現能力の非対称を解消する（TAB 自体を含む path は表現できない）。
+    if [[ "$line" == *$'\t'* ]]; then
+      IFS=$'\t' read -r a_path a_blob a_rest <<< "$line"
+    else
+      read -r a_path a_blob a_rest <<< "$line"
+    fi
     [[ -n "$a_path" && -n "$a_blob" && -n "$a_rest" ]] \
       || die2 "--allowlist の $lineno 行目が不正です（'<path> <blob> <根拠>' が必要）: $ALLOWLIST"
     add_decl "$a_path=$a_blob" "--allowlist の $lineno 行目"

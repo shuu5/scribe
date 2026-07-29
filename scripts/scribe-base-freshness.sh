@@ -102,7 +102,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for c in git awk comm sort mktemp; do
+# 依存 probe は**実使用する全コマンド**を列挙する（漏れると不在時に rc=127 が漏出し契約 {0,1,2} を
+# 破る。実測: wc を PATH から外すと rc=127）。
+for c in git awk comm sort mktemp wc tr head; do
   command -v "$c" >/dev/null 2>&1 || die2 "外部コマンドが見つかりません: $c"
 done
 
@@ -117,7 +119,16 @@ SHALLOW="$(git -C "$REPO" rev-parse --is-shallow-repository 2>/dev/null || true)
 [[ "$SHALLOW" == "false" ]] \
   || die2 "履歴が完全ではありません（is-shallow-repository=${SHALLOW:-unknown}）: $REPO"
 # replace ref は object graph を差し替えるため、照合結果が黙って変わる。
-REPLACE_N="$({ git -C "$REPO" replace -l 2>/dev/null || true; } | wc -l)"; REPLACE_N=${REPLACE_N// /}
+# `|| true` を判定経路に置かない（列挙自体が失敗したら「0 件」ではなく harness-fail）。件数は
+# 外部コマンドを使わず bash で数える（wc の rc を判定経路から外す）。
+if ! REPLACE_RAW="$(git -C "$REPO" replace -l 2>/dev/null)"; then
+  die2 "replace ref の列挙に失敗しました（0 件と区別できません）: $REPO"
+fi
+REPLACE_N=0
+if [[ -n "$REPLACE_RAW" ]]; then
+  mapfile -t REPLACE_LINES <<< "$REPLACE_RAW"
+  REPLACE_N=${#REPLACE_LINES[@]}
+fi
 [[ "$REPLACE_N" -eq 0 ]] \
   || die2 "replace ref が $REPLACE_N 件あります（object graph が差し替わり照合結果が変わる）: $REPO"
 
@@ -202,7 +213,9 @@ declare -A DECL=()
 add_decl() { # <path>=<blob> <出所>
   local spec="$1" src="$2" p b
   [[ "$spec" == *=* ]] || die2 "$src の形式が不正です（<path>=<blob> が必要）: '$spec'"
-  p="${spec%%=*}"; b="${spec#*=}"
+  # blob 側は hex に検証済みなので **最後の `=`** で分割する（最短前方一致だと path に `=` を
+  # 含む file を宣言できない＝宣言経路 2 つとも add_decl 経由ゆえ同根）。
+  p="${spec%=*}"; b="${spec##*=}"
   [[ -n "$p" ]] || die2 "$src の path が空です: '$spec'"
   [[ "$b" =~ ^[0-9a-fA-F]{4,40}$ ]] || die2 "$src の blob が不正です（16 進 4-40 桁）: '$spec'"
   DECL["$p"]="${DECL[$p]:-} ${b,,}"
@@ -213,9 +226,16 @@ if [[ -n "$ALLOWLIST" ]]; then
   lineno=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     lineno=$((lineno + 1))
-    line="${line%%#*}"
-    [[ -n "${line// /}" ]] || continue
-    read -r a_path a_blob a_rest <<< "$line"
+    # コメントは**行頭（先頭空白を除く）が # の行だけ**（行中 # を落とすと path に # を含められない）。
+    case "${line#"${line%%[![:space:]]*}"}" in '#'*) continue ;; esac
+    [[ -n "${line//[[:space:]]/}" ]] || continue
+    # TAB 区切りが在れば TAB で分割する（path に**空白**を含められる）。無ければ従来の空白区切り。
+    # ＝--expect-restore との表現能力の非対称を解消する（TAB 自体を含む path は表現できない）。
+    if [[ "$line" == *$'\t'* ]]; then
+      IFS=$'\t' read -r a_path a_blob a_rest <<< "$line"
+    else
+      read -r a_path a_blob a_rest <<< "$line"
+    fi
     [[ -n "$a_path" && -n "$a_blob" && -n "$a_rest" ]] \
       || die2 "--allowlist の $lineno 行目が不正です（'<path> <blob> <根拠>' が必要）: $ALLOWLIST"
     add_decl "$a_path=$a_blob" "--allowlist の $lineno 行目"
