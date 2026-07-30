@@ -607,8 +607,13 @@ EOF
   require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   local escape="$BATS_TEST_TMPDIR/escape-canary.txt"
   rm -f "$escape"
-  # detached child を host 側から一意に見分けるための札（cmdline に残る文字列）
-  local canary_tag="sc4t3t-detach-canary-$$"
+  # 2 つの札は**部分文字列として重ならない**別語にする（pgrep -f が観測用 host process を
+  # 置き土産と誤検出しないため）。
+  local canary_tag="sc4t3t-detachcanary-$$"   # sandbox 内から spawn する detached child
+  local host_tag="sc4t3t-hostproc-$$"          # host 側で生かす観測対象（PID 分離の対象）
+  # host 側で確実に生きている実 process。tooth の途中で必ず落とす。
+  /bin/sh -c "sleep 30 # $host_tag" &
+  local host_pid=$!
   {
     printf "export const meta = { name: 'fx-contain', requiredArgs: ['anchor'] }\n"
     printf "const REQUIRED_ARGS = ['anchor']\n"
@@ -621,27 +626,39 @@ EOF
     # env 最小化 / 空 cwd: 破れていたら agent を起動する＝rc=1 に倒れる（rc で機械判定できる形にする）
     printf "if (Object.keys(process.env).length > 0) { await agent('env-not-minimal', { label: 'env' }) }\n"
     printf "if (__fs.readdirSync(process.cwd()).length > 0) { await agent('cwd-not-empty', { label: 'cwd' }) }\n"
-    # ERRATA-1 FIX-P(b)-1: host PID が不可視（--unshare-pid）。host で生きている実 PID（bats 自身）を
-    # sandbox 内から見に行き、見えたら agent を起動＝rc=1 に倒れる。
-    printf "if (__fs.existsSync('/proc/%s')) { await agent('host-pid-visible', { label: 'pid' }) }\n" "$$"
+    # ERRATA-1 FIX-P(b)-1: host PID が不可視（--unshare-pid）。host 側で生かした実 process を sandbox 内から
+    # 見に行き、見えたら agent を起動＝rc=1 に倒れる。
+    # ★ PID 番号の存在だけで判定しない: 本 cell 自体が PID namespace 内で走るため host PID は小さく、
+    #   probe の新 namespace の PID（1=bwrap init / 2=node）と衝突して**偽 RED**になりうる（実測で踏んだ）。
+    #   cmdline の一意札まで照合して「その host process 本体が見えているか」を確かめる（衝突不能）。
+    printf "let __hostVisible = false\n"
+    printf "try { __hostVisible = __fs.readFileSync('/proc/%s/cmdline', 'utf8').includes('%s') } catch (e) {}\n" "$host_pid" "$host_tag"
+    printf "if (__hostVisible) { await agent('host-pid-visible', { label: 'pid' }) }\n"
     # ERRATA-1 FIX-P(b)-2: detached child を置き土産にする。--unshare-pid が無いと engine 復帰後も host に残る。
     printf "const { spawn } = await import('node:child_process')\n"
     printf "try { spawn('/bin/sh', ['-c', 'sleep 20 # %s'], { detached: true, stdio: 'ignore' }).unref() } catch (e) {}\n" "$canary_tag"
     emit_block
     printf "\nawait agent('work', { label: 'w' })\nreturn { ok: true }\n"
   } > "$FIX/contain.workflow.js"
-  run "$ENGINE" --mode adhoc --file "$FIX/contain.workflow.js" --label fx-contain
+  # 観測対象の host process が probe 実行中ずっと生きていたことを先に確かめる（死んでいたら assert が空虚になる）
+  run kill -0 "$host_pid"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"OK fx-contain"* ]]
-  [[ "$output" != *"LEAK-STDOUT-CANARY"* ]]
-  [[ "$output" != *"LEAK-STDERR-CANARY"* ]]
-  [ ! -f "$escape" ]
 
+  run "$ENGINE" --mode adhoc --file "$FIX/contain.workflow.js" --label fx-contain
+  local engine_status="$status"
+  local engine_output="$output"
   # FIX-P(b)-2 の観測は host 側で行う: engine が rc を返した後に置き土産 process が残っていないこと。
   # （PID namespace を分離していれば sandbox 終了と同時に消える。--die-with-parent だけでは残る＝gate 実測）
   run pgrep -f "$canary_tag"
-  [ "$status" -ne 0 ] # 一致 0 件 = pgrep は 1 を返す
-  [ -z "$output" ]
+  local leftover_status="$status"
+  kill "$host_pid" 2>/dev/null || true # 観測用 host process は必ず落とす（assert の成否に関わらず）
+
+  [ "$engine_status" -eq 0 ]
+  [[ "$engine_output" == *"OK fx-contain"* ]]
+  [[ "$engine_output" != *"LEAK-STDOUT-CANARY"* ]]
+  [[ "$engine_output" != *"LEAK-STDERR-CANARY"* ]]
+  [ ! -f "$escape" ]
+  [ "$leftover_status" -ne 0 ] # pgrep は一致 0 件で 1 を返す＝置き土産なし
 }
 
 # ── T20 ──────────────────────────────────────────────────────────────────────
