@@ -28,7 +28,7 @@ SessionStart 注入が opt-in で発火する状態**にする。各次元を独
 1. `bd` が **導入済み**（バージョンは pin しない・upgrade 前検証は人間ポリシー＝PRIME §バージョン管理。reconciler は特定バージョンを強制/ダウングレードしない）
 2. `.beads/` が存在（embedded Dolt）
 3. `bd config` の `backup.git-push = false`
-4. Dolt remote `origin = git+https://...`（マルチPC同期）
+4. Dolt remote `origin = git+https://...` が**コード repo とは別の「台帳専用 private repo」**を指す（マルチPC同期は維持したまま台帳本文をコード repo の公開面から分離する。fleet 標準・全 repo 既定＝PUBLIC repo に限らない。orchestrator 裁定 orch-jot0 / bd sc-zkof）
 5. `.beads/PRIME.md` が**我々の役割中立版**（役割分担・bd remember 禁止・役割規約は scribe role 注入へ委譲）
 6. CLAUDE.md/AGENTS.md に **bd 既定の汚染ブロックが無い**（`bd remember` 推奨/`git push` MANDATORY 等）
 7. project-local `.claude/settings.json` に **bd の `bd prime` hook が無い**（グローバル hook と二重発火しない）
@@ -37,6 +37,60 @@ SessionStart 注入が opt-in で発火する状態**にする。各次元を独
 10. **scribe role 注入が opt-in 成立**: `.beads/` が在り（= scribe で管理する意思表示）、PRIME が role 中立版で
     scribe role 別 SessionStart 注入（admin/worker/consult）と矛盾しない。scribe plugin 登録済みなら、これで
     worktree=worker / `SCRIBE_ROLE=consult`=consult / anchor=admin の注入が矛盾なく発火する状態になる。
+11. **機械条件 1（台帳分離）**: `git ls-remote <このコード repo> 'refs/dolt/*'` が **0 件**（台帳がコード repo の面に出ていない）
+12. **機械条件 2（台帳分離）**: `sync.remote` が当該コード repo を**指さない**。判定は 3 経路を OR で見る
+    ——(2a) col0 平坦の `sync.remote:` 行 / (2b) nested `sync:` ブロックの `remote:` / (2c) `bd dolt remote list` の
+    **実 push 先**（← 真の決定点。config.yaml を編集しても push 先は変わらない）。
+
+> **#11 / #12 の判定は散文でなく実行可能な checker が持つ**: `${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh`
+> （rc **0**=clean / **1**=違反 / **2**=判定不能）。**rc 2（判定不能）を rc 0 に畳まない**——到達不能・認証不能・timeout を
+> 「OK」と読み替えると、検査が在るのに露出を見逃す（fail-open）。本 skill は Step 0（検出）・Dolt remote 収束 step・
+> Step 末（push 前ゲート）の **3 箇所すべて**でこの checker を呼ぶ。
+>
+> checker は `COND1-EXTRA: DOLT-REF-OUTSIDE-GLOB <ref>` 行も出す（`refs/dolt/*` の外に居る台帳由来 ref＝
+> dolt が push する `refs/heads/__dolt_remote_info__` の残存）。**rc は変わらない**——既存 ref の削除は破壊操作
+> ＝人間承認事案で reconciler の裁量外ゆえ、この行が出たら報告に載せて人間へ上げる（自動で消さない）。
+>
+> 同じ checker が **wire 前ゲート** も提供する: `--assert-not-code-repo <url>`（rc 0=コード repo でない /
+> 1=コード repo と一致 / 2=判定不能）。`bd dolt remote add` の**前**にこれを通す（下記 #4 収束 step）。
+> 正規化ロジックを SKILL.md 側へ二重実装しないための単一実装。
+>
+> **wire ゲートの境界（rc=0 を「安全の証明」と読まないこと）**: checker の URL 正規化が吸収するのは
+> 列挙された同値類だけ——scheme（http / git / ssh → https）・既定ポート・連続スラッシュ・`.` と `..`・
+> percent-encode（unreserved）・`file://localhost` と空 host・相対 path の repo 基準解決。
+> **文字列正規化は同一 repo 別表記の完全な同値判定ではない**。したがって
+> `ASSERT-NOT-CODE-REPO: OK`（rc=0）は**「既知同値類で一致しない」ことの確認**であって
+> **「コード repo でない」ことの証明ではない**。IDN homograph・IP literal 表記・HTTP redirect 経由の
+> 別 URL・別ホスト名の同一 forge・非既定 ssh ポートと https 表記の対応などは吸収しない。
+> 到達性ベースの同値判定（`ls-remote` の HEAD 対照等）は本 skill の領分ではなく exposure gate v2 が担う。
+> **人間が与える URL は、目視でも台帳専用 private repo であることを確認すること。**
+>
+> **rc の適用範囲**: rc≠0 が止めるのは **台帳同期（`bd dolt push` と wire）だけ**。台帳分離と無関係な
+> 収束次元（#1 / #2 / #3 / #5〜#10）は独立に収束させる。`origin` を持たない repo でも他次元が
+> 恒久停止しないよう、checker は remote 0 本なら条件 1 を N/A（`COND1-NOTE: NO-GIT-REMOTE`）として扱い、
+> 条件 2 は repo 自身のパスを code-identity に用いて判定を続ける。
+>
+> **コード面は origin の fetch URL だけではない**: code-identity は **各 remote の全 fetch URL
+> （`git remote get-url --all`）+ 全 push URL（`--push --all`＝`pushurl`）+ repo 自身の物理パス**の集合。
+> 条件 2 と `--assert-not-code-repo` はこの集合と完全一致で比較する（upstream / mirror / pushurl / 自リポ
+> へ台帳を向ける経路を塞ぐ）。条件 1 は **remote 名ではなく URL を直接指定して per-URL で走査**する
+> （remote 名指定の `ls-remote` は fetch URL しか見ないので pushurl 上の露出を取り逃がす）。
+> 出力は面ラベル付き（`COND1 origin: …` / `COND1 origin#push: …` / `COND1 mirror: …`）。VIOLATION 行には
+> `remote=<ラベル>` が付くので、本当にコード面かを弁別する——**台帳専用 private repo を git remote に
+> 登録している構成**では「台帳が台帳 repo を指す」ことが VIOLATION として出うる（偽 VIOLATION）。
+>
+> **条件 1 が測るのは「ref listing の不在」であって「object の不在」ではない**: ref を削除しても object は
+> remote に残り、匿名 fetch で取得できる場合がある（実測あり）。走査した run では
+> `COND1-NOTE: REF-LISTING-ONLY` が出る。**`COND1: OK` を「露出が消えた」証明として読まないこと**——
+> 既に公開面へ出てしまった台帳の実質的な解消には remote 側の GC / repo 再作成等が要り、それは
+> 破壊的・不可逆で人間の判断事項（reconciler は行わない）。
+>
+> **注記行が出たときの追加確認**:
+> - `COND2-NOTE: CODE-IDENTITY-PATH-ONLY` … remote 0 本の repo。code-identity が repo 自身のパスだけなので、
+>   **URL 形（`https://…` 等）の台帳先がコード repo でないことは機械照合できていない**。人間が確認すること。
+> - `COND2-NOTE: SCAN-INCOMPLETE` … `.beads` の走査が不完全（読取不能ディレクトリ等）。rc は UNKNOWN。
+>   部分結果を CLEAN と読まず、走査できなかった原因を解消して再検査する。
+> - `REPO-NOTE: NORMALIZED-TO-TOPLEVEL` … 渡したパスが git toplevel でなかったので toplevel で判定した。
 
 ## Step 0: 状態検出（read-only。まず現状を一覧化して報告）
 
@@ -67,8 +121,16 @@ for f in CLAUDE.md AGENTS.md; do grep -qE 'Use `bd remember`|do NOT use MEMORY\.
 test -f .claude/settings.json && grep -q 'bd prime' .claude/settings.json && echo "DOUBLEFIRE:yes" || echo "DOUBLEFIRE:no"
 # gitignore は必要行の全充足で yes（issues.jsonl のみの粗判定だと runtime marker 未収束でも yes になり #8 が skip される）
 { grep -q 'issues.jsonl' .gitignore && grep -q 'scribe-heartbeat' .gitignore && grep -q 'scribe-push-throttle' .gitignore; } 2>/dev/null && echo "GITIGNORE:yes" || echo "GITIGNORE:no"
+# 台帳分離の機械条件 2 本（#11 / #12）。判定は checker が持つ（散文 grep で代替しない）。
+# rc を**必ず捕捉**する（`| grep -q` へ流して rc を捨てると判定不能が OK に化ける＝fail-open）。
+"${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh"; echo "LEDGER-SEP:rc=$?"   # 0=clean / 1=違反 / 2=判定不能
 ```
 結果を「✅正しい / ⚠️要修正 / ➕要追加」で表にして報告してから収束に進む。**変更が一切不要なら「既に正しい構成」と報告して終了**。
+
+`LEDGER-SEP:rc=1`（違反）なら**この run で `bd dolt push` を一切しない**。既にコード repo へ push 済みの
+`refs/dolt/*` の削除は破壊操作（人間承認事案）なので reconciler は自動で消さず、事実と手順を報告して止める。
+`LEDGER-SEP:rc=2`（判定不能）も **OK として扱わない**——原因（network 不達・認証・`bd` 実行不能）を解消して
+再検査するまで push しない。
 
 ## Step 1〜: 各次元を収束（必要な次元だけ実行）
 
@@ -82,14 +144,67 @@ bd init --prefix <PREFIX> --non-interactive --skip-agents --skip-hooks
 `--skip-agents`(CLAUDE.md/AGENTS.md/settings 生成抑止) と `--skip-hooks` は**必須**。
 **既に `.beads/` が有れば re-init しない**（`bd init --force/--reinit-local/--destroy-token` は PreToolUse guard がブロック＝データ消失防止）。prefix はプロジェクト名から導出しユーザー確認。
 
-### backup.git-push（#3）/ Dolt remote（#4）
+### backup.git-push（#3）/ Dolt remote（#4 / #11 / #12）
 ```bash
 bd config get backup.git-push 2>/dev/null | grep -qx false || bd config set backup.git-push false
-bd dolt remote list 2>/dev/null | grep -q '://' || {
-  url=$(git remote get-url origin); case "$url" in git@github.com:*) url="https://github.com/${url#git@github.com:}";; /*) url="file://$url";; esac  # ssh→https / ローカル絶対パス→file://（git+ は URL scheme 必須。scheme 無しは bd が拒否）
-  bd dolt remote add origin "git+${url%.git}.git"; }
 ```
-origin remote が無い場合もスキップし「後で `bd dolt remote add origin git+<url>` を」と案内（安全・再 init はしない）。
+
+**Dolt remote は「台帳専用 private repo」の URL を人間から受け取ったときだけ wire する。コード repo へは
+絶対に wire しない**（`git remote get-url origin` 由来の自動 wire は撤去済み＝これが台帳をコード repo の面へ
+出す唯一の機構だった）。未提供なら **wire せず fail-loud で停止**する。reconciler は private repo を
+**自動作成しない**（`gh repo create` 等の外部 write を skill へ埋め込まない）。
+
+**wire は「検査してから」行う（wire-then-check にしない）**: `bd dolt remote add` を先に実行してから
+checker で気づく形は事後検知でしかない。レジストリへ書かれた時点で以後の自動 push（`scripts/scribe-sync-push.sh`
+は remote の有無だけを見て push する）が公開面へ台帳を出しうる＝不可逆。ゆえに **与えられた URL が
+コード repo でないことを wire の前に機械で確認**し、一致したら wire せず止める。
+
+```bash
+if bd dolt remote list 2>/dev/null | grep -q '://'; then
+  echo "Dolt remote: 設定済み（ここでは触らない。実 push 先の正しさは下の checker が判定する）"
+elif [ -n "${LEDGER_REMOTE_URL:-}" ]; then
+  # ★wire 前ゲート: この URL がコード repo でないことを確認する（rc 0=コード repo でない / 1=一致 / 2=判定不能）。
+  #   判定は checker の単一実装（正規化ロジックを二重に持たない）。rc≠0 なら add せず fail-loud で止める。
+  "${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh" --assert-not-code-repo "$LEDGER_REMOTE_URL"
+  assert_rc=$?
+  if [ "$assert_rc" -ne 0 ]; then
+    echo "⛔ LEDGER_REMOTE_URL がコード repo と一致（または判定不能・rc=$assert_rc）につき wire しない"
+    echo "   台帳専用の別 private repo の URL を与えて再実行すること（コード repo へは絶対に wire しない）"
+    exit 1
+  fi
+  # 台帳専用 private repo の URL。ssh→https / ローカル絶対パス→file://（git+ は URL scheme 必須）
+  url="$LEDGER_REMOTE_URL"
+  case "$url" in git@github.com:*) url="https://github.com/${url#git@github.com:}";; /*) url="file://$url";; esac
+  bd dolt remote add origin "git+${url%.git}.git"
+else
+  echo "⛔ 台帳専用 private repo の URL が未提供のため Dolt remote を wire しない（コード repo へは wire しない）"
+  echo "   1. private repo を用意する（候補名: <project>-beads。先例: scribe-beads / cc-session-beads）"
+  echo "      台帳 1 つにつき private repo 1 つ（dolt の push 先 ref 名は refs/dolt/data 固定で複数台帳は衝突する）"
+  echo "   2. LEDGER_REMOTE_URL=<url> を与えて本 step を再実行する（または bd dolt remote add origin git+<url>）"
+  exit 1   # 未 wire のまま先へ進めない（自動作成もコード repo への wire もしない）
+fi
+# wire 直後に機械条件 2 本を再検査する（config.yaml だけでなく dolt レジストリの実 push 先も見る）
+"${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh"; echo "LEDGER-SEP:rc=$?"   # 0=clean / 1=違反 / 2=判定不能
+```
+rc が 0 以外のときに止めるのは **台帳同期に関わる操作だけ**（`bd dolt push` と以降の wire）。違反内容
+（どの経路がコード repo を指しているか）を報告する。
+
+- **rc=1（違反）で、直前に自分が wire した結果そうなった場合は巻き戻す**: `bd dolt remote remove origin` を
+  実行し、**`bd dolt push` はしない**。レジストリに残したままにすると、以後の自動 push
+  （`scripts/scribe-sync-push.sh` は remote の有無だけを見る）が台帳を公開面へ出す。
+- **この run で wire していなくても、既存レジストリがコード面を指している（`COND2 … 2c: VIOLATION`）なら
+  同じ手当てが要る**: 台帳専用 private repo を用意したうえで `bd dolt remote remove origin` →
+  `--assert-not-code-repo` を通してから `bd dolt remote add origin git+<台帳 repo>` の順で入れ替え、
+  **入れ替えが済むまで `bd dolt push` を一切しない**（実測と push を別の実行単位に保つ）。
+  `COND2 … 2c: VIOLATION remote=<名前>` の remote 名を見て、本当にコード面か、台帳 private repo を
+  git remote に登録しているだけかを弁別する（後者なら偽 VIOLATION なので入れ替えは不要）。
+  既に公開面へ push 済みの `refs/dolt/*` の削除は**破壊操作＝人間承認事案**なので reconciler は消さず報告に留める。
+- **rc=2（判定不能）も OK 扱いしない**（同じく push しない）。
+- **rc≠0 を理由に他の収束次元（#1 / #2 / #3 / #5〜#10）まで止めないこと**。PRIME 同期・汚染除去・
+  二重発火除去・gitignore・CLAUDE.md ポインタは台帳分離と独立なので、それぞれ収束させたうえで
+  「台帳分離だけが未確認/違反」と切り分けて報告する。`origin` を持たない repo は rc=2 になり得るが、
+  それは**台帳分離の判定不能**であって他次元を止める理由ではない（checker は remote 0 本の repo では
+  条件 1 を N/A として扱い、`COND1-NOTE: NO-GIT-REMOTE` を出す）。
 
 ### PRIME.md（#5）— missing/wrong または旧版（marker 旧/無し・role-laden）のときだけ配置
 テンプレ（**この skill に同梱** `${CLAUDE_PLUGIN_ROOT}/skills/setup/PRIME.template.md`）を置換コピー:
@@ -186,8 +301,34 @@ surface するため取りこぼさない（intent 路と backstop の対）。�
 書かない。
 
 ## Step 末: 同期＋検証＋コミット
+
+**`bd dolt push` の前に実 push 先を実測するゲートを置く**（2026-07-27 incident の恒久対策）。`config.yaml` を
+編集しても push 先は切り替わらない——dolt エンジンは自前の remote レジストリを持ち、切替には
+`bd dolt remote remove/add` が要る。ゆえに**実測と push を別の実行単位に分け、実測結果で分岐**させる。
+
+**rc はシェル変数では次の実行単位へ渡らない**（Bash 呼出し間でシェル状態は保持されない）。第 2 ブロックで
+`sep_rc=$?` の値を読もうとすると常に未設定＝既定 2 に畳まれ、**分離が緑でも push へ到達しない**（fail-closed
+だが同期 step が恒久的に死ぬ）。ゆえにゲートの rc は **file 経由で持ち越し**、push 側では checker を
+**再実測**して、**ゲート rc と再実測 rc の両方が 0 のときだけ** push する（stale な rc file 単独では緑にならない）。
+
 ```bash
-bd dolt push          # remote 設定済みなら
+# ゲート（実測・第 1 実行単位）: 実 push 先そのものを目で見る + 機械条件 2 本を checker で判定
+rm -f "${TMPDIR:-/tmp}/ledger-sep.rc"
+# 実 push 先の一次観測。bd が hang するとゲートが返らないので有界化する（checker 内の bd 呼出も同様）
+timeout "${LEDGER_SEP_BD_TIMEOUT:-20}" bd dolt remote list || echo "⚠ bd dolt remote list が rc=$? （timeout=124）"
+"${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh"; echo $? > "${TMPDIR:-/tmp}/ledger-sep.rc"
+echo "LEDGER-SEP:rc=$(cat "${TMPDIR:-/tmp}/ledger-sep.rc")"                 # 0=clean / 1=違反 / 2=判定不能
+```
+```bash
+# push（第 2 実行単位）。前段のシェル変数には依存しない: ゲートが残した rc を読み直し、さらに checker を
+# 再実測して、両方 0 のときだけ push する（rc=2 を rc=0 に畳まない／rc file 単独では緑にしない）
+gate_rc="$(cat "${TMPDIR:-/tmp}/ledger-sep.rc" 2>/dev/null || echo 2)"; case "$gate_rc" in ''|*[!0-9]*) gate_rc=2 ;; esac
+"${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh" --quiet; now_rc=$?
+if [ "${gate_rc:-2}" -eq 0 ] && [ "${now_rc:-2}" -eq 0 ]; then
+  bd dolt push        # remote 設定済みなら
+else
+  echo "⛔ 台帳分離が未確認（ゲート rc=${gate_rc:-2} / 直前実測 rc=${now_rc:-2}）につき bd dolt push を実行しない"
+fi
 bd ready              # 動作確認
 grep -L 'BEGIN BEADS INTEGRATION' CLAUDE.md AGENTS.md   # 汚染が消えたか
 # 二重発火是正の確認（#7）: project-local settings.json に bd prime hook が残っていないか fail-loud 再 grep
@@ -205,6 +346,11 @@ git status --short
 - 既存 `.beads/` への `bd init --force`/`--reinit-local`/`--destroy-token`（guard がブロック、データ消失）。
 - 既存の「正しい」次元への不要な再書き込み（冪等性を壊す）。
 - `bd remember`/`bd recall`/`bd memories` の使用、v1.0.5+ の導入。
+- **コード repo への `bd dolt remote add`**（`git remote get-url origin` 由来の自動 wire を含む）。台帳は
+  コード repo と分離する（#4 / #11 / #12）。台帳専用 private repo の URL が無いなら wire せず止める。
+- **`check-ledger-separation.sh` の rc を捨てる呼び方**（`| grep -q` 等）と、rc 2（判定不能）を OK 扱いすること。
+- **既にコード repo へ push 済みの `refs/dolt/*` を reconciler が削除すること**（破壊操作＝人間承認事案。
+  検出して報告するに留める）。
 
 ## 注意
 - グローバル hook（SessionStart `bd prime` / SessionEnd 自動 push / 破壊的 bd guard）は machine 全体で有効。本スキルは**プロジェクト側**のみ収束させる。
