@@ -86,13 +86,26 @@
 #
 # 正規化仕様（sc-vbre の beads-bdw plugin 側 guard と同一契約。lib 共有は別便）:
 #   先頭 `git+` 除去 / ssh 形 `git@host:owner/repo` を `https://host/owner/repo` へ写像 /
-#   素の絶対パスを `file://` へ写像 / scheme・host を小文字化しユーザ情報を除去 /
+#   素の絶対パスを `file://` へ写像 / **相対パスを `$REPO` 基準で解決**して `file://` へ写像 /
+#   scheme・host を小文字化しユーザ情報を除去 /
 #   既定ポート除去（https:443 / http:80 / ssh:22 / git:9418）/
 #   **network scheme（http / https / git / ssh）を https へ畳む**（同一 repo の別 transport 表記を同一視）/
+#   **file scheme の `localhost` を空 host と同一視**（`file://localhost/x` ≡ `file:///x`）/
+#   path の **percent-escape のうち unreserved 文字のみ復号**（予約文字は復号せず 16 進を大文字へ正準化）/
 #   path の連続スラッシュ圧縮と `.` / `..` の字句解決 /
 #   末尾 `/` と末尾 `.git` を除去。
 #   path の大小文字は既定で保存するが、**大小文字を区別しない既知ホスト**（github.com 等の白名リスト）
 #   では比較時のみ path も小文字化する。表示は元表記。
+#
+# ★**正規化の境界（この checker が保証しないこと）**:
+#   本 checker の URL 正規化は上に列挙した同値類（scheme http/git/ssh→https・既定ポート・連続スラッシュ・
+#   `.` と `..`・percent-encode〔unreserved〕・file の localhost/空 host・相対 path の `$REPO` 基準解決）
+#   **のみ**を吸収する。文字列正規化は同一 repo 別表記の完全な同値判定ではない
+#   ＝ `ASSERT-NOT-CODE-REPO: OK` / rc=0 は **「既知同値類で一致しない」ことの確認**であって
+#   **「コード repo でない」ことの証明ではない**。
+#   吸収しない例: IDN homograph / IP literal 表記 / HTTP redirect 経由の別 URL / 別ホスト名の同一 forge /
+#   非既定 ssh ポートと https 表記の対応。到達性ベースの同値判定（`ls-remote` の HEAD 対照等）は
+#   本 checker の領分ではなく exposure gate v2 が担う。
 #
 # usage:
 #   check-ledger-separation.sh [--repo <path>] [--quiet]
@@ -165,6 +178,36 @@ fi
 # --- URL 正規化 -------------------------------------------------------------
 lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
+# path の percent-escape のうち **unreserved 文字（A-Za-z0-9 - . _ ~）だけ**を復号する。
+# 予約文字（%2F 等）は復号しない——復号すると path 構造が変わり、別 repo を同一視しかねない。
+# 復号しない escape は 16 進を大文字へ揃える（`%2f` と `%2F` を同一視するための正準化）。
+pct_decode_unreserved() {
+  # ※ `local a=$1 n=${#a}` は書かない——`local` の右辺は代入**前**に展開されるため、`set -u` 下で
+  #   外側スコープの未定義変数を参照して落ちる（実測: `s: unbound variable`）。宣言を分ける。
+  local s="${1:-}"
+  local out="" i=0 n c h ch
+  n=${#s}
+  while [ "$i" -lt "$n" ]; do
+    c="${s:$i:1}"
+    if [ "$c" = "%" ] && [ $((i + 3)) -le "$n" ]; then
+      h="${s:$((i + 1)):2}"
+      if [[ "$h" =~ ^[0-9A-Fa-f]{2}$ ]]; then
+        ch="$(printf '%b' "\\x$h")"
+        if [[ "$ch" =~ ^[A-Za-z0-9._~-]$ ]]; then
+          out="$out$ch"
+        else
+          out="$out%$(printf '%s' "$h" | tr '[:lower:]' '[:upper:]')"
+        fi
+        i=$((i + 3))
+        continue
+      fi
+    fi
+    out="$out$c"
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
 # path の連続スラッシュ圧縮 + `.` / `..` の字句解決（存在しないパスでも解決できる＝realpath -m 相当）
 norm_path() {
   local p="${1:-}" seg out=""
@@ -199,6 +242,11 @@ normalize_url() {
   if [[ "$u" != *"://"* && "$u" == /* ]]; then
     u="file://$u"
   fi
+  # 相対パス形（`../code.git` 等）は $REPO 基準で解決する。git は相対 remote を repo 基準で解くので、
+  # 解決しないと同一 repo の絶対 file:// 指定と照合できず code-identity が盲目になる。
+  if [[ "$u" != *"://"* && "$u" != /* ]]; then
+    u="file://$(norm_path "$REPO/$u")"
+  fi
   if [[ "$u" =~ ^([A-Za-z][A-Za-z0-9+.-]*)://([^/]*)(.*)$ ]]; then
     local sch host rest port=""
     sch="$(lc "${BASH_REMATCH[1]}")"
@@ -218,7 +266,10 @@ normalize_url() {
     case "$sch" in
       http|https|git|ssh) sch="https" ;;
     esac
-    # path の連続スラッシュ圧縮と . / .. の解決
+    # file scheme の localhost は空 host と同義（file://localhost/x ≡ file:///x）
+    if [ "$sch" = "file" ] && [ "$host" = "localhost" ]; then host=""; fi
+    # path: unreserved の percent-escape を復号 → 連続スラッシュ圧縮と . / .. の解決
+    rest="$(pct_decode_unreserved "$rest")"
     rest="$(norm_path "$rest")"
     # 大小文字を区別しない既知ホストでは比較用に path も小文字化
     local h

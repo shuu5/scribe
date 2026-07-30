@@ -55,6 +55,16 @@ SessionStart 注入が opt-in で発火する状態**にする。各次元を独
 > 1=コード repo と一致 / 2=判定不能）。`bd dolt remote add` の**前**にこれを通す（下記 #4 収束 step）。
 > 正規化ロジックを SKILL.md 側へ二重実装しないための単一実装。
 >
+> **wire ゲートの境界（rc=0 を「安全の証明」と読まないこと）**: checker の URL 正規化が吸収するのは
+> 列挙された同値類だけ——scheme（http / git / ssh → https）・既定ポート・連続スラッシュ・`.` と `..`・
+> percent-encode（unreserved）・`file://localhost` と空 host・相対 path の repo 基準解決。
+> **文字列正規化は同一 repo 別表記の完全な同値判定ではない**。したがって
+> `ASSERT-NOT-CODE-REPO: OK`（rc=0）は**「既知同値類で一致しない」ことの確認**であって
+> **「コード repo でない」ことの証明ではない**。IDN homograph・IP literal 表記・HTTP redirect 経由の
+> 別 URL・別ホスト名の同一 forge・非既定 ssh ポートと https 表記の対応などは吸収しない。
+> 到達性ベースの同値判定（`ls-remote` の HEAD 対照等）は本 skill の領分ではなく exposure gate v2 が担う。
+> **人間が与える URL は、目視でも台帳専用 private repo であることを確認すること。**
+>
 > **rc の適用範囲**: rc≠0 が止めるのは **台帳同期（`bd dolt push` と wire）だけ**。台帳分離と無関係な
 > 収束次元（#1 / #2 / #3 / #5〜#10）は独立に収束させる。`origin` を持たない repo でも他次元が
 > 恒久停止しないよう、checker は remote 0 本なら条件 1 を N/A（`COND1-NOTE: NO-GIT-REMOTE`）として扱い、

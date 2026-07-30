@@ -1192,6 +1192,143 @@ STUB
 }
 
 # ---------------------------------------------------------------------------
+# 4e. errata R4 — URL-alias class の残余（percent-encode / file://localhost / 相対 path）と境界宣言
+# ---------------------------------------------------------------------------
+
+@test "FIX-E(a) percent-encode: unreserved の %XX 形は同一コード面として assert rc=1（実到達する真の alias）" {
+  # %73 → 's'。git はこの URL で実 repo に到達できる（gate 実測 REACHABLE）ので、
+  # 文字列比較で弾けないと wire ゲートを素通りする。
+  d="$BATS_TEST_TMPDIR/pe"; mkdir -p "$d"
+  git init -q --bare "$d/scribe.git"
+  w="$BATS_TEST_TMPDIR/pe-w"
+  git -c init.defaultBranch=main init -q "$w"
+  git -C "$w" config user.email t@e; git -C "$w" config user.name t
+  git -C "$w" commit -q --allow-empty -m init
+  git -C "$w" remote add origin "$d/scribe.git"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/pe-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/pe-beads.git"
+
+  # 前提: この percent 形が実際に同じ repo へ到達する（alias である）ことを先に確かめる
+  run git ls-remote "file://$d/%73cribe.git"
+  [ "$status" -eq 0 ]
+
+  run "$CHECKER" --repo "$w" --assert-not-code-repo "file://$d/%73cribe.git"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ASSERT-NOT-CODE-REPO: VIOLATION"* ]]
+}
+
+@test "FIX-E(a) percent-encode: 予約文字（%2F）は復号しない（path 構造を変えて別 repo を同一視しない）" {
+  w="$(mk_work sep-pct2)"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-pct2-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-pct2-beads.git"
+  # `%2F` を `/` へ復号してしまうと別 path が origin と一致してしまう形
+  run "$CHECKER" --repo "$w" --assert-not-code-repo "file://$BATS_TEST_TMPDIR/sep-pct2.git%2Fx"
+  [ "$status" -eq 0 ]
+}
+
+@test "FIX-E(b) file://localhost: localhost 形と空 host 形を同一視して COND2 を RED にする" {
+  w="$(mk_work sep-lh)"
+  put_ledger "$w" . flat "file://localhost$BATS_TEST_TMPDIR/sep-lh.git"   # ← コード repo（localhost 形）
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-lh-beads.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"COND2 .beads 2a: VIOLATION"* ]]
+  [[ "$output" == *"RESULT: VIOLATION"* ]]
+}
+
+@test "FIX-E(b) file://localhost: assert も rc=1（wire 前に止まる）" {
+  w="$(mk_work sep-lh2)"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-lh2-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-lh2-beads.git"
+  run "$CHECKER" --repo "$w" --assert-not-code-repo "file://localhost$BATS_TEST_TMPDIR/sep-lh2.git"
+  [ "$status" -eq 1 ]
+  # 対照: 別 repo の localhost 形は通す（何でも赤にしているのではない）
+  run "$CHECKER" --repo "$w" --assert-not-code-repo "file://localhost$BATS_TEST_TMPDIR/sep-lh2-beads.git"
+  [ "$status" -eq 0 ]
+}
+
+@test "s1 相対 remote: origin=../code.git を repo 基準で解決し COND2 を RED にする" {
+  git init -q --bare "$BATS_TEST_TMPDIR/rel-code.git"
+  w="$BATS_TEST_TMPDIR/relbase/w"
+  mkdir -p "$BATS_TEST_TMPDIR/relbase"
+  git -c init.defaultBranch=main init -q "$w"
+  git -C "$w" config user.email t@e; git -C "$w" config user.name t
+  git -C "$w" commit -q --allow-empty -m init
+  git -C "$w" remote add origin "../../rel-code.git"      # ← 相対形
+  put_ledger "$w" . flat "file://$BATS_TEST_TMPDIR/rel-code.git"   # 同一 repo を絶対形で指す＝違反
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/rel-beads.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"COND2 .beads 2a: VIOLATION"* ]]
+}
+
+@test "s1 相対 remote: 同 URL の assert も rc=1（wire 前に止まる）" {
+  git init -q --bare "$BATS_TEST_TMPDIR/rel2-code.git"
+  w="$BATS_TEST_TMPDIR/relbase2/w"
+  mkdir -p "$BATS_TEST_TMPDIR/relbase2"
+  git -c init.defaultBranch=main init -q "$w"
+  git -C "$w" config user.email t@e; git -C "$w" config user.name t
+  git -C "$w" commit -q --allow-empty -m init
+  git -C "$w" remote add origin "../../rel2-code.git"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/rel2-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/rel2-beads.git"
+  run "$CHECKER" --repo "$w" --assert-not-code-repo "file://$BATS_TEST_TMPDIR/rel2-code.git"
+  [ "$status" -eq 1 ]
+}
+
+@test "R4 境界宣言: checker header と SKILL.md の両方に「rc=0 はコード repo でない証明ではない」が在る" {
+  # 同値類を列挙して塞ぐ設計である以上、未列挙の変種は残る。その境界を doc 化しておかないと
+  # rc=0 が「安全の証明」として読まれる。
+  hdr="$(awk 'NR==1 && /^#!/ { next } /^#/ { print; next } { exit }' "$CHECKER")"
+  [[ "$hdr" == *"証明ではない"* ]]
+  [[ "$hdr" == *"exposure gate v2"* ]]
+  [[ "$hdr" == *"IDN homograph"* ]]
+  run grep -q '証明ではない' "$SKILL"
+  [ "$status" -eq 0 ]
+  run grep -q 'exposure gate v2' "$SKILL"
+  [ "$status" -eq 0 ]
+  # 吸収する同値類が doc に列挙されている（何を保証するかも書く）
+  [[ "$hdr" == *"percent-encode"* ]]
+  [[ "$hdr" == *"localhost"* ]]
+}
+
+# --- s3: Step 0 の配線を実走で pin する（文字列存在だけでは rc 破棄形への退化を素通しする） ------
+run_step0_block() {   # $1 = stub checker が返す rc
+  local chk_rc="$1"
+  local d="$BATS_TEST_TMPDIR/step0"
+  rm -rf "$d"; mkdir -p "$d/plugin/skills/setup" "$d/bin" "$d/cwd"
+
+  awk '/^## Step 0:/,/^## Step 1/' "$SKILL" > "$d/section.md"
+  awk -v out="$d" '/^```bash$/{inb=1;n++;next} /^```$/{inb=0;next} inb{print > (out "/block" n ".sh")}' \
+    "$d/section.md"
+  [ -s "$d/block1.sh" ]
+
+  printf '#!/usr/bin/env bash\nexit %s\n' "$chk_rc" > "$d/plugin/skills/setup/check-ledger-separation.sh"
+  chmod +x "$d/plugin/skills/setup/check-ledger-separation.sh"
+  # Step 0 は bd / git / jq 等を叩くので、失敗しても続行できるよう最小 stub を置く
+  for c in bd; do printf '#!/usr/bin/env bash\nexit 0\n' > "$d/bin/$c"; chmod +x "$d/bin/$c"; done
+
+  export CLAUDE_PLUGIN_ROOT="$d/plugin"
+  ( cd "$d/cwd" && git -c init.defaultBranch=main init -q . && PATH="$d/bin:$PATH" bash "$d/block1.sh" ) \
+    > "$d/out" 2>&1 || true
+  STEP0_DIR="$d"
+}
+
+@test "s3 Step 0 実走: checker の rc が LEDGER-SEP:rc= に反映される（rc=1）" {
+  run_step0_block 1
+  run grep -q 'LEDGER-SEP:rc=1' "$STEP0_DIR/out"
+  [ "$status" -eq 0 ]
+}
+
+@test "s3 Step 0 実走: checker の rc が LEDGER-SEP:rc= に反映される（rc=2 を 0 に畳まない）" {
+  run_step0_block 2
+  run grep -q 'LEDGER-SEP:rc=2' "$STEP0_DIR/out"
+  [ "$status" -eq 0 ]
+  run grep -q 'LEDGER-SEP:rc=0' "$STEP0_DIR/out"
+  [ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # 5. acceptance 1a — 本リポ worktree の .beads/config.yaml を回帰 pin（read のみ）
 # ---------------------------------------------------------------------------
 
