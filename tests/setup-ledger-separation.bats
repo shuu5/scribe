@@ -359,17 +359,20 @@ put_dolt_remote() {
   [[ "$output" == *"RESULT: CLEAN"* ]]
 }
 
-@test "走査範囲: .worktrees 配下の stale checkout は台帳として数えない（本リポ anchor の偽 RED 回帰 pin）" {
+@test "走査範囲: .worktrees 配下の **非 live** stale checkout は台帳として数えない（anchor の偽 RED 回帰 pin）" {
   # 本リポ anchor は .worktrees/spawn/<cell>/ に他 cell の checkout を持つ（.gitignore 済み・ephemeral）。
   # 分離前 commit の config が残っているだけで anchor 全体が RESULT: VIOLATION になると、
   # SKILL.md の規定により /scribe:setup が構造的に停止する（恒常 false RED → gate 無視の誘発）。
+  # ★除外の根拠は「ディレクトリ名が .worktrees だから」ではなく「git-ignored かつ DB 実体なし」。
+  #   live な台帳は .worktrees 配下でも評価される（→ C1 の tooth が対）ので、fixture は DB 実体なしにする。
   w="$(mk_work sep-wt)"
   printf '/.worktrees/\n' > "$w/.gitignore"
   put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-wt-beads.git"
   put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-wt-beads.git"
-  # ephemeral な worktree checkout に「分離前」の違反 config を置く。
+  # ephemeral な worktree checkout に「分離前」の違反 config を置く（DB 実体は持たない＝実測どおり）。
   put_ledger "$w" .worktrees/spawn/other-cell flat "git+file://$BATS_TEST_TMPDIR/sep-wt.git"
   put_dolt_remote "$w/.worktrees/spawn/other-cell" "git+file://$BATS_TEST_TMPDIR/sep-wt.git"
+  rm -rf "$w/.worktrees/spawn/other-cell/.beads/embeddeddolt"
   run "$CHECKER" --repo "$w"
   [ "$status" -eq 0 ]
   [[ "$output" == *"RESULT: CLEAN"* ]]
@@ -956,6 +959,236 @@ STUB
   # usage 節（ヘッダ末尾付近）まで到達している＝切れていない
   [[ "$output" == *"--assert-not-code-repo"* ]]
   [[ "$output" == *"LEDGER_SEP_LSREMOTE_TIMEOUT"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# 4d. errata R3 — prune / URL 正規化 / pushurl / URL 解決不能 / bd timeout の穴
+# ---------------------------------------------------------------------------
+
+@test "C1 prune 撤去: ディレクトリ名で事前 prune せず、.worktrees 配下の live 台帳もコード面を指せば RED" {
+  # 名前 prune は live 安全弁より前段で効くため、prune 対象配下の live 台帳が存在ごと不可視になる。
+  # 除外は「git-ignored かつ live でない」の単一述語に一本化する。
+  w="$(mk_work sep-c1)"
+  printf '/.worktrees/\n' > "$w/.gitignore"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-c1-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-c1-beads.git"
+  put_ledger "$w" .worktrees/spawn/x flat "git+file://$BATS_TEST_TMPDIR/sep-c1.git"   # live + 違反
+  put_dolt_remote "$w/.worktrees/spawn/x" "git+file://$BATS_TEST_TMPDIR/sep-c1.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"COND2 .worktrees/spawn/x/.beads 2a: VIOLATION"* ]]
+  [[ "$output" == *"RESULT: VIOLATION"* ]]
+}
+
+@test "C1 prune 撤去: node_modules 配下の live 台帳もコード面を指せば RED（名前で免除しない）" {
+  w="$(mk_work sep-c1n)"
+  printf '/node_modules/\n' > "$w/.gitignore"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-c1n-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-c1n-beads.git"
+  put_ledger "$w" node_modules/pkg flat "git+file://$BATS_TEST_TMPDIR/sep-c1n.git"
+  put_dolt_remote "$w/node_modules/pkg" "git+file://$BATS_TEST_TMPDIR/sep-c1n.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"COND2 node_modules/pkg/.beads 2a: VIOLATION"* ]]
+}
+
+@test "C2 正規化: http / git / 連続スラッシュ / 既定ポート が同一コード面として assert rc=1" {
+  w="$BATS_TEST_TMPDIR/sep-c2"
+  put_ledger "$w" . both "git+https://github.com/shuu5/scribe-beads.git"
+  put_dolt_remote "$w" "git+https://github.com/shuu5/scribe-beads.git"
+  export PATH="$GITSTUB:$PATH"
+  export GIT_STUB_ORIGIN="https://github.com/shuu5/scribe.git"
+  export GIT_STUB_LSREMOTE_RC=0
+  for v in "http://github.com/shuu5/scribe.git" \
+           "git://github.com/shuu5/scribe.git" \
+           "https://github.com/shuu5//scribe.git" \
+           "https://github.com:443/shuu5/scribe.git" \
+           "ssh://git@github.com:22/shuu5/scribe.git"; do
+    run "$CHECKER" --repo "$w" --assert-not-code-repo "$v"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ASSERT-NOT-CODE-REPO: VIOLATION"* ]]
+  done
+  # 対照: 別 repo は通す（何でも赤にしているのではない）
+  run "$CHECKER" --repo "$w" --assert-not-code-repo "https://github.com/shuu5/scribe-beads.git"
+  [ "$status" -eq 0 ]
+}
+
+@test "C2 正規化: file 形の . / .. / 連続スラッシュ を解決して同一視する（assert rc=1）" {
+  w="$(mk_work sep-c2f)"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-c2f-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-c2f-beads.git"
+  for v in "file://$BATS_TEST_TMPDIR/./sep-c2f.git" \
+           "file://$BATS_TEST_TMPDIR/sub/../sep-c2f.git" \
+           "file://$BATS_TEST_TMPDIR//sep-c2f.git" \
+           "$BATS_TEST_TMPDIR/./sep-c2f.git"; do
+    run "$CHECKER" --repo "$w" --assert-not-code-repo "$v"
+    [ "$status" -eq 1 ]
+  done
+}
+
+@test "C2 正規化: COND2 側でも別表記のコード面を VIOLATION にする" {
+  w="$BATS_TEST_TMPDIR/sep-c2c"
+  put_ledger "$w" . flat "git+http://github.com/shuu5//scribe.git"   # http + 連続スラッシュ
+  put_dolt_remote "$w" "git+https://github.com/shuu5/scribe-beads.git"
+  export PATH="$GITSTUB:$PATH"
+  export GIT_STUB_ORIGIN="https://github.com/shuu5/scribe.git"
+  export GIT_STUB_LSREMOTE_RC=0
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"COND2 .beads 2a: VIOLATION"* ]]
+}
+
+@test "C3 pushurl: pushurl がコード面で台帳がそこを指せば rc=1（remote 名指定では取り逃がす経路）" {
+  w="$(mk_work sep-c3)"
+  git init -q --bare "$BATS_TEST_TMPDIR/sep-c3-push.git"
+  git -C "$w" config remote.origin.pushurl "$BATS_TEST_TMPDIR/sep-c3-push.git"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-c3-push.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-c3-push.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"COND2 .beads 2a: VIOLATION remote=origin#push"* ]]
+  [[ "$output" == *"RESULT: VIOLATION"* ]]
+}
+
+@test "C3 pushurl: 同 URL の assert も rc=1（wire 前に止まる）" {
+  w="$(mk_work sep-c3a)"
+  git init -q --bare "$BATS_TEST_TMPDIR/sep-c3a-push.git"
+  git -C "$w" config remote.origin.pushurl "$BATS_TEST_TMPDIR/sep-c3a-push.git"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-c3a-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-c3a-beads.git"
+  run "$CHECKER" --repo "$w" --assert-not-code-repo "git+file://$BATS_TEST_TMPDIR/sep-c3a-push.git"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ASSERT-NOT-CODE-REPO: VIOLATION remote=origin#push"* ]]
+}
+
+@test "C3 pushurl: pushurl 上の refs/dolt/* も条件1 で検出する（URL 直指定の走査）" {
+  w="$(mk_work sep-c3b)"
+  git init -q --bare "$BATS_TEST_TMPDIR/sep-c3b-push.git"
+  git -C "$w" config remote.origin.pushurl "$BATS_TEST_TMPDIR/sep-c3b-push.git"
+  git -C "$w" push -q "$BATS_TEST_TMPDIR/sep-c3b-push.git" HEAD:refs/dolt/data
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-c3b-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-c3b-beads.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"COND1 origin: OK"* ]]
+  [[ "$output" == *"COND1 origin#push: VIOLATION"* ]]
+}
+
+@test "C4 silent drop: URL 解決不能な remote は drop せず UNKNOWN として記録する" {
+  # ★単一 remote fixture にすると「CODE_IDS が空」の旧 fail-closed 分岐で rc=2 になり空虚な tooth になる。
+  #   origin は解決可・第 2 remote だけ解決不可、という構成でなければ silent drop を捕まえられない。
+  w="$(mk_work sep-c4)"
+  git init -q --bare "$BATS_TEST_TMPDIR/sep-c4-other.git"
+  git -C "$w" remote add other "$BATS_TEST_TMPDIR/sep-c4-other.git"
+  git -C "$w" config remote.other.url ""
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-c4-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-c4-beads.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"COND1 other: UNKNOWN"* ]]
+  [[ "$output" == *"COND1: UNKNOWN"* ]]
+  [[ "$output" != *"RESULT: CLEAN"* ]]
+}
+
+@test "C4 silent drop: 解決不能 remote があるときは assert も UNKNOWN（比較集合に穴がある）" {
+  w="$(mk_work sep-c4a)"
+  git init -q --bare "$BATS_TEST_TMPDIR/sep-c4a-other.git"
+  git -C "$w" remote add other "$BATS_TEST_TMPDIR/sep-c4a-other.git"
+  git -C "$w" config remote.other.url ""
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-c4a-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-c4a-beads.git"
+  run "$CHECKER" --repo "$w" --assert-not-code-repo "git+file://$BATS_TEST_TMPDIR/sep-c4a-beads.git"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"ASSERT-NOT-CODE-REPO: UNKNOWN"* ]]
+}
+
+@test "C5 bd timeout: bd が hang しても有界時間で 2c: UNKNOWN を返す（ゲートが返らない状態を作らない）" {
+  w="$(mk_work sep-c5)"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-c5-beads.git"
+  HANG="$BATS_TEST_TMPDIR/hangbd"; mkdir -p "$HANG"
+  printf '#!/usr/bin/env bash\nsleep 30\n' > "$HANG/bd"
+  chmod +x "$HANG/bd"
+  PATH="$HANG:$PATH" LEDGER_SEP_BD_TIMEOUT=1 run timeout 20 "$CHECKER" --repo "$w"
+  [ "$status" -eq 2 ]                       # 124（呼出側 timeout）ではなく checker 自身の UNKNOWN
+  [[ "$output" == *"COND2 .beads 2c: UNKNOWN"* ]]
+  [[ "$output" == *"RESULT: UNKNOWN"* ]]
+}
+
+@test "C-extra listing 語彙: 条件1 の OK は ref listing の不在であって object の不在ではないと明示する" {
+  # ref を削除しても object は remote に残り匿名 fetch で取れる場合がある（実測）。`COND1: OK` を
+  # 「露出が消えた」証明として読ませないため、走査した run では必ず注記を出す。
+  w="$(mk_work sep-listing)"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-listing-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-listing-beads.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"COND1: OK"* ]]
+  [[ "$output" == *"COND1-NOTE: REF-LISTING-ONLY"* ]]
+  [[ "$output" == *"ref listing に無い"* ]]
+}
+
+@test "C-extra listing 語彙: remote 0 本（走査していない）run では REF-LISTING-ONLY を出さない（安売りしない）" {
+  w="$BATS_TEST_TMPDIR/sep-listing2"
+  git -c init.defaultBranch=main init -q "$w"
+  git -C "$w" config user.email t@e; git -C "$w" config user.name t
+  git -C "$w" commit -q --allow-empty -m init
+  put_ledger "$w" . both "git+https://github.com/shuu5/sep-listing2-beads.git"
+  put_dolt_remote "$w" "git+https://github.com/shuu5/sep-listing2-beads.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"COND1-NOTE: REF-LISTING-ONLY"* ]]
+  [[ "$output" == *"COND1-NOTE: NO-GIT-REMOTE"* ]]
+}
+
+@test "q1 自リポ: remote が在る repo でも台帳が repo 自パスを指せば RED / assert も rc=1" {
+  w="$(mk_work sep-q1)"
+  put_ledger "$w" . flat "file://$w"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-q1-beads.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"COND2 .beads 2a: VIOLATION remote=<repo 自身のパス>"* ]]
+  run "$CHECKER" --repo "$w" --assert-not-code-repo "file://$w"
+  [ "$status" -eq 1 ]
+}
+
+@test "q2 config 不読: config.yaml が在るのに読めなければ 2a/2b を ABSENT にせず UNKNOWN" {
+  w="$(mk_work sep-q2)"
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-q2-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-q2-beads.git"
+  chmod 000 "$w/.beads/config.yaml"
+  run "$CHECKER" --repo "$w"
+  chmod 644 "$w/.beads/config.yaml"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"COND2-NOTE: CONFIG-UNREADABLE"* ]]
+  [[ "$output" == *"COND2 .beads 2a: UNKNOWN"* ]]
+  [[ "$output" != *"COND2 .beads 2a: ABSENT"* ]]
+  [[ "$output" != *"RESULT: CLEAN"* ]]
+}
+
+@test "q3 補助検出: COND1-EXTRA が origin 限定でなく走査対象の面ごとに出る" {
+  w="$(mk_work sep-q3)"
+  git init -q --bare "$BATS_TEST_TMPDIR/sep-q3-push.git"
+  git -C "$w" config remote.origin.pushurl "$BATS_TEST_TMPDIR/sep-q3-push.git"
+  git -C "$w" push -q "$BATS_TEST_TMPDIR/sep-q3-push.git" HEAD:refs/heads/__dolt_remote_info__
+  put_ledger "$w" . both "git+file://$BATS_TEST_TMPDIR/sep-q3-beads.git"
+  put_dolt_remote "$w" "git+file://$BATS_TEST_TMPDIR/sep-q3-beads.git"
+  run "$CHECKER" --repo "$w"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"COND1-EXTRA: DOLT-REF-OUTSIDE-GLOB refs/heads/__dolt_remote_info__"* ]]
+}
+
+@test "q5 正規化: 既定ポート（https:443 / ssh:22）は畳むが非既定ポートは畳まない" {
+  w="$BATS_TEST_TMPDIR/sep-q5"
+  put_ledger "$w" . both "git+https://github.com/shuu5/scribe-beads.git"
+  put_dolt_remote "$w" "git+https://github.com/shuu5/scribe-beads.git"
+  export PATH="$GITSTUB:$PATH"
+  export GIT_STUB_ORIGIN="https://github.com/shuu5/scribe.git"
+  export GIT_STUB_LSREMOTE_RC=0
+  run "$CHECKER" --repo "$w" --assert-not-code-repo "https://github.com:443/shuu5/scribe.git"
+  [ "$status" -eq 1 ]
+  # 非既定ポートは別ホストとして扱う（畳みすぎない）
+  run "$CHECKER" --repo "$w" --assert-not-code-repo "https://github.com:8443/shuu5/scribe.git"
+  [ "$status" -eq 0 ]
 }
 
 # ---------------------------------------------------------------------------

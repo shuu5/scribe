@@ -43,6 +43,14 @@
 #   合成は VIOLATION > UNKNOWN > OK。`| grep -q` でパイプして rc を捨てる形は使わない。
 #   走査は **remote 名ではなく URL を直接指定**する（remote 名指定の ls-remote は fetch URL しか見ないので
 #   pushurl 上の露出を取り逃がす）。
+#
+#   ★**条件 1 が測っているのは「ref listing の不在」であって「object の不在」ではない**（orch-g0xs 実測）。
+#     ref を削除しても object 自体は remote に残り、匿名 fetch で取得できる場合がある（public repo で
+#     台帳本体 32MB が ref 削除後も匿名到達可能であることが実測されている）。ゆえに条件 1 の OK は
+#     「一覧に出ない」ことの確認であり、**露出が消えたことの証明ではない**。この区別を出力語彙でも保つ:
+#     走査を行った run では `COND1-NOTE: REF-LISTING-ONLY` を必ず出し、per-URL の OK 行も
+#     「listing に無い」と書く。露出の完全な解消には remote 側の GC / repo 再作成等が要る（本 checker の
+#     裁量外＝人間の判断事項）。
 #   ※ 補助検出: dolt の git-remote 実装は `refs/heads/__dolt_remote_info__` も push するため、
 #     glob の外に居る台帳由来 ref を `COND1-EXTRA: DOLT-REF-OUTSIDE-GLOB <ref>` で per-URL に surface する
 #     （rc は変えない。既存 ref の削除は破壊操作＝人間承認事案で reconciler の裁量外ゆえ報告に留める）。
@@ -442,7 +450,7 @@ else
     fi
     if [ "$n_refs" -eq 0 ]; then
       printf 'COND1 %s: OK\n' "$lbl"
-      say "    面 $lbl: OK — refs/dolt/* は 0 件"
+      say "    面 $lbl: OK — refs/dolt/* が **ref listing に無い**（object の到達可能性は別問題）"
     else
       printf 'COND1 %s: VIOLATION refs=%s\n' "$lbl" "$n_refs"
       say "    面 $lbl: VIOLATION — refs/dolt/* が ${n_refs} 件（台帳がこの面に出ている）"
@@ -481,8 +489,17 @@ else
     printf 'COND1: UNKNOWN\n'
     unknown=1
   else
-    say "  条件1: OK — 全ての面に refs/dolt/* は 0 件"
+    say "  条件1: OK — 全ての面で refs/dolt/* が ref listing に無い"
     printf 'COND1: OK\n'
+  fi
+
+  # 走査を行った run では、条件 1 が測ったのが「listing の不在」であって「object の不在」ではないことを
+  # 機械可読に明示する（ref を消しても object は remote に残り匿名 fetch で取れる場合がある＝実測）。
+  # この注記は rc を変えない。露出の完全解消（remote 側 GC / repo 再作成）は人間の判断事項。
+  if [ "${#SCAN_URLS[@]}" -gt 0 ]; then
+    printf 'COND1-NOTE: REF-LISTING-ONLY\n'
+    say "  ※ 条件1 は ref listing の不在のみを測る。ref を削除しても object は remote に残りうる"
+    say "    （匿名 fetch で到達可能な実測あり）。listing が空でも「露出が消えた」証明にはならない。"
   fi
 fi
 

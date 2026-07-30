@@ -60,11 +60,20 @@ SessionStart 注入が opt-in で発火する状態**にする。各次元を独
 > 恒久停止しないよう、checker は remote 0 本なら条件 1 を N/A（`COND1-NOTE: NO-GIT-REMOTE`）として扱い、
 > 条件 2 は repo 自身のパスを code-identity に用いて判定を続ける。
 >
-> **コード面は origin だけではない**: 条件 2 と `--assert-not-code-repo` は **全 git remote の URL** と
-> 完全一致で比較する（upstream / mirror 等に台帳を wire する経路を塞ぐ）。条件 1 も全 remote を
-> per-remote で走査する（`COND1 <名前>: OK|VIOLATION|UNKNOWN`）。VIOLATION 行には `remote=<名前>` が
-> 付くので、本当にコード面かを名前で弁別する——**台帳専用 private repo を git remote に登録している構成**
-> では「台帳が台帳 repo を指す」ことが VIOLATION として出うる（偽 VIOLATION）。
+> **コード面は origin の fetch URL だけではない**: code-identity は **各 remote の全 fetch URL
+> （`git remote get-url --all`）+ 全 push URL（`--push --all`＝`pushurl`）+ repo 自身の物理パス**の集合。
+> 条件 2 と `--assert-not-code-repo` はこの集合と完全一致で比較する（upstream / mirror / pushurl / 自リポ
+> へ台帳を向ける経路を塞ぐ）。条件 1 は **remote 名ではなく URL を直接指定して per-URL で走査**する
+> （remote 名指定の `ls-remote` は fetch URL しか見ないので pushurl 上の露出を取り逃がす）。
+> 出力は面ラベル付き（`COND1 origin: …` / `COND1 origin#push: …` / `COND1 mirror: …`）。VIOLATION 行には
+> `remote=<ラベル>` が付くので、本当にコード面かを弁別する——**台帳専用 private repo を git remote に
+> 登録している構成**では「台帳が台帳 repo を指す」ことが VIOLATION として出うる（偽 VIOLATION）。
+>
+> **条件 1 が測るのは「ref listing の不在」であって「object の不在」ではない**: ref を削除しても object は
+> remote に残り、匿名 fetch で取得できる場合がある（実測あり）。走査した run では
+> `COND1-NOTE: REF-LISTING-ONLY` が出る。**`COND1: OK` を「露出が消えた」証明として読まないこと**——
+> 既に公開面へ出てしまった台帳の実質的な解消には remote 側の GC / repo 再作成等が要り、それは
+> 破壊的・不可逆で人間の判断事項（reconciler は行わない）。
 >
 > **注記行が出たときの追加確認**:
 > - `COND2-NOTE: CODE-IDENTITY-PATH-ONLY` … remote 0 本の repo。code-identity が repo 自身のパスだけなので、
@@ -295,7 +304,8 @@ surface するため取りこぼさない（intent 路と backstop の対）。�
 ```bash
 # ゲート（実測・第 1 実行単位）: 実 push 先そのものを目で見る + 機械条件 2 本を checker で判定
 rm -f "${TMPDIR:-/tmp}/ledger-sep.rc"
-bd dolt remote list                                                        # 実 push 先の一次観測
+# 実 push 先の一次観測。bd が hang するとゲートが返らないので有界化する（checker 内の bd 呼出も同様）
+timeout "${LEDGER_SEP_BD_TIMEOUT:-20}" bd dolt remote list || echo "⚠ bd dolt remote list が rc=$? （timeout=124）"
 "${CLAUDE_PLUGIN_ROOT}/skills/setup/check-ledger-separation.sh"; echo $? > "${TMPDIR:-/tmp}/ledger-sep.rc"
 echo "LEDGER-SEP:rc=$(cat "${TMPDIR:-/tmp}/ledger-sep.rc")"                 # 0=clean / 1=違反 / 2=判定不能
 ```
