@@ -61,6 +61,14 @@
 # workers silently skip and the next unsandboxed write refreshes the mirror).
 # This setting stays false so bd itself never duplicates that export path.
 export.auto: false
+sync:
+    remote: "git+https://github.com/shuu5/scribe-beads.git"
+
+# ★col0 平坦行は beads-bdw guard の has_remote 用（orch-0d37・2026-07-29）: guard は col0 の
+#   `sync.remote:` 行しか読まず、nested 形だけだと「local-only」誤判定で guard が silent no-op になる。
+#   dolt の push 先は自前レジストリ由来でこの行では変わらない（追記後に `bd dolt remote list` で実測済み）。
+#   nested 実効値（上の sync: ブロック）と本行の**両方を維持する**——将来の掃除で片方だけ消さないこと。
+sync.remote: "git+https://github.com/shuu5/scribe-beads.git"
 
 # Integration settings (access with 'bd config get/set')
 # Non-secret keys (stored in the database):
@@ -72,4 +80,22 @@ export.auto: false
 # - linear.api_key  → use LINEAR_API_KEY env var instead
 # - github.token    → use GITHUB_TOKEN env var instead
 
-sync.remote: "git+https://github.com/shuu5/scribe.git"
+# 台帳 remote はコード repo と分離する（fleet 標準・orchestrator 裁定 orch-jot0 / bd sc-zkof）。
+#
+# なぜ: bd の既定は台帳（refs/dolt/data）をコード repo と同じ remote へ push する。台帳本文には
+# コード repo の公開範囲と独立に扱うべき文脈情報が含まれるため、台帳専用の private repo で管理する
+# （経緯・判定の詳細は bd sc-zkof / orch-jot0 の notes が SSOT）。
+#
+# 不変条件（変更するときはこの 2 本を必ず再確認する）:
+#   1. git ls-remote <このコード repo> 'refs/dolt/*' が 0 件であること
+#   2. sync.remote が当該コード repo を指さないこと
+#
+# 台帳 1 つにつき private repo 1 つが必要（dolt の push 先 ref 名は refs/dolt/data 固定で、
+# 複数台帳を 1 repo に集約すると ref が衝突するため）。
+#
+# ★実効値は上の sync: ブロック（bd dolt remote add が書く正準形）。例外は guard 用 col0 平坦行
+#   `sync.remote:`（同値重複・orch-0d37）のみ——それ以外にここへ重複して書かない。
+# ★最重要の落とし穴: **このファイルを編集しても push 先は切り替わらない**。
+#   dolt エンジンは自前の remote レジストリを持ち、切替には `bd dolt remote remove/add` が要る。
+#   ゆえに push の前に必ず `bd dolt remote list` で実際の push 先を実測し、
+#   意図した private 先を指していなければ push しない（実測と push は別の実行単位で行う）。
