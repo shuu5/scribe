@@ -50,6 +50,16 @@
 
 bats_require_minimum_version 1.5.0 # `run -126` / `run -127`（期待 exit code 指定）を使うため
 
+GREP_BIN=/usr/bin/grep # 対話 grep（ugrep shim）と実装で挙動が割れるため常にフルパス固定（不在なら fail-loud）
+
+# `skip` 呼出しを数える regex の **単一 SSOT**（ERRATA-2 FIX-Q）。
+# 末尾の `([[:space:]]|;|$)` が要: これを `[[:space:]]` だけにすると **bare skip（引数なし・行末 skip）**を
+# 数え落とす。bare skip は bats で完全に合法かつ require_probe_env を通らないため env-skipped.txt にも
+# 記録されず、teardown_file が「環境 skip 0 本（全 tooth を実行した）」と偽の自己申告を出したまま rc=0 になる
+# （裁定-ENV 条件(iii)(iv) の機械線が同時に空洞化する）。ERRATA-1 の改訂でこの末尾を落として実際に退行させた
+# ため、定義を 1 箇所に集約して同じ drift を構造的に再発させない。
+skip_call_regex() { printf '%s' '^[[:space:]]*skip([[:space:]]|;|$)'; }
+
 # 封じ込め可否の判定は engine の --check-containment が単一 SSOT（bwrap の引数を bats 側へ複製しない）。
 # 使えるなら空文字を返す。使えないなら理由文字列を返す。setup / teardown_file の双方から呼べるよう自己完結。
 probe_env_reason() {
@@ -76,14 +86,27 @@ require_probe_env() {
 }
 
 # 条件(iv): skip 本数の自己記述。併せて条件(iii) の強制（bwrap 使用可の host で skip が出たら file を fail させる）。
+# ERRATA-2 FIX-Q(c): 自己記述を「実際に skip した本数」だけでなく **source の skip 総数**とも突合する。
+# env guard 以外の skip（bare skip 等）は env-skipped.txt に載らないため、本数だけを見ていると
+# 「環境 skip 0 本＝全 tooth を実行した」という**偽の自己申告**が rc=0 のまま通る（本 errata の発端）。
 teardown_file() {
   local n=0
   [ -f "$BATS_FILE_TMPDIR/env-skipped.txt" ] && n="$(wc -l < "$BATS_FILE_TMPDIR/env-skipped.txt")"
+  local src_skips
+  src_skips="$("$GREP_BIN" -c -E "$(skip_call_regex)" "$BATS_TEST_FILENAME")" || src_skips=0
   if [ "$n" -gt 0 ]; then
     echo "# bwrap 不在により $n 本 skip（環境要因・復旧手段: bubblewrap 導入 + userns 許可。判定ロジックは無効化していない）" >&3
   else
-    echo "# bwrap 在: 環境 skip 0 本（全 tooth を実行した）" >&3
+    # ★ ここで「env guard のみ」と断定しない: src_skips が 1 でない可能性がある時点では偽になりうる
+    #   （偽の自己申告こそ本 errata の発端）。断定は下の src_skips -ne 1 チェックを通った後の事実だけに留める。
+    echo "# bwrap 在: 環境 skip 0 本（全 tooth を実行した・source の skip 呼出しは $src_skips 箇所）" >&3
   fi
+  # (iii) 実効化その 1: env guard 以外の skip が source に 1 本でもあれば fail（自己記述が偽になる形を塞ぐ）
+  if [ "$src_skips" -ne 1 ]; then
+    echo "# FAIL: source の skip 呼出しが $src_skips 箇所（env guard の 1 箇所のみが許容）。env guard 以外の skip は禁止（裁定-ENV 条件(i)(iii)）" >&3
+    return 1
+  fi
+  # (iii) 実効化その 2: bwrap 使用可の host で環境 skip が出たら fail
   if [ -z "$(probe_env_reason)" ] && [ "$n" -gt 0 ]; then
     echo "# FAIL: bwrap 使用可の host で環境 skip が $n 本発生した（skip 逃げの常態化を禁止・条件(iii)）" >&3
     return 1
@@ -479,19 +502,23 @@ EOF
 # inventory: invariant=skip の発火点は環境 guard の 1 箇所だけであり（他の理由の skip は 0 本）、
 #            bwrap が使える host では **その 1 箇所も発火しない**（skip 逃げの常態化を禁止）
 #          | polarity=positive
-#          | mutant_fingerprint=(a) どこかの tooth に素の `skip` を 1 行足す → 本 tooth の source 側 assert が RED
+#          | mutant_fingerprint=(a) どこかの tooth に素の `skip` を 1 行足す（**引数なしの bare skip** を含む）
+#            → 本 tooth の source 側 assert が RED（count 1→2）+ teardown_file も fail。ERRATA-2 で実測済み
 #            (b) require_probe_env の判定を `reason="always"` 等へ反転 → bwrap 在 host で
 #            probe_env_reason が非空になり本 tooth の runtime 側 assert が RED
+#            (c) skip_call_regex の末尾 `([[:space:]]|;|$)` を `[[:space:]]` へ戻す → bare skip 変異が
+#            生存する（(a) の fingerprint が falsify される）。ERRATA-2 FIX-Q が塞いだ退行そのもの
 #   ★ ERRATA-1 裁定-ENV 条件(iii) の実装。source（skip 箇所の数と位置）と runtime（この host で発火するか）を
 #     両方 pin する。実行末尾の本数自己記述は teardown_file が出す（条件(iv)）。
 @test "sc-4t3t T16: skip は環境 guard の 1 箇所のみ・bwrap 在 host では 0 本（skip 逃げの禁止）" {
-  # (a) source: `skip` の呼出しは 1 箇所だけ
-  run "$GREP" -c -E "^[[:space:]]*skip[[:space:]]" "$BATS_TEST_FILENAME"
+  # (a) source: `skip` の呼出しは 1 箇所だけ（regex は skip_call_regex が単一 SSOT。
+  #     bare skip〔行末 skip〕・`skip;` も必ず数に入る＝ERRATA-2 FIX-Q）
+  run "$GREP" -c -E "$(skip_call_regex)" "$BATS_TEST_FILENAME"
   [ "$status" -eq 0 ]
   [ "$output" = "1" ]
 
   # (b) その 1 箇所は require_probe_env() の中（環境要因 + 復旧手段を明記した理由文）である
-  run "$GREP" -n -E "^[[:space:]]*skip[[:space:]]" "$BATS_TEST_FILENAME"
+  run "$GREP" -n -E "$(skip_call_regex)" "$BATS_TEST_FILENAME"
   [ "$status" -eq 0 ]
   [[ "$output" == *"環境要因"* ]]
   [[ "$output" == *"復旧手段"* ]]
