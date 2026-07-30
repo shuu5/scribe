@@ -904,9 +904,14 @@ real_commit_or_skip() { # <rev>...
   rm -rf "$r"
   [ "$status" -eq 1 ]                       # C-quote 形では効かない（fail-closed）
 
-  # 非対称が文書化されていること（無言の罠にしない）
-  grep -q 'C-quote 形' "$SCAN"
-  grep -q '生 path' "$FRESH"
+  # 非対称が **--help の実出力** に出ていること（script 全文 grep だとヘッダ comment に当たるため、
+  # usage の記載を削っても green になり pin として空虚になる）。
+  run "$SCAN" --help
+  [ "$status" -eq 0 ]
+  grep -q 'C-quote 形' <<< "$output"
+  run "$FRESH" --help
+  [ "$status" -eq 0 ]
+  grep -q '生 path' <<< "$output"
 }
 
 @test "MINOR legB: branch が削除した path は集計行へ br-deleted-paths として痕跡を残す" {
@@ -1087,20 +1092,37 @@ real_commit_or_skip() { # <rev>...
 }
 
 @test "MINOR-n6: 不正な --expect-restore（blob が hex でない / = 無し）は両 leg とも rc=2" {
+  # ★leg B 側は **本来 rc=1 になる branch**（clobber 済み）を渡す。0 file の branch を渡すと
+  #   「走査対象 file が 0 件」の別理由で rc=2 になり teeth が空虚になる（宣言 guard は BR_N 検査の後）。
+  local br
+  br="$(fx_commit_on feat-clobber "$C4" a.txt 'v2
+')"
   run "$SCAN" --repo "$FX" --range "$C2..$C3" --expect-restore 'a.txt=notahexvalue!'
   [ "$status" -eq 2 ]
   run "$SCAN" --repo "$FX" --range "$C2..$C3" --expect-restore 'a.txt-no-equals'
   [ "$status" -eq 2 ]
-  run "$FRESH" --repo "$FX" --branch feat-fresh --base-ref origin/main --expect-restore 'a.txt=zz'
+  run "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main --expect-restore 'a.txt=zz'
   [ "$status" -eq 2 ]
+  run "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main --expect-restore 'a.txt-no-equals'
+  [ "$status" -eq 2 ]
+  # guard あり時に本来 rc=1 になる引数であること（別理由の 2 で空虚にしない）
+  run "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main
+  [ "$status" -eq 1 ]
 }
 
 @test "MINOR-n6: 不在の --allowlist file は両 leg とも rc=2（空 allowlist として素通ししない）" {
+  # ★leg B 側は本来 rc=1 になる branch を渡す（上と同じ理由）。
+  local br
+  br="$(fx_commit_on feat-clobber "$C4" a.txt 'v2
+')"
   run "$SCAN" --repo "$FX" --range "$C2..$C3" --allowlist "$FX/no-such-allowlist.txt"
   [ "$status" -eq 2 ]
   grep -q 'allowlist' <<< "$output"
-  run "$FRESH" --repo "$FX" --branch feat-fresh --base-ref origin/main --allowlist "$FX/no-such-allowlist.txt"
+  run "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main --allowlist "$FX/no-such-allowlist.txt"
   [ "$status" -eq 2 ]
+  grep -q 'allowlist' <<< "$output"
+  run "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main
+  [ "$status" -eq 1 ]
 }
 
 @test "MINOR-n6: unset 対象の git 環境変数すべてが結果を汚さない（GIT_DIR 以外も含む）" {
@@ -1144,8 +1166,104 @@ real_commit_or_skip() { # <rev>...
         --expect-restore "\"q\\tb.txt\"=$(git -C "$r" rev-parse "$c1:$tp" | cut -c1-7)"
   rm -rf "$r"
   [ "$status" -eq 1 ]
-  # usage に モード別の表記規約が書かれていること
-  grep -q 'mode pre-merge' "$SCAN"
+  # usage（--help の実出力）にモード別の表記規約が書かれていること
+  run "$SCAN" --help
+  [ "$status" -eq 0 ]
+  grep -q 'mode post-merge（既定） … \*\*C-quote 形\*\*' <<< "$output"
+  grep -q 'mode pre-merge          … \*\*生 path\*\*' <<< "$output"
+}
+
+# ---------- ERRATA-4 FIX-B: EXIT trap の cleanup が判定 rc を上書きしない ----------
+
+@test "FIX-B legA: rm が失敗しても clean は rc=0 / 検知は rc=1 / harness-fail は rc=2 のまま" {
+  # 機構: `set -e` 下では EXIT trap の最終コマンドの非 0 で **判定 rc が上書きされる**。
+  # 実測（修正前）: rm を exit 1 shim にすると clean(0) も harness-fail(2) も rc=1（偽検知）。
+  local shim
+  shim="$(cd "$(mktemp -d)" && pwd -P)"
+  printf '#!/bin/sh\nexit 1\n' > "$shim/rm"
+  chmod +x "$shim/rm"
+  # まず guard あり（正規 PATH）での本来 rc を pin する（別理由で一致して空虚になるのを防ぐ）。
+  run "$SCAN" --repo "$FX" --range "$C1..$C2"
+  [ "$status" -eq 0 ]
+  run "$SCAN" --repo "$FX" --range "$C2..$C3"
+  [ "$status" -eq 1 ]
+  run "$SCAN" --repo "$FX" --range "$C4..$C4"
+  [ "$status" -eq 2 ]
+  # rm を壊しても 3 つの rc が変わらないこと
+  run env PATH="$shim:$PATH" "$SCAN" --repo "$FX" --range "$C1..$C2"
+  [ "$status" -eq 0 ]
+  run env PATH="$shim:$PATH" "$SCAN" --repo "$FX" --range "$C2..$C3"
+  [ "$status" -eq 1 ]
+  run env PATH="$shim:$PATH" "$SCAN" --repo "$FX" --range "$C4..$C4"
+  rm -rf "$shim"
+  [ "$status" -eq 2 ]
+}
+
+@test "FIX-B legA: rm が exit 3 でも判定 rc が 3 へ漏れない" {
+  local shim
+  shim="$(cd "$(mktemp -d)" && pwd -P)"
+  printf '#!/bin/sh\nexit 3\n' > "$shim/rm"
+  chmod +x "$shim/rm"
+  run env PATH="$shim:$PATH" "$SCAN" --repo "$FX" --range "$C2..$C3"
+  rm -rf "$shim"
+  [ "$status" -eq 1 ]
+  grep -q 'clobber-suspect=1' <<< "$output"
+}
+
+@test "FIX-B legB: rm が失敗しても clean は rc=0 / 検知は rc=1 / harness-fail は rc=2 のまま" {
+  local br shim
+  br="$(fx_commit_on feat-clobber "$C4" a.txt 'v2
+')"
+  fx_commit_on feat-clean "$C4" newfile.txt 'fresh content' > /dev/null
+  shim="$(cd "$(mktemp -d)" && pwd -P)"
+  printf '#!/bin/sh\nexit 1\n' > "$shim/rm"
+  chmod +x "$shim/rm"
+  run "$FRESH" --repo "$FX" --branch feat-clean --base-ref origin/main
+  [ "$status" -eq 0 ]
+  run "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main
+  [ "$status" -eq 1 ]
+  run "$FRESH" --repo "$FX" --branch no-such-branch --base-ref origin/main
+  [ "$status" -eq 2 ]
+  run env PATH="$shim:$PATH" "$FRESH" --repo "$FX" --branch feat-clean --base-ref origin/main
+  [ "$status" -eq 0 ]
+  run env PATH="$shim:$PATH" "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main
+  [ "$status" -eq 1 ]
+  run env PATH="$shim:$PATH" "$FRESH" --repo "$FX" --branch no-such-branch --base-ref origin/main
+  rm -rf "$shim"
+  [ "$status" -eq 2 ]
+}
+
+@test "FIX-B: rm 抜き stub PATH は両 leg とも rc=2（rc=127 を漏らさない）" {
+  local stub c p
+  stub="$(cd "$(mktemp -d)" && pwd -P)"
+  for c in bash sh git awk comm sort mktemp tr sed head cat env printf readlink dirname wc; do
+    p="$(command -v "$c" 2>/dev/null)" && ln -sf "$p" "$stub/$c"
+  done
+  run env PATH="$stub" "$SCAN" --repo "$FX" --range "$C2..$C3"
+  [ "$status" -eq 2 ]
+  grep -q '外部コマンドが見つかりません: rm' <<< "$output"
+  run env PATH="$stub" "$FRESH" --repo "$FX" --branch feat-fresh --base-ref origin/main
+  rm -rf "$stub"
+  [ "$status" -eq 2 ]
+  grep -q '外部コマンドが見つかりません: rm' <<< "$output"
+}
+
+@test "FIX-B: --help は外部 cat 不在でも rc=0 で usage 本文を出す" {
+  # 実測（修正前）: cat 抜き PATH で -h が rc=127・usage 本文が出なかった（usage は引数解析中に
+  # 走るため依存 probe より前＝probe へ cat を足しても救えない）。builtin 出力へ変えて解消する。
+  local stub c p
+  stub="$(cd "$(mktemp -d)" && pwd -P)"
+  for c in bash sh git awk comm sort mktemp tr sed head env printf readlink dirname wc rm; do
+    p="$(command -v "$c" 2>/dev/null)" && ln -sf "$p" "$stub/$c"
+  done
+  run env PATH="$stub" "$SCAN" --help
+  [ "$status" -eq 0 ]
+  grep -q '^Usage:' <<< "$output"
+  grep -q 'Exit: 0=clean' <<< "$output"
+  run env PATH="$stub" "$FRESH" --help
+  rm -rf "$stub"
+  [ "$status" -eq 0 ]
+  grep -q '^Usage:' <<< "$output"
 }
 
 @test "実データ legA: 本リポ走査でも HEAD と working tree を変更しない" {

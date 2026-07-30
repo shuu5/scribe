@@ -68,7 +68,9 @@ die2() { printf '%s: harness-fail: %s\n' "$PROG" "$*" >&2; exit 2; }
 need_val() { [[ -n "${1:-}" && "$1" != -* ]] || die2 "$2 に値を指定してください（値の欠落・次フラグの誤消費を防止）"; }
 
 usage() {
-  cat <<'EOF'
+  # 外部 `cat` に依存しない（cat 不在で -h が rc=127 になり usage 本文も出ないのを避ける）。
+  local _l
+  while IFS= read -r _l; do printf '%s\n' "$_l"; done <<'EOF'
 Usage:
   scribe-blob-revive-scan.sh --range <base>..<tip> [--repo PATH] [宣言オプション]
       post-merge 検知（既定）。range は **sha で pin** すること（HEAD 相対は cell ごとに再現しない）。
@@ -112,8 +114,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 # 依存 probe は**実使用する全コマンド**を列挙する（漏れると不在時に rc=127 が漏出し契約 {0,1,2} を
-# 破る。実測: wc を PATH から外すと rc=127）。
-for c in git awk mktemp wc head; do
+# 破る。実測: wc / rm を PATH から外すと rc=127）。rm は EXIT trap の cleanup が使う。
+# `cat` は列挙しない — usage は builtin（read + printf）で出すので外部 cat に依存しない
+# （usage は引数解析中に走るため、本 probe より前に到達する＝probe へ足しても -h は救えない）。
+for c in git awk mktemp wc head rm; do
   command -v "$c" >/dev/null 2>&1 || die2 "外部コマンドが見つかりません: $c"
 done
 
@@ -187,7 +191,10 @@ RANGE_BASE="$(resolve_commit "$RANGE_BASE_IN" "--range の base")"
 RANGE_TIP="$(resolve_commit "$RANGE_TIP_IN" "--range の tip")"
 
 TMPD="$(mktemp -d)" || die2 "mktemp -d に失敗しました"
-cleanup() { rm -rf "$TMPD"; }
+# EXIT trap の最終コマンドが非 0 だと **判定 rc がそれで上書きされる**（実測: rm を exit 1 shim に
+# すると clean(0) と harness-fail(2) がどちらも 1＝偽検知になり、exit 3 shim では rc=3 が漏れる）。
+# rc に干渉させないため失敗を吸収して必ず真を返す。
+cleanup() { rm -rf "$TMPD" 2>/dev/null || :; }
 trap cleanup EXIT
 
 # --- 走査対象 commit（range 内・first-parent） ---
