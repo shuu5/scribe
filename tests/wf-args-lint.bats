@@ -52,13 +52,30 @@ bats_require_minimum_version 1.5.0 # `run -126` / `run -127`（期待 exit code 
 
 GREP_BIN=/usr/bin/grep # 対話 grep（ugrep shim）と実装で挙動が割れるため常にフルパス固定（不在なら fail-loud）
 
-# `skip` 呼出しを数える regex の **単一 SSOT**（ERRATA-2 FIX-Q）。
-# 末尾の `([[:space:]]|;|$)` が要: これを `[[:space:]]` だけにすると **bare skip（引数なし・行末 skip）**を
-# 数え落とす。bare skip は bats で完全に合法かつ require_probe_env を通らないため env-skipped.txt にも
-# 記録されず、teardown_file が「環境 skip 0 本（全 tooth を実行した）」と偽の自己申告を出したまま rc=0 になる
-# （裁定-ENV 条件(iii)(iv) の機械線が同時に空洞化する）。ERRATA-1 の改訂でこの末尾を落として実際に退行させた
-# ため、定義を 1 箇所に集約して同じ drift を構造的に再発させない。
-skip_call_regex() { printf '%s' '^[[:space:]]*skip([[:space:]]|;|$)'; }
+# `skip` 呼出しを数える regex の **単一 SSOT**（ERRATA-2 FIX-Q / ERRATA-3 FIX-R）。
+#
+# ■ 捕捉範囲の境界宣言（ERRATA-3 admin 裁定・必須。teardown_file の申告はこの範囲を超えて主張しない）
+#   本 regex が捕捉するのは次の **5 形に限る**:
+#     (1) 行頭 skip  (2) 行頭 skip;  (3) `||` 直後の skip  (4) `&&` 直後の skip  (5) `; then` 直後の skip
+#   これは *shell の skip 呼出し全体の同値判定ではない*。すなわち eval 経由・変数展開経由（$SKIP_CMD）・
+#   関数ラップ経由・複数行継続（`\` で改行をまたぐ形）の skip は **捕捉しない**。
+#   teardown_file の「env guard 以外の skip は 0 本」という申告は *この 5 形の範囲で機械確認した* という意味
+#   であり、それ以上を主張しない。捕捉外形の追跡は follow-up bead sc-6x3s で扱う（本 leg の射程外）。
+#
+# ■ なぜこの形なのか（2 度の退行の記録）
+#   末尾の `([[:space:]]|;|$)` を落とすと **bare skip（引数なし・行末 skip）**を数え落とす（ERRATA-1 で実際に退行）。
+#   行頭 anchor だけにすると本 repo で**支配的な mid-line 形**（`|| skip` は本 repo に 22 hit / 5 file）を
+#   数え落とす（ERRATA-2 の実装が該当）。いずれの取りこぼしも、その skip は require_probe_env を通らず
+#   env-skipped.txt にも載らないため、teardown_file が「環境 skip 0 本（全 tooth を実行した）」と
+#   **偽の自己申告**を出したまま rc=0 になる（裁定-ENV 条件(iii)(iv) の機械線が同時に空洞化する）。
+#   素朴に `(^|[[:space:]])skip` へ緩めると @test の title 等を誤検出するため、**演算子 anchor 併記形**を採る。
+#   演算子 anchor 側は `^[^#]*` を前置してコメント行の言及を除外する。その帰結として「同一行で `#` より後ろに
+#   置かれた `|| skip`」も捕捉外になる（上の境界宣言に含まれる既知の取りこぼし。実コードでその位置に skip を
+#   書くと `#` 以降はコメントで実行されないため、実害のある取りこぼしではない）。
+#   定義は 1 箇所に集約し（T16(a)(b)(d) と teardown_file が参照）、同じ drift を構造的に再発させない。
+skip_call_regex() {
+  printf '%s' '^[[:space:]]*skip([[:space:]]|;|$)|^[^#]*(\|\||&&|;|[[:space:]]then)[[:space:]]+skip([[:space:]]|;|$)'
+}
 
 # 封じ込め可否の判定は engine の --check-containment が単一 SSOT（bwrap の引数を bats 側へ複製しない）。
 # 使えるなら空文字を返す。使えないなら理由文字列を返す。setup / teardown_file の双方から呼べるよう自己完結。
@@ -94,13 +111,9 @@ teardown_file() {
   [ -f "$BATS_FILE_TMPDIR/env-skipped.txt" ] && n="$(wc -l < "$BATS_FILE_TMPDIR/env-skipped.txt")"
   local src_skips
   src_skips="$("$GREP_BIN" -c -E "$(skip_call_regex)" "$BATS_TEST_FILENAME")" || src_skips=0
-  if [ "$n" -gt 0 ]; then
-    echo "# bwrap 不在により $n 本 skip（環境要因・復旧手段: bubblewrap 導入 + userns 許可。判定ロジックは無効化していない）" >&3
-  else
-    # ★ ここで「env guard のみ」と断定しない: src_skips が 1 でない可能性がある時点では偽になりうる
-    #   （偽の自己申告こそ本 errata の発端）。断定は下の src_skips -ne 1 チェックを通った後の事実だけに留める。
-    echo "# bwrap 在: 環境 skip 0 本（全 tooth を実行した・source の skip 呼出しは $src_skips 箇所）" >&3
-  fi
+
+  # ★ 順序（ERRATA-3 FIX-R(c)・minor 一体対応）: **検査を通す前に「全 tooth を実行した」と断定しない**。
+  #   ERRATA-2 版は自己記述を先に出していたため、src_skips 異常時に偽の断定が先に stream へ出ていた。
   # (iii) 実効化その 1: env guard 以外の skip が source に 1 本でもあれば fail（自己記述が偽になる形を塞ぐ）
   if [ "$src_skips" -ne 1 ]; then
     echo "# FAIL: source の skip 呼出しが $src_skips 箇所（env guard の 1 箇所のみが許容）。env guard 以外の skip は禁止（裁定-ENV 条件(i)(iii)）" >&3
@@ -110,6 +123,13 @@ teardown_file() {
   if [ -z "$(probe_env_reason)" ] && [ "$n" -gt 0 ]; then
     echo "# FAIL: bwrap 使用可の host で環境 skip が $n 本発生した（skip 逃げの常態化を禁止・条件(iii)）" >&3
     return 1
+  fi
+
+  # ここまで通った後にだけ自己記述する。文言は **実機構が確かめた範囲**（skip_call_regex の 5 形）を超えない。
+  if [ "$n" -gt 0 ]; then
+    echo "# bwrap 不在により $n 本 skip（環境要因・復旧手段: bubblewrap 導入 + userns 許可。判定ロジックは無効化していない）" >&3
+  else
+    echo "# bwrap 在: 環境 skip 0 本（全 tooth を実行した）。『env guard 以外の skip なし』は skip_call_regex が捕捉する 5 形〔行頭 skip / 行頭 skip; / '||' '&&' '; then' 直後の skip〕の範囲での機械確認であり、eval・変数展開・関数ラップ・複数行継続は範囲外（follow-up sc-6x3s）" >&3
   fi
   return 0
 }
@@ -502,12 +522,15 @@ EOF
 # inventory: invariant=skip の発火点は環境 guard の 1 箇所だけであり（他の理由の skip は 0 本）、
 #            bwrap が使える host では **その 1 箇所も発火しない**（skip 逃げの常態化を禁止）
 #          | polarity=positive
-#          | mutant_fingerprint=(a) どこかの tooth に素の `skip` を 1 行足す（**引数なしの bare skip** を含む）
-#            → 本 tooth の source 側 assert が RED（count 1→2）+ teardown_file も fail。ERRATA-2 で実測済み
+#          | mutant_fingerprint=(a) どこかの tooth に skip を 1 行足す（**bare skip / `skip;` /
+#            `|| skip` / `&& skip` / `; then skip` の 5 形いずれでも**）→ 本 tooth の source 側 assert が
+#            RED（count 1→2）+ teardown_file も fail。bare 形は ERRATA-2、`|| skip` 形は ERRATA-3 で実測済み
 #            (b) require_probe_env の判定を `reason="always"` 等へ反転 → bwrap 在 host で
 #            probe_env_reason が非空になり本 tooth の runtime 側 assert が RED
 #            (c) skip_call_regex の末尾 `([[:space:]]|;|$)` を `[[:space:]]` へ戻す → bare skip 変異が
 #            生存する（(a) の fingerprint が falsify される）。ERRATA-2 FIX-Q が塞いだ退行そのもの
+#            (d) skip_call_regex から演算子 anchor 側の alternative を落とす → `|| skip` 変異が生存し、
+#            かつ本 tooth の positive control (d) が count 5→2 で RED。ERRATA-3 FIX-R が塞いだ退行そのもの
 #   ★ ERRATA-1 裁定-ENV 条件(iii) の実装。source（skip 箇所の数と位置）と runtime（この host で発火するか）を
 #     両方 pin する。実行末尾の本数自己記述は teardown_file が出す（条件(iv)）。
 @test "sc-4t3t T16: skip は環境 guard の 1 箇所のみ・bwrap 在 host では 0 本（skip 逃げの禁止）" {
@@ -528,6 +551,32 @@ EOF
   local fn_line="${output%%:*}"
   [ "$skip_line" -gt "$fn_line" ]
   [ $((skip_line - fn_line)) -lt 12 ] # 関数本体の中に在る（別 tooth へ紛れ込んでいない）
+
+  # (d) SSOT regex 自身の positive control（ERRATA-3 FIX-R(b)・**同一 tooth 内で閉じる**）。
+  #     (a)(b) は「count が 1 であること」しか見ないので、regex が**何も捕捉できない形へ壊れて**も green に
+  #     なりうる（実際 ERRATA-1/2 の 2 度の退行はどちらも「捕捉漏れ」側だった）。捕捉すべき 5 形を必ず数え、
+  #     非該当を数えないことを、その場で合成した sample に対して確かめる。
+  #     ★ sample を literal で書かない: この bats 自身が (a) の検査対象なので、`|| skip` 等を素で書くと
+  #       自分の count に写り込んで偽 RED になる。演算子・キーワードだけ変数へ逃がして合成する。
+  local op_or='||' op_and='&&' kw_then='then'
+  printf '%s\n' \
+    '  skip' \
+    '  skip;' \
+    "  command -v foo $op_or skip \"deps 不足で判定不能\"" \
+    "  if ! have_x; $kw_then skip; fi" \
+    "  run something $op_and skip" > "$FIX/skip-forms.txt"
+  run "$GREP" -c -E "$(skip_call_regex)" "$FIX/skip-forms.txt"
+  [ "$status" -eq 0 ]
+  [ "$output" = "5" ] # 境界宣言の 5 形（bare / ';' / '||' / '; then' / '&&'）を全部捕まえる
+
+  printf '%s\n' \
+    "skip_call_regex() { printf '%s' 'x'; }" \
+    '# コメント中の言及: cmd '"$op_or"' skip は数えない' \
+    '@test "T99: skip を語る title" {' \
+    '  local skipped=0' > "$FIX/skip-nonforms.txt"
+  run "$GREP" -c -E "$(skip_call_regex)" "$FIX/skip-nonforms.txt"
+  [ "$status" -eq 1 ] # 一致 0 件（grep -c は 0 件で rc=1）
+  [ "$output" = "0" ] # 定義行・コメント言及・@test title・skipped 変数を誤検出しない
 
   # (c) runtime: この host で封じ込めが使えるなら guard は発火しない＝環境 skip 0 本
   run probe_env_reason
