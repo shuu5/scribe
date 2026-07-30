@@ -1189,48 +1189,79 @@ real_commit_or_skip() { # <rev>...
   [ "$status" -eq 1 ]
   run "$SCAN" --repo "$FX" --range "$C4..$C4"
   [ "$status" -eq 2 ]
-  # rm を壊しても 3 つの rc が変わらないこと
-  run env PATH="$shim:$PATH" "$SCAN" --repo "$FX" --range "$C1..$C2"
+  # rm を壊しても 3 つの rc が変わらないこと。
+  # ★rm が壊れている間は script 側 cleanup が TMPD を消せないので、TMPDIR を per-test 使い捨て dir へ
+  #   向けて leak を閉じ込め、tooth 末尾で親ごと回収する（ERRATA-3 n5 と同 class）。
+  local tmpd
+  tmpd="$(cd "$(mktemp -d)" && pwd -P)"
+  run env TMPDIR="$tmpd" PATH="$shim:$PATH" "$SCAN" --repo "$FX" --range "$C1..$C2"
   [ "$status" -eq 0 ]
-  run env PATH="$shim:$PATH" "$SCAN" --repo "$FX" --range "$C2..$C3"
+  run env TMPDIR="$tmpd" PATH="$shim:$PATH" "$SCAN" --repo "$FX" --range "$C2..$C3"
   [ "$status" -eq 1 ]
-  run env PATH="$shim:$PATH" "$SCAN" --repo "$FX" --range "$C4..$C4"
-  rm -rf "$shim"
+  run env TMPDIR="$tmpd" PATH="$shim:$PATH" "$SCAN" --repo "$FX" --range "$C4..$C4"
+  rm -rf "$shim" "$tmpd"
   [ "$status" -eq 2 ]
 }
 
 @test "FIX-B legA: rm が exit 3 でも判定 rc が 3 へ漏れない" {
-  local shim
+  local shim tmpd
   shim="$(cd "$(mktemp -d)" && pwd -P)"
   printf '#!/bin/sh\nexit 3\n' > "$shim/rm"
   chmod +x "$shim/rm"
-  run env PATH="$shim:$PATH" "$SCAN" --repo "$FX" --range "$C2..$C3"
-  rm -rf "$shim"
+  tmpd="$(cd "$(mktemp -d)" && pwd -P)"
+  run env TMPDIR="$tmpd" PATH="$shim:$PATH" "$SCAN" --repo "$FX" --range "$C2..$C3"
+  rm -rf "$shim" "$tmpd"
   [ "$status" -eq 1 ]
   grep -q 'clobber-suspect=1' <<< "$output"
 }
 
 @test "FIX-B legB: rm が失敗しても clean は rc=0 / 検知は rc=1 / harness-fail は rc=2 のまま" {
-  local br shim
+  # ★harness-fail arm は **trap 設置後に die2 する経路**でなければ空虚（no-such-branch は ref 解決で
+  #   落ちるため trap 設置**前**＝cleanup を通らず、cleanup を壊しても rc=2 のまま緑になる）。
+  #   trap 設置後に die2 する経路 = merge-base から 0 file の branch（「走査対象 file が 0 件」）。
+  local br shim empty tmpd
   br="$(fx_commit_on feat-clobber "$C4" a.txt 'v2
 ')"
   fx_commit_on feat-clean "$C4" newfile.txt 'fresh content' > /dev/null
+  empty="$(git -C "$FX" commit-tree "$C4^{tree}" -p "$C4" -m empty)"
+  git -C "$FX" update-ref refs/heads/feat-empty "$empty"
   shim="$(cd "$(mktemp -d)" && pwd -P)"
   printf '#!/bin/sh\nexit 1\n' > "$shim/rm"
   chmod +x "$shim/rm"
+  tmpd="$(cd "$(mktemp -d)" && pwd -P)"   # shim 実行時の TMPD leak を per-test dir に閉じ込める
+  # 正規 PATH での本来 rc を pin
   run "$FRESH" --repo "$FX" --branch feat-clean --base-ref origin/main
   [ "$status" -eq 0 ]
   run "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main
   [ "$status" -eq 1 ]
+  run "$FRESH" --repo "$FX" --branch feat-empty --base-ref origin/main
+  [ "$status" -eq 2 ]
   run "$FRESH" --repo "$FX" --branch no-such-branch --base-ref origin/main
   [ "$status" -eq 2 ]
-  run env PATH="$shim:$PATH" "$FRESH" --repo "$FX" --branch feat-clean --base-ref origin/main
+  # rm を壊しても変わらないこと（feat-empty が trap 設置後 arm / no-such-branch は pre-trap control）
+  run env TMPDIR="$tmpd" PATH="$shim:$PATH" "$FRESH" --repo "$FX" --branch feat-clean --base-ref origin/main
   [ "$status" -eq 0 ]
-  run env PATH="$shim:$PATH" "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main
+  run env TMPDIR="$tmpd" PATH="$shim:$PATH" "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main
   [ "$status" -eq 1 ]
-  run env PATH="$shim:$PATH" "$FRESH" --repo "$FX" --branch no-such-branch --base-ref origin/main
-  rm -rf "$shim"
+  run env TMPDIR="$tmpd" PATH="$shim:$PATH" "$FRESH" --repo "$FX" --branch feat-empty --base-ref origin/main
   [ "$status" -eq 2 ]
+  run env TMPDIR="$tmpd" PATH="$shim:$PATH" "$FRESH" --repo "$FX" --branch no-such-branch --base-ref origin/main
+  rm -rf "$shim" "$tmpd"
+  [ "$status" -eq 2 ]
+}
+
+@test "FIX-B legB: rm が exit 3 でも判定 rc が 3 へ漏れない（leg A と対称）" {
+  local br shim tmpd
+  br="$(fx_commit_on feat-clobber "$C4" a.txt 'v2
+')"
+  shim="$(cd "$(mktemp -d)" && pwd -P)"
+  printf '#!/bin/sh\nexit 3\n' > "$shim/rm"
+  chmod +x "$shim/rm"
+  tmpd="$(cd "$(mktemp -d)" && pwd -P)"
+  run env TMPDIR="$tmpd" PATH="$shim:$PATH" "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main
+  rm -rf "$shim" "$tmpd"
+  [ "$status" -eq 1 ]
+  grep -q 'clobber-suspect=1' <<< "$output"
 }
 
 @test "FIX-B: rm 抜き stub PATH は両 leg とも rc=2（rc=127 を漏らさない）" {
@@ -1264,6 +1295,86 @@ real_commit_or_skip() { # <rev>...
   rm -rf "$stub"
   [ "$status" -eq 0 ]
   grep -q '^Usage:' <<< "$output"
+}
+
+# ---------- ERRATA-5 FIX-C: 「在るが読めない」allowlist を偽検知にしない ----------
+
+@test "FIX-C: 読めない --allowlist は両 leg + pre-merge とも rc=2（rc=1 の偽検知にしない）" {
+  # 実測（修正前）: chmod 000 の allowlist を渡すと rc=1 かつ集計行なし。存在検査が -f だけで、
+  # 実読取りの redirect が guard 無しだったため set -e が rc=1 で script を殺していた。
+  local br al
+  br="$(fx_commit_on feat-clobber "$C4" a.txt 'v2
+')"
+  al="$FX/allow-perm.txt"
+  printf 'a.txt %s 意図的な再 land\n' "${BLOB_V2:0:7}" > "$al"
+  # readable なら本来 rc=0（declared）であることを先に pin する（別理由の 2 で空虚にしない）。
+  run "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main --allowlist "$al"
+  [ "$status" -eq 0 ]
+  grep -q 'declared-restore=1' <<< "$output"
+  run "$SCAN" --repo "$FX" --range "$C2..$C3" --allowlist "$FX/allow-a.txt.none" 
+  [ "$status" -eq 2 ]
+  # 読めなくする
+  chmod 000 "$al"
+  run "$FRESH" --repo "$FX" --branch feat-clobber --base-ref origin/main --allowlist "$al"
+  [ "$status" -eq 2 ]
+  grep -q 'harness-fail' <<< "$output"
+  run "$SCAN" --repo "$FX" --mode pre-merge --branch feat-clobber --base-ref origin/main --allowlist "$al"
+  [ "$status" -eq 2 ]
+  grep -q 'harness-fail' <<< "$output"
+  chmod 644 "$al"
+}
+
+@test "FIX-C legA: 読めない --allowlist は rc=2（readable 時の本来 rc も同一 tooth 内で pin）" {
+  local al
+  al="$FX/allow-perm-a.txt"
+  printf 'a.txt %s 意図的な再 land\n' "${BLOB_V1:0:7}" > "$al"
+  run "$SCAN" --repo "$FX" --range "$C2..$C3" --allowlist "$al"
+  [ "$status" -eq 0 ]
+  grep -q 'declared-restore=1' <<< "$output"
+  chmod 000 "$al"
+  run "$SCAN" --repo "$FX" --range "$C2..$C3" --allowlist "$al"
+  chmod 644 "$al"
+  [ "$status" -eq 2 ]
+  grep -q '読めません' <<< "$output"
+}
+
+# ---------- ERRATA-5 FIX-D: stdout / stderr が書けないときの rc 漏れ ----------
+
+@test "FIX-D legA: stderr が閉じていても harness-fail は rc=2（rc=1 に化けない）" {
+  # 実測（修正前）: 2>&- で harness-fail が rc=1。`if ! ...; then die2` の then 節は errexit が
+  # 生きており、die2 の printf 失敗が exit 2 到達前に script を殺していた。
+  run "$SCAN" --repo "$FX" --range "$C4..$C4"
+  [ "$status" -eq 2 ]                       # 正規 stdio での本来 rc を pin
+  run env sh -c '"$1" --repo "$2" --range "$3" 2>&-' _ "$SCAN" "$FX" "$C4..$C4"
+  [ "$status" -eq 2 ]
+}
+
+@test "FIX-D legB: stderr が閉じていても harness-fail は rc=2" {
+  local empty
+  empty="$(git -C "$FX" commit-tree "$C4^{tree}" -p "$C4" -m empty)"
+  git -C "$FX" update-ref refs/heads/feat-empty "$empty"
+  run "$FRESH" --repo "$FX" --branch feat-empty --base-ref origin/main
+  [ "$status" -eq 2 ]
+  run env sh -c '"$1" --repo "$2" --branch feat-empty --base-ref origin/main 2>&-' _ "$FRESH" "$FX"
+  [ "$status" -eq 2 ]
+}
+
+@test "FIX-D: stdout が書けないときは clean/検知とも harness-fail(2) へ倒す（沈黙を green と読ませない）" {
+  # 集計行を出せない以上「走査した上で 0 件」を主張できないので clean(0) を名乗らせない。
+  # 採った写像 = die2(2)。正規 stdio での本来 rc を同一 tooth 内で pin する。
+  local br
+  br="$(fx_commit_on feat-clobber "$C4" a.txt 'v2
+')"
+  run "$SCAN" --repo "$FX" --range "$C1..$C2"
+  [ "$status" -eq 0 ]
+  run "$SCAN" --repo "$FX" --range "$C2..$C3"
+  [ "$status" -eq 1 ]
+  run env sh -c '"$1" --repo "$2" --range "$3" >/dev/full 2>/dev/null' _ "$SCAN" "$FX" "$C1..$C2"
+  [ "$status" -eq 2 ]
+  run env sh -c '"$1" --repo "$2" --range "$3" >/dev/full 2>/dev/null' _ "$SCAN" "$FX" "$C2..$C3"
+  [ "$status" -eq 2 ]
+  run env sh -c '"$1" --repo "$2" --branch feat-clobber --base-ref origin/main >/dev/full 2>/dev/null' _ "$FRESH" "$FX"
+  [ "$status" -eq 2 ]
 }
 
 @test "実データ legA: 本リポ走査でも HEAD と working tree を変更しない" {

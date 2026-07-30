@@ -35,6 +35,8 @@
 #   1 = 検知（clobber-suspect ≥ 1 件）
 #   2 = harness-fail（引数不備 / 非 git dir / ref・範囲の解決不能 / 走査対象 0 / 外部コマンド不在）
 #   harness-fail を緑にも検知にも倒さない。0 件でも集計行を必ず stdout へ出す（沈黙を green と読ませない）。
+#   **rc 契約は stdout / stderr が書けることを前提とする（SIGPIPE による 141 は契約外）**。書けない
+#   場合は集計行を出せず「走査した上で 0 件」を主張できないため、clean(0) でなく harness-fail(2) へ倒す。
 #
 # 2 モード:
 #   --mode post-merge（既定） main 等の first-parent 履歴を **sha で pin した range** で走査（結果側の検知）。
@@ -64,7 +66,10 @@ PROG="blob-revive-scan"
 US=$'\037'
 
 # harness-fail 専用経路（lib の scribe_die は exit 1 固定ゆえ使わない — 1 は「検知」に予約されている）。
-die2() { printf '%s: harness-fail: %s\n' "$PROG" "$*" >&2; exit 2; }
+# rc 契約は stdout/stderr が書ける前提（SIGPIPE を除く）。stderr が書けない状況でも exit 2 へ必ず
+# 到達させるため、printf の失敗は吸収する（`if ! ...; then die2` の then 節は errexit が生きており、
+# printf 失敗が exit 2 到達前に script を rc=1 で殺すため。実測: 2>&- で harness-fail が rc=1）。
+die2() { printf '%s: harness-fail: %s\n' "$PROG" "$*" >&2 || :; exit 2; }
 need_val() { [[ -n "${1:-}" && "$1" != -* ]] || die2 "$2 に値を指定してください（値の欠落・次フラグの誤消費を防止）"; }
 
 usage() {
@@ -285,9 +290,16 @@ add_decl() { # <path>=<blob> <出所>
 }
 for d in ${DECL_ARGS[@]+"${DECL_ARGS[@]}"}; do add_decl "$d" "--expect-restore"; done
 if [[ -n "$ALLOWLIST" ]]; then
-  [[ -f "$ALLOWLIST" ]] || die2 "--allowlist の file が読めません: $ALLOWLIST"
+  # 「在るが読めない」を素通しさせない。存在検査だけだと実読取りの redirect が guard 無しで失敗し、
+  # set -e が rc=1 で script を殺す＝**偽検知**（実測: chmod 000 の allowlist で rc=1・stdout 0 byte）。
+  [[ -f "$ALLOWLIST" ]] || die2 "--allowlist の file がありません: $ALLOWLIST"
+  [[ -r "$ALLOWLIST" ]] || die2 "--allowlist の file を読めません（権限）: $ALLOWLIST"
+  # 実読取りも rc を捕まえて 2 へ写像する（外部 cat は使わない＝builtin の mapfile で読む）。
+  if ! mapfile -t AL_LINES < "$ALLOWLIST"; then
+    die2 "--allowlist の file の読取りに失敗しました: $ALLOWLIST"
+  fi
   lineno=0
-  while IFS= read -r line || [[ -n "$line" ]]; do
+  for line in ${AL_LINES[@]+"${AL_LINES[@]}"}; do
     lineno=$((lineno + 1))
     # コメントは**行頭（先頭空白を除く）が # の行だけ**（行中 # を落とすと path に # を含められない）。
     case "${line#"${line%%[![:space:]]*}"}" in '#'*) continue ;; esac
@@ -303,7 +315,7 @@ if [[ -n "$ALLOWLIST" ]]; then
     [[ -n "$a_path" && -n "$a_blob" && -n "$a_rest" ]] \
       || die2 "--allowlist の $lineno 行目が不正です（'<path> <blob> <根拠>' が必要）: $ALLOWLIST"
     add_decl "$a_path=$a_blob" "--allowlist の $lineno 行目"
-  done < "$ALLOWLIST"
+  done
 fi
 
 is_declared() { # <path> <blob-full>
@@ -357,10 +369,15 @@ done < "$TMPD/out.txt"
 # 集計単位を沈黙で落とさないため両方出す（他実装の raw 集計と桁が合わない時の突合点になる）。
 printf '%s: mode=post-merge repo=%s range=%s..%s range-in=%s scanned-commits=%s merges=%s skipped-merges=%s touched-paths=%s deleted-only-paths=%s revived=%s clobber-suspect=%s declared-restore=%s\n' \
   "$PROG" "$REPO" "$(short "$RANGE_BASE")" "$(short "$RANGE_TIP")" "$RANGE" \
-  "$SCANNED" "$MERGE_N" "$SKIPPED_MERGES" "$TOUCHED" "$DELONLY" "$REVIVED" "$SUSPECT" "$DECLARED"
+  "$SCANNED" "$MERGE_N" "$SKIPPED_MERGES" "$TOUCHED" "$DELONLY" "$REVIVED" "$SUSPECT" "$DECLARED" \
+  || die2 "集計行の出力に失敗しました（stdout が書けません）"
 
-[[ ${#SUSPECT_LINES[@]}  -eq 0 ]] || printf '%s\n' "${SUSPECT_LINES[@]}"
-[[ ${#DECLARED_LINES[@]} -eq 0 ]] || printf '%s\n' "${DECLARED_LINES[@]}"
+if [[ ${#SUSPECT_LINES[@]} -gt 0 ]]; then
+  printf '%s\n' "${SUSPECT_LINES[@]}" || die2 "clobber-suspect 行の出力に失敗しました（stdout が書けません）"
+fi
+if [[ ${#DECLARED_LINES[@]} -gt 0 ]]; then
+  printf '%s\n' "${DECLARED_LINES[@]}" || die2 "declared-restore 行の出力に失敗しました（stdout が書けません）"
+fi
 
 if [[ "$SUSPECT" -gt 0 ]]; then
   exit 1

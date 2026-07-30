@@ -37,6 +37,8 @@
 #   `git merge-base --is-ancestor` は 0 / 1 のほか 128・129 を返す（実測: 不正 ref で 128・引数欠落で
 #   129）。**1 以外の非 0 は必ず 2 へ写像**し、1 だけを検知にする（usage error を「検知」に倒さない）。
 #   0 件でも集計行を必ず stdout へ出す（沈黙を green と読ませない）。
+#   **rc 契約は stdout / stderr が書けることを前提とする（SIGPIPE による 141 は契約外）**。書けない
+#   場合は集計行を出せず「走査した上で 0 件」を主張できないため、clean(0) でなく harness-fail(2) へ倒す。
 #
 # --rc-leg: rc を決める leg を選ぶ（既定 b2）。b2 = content 条件 / b = is-ancestor。
 #   どちらの場合も他方は advisory として出力へ併記する（OR で多重化はしない）。
@@ -61,7 +63,10 @@ PROG="base-freshness"
 # 中間表現（cand / hit）の field 区切り。path は TAB を含みうるので TAB を区切りに使わない。
 US=$'\037'
 
-die2() { printf '%s: harness-fail: %s\n' "$PROG" "$*" >&2; exit 2; }
+# rc 契約は stdout/stderr が書ける前提（SIGPIPE を除く）。stderr が書けない状況でも exit 2 へ必ず
+# 到達させるため、printf の失敗は吸収する（`if ! ...; then die2` の then 節は errexit が生きており、
+# printf 失敗が exit 2 到達前に script を rc=1 で殺すため。実測: 2>&- で harness-fail が rc=1）。
+die2() { printf '%s: harness-fail: %s\n' "$PROG" "$*" >&2 || :; exit 2; }
 need_val() { [[ -n "${1:-}" && "$1" != -* ]] || die2 "$2 に値を指定してください（値の欠落・次フラグの誤消費を防止）"; }
 
 usage() {
@@ -229,9 +234,16 @@ add_decl() { # <path>=<blob> <出所>
 }
 for d in ${DECL_ARGS[@]+"${DECL_ARGS[@]}"}; do add_decl "$d" "--expect-restore"; done
 if [[ -n "$ALLOWLIST" ]]; then
-  [[ -f "$ALLOWLIST" ]] || die2 "--allowlist の file が読めません: $ALLOWLIST"
+  # 「在るが読めない」を素通しさせない。存在検査だけだと実読取りの redirect が guard 無しで失敗し、
+  # set -e が rc=1 で script を殺す＝**偽検知**（実測: chmod 000 の allowlist で rc=1・stdout 0 byte）。
+  [[ -f "$ALLOWLIST" ]] || die2 "--allowlist の file がありません: $ALLOWLIST"
+  [[ -r "$ALLOWLIST" ]] || die2 "--allowlist の file を読めません（権限）: $ALLOWLIST"
+  # 実読取りも rc を捕まえて 2 へ写像する（外部 cat は使わない＝builtin の mapfile で読む）。
+  if ! mapfile -t AL_LINES < "$ALLOWLIST"; then
+    die2 "--allowlist の file の読取りに失敗しました: $ALLOWLIST"
+  fi
   lineno=0
-  while IFS= read -r line || [[ -n "$line" ]]; do
+  for line in ${AL_LINES[@]+"${AL_LINES[@]}"}; do
     lineno=$((lineno + 1))
     # コメントは**行頭（先頭空白を除く）が # の行だけ**（行中 # を落とすと path に # を含められない）。
     case "${line#"${line%%[![:space:]]*}"}" in '#'*) continue ;; esac
@@ -246,7 +258,7 @@ if [[ -n "$ALLOWLIST" ]]; then
     [[ -n "$a_path" && -n "$a_blob" && -n "$a_rest" ]] \
       || die2 "--allowlist の $lineno 行目が不正です（'<path> <blob> <根拠>' が必要）: $ALLOWLIST"
     add_decl "$a_path=$a_blob" "--allowlist の $lineno 行目"
-  done < "$ALLOWLIST"
+  done
 fi
 is_declared() { # <path> <blob-full>
   local p="$1" blob="${2,,}" b
@@ -269,7 +281,7 @@ mapfile -t QPATHS < "$TMPD/br.q"
 QUOTED_N=0
 BR_DELETED_N=0
 qi=0
-: > "$TMPD/cand.txt"
+: > "$TMPD/cand.txt" || die2 "一時 file を作成できません: $TMPD/cand.txt"
 while IFS= read -r -d '' path; do
   qpath="${QPATHS[$qi]:-}"
   qi=$((qi + 1))
@@ -300,11 +312,11 @@ while IFS= read -r -d '' path; do
   # 現行と一致していれば巻き戻しではない（base_cur 空なら一致しようがない）
   [[ -z "$base_cur" || "$br_blob" != "$base_cur" ]] || continue
   printf '%s%s%s%s%s%s%s\n' "$qpath" "$US" "$path" "$US" "$br_blob" "$US" "${base_cur:-absent}" \
-    >> "$TMPD/cand.txt"
+    >> "$TMPD/cand.txt" || die2 "一時 file へ書けません: $TMPD/cand.txt"
 done < "$TMPD/br.z"
 
 # base の**過去** blob に br_blob が居るかを 1 回の awk で照合する（path ごとに log/awk を回さない）。
-: > "$TMPD/hit.txt"
+: > "$TMPD/hit.txt" || die2 "一時 file を作成できません: $TMPD/hit.txt"
 if [[ -s "$TMPD/cand.txt" ]]; then
   # cand の field: 1=履歴照合 key（行表現）/ 2=生 path（表示・宣言照合）/ 3=branch blob / 4=base 現行 blob
   awk -v FS="$US" -v US="$US" '
@@ -336,11 +348,19 @@ done < "$TMPD/hit.txt"
 
 printf '%s: repo=%s branch=%s@%s base-ref=%s@%s merge-base=%s is-ancestor=%s overlap-files=%s br-touched-files=%s quoted-paths=%s br-deleted-paths=%s clobber-suspect=%s declared-restore=%s rc-leg=%s\n' \
   "$PROG" "$REPO" "$BRANCH" "$(short "$BR_SHA")" "$BASE_REF" "$(short "$BASE_SHA")" "$(short "$MB")" \
-  "$IS_ANC" "$OVERLAP_N" "$BR_N" "$QUOTED_N" "$BR_DELETED_N" "$SUSPECT" "$DECLARED" "$RC_LEG"
+  "$IS_ANC" "$OVERLAP_N" "$BR_N" "$QUOTED_N" "$BR_DELETED_N" "$SUSPECT" "$DECLARED" "$RC_LEG" \
+  || die2 "集計行の出力に失敗しました（stdout が書けません）"
 
-while IFS= read -r p; do [[ -z "$p" ]] || printf 'overlap: path=%s\n' "$p"; done < "$TMPD/overlap.txt"
-[[ ${#SUSPECT_LINES[@]}  -eq 0 ]] || printf '%s\n' "${SUSPECT_LINES[@]}"
-[[ ${#DECLARED_LINES[@]} -eq 0 ]] || printf '%s\n' "${DECLARED_LINES[@]}"
+while IFS= read -r p; do
+  [[ -n "$p" ]] || continue
+  printf 'overlap: path=%s\n' "$p" || die2 "overlap 行の出力に失敗しました（stdout が書けません）"
+done < "$TMPD/overlap.txt"
+if [[ ${#SUSPECT_LINES[@]} -gt 0 ]]; then
+  printf '%s\n' "${SUSPECT_LINES[@]}" || die2 "clobber-suspect 行の出力に失敗しました（stdout が書けません）"
+fi
+if [[ ${#DECLARED_LINES[@]} -gt 0 ]]; then
+  printf '%s\n' "${DECLARED_LINES[@]}" || die2 "declared-restore 行の出力に失敗しました（stdout が書けません）"
+fi
 
 # rc は 1 本の leg だけが決める（OR で多重化しない）。他方は上の集計行に advisory として出ている。
 if [[ "$RC_LEG" == "b" ]]; then
