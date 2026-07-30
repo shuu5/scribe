@@ -4,8 +4,9 @@
 # 対象: scripts/scribe-wf-args-lint.sh（wrapper）+ scripts/lib/wf-args-probe.mjs（判定本体）
 #       + workflows/lib/args-preamble.snippet.js（canonical SSOT）
 #
-# ■ 非空虚性の規律（notes ■7）
-#   - skip を 1 つも使わない（依存不在は skip でなく fail させる存在確認 tooth を置く＝T1）。
+# ■ 非空虚性の規律（notes ■7・ERRATA-1 裁定-ENV で skip 条項のみ限定改訂）
+#   - skip は「bwrap 不在 / userns 不可」の 1 条件だけ（下記「環境 skip」節）。それ以外の理由の skip は禁止。
+#     依存不在は skip でなく fail させる存在確認 tooth を置く（T1）。
 #   - RED 判定は「status が 0 でない」で書かない。rc の exact 一致（違反=1 / 判定不能=2）と stdout の
 #     違反 ID marker 一致の AND で assert する。engine 不在の 127 / 非実行ビットの 126 を RED 扱いしない
 #     tooth を置く（T7）。
@@ -34,7 +35,61 @@
 #       skip/xfail で書かず EXPECTED_CANONICAL_RED の集合一致 assert として焼く。波1 が throw 形へ置換した
 #       瞬間に本 tooth が RED になり気づける向き（＝設計上の tripwire・退行ではない）。
 
+# ■ 環境 skip（fence ■7「skip 0 本」の**限定改訂**・ERRATA-1 裁定-ENV 2026-07-31）
+#   fence ■7 の趣旨は *判定ロジックの空洞化防止* であり、*host 能力不在による環境 skip* はその趣旨に反しない
+#   ため、**「bwrap 不在 または userns 不可」の 1 条件に限り** skip を許可する（他の理由の skip は引き続き禁止）。
+#   条件 4 点の実装対応:
+#     (i)   skip の発火点は require_probe_env() の **1 箇所のみ**（T16 が source で機械 pin する）。
+#           理由文に「環境要因である旨」と「復旧手段（bwrap 導入 / userns 許可）」を明記する。
+#     (ii)  依存存在確認 tooth（T1）は skip せず **fail のまま**（環境が要件未達であることを loud に残す）。
+#     (iii) bwrap が使える host では skip 0 本であることを T16 と teardown_file が pin する（skip 逃げ防止）。
+#     (iv)  skip 本数を実行末尾に自己記述（teardown_file が `# ...` 行を出す）。DONE note には bwrap 在/不在
+#           両環境の ok/skip/not-ok を並記する。
+#   暫定措置である（fleet 恒久裁定 = 別 bead sc-k3im。裁定が出たら skip 条件を追随させる）。
+#   engine 側の posture は不変: bwrap 不在なら全件 rc=2 INCONCLUSIVE PROBE_UNCONTAINED（fence ■10 の literal）。
+
 bats_require_minimum_version 1.5.0 # `run -126` / `run -127`（期待 exit code 指定）を使うため
+
+# 封じ込め可否の判定は engine の --check-containment が単一 SSOT（bwrap の引数を bats 側へ複製しない）。
+# 使えるなら空文字を返す。使えないなら理由文字列を返す。setup / teardown_file の双方から呼べるよう自己完結。
+probe_env_reason() {
+  local engine
+  engine="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts/scribe-wf-args-lint.sh"
+  if ! command -v bwrap >/dev/null 2>&1; then
+    printf 'bwrap(bubblewrap) が PATH に無い'
+    return 0
+  fi
+  if ! "$engine" --check-containment >/dev/null 2>&1; then
+    printf 'bwrap は在るが user namespace が使えない（--check-containment が非 0）'
+    return 0
+  fi
+  return 0
+}
+
+# skip の唯一の発火点（条件(i)）。呼んだ tooth は環境不足時のみ skip される。
+require_probe_env() {
+  local reason
+  reason="$(probe_env_reason)"
+  [ -z "$reason" ] && return 0
+  printf '%s\n' "${BATS_TEST_NAME:-unknown}" >> "$BATS_FILE_TMPDIR/env-skipped.txt"
+  skip "環境要因（${reason}）: probe を封じ込めて実行できないため本 tooth は判定不能。判定ロジックを無効化したのではない（fence ■7 限定改訂・ERRATA-1 裁定-ENV）。復旧手段: bubblewrap を導入し user namespace を許可する（本 fleet は host 全体の userns を緩めず、標的 apparmor profile で付与する運用）。engine 側は同環境で全件 rc=2 INCONCLUSIVE PROBE_UNCONTAINED を返す（fail-closed で正しい）。"
+}
+
+# 条件(iv): skip 本数の自己記述。併せて条件(iii) の強制（bwrap 使用可の host で skip が出たら file を fail させる）。
+teardown_file() {
+  local n=0
+  [ -f "$BATS_FILE_TMPDIR/env-skipped.txt" ] && n="$(wc -l < "$BATS_FILE_TMPDIR/env-skipped.txt")"
+  if [ "$n" -gt 0 ]; then
+    echo "# bwrap 不在により $n 本 skip（環境要因・復旧手段: bubblewrap 導入 + userns 許可。判定ロジックは無効化していない）" >&3
+  else
+    echo "# bwrap 在: 環境 skip 0 本（全 tooth を実行した）" >&3
+  fi
+  if [ -z "$(probe_env_reason)" ] && [ "$n" -gt 0 ]; then
+    echo "# FAIL: bwrap 使用可の host で環境 skip が $n 本発生した（skip 逃げの常態化を禁止・条件(iii)）" >&3
+    return 1
+  fi
+  return 0
+}
 
 setup() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
@@ -106,9 +161,15 @@ mk_good() {
   run command -v env
   [ "$status" -eq 0 ]
   # bwrap は probe の追加封じ込め（notes ■10）の必須依存。不在ホストでは engine が全件 rc=2 に倒れる
-  # ＝本 lint は bwrap 搭載ホストでのみ green（engine ヘッダに明記した読み）。skip で逃がさず fail させる。
+  # ＝本 lint は bwrap 搭載ホストでのみ green（engine ヘッダに明記した読み）。
+  # ★ ERRATA-1 裁定-ENV 条件(ii): 他 tooth は環境 skip で逃がすが、**本 tooth だけは skip せず fail のまま**
+  #   維持する（環境が要件未達であることを loud に残す＝無音化しない）。require_probe_env を呼ばないのは意図。
   run command -v bwrap
   [ "$status" -eq 0 ]
+  # userns まで含めた実効可否も loud に見せる（bwrap は在るが起動できない host を「依存充足」と読ませない）。
+  run "$ENGINE" --check-containment
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CONTAINMENT_OK"* ]]
   [ -x "$ENGINE" ]
   [ -f "$PROBE" ]
   [ -f "$SNIPPET" ]
@@ -120,6 +181,7 @@ mk_good() {
 #          | mutant_fingerprint=snippet block の `if (__scargsParseFailed || __scargsMissing.length > 0) {`
 #            を `if (false) {` へ反転 → rc 0→1（VIOLATION AGENT_STARTED_BEFORE_FAILFAST）
 @test "sc-4t3t T2: engine 単体 green — canonical 準拠 fixture は rc=0 / agentCalls=0 / bytePin=match" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   mk_good "$FIX/good.workflow.js"
   run "$ENGINE" --mode skeleton --file "$FIX/good.workflow.js" --snippet "$SNIPPET" --label fx-good
   [ "$status" -eq 0 ]
@@ -136,6 +198,7 @@ mk_good() {
 #          | polarity=negative
 #          | mutant_fingerprint=wf-args-probe.mjs の `if (started.length > 0)` を `if (false)` へ → 本 tooth RED
 @test "sc-4t3t T3: engine 単体 RED — agent 先行起動は rc exact 1 + VIOLATION AGENT_STARTED_BEFORE_FAILFAST" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   {
     printf "export const meta = { name: 'fx-bad-agent', requiredArgs: ['anchor'] }\n"
     printf "const REQUIRED_ARGS = ['anchor']\n"
@@ -153,6 +216,7 @@ mk_good() {
 #          | polarity=negative
 #          | mutant_fingerprint=wf-args-probe.mjs の `if (expect === 'canonical')` を `if (false)` へ → 本 tooth RED
 @test "sc-4t3t T4: engine 単体 RED — escalate return 形（throw なし）は rc exact 1 + VIOLATION NO_THROW_ON_MISSING_ARGS" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   cat > "$FIX/escalate.workflow.js" <<'EOF'
 export const meta = { name: 'fx-escalate', requiredArgs: ['anchor'] }
 const REQUIRED_ARGS = ['anchor']
@@ -181,6 +245,7 @@ EOF
 #          | mutant_fingerprint=wf-args-probe.mjs の DECL_MISMATCH 分岐を `requiredArgs = declBody || declMeta`
 #            の救済へ書き換える（fail-open 化）→ 本 tooth RED
 @test "sc-4t3t T5: rc=2 判定不能 — 片面宣言/集合不一致/--mode 未指定はすべて INCONCLUSIVE（0 に丸めない）" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   printf "export const meta = { name: 'fx-decl', requiredArgs: ['anchor'] }\nconst A = args || {}\nreturn { A }\n" > "$FIX/decl-one-sided.workflow.js"
   run "$ENGINE" --mode adhoc --file "$FIX/decl-one-sided.workflow.js" --label fx-decl
   [ "$status" -eq 2 ]
@@ -206,11 +271,22 @@ EOF
 #          | polarity=positive
 #          | mutant_fingerprint=wf-args-probe.mjs の `out.push(\`SKIP ...\`)` を削除 → 本 tooth RED
 @test "sc-4t3t T6: 対象外の可視化 — args 参照 0 hit は rc=0 + SKIP 行 + summary skipped=1（silent skip 禁止）" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   printf "export const meta = { name: 'fx-noargs' }\n// args の話はコメントにだけ出る\nreturn { ok: true }\n" > "$FIX/noargs.workflow.js"
   run "$ENGINE" --mode adhoc --file "$FIX/noargs.workflow.js" --label fx-noargs
   [ "$status" -eq 0 ]
   [[ "$output" == *"SKIP fx-noargs"* ]]
   [[ "$output" == *"summary: checked=0 skipped=1"* ]]
+
+  # ERRATA-1 m5: チャネル分離の assert（rc 契約は「SKIP 行は stdout・理由 1 行は stderr」と定めている）。
+  # run --separate-stderr で $output(stdout) と $stderr を分けて取り、混線していないことを両向きで pin する。
+  run --separate-stderr "$ENGINE" --mode adhoc --file "$FIX/noargs.workflow.js" --label fx-noargs
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SKIP fx-noargs"* ]]        # stdout 側に SKIP 行が在る
+  [[ "$output" != *"skip: fx-noargs"* ]]       # stderr 用の理由行は stdout に混ざらない
+  [[ "$stderr" == *"skip: fx-noargs"* ]]       # stderr 側に理由 1 行が在る
+  [[ "$stderr" != *"SKIP fx-noargs"* ]]        # SKIP 行は stderr に混ざらない
+  [[ "$stderr" != *"summary:"* ]]              # summary も stdout 専用
 }
 
 # ── T7 ───────────────────────────────────────────────────────────────────────
@@ -233,6 +309,7 @@ EOF
 #          | mutant_fingerprint=cell-quality の isWorkerCell gate を除去（`if (isWorkerCell)` → `if (false)`）
 #            → cell-quality の legacy 判定が rc 0→1（AGENT_STARTED_BEFORE_FAILFAST）
 @test "sc-4t3t T8: 骨格 (A) legacy — 骨格別 verbatim probe args で 3 本とも agentCalls=0（rc=0）" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   local pass=""
   run "$ENGINE" --mode skeleton --file "$SKEL_CELL_QUALITY" --expect legacy --probe-args "$ARGS_CELL_QUALITY" --label cell-quality
   [ "$status" -eq 0 ]
@@ -254,6 +331,7 @@ EOF
 #          | polarity=negative（現状 RED が正・波1 の throw 化で本 tooth が RED になるのは設計上の tripwire）
 #          | mutant_fingerprint=いずれか 1 本を throw 形へ置換 → 集合一致が崩れて本 tooth RED
 @test "sc-4t3t T9: 骨格 (B) canonical — EXPECTED_CANONICAL_RED の集合一致（skip/xfail で書かない）" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   # 波1（sc-k33c 項目6 / C1a・L1c）が canonical snippet へ置換した瞬間にここが RED になる向き＝退行検知でなく
   # 「置換が land した」ことの tripwire。RED になったら EXPECTED_CANONICAL_RED から当該骨格を外す。
   local expected="cell-quality mandate-verify needs-user-prebake"
@@ -272,6 +350,7 @@ EOF
 #          | polarity=negative（非空虚性の実証）
 #          | mutant_fingerprint=`if (__scargsParseFailed || __scargsMissing.length > 0) {` → `if (false) {`
 @test "sc-4t3t T10: mutation で RED flip — fail-fast 条件の意味反転 1 箇所で rc 0→1（diff 命中も確認）" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   mk_good "$FIX/mut-base.workflow.js"
   run "$ENGINE" --mode adhoc --file "$FIX/mut-base.workflow.js" --label mut-base
   [ "$status" -eq 0 ]
@@ -294,6 +373,7 @@ EOF
 #          | mutant_fingerprint=wf-args-probe.mjs の stripMeta を「`export ` を剥がすだけ」の旧方式へ戻す
 #            → meta 参照 fixture が通ってしまい本 tooth RED
 @test "sc-4t3t T11: meta 切除の pin — body の meta 参照は ReferenceError として RED（sc-ojom ギャップの封鎖）" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   {
     printf "export const meta = { name: 'fx-meta-ref', requiredArgs: ['anchor'] }\n"
     printf "const REQUIRED_ARGS = ['anchor']\n"
@@ -305,6 +385,23 @@ EOF
   [ "$status" -eq 1 ]
   [[ "$output" == *"VIOLATION RUNTIME_REFERENCE_ERROR"* ]]
   [[ "$output" == *"meta is not defined"* ]]
+
+  # ERRATA-1 m1: **canonical 配置**（block が body 先頭・meta 参照はその後段）では、病的 args のシナリオは
+  # block で必ず throw して meta 参照へ到達しない＝sc-ojom ギャップは positive control 経路でしか観測できない。
+  # ここを「帰属できない throw」として rc=2 に畳むと実機 crash が判定不能に化けるため、rc=1 で立つことを pin する。
+  {
+    printf "export const meta = { name: 'fx-meta-after', requiredArgs: ['anchor'] }\n"
+    printf "const REQUIRED_ARGS = ['anchor']\n"
+    emit_block
+    printf "\nlog('run ' + meta.name)\n"          # ← block より **後** の meta 参照
+    printf "await agent('work', { label: 'w' })\nreturn { ok: true }\n"
+  } > "$FIX/meta-after.workflow.js"
+  run "$ENGINE" --mode adhoc --file "$FIX/meta-after.workflow.js" --label fx-meta-after
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"VIOLATION RUNTIME_REFERENCE_ERROR"* ]]
+  [[ "$output" == *"meta is not defined"* ]]
+  # 誤導文（--base-args を与えよ）の判定不能へ畳まれていないこと
+  [[ "$output" != *"POSITIVE_THROW_UNATTRIBUTED"* ]]
 }
 
 # ── T12 ──────────────────────────────────────────────────────────────────────
@@ -367,6 +464,7 @@ EOF
 #          | polarity=negative
 #          | mutant_fingerprint=wf-args-probe.mjs の sha 比較を `if (false)` へ → 本 tooth RED
 @test "sc-4t3t T15: byte-pin（従）— 複製 block の 1 byte drift を SNIPPET_BLOCK_DRIFT で検出" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   mk_good "$FIX/drift.workflow.js"
   # 意味を変えない編集（block 内コメントの 1 語）だけを入れる＝挙動 probe は素通り、byte-pin だけが鳴る
   sed 's|// (2) receivedArgs: |// (2) receivedArgsX: |' "$FIX/drift.workflow.js" > "$FIX/drift-mut.workflow.js"
@@ -378,13 +476,41 @@ EOF
 }
 
 # ── T16 ──────────────────────────────────────────────────────────────────────
-# inventory: invariant=本 bats は skip を 1 つも持たない（依存不在を skip で逃がさない・notes ■7）
+# inventory: invariant=skip の発火点は環境 guard の 1 箇所だけであり（他の理由の skip は 0 本）、
+#            bwrap が使える host では **その 1 箇所も発火しない**（skip 逃げの常態化を禁止）
 #          | polarity=positive
-#          | mutant_fingerprint=どこかの tooth に `skip` を 1 行足す → 本 tooth RED
-@test "sc-4t3t T16: 本 bats に skip が 0 本（非空虚性の自己 assert）" {
-  run "$GREP" -c -E "^[[:space:]]*skip([[:space:]]|$)" "$BATS_TEST_FILENAME"
-  [ "$status" -eq 1 ]
-  [ "$output" = "0" ]
+#          | mutant_fingerprint=(a) どこかの tooth に素の `skip` を 1 行足す → 本 tooth の source 側 assert が RED
+#            (b) require_probe_env の判定を `reason="always"` 等へ反転 → bwrap 在 host で
+#            probe_env_reason が非空になり本 tooth の runtime 側 assert が RED
+#   ★ ERRATA-1 裁定-ENV 条件(iii) の実装。source（skip 箇所の数と位置）と runtime（この host で発火するか）を
+#     両方 pin する。実行末尾の本数自己記述は teardown_file が出す（条件(iv)）。
+@test "sc-4t3t T16: skip は環境 guard の 1 箇所のみ・bwrap 在 host では 0 本（skip 逃げの禁止）" {
+  # (a) source: `skip` の呼出しは 1 箇所だけ
+  run "$GREP" -c -E "^[[:space:]]*skip[[:space:]]" "$BATS_TEST_FILENAME"
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+
+  # (b) その 1 箇所は require_probe_env() の中（環境要因 + 復旧手段を明記した理由文）である
+  run "$GREP" -n -E "^[[:space:]]*skip[[:space:]]" "$BATS_TEST_FILENAME"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"環境要因"* ]]
+  [[ "$output" == *"復旧手段"* ]]
+  local skip_line="${output%%:*}"
+  run "$GREP" -n "^require_probe_env() {" "$BATS_TEST_FILENAME"
+  [ "$status" -eq 0 ]
+  local fn_line="${output%%:*}"
+  [ "$skip_line" -gt "$fn_line" ]
+  [ $((skip_line - fn_line)) -lt 12 ] # 関数本体の中に在る（別 tooth へ紛れ込んでいない）
+
+  # (c) runtime: この host で封じ込めが使えるなら guard は発火しない＝環境 skip 0 本
+  run probe_env_reason
+  [ "$status" -eq 0 ]
+  if [ -n "$output" ]; then
+    # bwrap 不在 host: 環境 skip が起きるのが正。ここで fail させない（条件(i) の 1 条件に該当するため）。
+    [[ "$output" == *"bwrap"* ]]
+  else
+    [ ! -s "$BATS_FILE_TMPDIR/env-skipped.txt" ]
+  fi
 }
 
 # ── T17 ──────────────────────────────────────────────────────────────────────
@@ -419,11 +545,15 @@ EOF
 
 # ── T18 ──────────────────────────────────────────────────────────────────────
 # inventory: invariant=probe は timeout を実際に掛け、timeout 時は fail-closed に倒れる
-#            （agent 起動の実測が無ければ rc=2 INCONCLUSIVE TIMEOUT / 在れば rc=1 VIOLATION）
+#            （仕事開始の実測が無ければ rc=2 INCONCLUSIVE TIMEOUT / 在れば rc=1 VIOLATION）。
+#            **仕事開始の modality は agent() と nested workflow() の 2 つ**（ERRATA-1 m2）
 #          | polarity=negative
 #          | mutant_fingerprint=wrapper の `"$TIMEOUT_BIN" "$TIMEOUT_SECONDS"` を外す → 本 tooth が
-#            無限ハングして RED（bats の timeout で落ちる）。124/137 分岐の削除でも RED
+#            無限ハングして RED（bats の timeout で落ちる）。124/137 分岐の削除でも RED。
+#            **wf-args-probe.mjs の marker append を `kind === 'workflow'` でも書く形から agent 専用へ戻す
+#            → workflow hang の節が rc 1→2 になり RED**
 @test "sc-4t3t T18: 封じ込め(timeout) — hang は rc exact 2 + INCONCLUSIVE TIMEOUT / agent 先行 hang は rc exact 1" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   # 未解決 Promise だけでは node が exit 13 で即死する（＝hang しない）ので、pending timer で本当に居座らせる。
   {
     printf "export const meta = { name: 'fx-hang', requiredArgs: ['anchor'] }\n"
@@ -447,17 +577,38 @@ EOF
   run "$ENGINE" --mode adhoc --file "$FIX/agent-hang.workflow.js" --timeout "$PROBE_TIMEOUT" --label fx-agent-hang
   [ "$status" -eq 1 ]
   [[ "$output" == *"VIOLATION AGENT_STARTED_BEFORE_FAILFAST"* ]]
+
+  # ERRATA-1 m2: timeout backstop の modality は agent() だけでなく nested workflow() も含む。
+  # workflow() で仕事を始めてから hang する形は「実測が無い」（rc=2）ではなく rc=1 でなければならない。
+  {
+    printf "export const meta = { name: 'fx-wf-hang', requiredArgs: ['anchor'] }\n"
+    printf "const REQUIRED_ARGS = ['anchor']\n"
+    printf "await workflow('cell-quality', { doImplement: true })\n"
+    printf "if (!args.anchor) { await new Promise((r) => setTimeout(r, 3600000)) }\n"
+    emit_block
+    printf "\nreturn { ok: true }\n"
+  } > "$FIX/wf-hang.workflow.js"
+  run "$ENGINE" --mode adhoc --file "$FIX/wf-hang.workflow.js" --timeout "$PROBE_TIMEOUT" --label fx-wf-hang
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"VIOLATION AGENT_STARTED_BEFORE_FAILFAST"* ]]
+  [[ "$output" == *"agent()/workflow() 起動を実測した"* ]]
 }
 
 # ── T19 ──────────────────────────────────────────────────────────────────────
-# inventory: invariant=probe の封じ込め 4 条件（空 cwd / env 最小化 / 出力破棄 / bwrap の fs 隔離）が
-#            実際に効いている（被検査 script から観測して assert する）
+# inventory: invariant=probe の封じ込め 6 条件（空 cwd / env 最小化 / 出力破棄 / bwrap の fs 隔離 /
+#            **host PID 不可視** / **detached child が engine 復帰後に残存しない**）が実際に効いている
+#            （被検査 script から観測 + host 側から process 実測して assert する）
 #          | polarity=positive
 #          | mutant_fingerprint=wrapper の `"$ENV_BIN" -i` を外す → env 非空で agent 起動 → rc 0→1 で RED。
-#            bwrap 一式を外す → escape canary が生成されて RED。`>/dev/null 2>/dev/null` を外す → canary 混入で RED
-@test "sc-4t3t T19: 封じ込め(空 cwd / env 最小化 / 出力破棄 / fs 隔離) — 被検査 script から実測して pin" {
+#            bwrap 一式を外す → escape canary が生成されて RED。`>/dev/null 2>/dev/null` を外す → canary 混入で RED。
+#            **`--unshare-pid` を外す → host PID が /proc に見えて agent 起動（rc 0→1）+ detached child が
+#            engine 復帰後も pgrep に残り RED**（ERRATA-1 FIX-P(b) の 2 assert）
+@test "sc-4t3t T19: 封じ込め(空 cwd / env 最小化 / 出力破棄 / fs 隔離 / PID 分離 / 置き土産 process) — 実測 pin" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   local escape="$BATS_TEST_TMPDIR/escape-canary.txt"
   rm -f "$escape"
+  # detached child を host 側から一意に見分けるための札（cmdline に残る文字列）
+  local canary_tag="sc4t3t-detach-canary-$$"
   {
     printf "export const meta = { name: 'fx-contain', requiredArgs: ['anchor'] }\n"
     printf "const REQUIRED_ARGS = ['anchor']\n"
@@ -470,6 +621,12 @@ EOF
     # env 最小化 / 空 cwd: 破れていたら agent を起動する＝rc=1 に倒れる（rc で機械判定できる形にする）
     printf "if (Object.keys(process.env).length > 0) { await agent('env-not-minimal', { label: 'env' }) }\n"
     printf "if (__fs.readdirSync(process.cwd()).length > 0) { await agent('cwd-not-empty', { label: 'cwd' }) }\n"
+    # ERRATA-1 FIX-P(b)-1: host PID が不可視（--unshare-pid）。host で生きている実 PID（bats 自身）を
+    # sandbox 内から見に行き、見えたら agent を起動＝rc=1 に倒れる。
+    printf "if (__fs.existsSync('/proc/%s')) { await agent('host-pid-visible', { label: 'pid' }) }\n" "$$"
+    # ERRATA-1 FIX-P(b)-2: detached child を置き土産にする。--unshare-pid が無いと engine 復帰後も host に残る。
+    printf "const { spawn } = await import('node:child_process')\n"
+    printf "try { spawn('/bin/sh', ['-c', 'sleep 20 # %s'], { detached: true, stdio: 'ignore' }).unref() } catch (e) {}\n" "$canary_tag"
     emit_block
     printf "\nawait agent('work', { label: 'w' })\nreturn { ok: true }\n"
   } > "$FIX/contain.workflow.js"
@@ -479,6 +636,12 @@ EOF
   [[ "$output" != *"LEAK-STDOUT-CANARY"* ]]
   [[ "$output" != *"LEAK-STDERR-CANARY"* ]]
   [ ! -f "$escape" ]
+
+  # FIX-P(b)-2 の観測は host 側で行う: engine が rc を返した後に置き土産 process が残っていないこと。
+  # （PID namespace を分離していれば sandbox 終了と同時に消える。--die-with-parent だけでは残る＝gate 実測）
+  run pgrep -f "$canary_tag"
+  [ "$status" -ne 0 ] # 一致 0 件 = pgrep は 1 を返す
+  [ -z "$output" ]
 }
 
 # ── T20 ──────────────────────────────────────────────────────────────────────
@@ -488,6 +651,7 @@ EOF
 #          | mutant_fingerprint=wf-args-probe.mjs の maskSource テンプレート分岐で `${` 以降を
 #            `stack.push('interp'); out.push('${')` から旧方式（中身を blank）へ戻す → SKIP rc=0 になり本 tooth RED
 @test "sc-4t3t T20: mask の過剰潰し封鎖 — args を \${} 補間だけで使う fail-fast 無し script は SKIP されず rc exact 1" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   {
     printf "export const meta = { name: 'fx-tmpl', requiredArgs: ['anchor'] }\n"
     printf "const REQUIRED_ARGS = ['anchor']\n"
@@ -514,11 +678,14 @@ EOF
 #            を `if (true) {` へ反転 → rc 0→1（VIOLATION FAILFAST_FALSE_POSITIVE）。
 #            engine 側なら `if (pr.threw || pr.agentCalls < 1)` を `if (false)` へ → 本 tooth RED
 @test "sc-4t3t T21: positive control — 正常 args で agent 到達を要求し、常時 throw preamble は rc exact 1" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   # (1) 準拠 fixture は正常 args で agent 起動まで到達する
   mk_good "$FIX/pos-base.workflow.js"
   run "$ENGINE" --mode adhoc --file "$FIX/pos-base.workflow.js" --label fx-pos
   [ "$status" -eq 0 ]
-  [[ "$output" == *"positiveControl=ok(agentCalls=1)"* ]]
+  [[ "$output" == *"positiveControl=ok(agentCalls=1,"* ]]
+  # ERRATA-1 m4: 返り値の回収面（型 + key 一覧）が判定行に載る。mk_good は { ok, receivedArgs } を返す。
+  [[ "$output" == *"returned=object[ok,receivedArgs]"* ]]
 
   # (2) args と無関係に常に throw する preamble は違反（病的側は「throw + agentCalls=0」を満たしてしまう）
   {
@@ -550,6 +717,7 @@ EOF
 #          | mutant_fingerprint=wf-args-probe.mjs の positive control 判定を
 #            `if (pr.threw || pr.agentCalls < 1)`（3 事象を畳む旧形）へ戻す → (1)(2) とも RED
 @test "sc-4t3t T22: positive control の射程 — 下流 throw は rc exact 0 / agent 未到達は rc exact 2（違反に畳まない）" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   # (1) ② agent 到達**後**の throw（agent stub が {} を返すため r.text が undefined → SyntaxError）。
   #     canonical block を verbatim 複製した完全準拠 script なので rc=0 でなければならない。
   {
@@ -582,6 +750,7 @@ EOF
 #            準拠 script が（当然 throw しないため）rc 0→1（VIOLATION AGENT_STARTED_BEFORE_FAILFAST）
 #            になり本 tooth RED（実測済み）
 @test "sc-4t3t T23: 宣言抽出の mask 適用 — 配列内コメントの引用符付き語を必須 args にしない（rc exact 0）" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   {
     printf "export const meta = {\n  name: 'fx-arrcomment',\n"
     printf "  requiredArgs: ['anchor', /* 旧名 'oldName' は廃止 */ 'targetBead'],\n}\n"
@@ -607,6 +776,7 @@ EOF
 #            そのときは「偽造検知で rc=2」を要求する向きへ本 tooth を書き換える＝設計上の tripwire）
 #          | mutant_fingerprint=判定チャネルを子 process へ分離（親は対象コードを eval しない）→ 本 tooth RED
 @test "sc-4t3t T24: 判定チャネルの既知の穴 — 被検査 script は report を掌握して OK を偽造できる（trusted-input 前提の pin）" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   {
     printf "export const meta = { name: 'fx-forge', requiredArgs: ['anchor'] }\n"
     printf "const REQUIRED_ARGS = ['anchor']\n"
@@ -628,6 +798,7 @@ EOF
 #          | mutant_fingerprint=block の `A = __scargsParsed && ...` 代入を削る（`A = {}` 固定）→
 #            必須 args が満たされず throw して rc 1→0 になり本 tooth RED
 @test "sc-4t3t T25: defensive parse の挙動 pin — JSON 文字列 args は parse され A へ入る（rc exact 1）" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   mk_good "$FIX/parse-ok.workflow.js"
   run "$ENGINE" --mode adhoc --file "$FIX/parse-ok.workflow.js" \
     --probe-args '"{\"anchor\":\"a1\",\"targetBead\":\"b1\"}"' --label fx-parse-ok
@@ -645,6 +816,7 @@ EOF
 #     依然 throw する（＝mutant が flip しない空虚な tooth になる）。よって **REQUIRED_ARGS を空**にして
 #     parse 失敗だけが唯一の fail-fast 発火源になる形で pin する。
 @test "sc-4t3t T26: parse 失敗の挙動 pin — parse 不能な文字列 args は単独で fail-fast する（rc exact 0）" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   {
     printf "export const meta = { name: 'fx-parse-bad', requiredArgs: [] }\n"
     printf "const REQUIRED_ARGS = []\n"
@@ -672,6 +844,7 @@ EOF
 #          | mutant_fingerprint=wf-args-probe.mjs の `tokenMissed` の検査面を masked（codeText）から
 #            raw（`test(src)`）へ戻す → rc 0→2（INCONCLUSIVE MASK_AMBIGUOUS）で本 tooth RED（実測済み）
 @test "sc-4t3t T27: 交差検査の検査面 — コメント言及だけの宣言なし script は rc exact 0 + SKIP（rc=2 に倒さない）" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   {
     printf "export const meta = { name: 'fx-commentonly' }\n"
     printf "// 将来 meta.requiredArgs / REQUIRED_ARGS の二面宣言を持つ予定（今は宣言なし）\n"
@@ -704,6 +877,7 @@ EOF
 #          | mutant_fingerprint=wf-args-probe.mjs の tokenMissed 分岐（MASK_AMBIGUOUS 判定）を削除する
 #            → 宣言なし扱いの SKIP へ落ちて rc 2→0 になり本 tooth RED
 @test "sc-4t3t T28: 交差検査の非空虚性 — コード面に宣言 token が在るが抽出不能なら rc exact 2 + MASK_AMBIGUOUS" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   {
     printf "export const meta = { name: 'fx-shorthand', requiredArgs }\n"
     printf "const A = args || {}\n"
@@ -723,6 +897,7 @@ EOF
 #          | mutant_fingerprint=wf-args-probe.mjs の workflow stub を無計数（`async () => null`）へ戻す
 #            または `started` 判定から `r.workflowCalls > 0` を落とす → rc 1→0 で本 tooth RED（実測済み）
 @test "sc-4t3t T29: 仕事開始の modality — fail-fast 前の nested workflow() 起動は rc exact 1（agent 0 回でも違反）" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   {
     printf "export const meta = { name: 'fx-nested-wf', requiredArgs: ['anchor'] }\n"
     printf "const REQUIRED_ARGS = ['anchor']\n"
@@ -748,4 +923,72 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"OK fx-nested-wf-ok"* ]]
   [[ "$output" == *"workflowCalls=0"* ]]
+}
+
+# ── T30 ──────────────────────────────────────────────────────────────────────
+# inventory: invariant=構文が壊れた script は「合格」でも「違反」でもなく **判定不能(rc=2 PARSE_FAILED)**
+#            （acceptance(1) が名指しする rc=2 経路の 1 つ。0 にも 1 にも丸めない）
+#          | polarity=negative
+#          | mutant_fingerprint=wf-args-probe.mjs の compileBody try/catch を `catch { compiled = () => {} }`
+#            のような握り潰しへ変える → rc 2→0/1 になり本 tooth RED
+#   ★ ERRATA-1 m3。fixture は BATS_TEST_TMPDIR に heredoc 生成（/tmp をリテラルで焼かない）。
+@test "sc-4t3t T30: rc=2 の parse 不能経路 — 構文破綻は rc exact 2 + INCONCLUSIVE PARSE_FAILED" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
+  cat > "$FIX/parse-broken.workflow.js" <<'EOF'
+export const meta = { name: 'fx-parse-broken', requiredArgs: ['anchor'] }
+const REQUIRED_ARGS = ['anchor']
+const A = args || {}
+if (A.anchor) {
+  await agent('work'
+EOF
+  run "$ENGINE" --mode adhoc --file "$FIX/parse-broken.workflow.js" --label fx-parse-broken
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"INCONCLUSIVE PARSE_FAILED"* ]]
+  # 対の向き: 同じ fixture の括弧を閉じれば判定に進む（構文以外の理由で 2 に倒れていない証明）
+  cat > "$FIX/parse-fixed.workflow.js" <<'EOF'
+export const meta = { name: 'fx-parse-fixed', requiredArgs: ['anchor'] }
+const REQUIRED_ARGS = ['anchor']
+const A = args || {}
+if (A.anchor) {
+  await agent('work', { label: 'w' })
+}
+return { ok: true }
+EOF
+  run "$ENGINE" --mode adhoc --file "$FIX/parse-fixed.workflow.js" --label fx-parse-fixed
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"VIOLATION"* ]]
+}
+
+# ── T31 ──────────────────────────────────────────────────────────────────────
+# inventory: invariant=コメント/文字列を除去できない script は「対象外(rc=0)」に落とさず
+#            **判定不能(rc=2 MASK_FAILED)** にする（notes ■6「除去できないときは rc=2 へ倒す」）
+#          | polarity=negative
+#          | mutant_fingerprint=maskSource の未終端ブロックコメント分岐 `return { ..., ok: false, ... }` を
+#            `ok: true` へ変える → rc 2→0（SKIP 扱い）になり本 tooth RED
+#   ★ ERRATA-1 m3。未 tooth の verdict ID 一覧は DONE note に列挙して後続 leg へ申し送る。
+@test "sc-4t3t T31: rc=2 の mask 不能経路 — 未終端ブロックコメントは rc exact 2 + INCONCLUSIVE MASK_FAILED" {
+  require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
+  cat > "$FIX/mask-broken.workflow.js" <<'EOF'
+export const meta = { name: 'fx-mask-broken', requiredArgs: ['anchor'] }
+const REQUIRED_ARGS = ['anchor']
+const A = args || {}
+/* 閉じないブロックコメント。ここから先は mask できない
+await agent('work', { label: 'w' })
+EOF
+  run "$ENGINE" --mode adhoc --file "$FIX/mask-broken.workflow.js" --label fx-mask-broken
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"INCONCLUSIVE MASK_FAILED"* ]]
+  [[ "$output" == *"未終端のブロックコメント"* ]]
+  # 対の向き: コメントを閉じれば通常判定へ進む（mask 以外の理由で 2 に倒れていない証明）
+  cat > "$FIX/mask-fixed.workflow.js" <<'EOF'
+export const meta = { name: 'fx-mask-fixed', requiredArgs: ['anchor'] }
+const REQUIRED_ARGS = ['anchor']
+const A = args || {}
+/* 閉じたブロックコメント */
+await agent('work', { label: 'w' })
+return { ok: true }
+EOF
+  run "$ENGINE" --mode adhoc --file "$FIX/mask-fixed.workflow.js" --label fx-mask-fixed
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"VIOLATION AGENT_STARTED_BEFORE_FAILFAST"* ]]
 }

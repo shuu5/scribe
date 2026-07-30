@@ -19,8 +19,14 @@
 //     1) source から `export const meta = {...}` を宣言まるごと（metaNode.end 相当）切り落とす
 //     2) 残り body を new AsyncFunction(...INJECTED_GLOBALS, body) で wrap（compile 自体が構文検査）
 //     3) agent stub は呼ばれたら計数して即 resolve する（**throw させない**＝「agent が呼ばれた事実」と
-//        「fail-fast の throw」を混同しない）
-//     4) threw / errorName / agentCalls / returned を回収する
+//        「fail-fast の throw」を混同しない）。nested workflow() stub も同様に計数する（modality 2 面）
+//     4) 1 シナリオごとに threw / errorName / errorMessage / agentCalls / workflowCalls /
+//        returnedType / returnedKeys を回収する（ERRATA-1 m4 で fence ■3 の 4 値と実装を突き合わせて訂正）。
+//        - returned は**生値を回収しない**: WF の返り値は数百 KB になりうるうえ、判定行へ被検査 script が
+//          任意文字列を差し込む面にもなるため、型と key 一覧（先頭 12 件）だけを取る。
+//        - exitCode は in-process 評価には存在しない概念なので**シナリオ単位では回収しない**。process 単位の
+//          exit code は wrapper が probe_status として回収し、124/137=timeout・report 不在=DRIVER_ERROR に写像する
+//          （＝fence ■3 の「exitCode」は wrapper 層の責務として実装されている）。
 //   `node --input-type=module` は probe runner（本 file）の実行形式であって WF 本体の評価形式ではない。
 //   未レビュー script を素の node process で実行する面を持つ（node v18 系は権限フラグ非対応＝vm でも隔離にならない）ため、
 //   timeout・出力破棄・空 cwd・env 最小化は wrapper 側が必須で与える。それらが与えられない環境では probe を
@@ -355,17 +361,24 @@ export function buildScenarios(requiredArgs, baseArgs) {
   return scenarios
 }
 
-// 1 シナリオを stub 環境で走らせ {agentCalls, workflowCalls, threw, errorName, errorMessage} を返す。
+// 1 シナリオを stub 環境で走らせ {agentCalls, workflowCalls, threw, errorName, errorMessage, returnedType,
+// returnedKeys} を返す。
 //
 // ★ workflow() も計数する: nested workflow は agent 木ごと起動する＝本 lint が塞ごうとしている
 //   「undefined を掴んだまま完走して token を溶かす」事故と同一クラスの副作用である。agent() だけを
 //   不変条件の観測面にすると、fail-fast より前に nested WF を起動する形（modality 違い）が素通りする。
-export async function runScenario(compiled, scenarioArgs, onAgentCall) {
+// ★ onStart(kind, label) は「仕事を始めた」の 2 modality（'agent' / 'workflow'）から等しく呼ばれる。
+//   wrapper 側の timeout backstop（hang して報告が残らない経路）が両 modality を拾えるようにするため
+//   （ERRATA-1 m2: agent のみ記録だと workflow() 起動 → hang が rc=1 でなく rc=2 に化ける）。
+export async function runScenario(compiled, scenarioArgs, onStart) {
   let agentCalls = 0
   let workflowCalls = 0
+  const notifyStart = (kind, label) => {
+    if (typeof onStart === 'function') onStart(kind, label)
+  }
   const agent = async (_prompt, opts) => {
     agentCalls++
-    if (typeof onAgentCall === 'function') onAgentCall((opts && opts.label) || '')
+    notifyStart('agent', (opts && opts.label) || '')
     return {} // throw させない（agent 起動の事実と fail-fast の throw を混同しない・notes ■3）
   }
   const parallel = async (thunks) =>
@@ -387,22 +400,31 @@ export async function runScenario(compiled, scenarioArgs, onAgentCall) {
   const log = () => {}
   const phase = () => {}
   const budget = { total: null, spent: () => 0, remaining: () => Infinity }
-  const workflow = async () => {
+  const workflow = async (nameOrRef) => {
     workflowCalls++
+    notifyStart('workflow', typeof nameOrRef === 'string' ? nameOrRef : '(ref)')
     return null // agent stub と同じく throw させない（起動の事実と fail-fast の throw を混同しない）
   }
 
   let threw = false
   let errorName = ''
   let errorMessage = ''
+  // ERRATA-1 m4: 返り値も回収する。ただし生値は載せない（WF の返り値は数百 KB になりうるうえ、
+  // 被検査 script が判定行へ任意文字列を差し込む面にもなる）。型と shape（object なら key 一覧）だけを取る。
+  let returnedType = 'undefined'
+  let returnedKeys = []
   try {
-    await compiled(agent, parallel, pipeline, log, phase, scenarioArgs, budget, workflow)
+    const returned = await compiled(agent, parallel, pipeline, log, phase, scenarioArgs, budget, workflow)
+    returnedType = returned === null ? 'null' : Array.isArray(returned) ? 'array' : typeof returned
+    if (returned && typeof returned === 'object' && !Array.isArray(returned)) {
+      returnedKeys = Object.keys(returned).slice(0, 12)
+    }
   } catch (e) {
     threw = true
     errorName = (e && e.name) || 'Error'
     errorMessage = String((e && e.message) || e).slice(0, 200).replace(/\s+/g, ' ')
   }
-  return { agentCalls, workflowCalls, threw, errorName, errorMessage }
+  return { agentCalls, workflowCalls, threw, errorName, errorMessage, returnedType, returnedKeys }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -516,10 +538,12 @@ export async function lint(opts) {
   const expect = opts.expect === 'legacy' ? 'legacy' : 'canonical'
   const results = []
   for (const sc of scenarios) {
-    const r = await runScenario(compiled, sc.args, () => {
+    // marker は「hang して報告が残らない」経路の backstop。agent / workflow の**両 modality**から書く
+    // （ERRATA-1 m2: workflow() 起動 → hang が rc=2 に化けるのを塞ぐ）。
+    const r = await runScenario(compiled, sc.args, (kind) => {
       if (opts.agentMarkerPath) {
         try {
-          appendFileSync(opts.agentMarkerPath, `AGENT_CALLED ${sc.name}\n`)
+          appendFileSync(opts.agentMarkerPath, `${kind === 'workflow' ? 'WORKFLOW_CALLED' : 'AGENT_CALLED'} ${sc.name}\n`)
         } catch (e) {
           /* marker は timeout 時の backstop。書けなくても probe 自体は続ける */
         }
@@ -552,7 +576,7 @@ export async function lint(opts) {
     if (noThrow.length > 0) {
       return violation(
         'NO_THROW_ON_MISSING_ARGS',
-        `病的 args ${noThrow.length}/${results.length} 件（例: ${noThrow[0].name}）で throw せず完走した（agentCalls=0 だが escalate return 形＝P0-2 canonical 不適合）`
+        `病的 args ${noThrow.length}/${results.length} 件（例: ${noThrow[0].name}）で throw せず完走した（agentCalls=0 だが escalate return 形＝P0-2 canonical 不適合）。returned=${noThrow[0].returnedType}${noThrow[0].returnedKeys.length ? `[${noThrow[0].returnedKeys.join(',')}]` : ''}`
       )
     }
   }
@@ -573,12 +597,24 @@ export async function lint(opts) {
   //                                   違反ではなく**判定不能**（rc=2・実値を --base-args で与えよ、の誘導）。
   //     ① のうち throw が args preamble 由来であること（message に FAILFAST_MARKER を含む）まで
   //     機械照合できたものだけを VIOLATION とし、帰属できない throw は rc=2 に倒す（rc=0 へは丸めない）。
+  //
+  //   ★ ただし ReferenceError だけは先に分岐する（ERRATA-1 m1）。canonical 配置（block が body 先頭・
+  //     meta 参照はその後段）では、病的 args のシナリオは block で必ず throw して meta 参照へ到達しないため、
+  //     sc-ojom ギャップ（実ハーネスが meta 宣言を切り落とすので meta 参照は実機で ReferenceError になる）は
+  //     **positive 経路でしか観測できない**。ここを「帰属できない throw」として rc=2 に畳むと、
+  //     本 leg が塞ぐべき実機 crash が判定不能に化け、しかも誘導文（--base-args を与えよ）が誤導になる。
   let positiveLine = 'positiveControl=skipped(caller-supplied probe-args)'
   if (opts.explicitProbeArgsObject === undefined) {
     const positiveArgs = buildPositiveArgs(requiredArgs, opts.baseArgs)
     // agent marker は「病的 args で agent が起動した」ことの backstop なので positive では書かない。
     const pr = await runScenario(compiled, positiveArgs, null)
     const posDetail = `expect=${expect} required=${JSON.stringify(requiredArgs)}(${requiredSource}) positiveArgs=${JSON.stringify(positiveArgs)}`
+    if (pr.threw && pr.errorName === 'ReferenceError') {
+      return violation(
+        'RUNTIME_REFERENCE_ERROR',
+        `正常 args で ReferenceError が出た（意図した fail-fast ではない。実ハーネスは meta 宣言を body から切り落とすため、body の meta 参照等はここでのみ観測される＝sc-ojom ギャップ）: ${pr.errorMessage}。${posDetail}`
+      )
+    }
     if (pr.threw && pr.agentCalls === 0) {
       if (pr.errorMessage.includes(FAILFAST_MARKER)) {
         return violation(
@@ -598,8 +634,8 @@ export async function lint(opts) {
       )
     }
     positiveLine = pr.threw
-      ? `positiveControl=ok(agentCalls=${pr.agentCalls},downstreamThrow=${pr.errorName}:射程外)`
-      : `positiveControl=ok(agentCalls=${pr.agentCalls})`
+      ? `positiveControl=ok(agentCalls=${pr.agentCalls},downstreamThrow=${pr.errorName}:射程外,returned=${pr.returnedType})`
+      : `positiveControl=ok(agentCalls=${pr.agentCalls},returned=${pr.returnedType}${pr.returnedKeys.length ? `[${pr.returnedKeys.join(',')}]` : ''})`
   }
 
   // ── byte-pin（従・skeleton mode のみ）──────────────────────────────────────
@@ -624,8 +660,10 @@ export async function lint(opts) {
     }
   }
 
+  // 病的シナリオの返り値型（ERRATA-1 m4 の回収面。canonical 準拠なら全件 throw ゆえ undefined に潰れる）
+  const pathReturned = [...new Set(results.map((r) => (r.threw ? `throw:${r.errorName}` : r.returnedType)))].join('|')
   out.push(
-    `OK ${label} expect=${expect} scenarios=${results.length} agentCalls=0 workflowCalls=0 ${positiveLine} required=${JSON.stringify(requiredArgs)}(${requiredSource}) ${pinLine}`
+    `OK ${label} expect=${expect} scenarios=${results.length} agentCalls=0 workflowCalls=0 pathReturned=${pathReturned} ${positiveLine} required=${JSON.stringify(requiredArgs)}(${requiredSource}) ${pinLine}`
   )
   out.push(`summary: checked=1 skipped=0 violations=0 inconclusive=0`)
   return { rc: 0, out, err }

@@ -22,6 +22,11 @@
 #     --base-args <json>     病的形を当てない残りの必須 args の埋め値（既定は非空の filler 文字列）
 #     --label <text>         出力に載せる対象名（既定は --file の値）
 #     --timeout <seconds>    probe の wall-clock 上限（env SCRIBE_WF_ARGS_LINT_TIMEOUT でも指定可）
+#   capability probe:
+#     --check-containment    probe を封じ込めて実行できる環境かだけを判定して終わる（--mode / --file 不要）。
+#                            rc=0 使用可 / rc=2 使用不可（INCONCLUSIVE PROBE_UNCONTAINED + 理由）。
+#                            封じ込め条件（BWRAP_ARGS）の単一 SSOT を呼出元へ露出するための口＝
+#                            bats の環境 skip 判定はこれを使う（bwrap の引数を bats 側へ複製しない）。
 #
 # ■ rc 契約（**hook の exit code とは別物**）
 #   0 = 合格 / 対象外（対象外は stdout へ `SKIP <path> <理由>` + stderr へ理由 1 行 + summary の skipped=N）
@@ -38,12 +43,29 @@
 #   本 leg の probe 対象は repo 内 script と bats fixture のみ。
 #   任意 script を probe する hook wire は別 leg（PreToolUse probe (a) の結果次第）へ回す。
 #
-#   【封じ込めが守るもの／守らないもの（既知の穴・trusted-input 前提）】
-#     上記の封じ込め（bwrap / env -i / 空 cwd / 出力破棄 / timeout）が抑えるのは**ホスト側の被害**であって、
-#     **判定の真正性**ではない。被検査 script は probe runner と同一 node process 内で評価されるため、
-#     process.argv から --report の path を読め、WORK_DIR は bwrap で書込可、process.exit も呼べる。
-#     つまり被検査 script は判定チャネル（REPORT file）を掌握でき、`RC 0` / `OUT OK ...` を自分で書いて
-#     VIOLATION を rc=0 に偽造できる（実測・tests/wf-args-lint.bats の forge tooth が現状仕様として pin する）。
+#   【封じ込めが抑えるもの／抑えないもの（実測どおりに書く・ERRATA-1 FIX-P(c) で訂正）】
+#     ★ 本節は「主張」ではなく **実測の記述**である。gate 実測（2026-07-31）で旧記述の前半が偽と判明したため
+#       実装（BWRAP_ARGS）と併せて訂正した。旧記述は「封じ込めはホスト側の被害を抑える」と書いていたが、
+#       当時の BWRAP_ARGS には PID/IPC/session 分離が無く、sandbox 内から host PID 627 個が可視・161 個へ
+#       signal 送出可（admin の claude session 本体を含む）、detached child は engine rc=0 復帰後も host に残存
+#       （--die-with-parent は sandbox init にしか効かず wrapper の timeout は孫の寿命を縛らない）だった。
+#
+#     抑える（現 BWRAP_ARGS で実測）:
+#       - fs 書込: / は読取専用。書込可能なのは一時 WORK_DIR のみ（空 cwd 自体は fs 隔離ではない＝絶対パスで
+#         cwd の外へ書けるため、実行側を bwrap で包むことが必須）。
+#       - network: --unshare-net で遮断。
+#       - host process への到達: --unshare-pid で PID namespace を分離（host PID は /proc に現れず signal も送れない）。
+#       - IPC: --unshare-ipc で System V IPC / POSIX mq を分離。
+#       - 端末・process group: --new-session で新セッション（TIOCSTI 等での端末インジェクションを断つ）。
+#       - 置き土産の process: detached child も PID namespace の init（bwrap）終了で道連れに消える。
+#       - wall-clock: wrapper の timeout(1)。
+#     抑えない（既知・trusted-input 前提）:
+#       - **判定の真正性**。被検査 script は probe runner と同一 node process 内で評価されるため、
+#         process.argv から --report の path を読め、WORK_DIR は bwrap で書込可、process.exit も呼べる。
+#         つまり判定チャネル（REPORT file）を掌握して `RC 0` / `OUT OK ...` を自分で書き、VIOLATION を rc=0 に
+#         偽造できる（実測・tests/wf-args-lint.bats の forge tooth が現状仕様として pin する）。
+#       - host の読取。/ は読取専用で **可視**（機密の読取は防いでいない）。
+#       - CPU / メモリ / fd 等の資源枯渇（cgroup 制限は掛けていない）。
 #     よって **本 engine の入力は trusted（repo 内 script と bats fixture）に限る**。
 #     任意 script を probe する hook wire leg の前提条件は「判定チャネルの分離」（シナリオ評価を子 process へ
 #     出し、対象コードを一切 eval しない親だけが report を書く／report を fd 継承にして argv・env から path を消す）
@@ -58,6 +80,9 @@
 #         実行側も bwrap で包む（/ は読取専用・書込は一時 WORK_DIR のみ・net 遮断）。
 #     帰結として本 lint は bwrap 搭載ホストでのみ green になる。CI/他ホストへ広げる際は
 #     「bwrap を前提に置く」か「■10 を緩める裁定を取る」かの選択が要る（後者は admin/裁定の領分・本 leg では未裁定）。
+#     ★ ERRATA-1 裁定-ENV（2026-07-31）: bats 側は「bwrap 不在 / userns 不可」の 1 条件に限り環境 skip を
+#       許可する限定改訂が入った（engine 側の posture は不変＝全件 rc=2 PROBE_UNCONTAINED のまま）。
+#       fleet 恒久裁定は別 bead sc-k3im。封じ込め可否の判定は `--check-containment`（下記）が単一 SSOT。
 
 set -euo pipefail
 
@@ -79,6 +104,7 @@ REQUIRED_SET=0
 REQUIRED=""
 BASE_ARGS_SET=0
 BASE_ARGS=""
+CHECK_CONTAINMENT=0
 
 die_inconclusive() {
   # $1 = ID, $2 = 詳細
@@ -113,17 +139,22 @@ while [ $# -gt 0 ]; do
     --probe-args) PROBE_ARGS_SET=1; PROBE_ARGS="${2:-}"; shift 2 ;;
     --required) REQUIRED_SET=1; REQUIRED="${2:-}"; shift 2 ;;
     --base-args) BASE_ARGS_SET=1; BASE_ARGS="${2:-}"; shift 2 ;;
+    --check-containment) CHECK_CONTAINMENT=1; shift ;;
     -h|--help) sed -n '2,/^$/p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die_inconclusive "BAD_USAGE" "未知の引数: $1" ;;
   esac
 done
 
-# --mode は必須（path から種別を推測しない）
-if [ "$MODE" != "skeleton" ] && [ "$MODE" != "adhoc" ]; then
-  die_inconclusive "MODE_UNSET" "--mode は skeleton|adhoc が必須（受領: ${MODE:-(none)}）"
-fi
-if [ "$USE_STDIN" -eq 0 ] && [ -z "$FILE" ]; then
-  die_inconclusive "NO_INPUT" "--file または --stdin が必要"
+# --mode は必須（path から種別を推測しない）。--check-containment は環境能力だけを見るので対象指定を要さない。
+if [ "$CHECK_CONTAINMENT" -eq 0 ]; then
+  if [ "$MODE" != "skeleton" ] && [ "$MODE" != "adhoc" ]; then
+    die_inconclusive "MODE_UNSET" "--mode は skeleton|adhoc が必須（受領: ${MODE:-(none)}）"
+  fi
+  if [ "$USE_STDIN" -eq 0 ] && [ -z "$FILE" ]; then
+    die_inconclusive "NO_INPUT" "--file または --stdin が必要"
+  fi
+else
+  LABEL="${LABEL:-(check-containment)}"
 fi
 
 # 封じ込めの前提（timeout / node / env / bwrap / 一時 dir）が揃わない環境では probe を実行しない
@@ -153,17 +184,19 @@ WORK_DIR="$(mktemp -d 2>/dev/null || true)"
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
-if [ "$USE_STDIN" -eq 1 ]; then
-  FILE="$WORK_DIR/stdin-source.js"
-  cat > "$FILE"
-  [ -n "$LABEL" ] || LABEL="(stdin)"
-fi
-[ -f "$FILE" ] || die_inconclusive "NO_INPUT" "対象 file が読めない: $FILE"
-[ -n "$LABEL" ] || LABEL="$FILE"
-FILE="$(abs_path "$FILE")"
-if [ -n "$SNIPPET" ]; then
-  [ -f "$SNIPPET" ] || die_inconclusive "NO_INPUT" "--snippet が読めない: $SNIPPET"
-  SNIPPET="$(abs_path "$SNIPPET")"
+if [ "$CHECK_CONTAINMENT" -eq 0 ]; then
+  if [ "$USE_STDIN" -eq 1 ]; then
+    FILE="$WORK_DIR/stdin-source.js"
+    cat > "$FILE"
+    [ -n "$LABEL" ] || LABEL="(stdin)"
+  fi
+  [ -f "$FILE" ] || die_inconclusive "NO_INPUT" "対象 file が読めない: $FILE"
+  [ -n "$LABEL" ] || LABEL="$FILE"
+  FILE="$(abs_path "$FILE")"
+  if [ -n "$SNIPPET" ]; then
+    [ -f "$SNIPPET" ] || die_inconclusive "NO_INPUT" "--snippet が読めない: $SNIPPET"
+    SNIPPET="$(abs_path "$SNIPPET")"
+  fi
 fi
 
 REPORT="$WORK_DIR/report.txt"
@@ -173,20 +206,37 @@ AGENT_MARKER="$WORK_DIR/agent-calls.txt"
 EMPTY_CWD="$WORK_DIR/cwd"
 mkdir -p "$EMPTY_CWD"
 
+if [ "$CHECK_CONTAINMENT" -eq 0 ]; then
 set -- --mode "$MODE" --file "$FILE" --report "$REPORT" --agent-marker "$AGENT_MARKER" --label "$LABEL"
 [ -n "$EXPECT" ] && set -- "$@" --expect "$EXPECT"
 [ -n "$SNIPPET" ] && set -- "$@" --snippet "$SNIPPET"
 [ "$PROBE_ARGS_SET" -eq 1 ] && set -- "$@" --probe-args "$PROBE_ARGS"
 [ "$REQUIRED_SET" -eq 1 ] && set -- "$@" --required "$REQUIRED"
 [ "$BASE_ARGS_SET" -eq 1 ] && set -- "$@" --base-args "$BASE_ARGS"
+fi
 
-# bwrap の追加封じ込め（fs 読取専用 + 書込は WORK_DIR のみ + net 遮断 + 空 cwd）。
+# bwrap の追加封じ込め（fs 読取専用 + 書込は WORK_DIR のみ + net 遮断 + PID/IPC/session 分離 + 空 cwd）。
 # 引数の順序が意味を持つ: --ro-bind / / で全体を読取専用にした後に --bind "$WORK_DIR" で報告先だけ書込可にする。
-BWRAP_ARGS=(--ro-bind / / --dev /dev --proc /proc --bind "$WORK_DIR" "$WORK_DIR" --chdir "$EMPTY_CWD" --unshare-net --die-with-parent)
+# ERRATA-1 FIX-P(a): --unshare-pid / --unshare-ipc / --new-session を追加。理由は実測（gate 2026-07-31）:
+#   これらが無いと sandbox 内から host PID が可視かつ signal 送出可（admin の claude session 本体を含む）で、
+#   detached child は engine の rc=0 復帰後も host に残存した（--die-with-parent は sandbox init にしか効かず、
+#   wrapper の timeout は孫の寿命を縛らない）。--unshare-pid で bwrap が PID namespace の init になるため、
+#   置き土産の process も namespace ごと消える（--proc /proc は既に在り、PID namespace 分離の前提を満たす）。
+BWRAP_ARGS=(
+  --ro-bind / / --dev /dev --proc /proc
+  --bind "$WORK_DIR" "$WORK_DIR" --chdir "$EMPTY_CWD"
+  --unshare-net --unshare-pid --unshare-ipc --new-session --die-with-parent
+)
 # bwrap が在っても user namespace が塞がれた環境では起動できない。その場合も「封じ込め不能」として
 # rc=2 に倒す（DRIVER_ERROR に化けさせない）。
 "$BWRAP_BIN" "${BWRAP_ARGS[@]}" -- "$ENV_BIN" -i "$NODE_BIN" --version >/dev/null 2>/dev/null ||
   die_inconclusive "PROBE_UNCONTAINED" "bwrap を起動できない（user namespace 不可等）ゆえ probe を実行しない"
+
+if [ "$CHECK_CONTAINMENT" -eq 1 ]; then
+  # 能力判定のみ（対象 script は評価しない）。呼出元（bats の環境 skip 判定）はこの rc を読む。
+  printf 'CONTAINMENT_OK bwrap=%s（--unshare-net --unshare-pid --unshare-ipc --new-session）\n' "$BWRAP_BIN"
+  exit 0
+fi
 
 # 封じ込め実行: bwrap + 空 cwd + env 最小化 + timeout + 出力破棄（判定は REPORT file 経由で回収する）
 probe_status=0
@@ -194,18 +244,20 @@ probe_status=0
   "$BWRAP_BIN" "${BWRAP_ARGS[@]}" -- "$ENV_BIN" -i "$NODE_BIN" "$PROBE_MJS" "$@" >/dev/null 2>/dev/null ||
   probe_status=$?
 
+# marker は「仕事を始めた」の backstop。modality は agent() と nested workflow() の 2 つで、どちらの行も
+# 同じ file へ append される（ERRATA-1 m2: agent のみ記録だと workflow() 起動 → hang が rc=1 でなく rc=2 になる）。
 if [ "$probe_status" -eq 124 ] || [ "$probe_status" -eq 137 ]; then
-  # timeout。ただし timeout 前に agent() が起動していれば「起動した」という実測は確定している（fail-closed）。
+  # timeout。ただし timeout 前に仕事を始めていれば「起動した」という実測は確定している（fail-closed）。
   if [ -s "$AGENT_MARKER" ]; then
-    printf 'VIOLATION AGENT_STARTED_BEFORE_FAILFAST %s probe が timeout(%ss) したが、その前に agent() 起動を実測した\n' "$LABEL" "$TIMEOUT_SECONDS"
+    printf 'VIOLATION AGENT_STARTED_BEFORE_FAILFAST %s probe が timeout(%ss) したが、その前に agent()/workflow() 起動を実測した\n' "$LABEL" "$TIMEOUT_SECONDS"
     exit 1
   fi
-  die_inconclusive "TIMEOUT" "probe が ${TIMEOUT_SECONDS}s で終わらなかった（agent() 起動の実測は無し）"
+  die_inconclusive "TIMEOUT" "probe が ${TIMEOUT_SECONDS}s で終わらなかった（agent()/workflow() 起動の実測は無し）"
 fi
 
 if [ ! -s "$REPORT" ]; then
   if [ -s "$AGENT_MARKER" ]; then
-    printf 'VIOLATION AGENT_STARTED_BEFORE_FAILFAST %s probe runner が報告前に落ちた(exit=%s)が、agent() 起動を実測した\n' "$LABEL" "$probe_status"
+    printf 'VIOLATION AGENT_STARTED_BEFORE_FAILFAST %s probe runner が報告前に落ちた(exit=%s)が、agent()/workflow() 起動を実測した\n' "$LABEL" "$probe_status"
     exit 1
   fi
   die_inconclusive "DRIVER_ERROR" "probe runner が報告を残さず終了（exit=${probe_status}）"
