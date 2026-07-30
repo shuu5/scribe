@@ -59,6 +59,19 @@ SessionStart 注入が opt-in で発火する状態**にする。各次元を独
 > 収束次元（#1 / #2 / #3 / #5〜#10）は独立に収束させる。`origin` を持たない repo でも他次元が
 > 恒久停止しないよう、checker は remote 0 本なら条件 1 を N/A（`COND1-NOTE: NO-GIT-REMOTE`）として扱い、
 > 条件 2 は repo 自身のパスを code-identity に用いて判定を続ける。
+>
+> **コード面は origin だけではない**: 条件 2 と `--assert-not-code-repo` は **全 git remote の URL** と
+> 完全一致で比較する（upstream / mirror 等に台帳を wire する経路を塞ぐ）。条件 1 も全 remote を
+> per-remote で走査する（`COND1 <名前>: OK|VIOLATION|UNKNOWN`）。VIOLATION 行には `remote=<名前>` が
+> 付くので、本当にコード面かを名前で弁別する——**台帳専用 private repo を git remote に登録している構成**
+> では「台帳が台帳 repo を指す」ことが VIOLATION として出うる（偽 VIOLATION）。
+>
+> **注記行が出たときの追加確認**:
+> - `COND2-NOTE: CODE-IDENTITY-PATH-ONLY` … remote 0 本の repo。code-identity が repo 自身のパスだけなので、
+>   **URL 形（`https://…` 等）の台帳先がコード repo でないことは機械照合できていない**。人間が確認すること。
+> - `COND2-NOTE: SCAN-INCOMPLETE` … `.beads` の走査が不完全（読取不能ディレクトリ等）。rc は UNKNOWN。
+>   部分結果を CLEAN と読まず、走査できなかった原因を解消して再検査する。
+> - `REPO-NOTE: NORMALIZED-TO-TOPLEVEL` … 渡したパスが git toplevel でなかったので toplevel で判定した。
 
 ## Step 0: 状態検出（read-only。まず現状を一覧化して報告）
 
@@ -160,6 +173,13 @@ rc が 0 以外のときに止めるのは **台帳同期に関わる操作だ�
 - **rc=1（違反）で、直前に自分が wire した結果そうなった場合は巻き戻す**: `bd dolt remote remove origin` を
   実行し、**`bd dolt push` はしない**。レジストリに残したままにすると、以後の自動 push
   （`scripts/scribe-sync-push.sh` は remote の有無だけを見る）が台帳を公開面へ出す。
+- **この run で wire していなくても、既存レジストリがコード面を指している（`COND2 … 2c: VIOLATION`）なら
+  同じ手当てが要る**: 台帳専用 private repo を用意したうえで `bd dolt remote remove origin` →
+  `--assert-not-code-repo` を通してから `bd dolt remote add origin git+<台帳 repo>` の順で入れ替え、
+  **入れ替えが済むまで `bd dolt push` を一切しない**（実測と push を別の実行単位に保つ）。
+  `COND2 … 2c: VIOLATION remote=<名前>` の remote 名を見て、本当にコード面か、台帳 private repo を
+  git remote に登録しているだけかを弁別する（後者なら偽 VIOLATION なので入れ替えは不要）。
+  既に公開面へ push 済みの `refs/dolt/*` の削除は**破壊操作＝人間承認事案**なので reconciler は消さず報告に留める。
 - **rc=2（判定不能）も OK 扱いしない**（同じく push しない）。
 - **rc≠0 を理由に他の収束次元（#1 / #2 / #3 / #5〜#10）まで止めないこと**。PRIME 同期・汚染除去・
   二重発火除去・gitignore・CLAUDE.md ポインタは台帳分離と独立なので、それぞれ収束させたうえで
