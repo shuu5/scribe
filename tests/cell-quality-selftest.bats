@@ -453,18 +453,10 @@ setup() {
   snsha="$(sha256sum "$snb" | awk '{print $1}')"
   [ -n "$wfsha" ]
   [ "$wfsha" = "$snsha" ]
-  # snippet 側は 1 byte も編集していない(self-pin と同じ値=波0 で焼いた canonical sha)。
-  # ※ここは末尾改行込みの file sha ではなく engine と同じ「改行 join・末尾改行なし」の block sha を取る。
-  run node -e '
-    const fs = require("fs"), c = require("crypto")
-    const lines = fs.readFileSync(process.argv[1], "utf8").split("\n")
-    const s = lines.findIndex((l) => l.trim() === "//SCARGS_BLOCK_START")
-    const e = lines.findIndex((l) => l.trim() === "//SCARGS_BLOCK_END")
-    const block = lines.slice(s, e + 1).join("\n")
-    console.log(c.createHash("sha256").update(block, "utf8").digest("hex"))
-  ' "$snippet"
-  [ "$status" -eq 0 ]
-  [ "$output" = "67602a094a1f3c3eeaeaf0ad1d735640a8e8b3db3752985085ee7685c2ce699d" ]
+  # ※ snippet の【絶対値】self-pin(canonical sha そのもの)はここに複製しない。所有者は
+  #   tests/wf-args-lint.bats の SELF_PIN_SHA256(T13)であり、同じ literal を 2 箇所へ置くと snippet の正当改訂時に
+  #   片側更新漏れで drift する。本 tooth は「WF ↔ snippet の相対一致 + marker 各 1 本 + 切出し非空」に限定し、
+  #   絶対値の凍結は T13 に一本化する(2 本合わせて『snippet が動いていない』かつ『WF が snippet と一致』を覆う)。
 }
 
 # ── P3: receivedArgs.roAgentType(block の後の property 代入)が監査面として載り上書きに追随する ────────
@@ -554,4 +546,59 @@ setup() {
   [ "$status" -eq 1 ]
   [[ "$output" != *"[SCARGS fail-fast]"* ]]
   [[ "$output" == *"DRIVER_AGENT_CALLS 0"* ]]
+  # positive 側も併記する: mutant が「無関係な理由(構文破綻・別例外)で死んだ」のを RED 見逃しにしないため、
+  # 死因が block 外の意味的 fail-fast へ後退したこと自体を marker で弁別する(negative assert だけだと空虚)。
+  [[ "$output" == *"[cell-quality args fail-fast]"* ]]
+}
+
+# ── (sc-pfn4 gate errata) headline 仕様変更の behavioral 面: read-only 軽量用途でも worktree 欠落は throw ────
+# 本便の headline は「doImplement/autoFix を伴わない読み取り専用 run でも worktree 欠落なら throw(= diff だけ
+# 渡す ad-hoc 直叩き経路を殺す)」。既存の throw 系 tooth は全て worker-cell(autoFix/doImplement 付き)入力で、
+# 非 worker-cell × worktree 欠落を踏む走行が 1 本も無かった(gate confirmed minor)。block の【無条件】必須が
+# isWorkerCell 条件下へ後退する退行は、この 1 本が無いと全 tooth green のまま通る。
+@test "sc-pfn4: read-only 軽量用途(非 worker-cell)でも worktree 欠落は canonical block が throw する(headline 仕様)" {
+  # diff だけを渡す ad-hoc 直叩き経路(doImplement/autoFix なし)。
+  run env CQ_ARGS='{"diff":"diff --git a/x b/x"}' node "$DRIVER" run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DRIVER_ERROR"* ]]
+  [[ "$output" == *"[SCARGS fail-fast]"* ]]
+  [[ "$output" == *"必須 args 欠落/未解決: worktree"* ]]
+  [[ "$output" == *"DRIVER_AGENT_CALLS 0"* ]]
+  # block 外の意味的 fail-fast(isWorkerCell 条件)ではなく block が殺している=無条件必須である証拠。
+  [[ "$output" != *"[cell-quality args fail-fast]"* ]]
+  # args 完全空(taskTitle すら無い)でも同じ(既定値で埋めて完走しない)。
+  run env CQ_ARGS='{}' node "$DRIVER" run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"[SCARGS fail-fast]"* ]]
+  [[ "$output" == *"DRIVER_AGENT_CALLS 0"* ]]
+}
+
+# ── (sc-pfn4 gate errata) 観測チャネル DRIVER_AGENT_CALLS の非空虚性: 非 0 を観測する走行を 1 本置く ────────
+# throw 系 tooth は全て `DRIVER_AGENT_CALLS 0` の一致だけで「agent 0 起動」を主張している。集計器の配線が
+# 壊れて常に 0 を出すようになっても全 tooth が green のまま通る(gate confirmed nit)。agent 到達【後】に
+# throw する合成シナリオで非 0 と callSeq 実体を観測し、チャネルが本当に数えていることを pin する。
+@test "sc-pfn4: DRIVER_AGENT_CALLS は agent 到達後の throw で非 0 と callSeq 実体を出す(観測チャネルの非空虚性)" {
+  local mut="$BATS_TEST_TMPDIR/late"
+  mkdir -p "$mut/tests" "$mut/workflows"
+  cp "$DRIVER" "$mut/tests/"
+  # classify 直後(= agent 1 体が確実に走った後)へ late throw を注入する。
+  sed "s|^verifyStrategy = VERIFY_STRATEGY\[taskType\].*\$|&\nthrow new Error('MUTANT_LATE_THROW')|" \
+    "$WF" > "$mut/workflows/cell-quality.workflow.js"
+  run diff "$WF" "$mut/workflows/cell-quality.workflow.js"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"MUTANT_LATE_THROW"* ]]
+
+  # taskType を渡さない = classify agent が必ず走る。
+  run env CQ_ARGS='{"taskTitle":"cell","worktree":"/tmp/wt","goal":"do x","selfTestCmd":"bats tests/x.bats","autoFix":true}' \
+    node "$mut/tests/cell-quality-selftest.driver.mjs" run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"MUTANT_LATE_THROW"* ]]
+  # 非 0 を実際に観測する(0 固定で出す壊れた配線ならここで RED)。
+  [[ "$output" != *"DRIVER_AGENT_CALLS 0"* ]]
+  local n
+  n="$(echo "$output" | awk '/^DRIVER_AGENT_CALLS / {print $2}')"
+  [ -n "$n" ]
+  [ "$n" -ge 1 ]
+  # callSeq も実体を持つ(空文字でない=label を実際に積んでいる)。
+  [[ "$output" == *"DRIVER_CALLSEQ classify"* ]]
 }

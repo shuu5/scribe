@@ -3,7 +3,7 @@ export const meta = {
   description:
     '1 issue = 1 実装セルの品質WF: task-type routing → [Plan] → [Implement] → perspective-diverse な Opus review → 各 finding を独立 Opus が adversarial refute-verify → gated autoFix(confirmed のみ+self-test fail-closed+amend) → loop-until-dry 収束。返り値を呼出元(worker/admin)が一次監査する薄 gate 設計。固有物は args で差し込む(骨格は再利用)。',
   whenToUse:
-    'worker worktree で substantive な per-issue 実装の品質を担保したいとき。固有物(taskTitle/worktree/goal/acceptance/diff/baseRef/contextFile/selfTestCmd/dimensions/model/maxRounds/autoFix/doPlan/doImplement/taskType/target/context/probe/roAgentType)は args で渡す。★args は Workflow tool 経路で【全体約 4KB】に切り詰められる実測がある(un-cw0z)ため inline を小さく保つこと: 大きい diff は baseRef(commit 済差分を snapshot 合成が worktree で直接取得=インライン転記不要)、大きい文脈は contextFile(readable な path を渡し各段 agent が Read)で渡す。autoFix は既定 off(共有 fail-safe)、worker cell 文脈は autoFix:true を渡す。roAgentType は read-only 段の agentType 上書き escape hatch(既定 scribe:explore・"none" で agentType 無し強制)。',
+    'worker worktree で substantive な per-issue 実装の品質を担保したいとき。固有物(taskTitle/worktree/goal/acceptance/diff/baseRef/contextFile/selfTestCmd/dimensions/model/maxRounds/autoFix/doPlan/doImplement/taskType/target/context/probe/roAgentType)は args で渡す。★args は Workflow tool 経路で【全体約 4KB】に切り詰められる実測がある(un-cw0z)ため inline を小さく保つこと: 大きい diff は baseRef(commit 済差分を snapshot 合成が worktree で直接取得=インライン転記不要)、大きい文脈は contextFile(readable な path を渡し各段 agent が Read)で渡す。autoFix は既定 off(共有 fail-safe)、worker cell 文脈は autoFix:true を渡す。roAgentType は read-only 段の agentType 上書き escape hatch(既定 scribe:explore・"none" で agentType 無し強制)。★worktree は【必須】= 欠落/空/undefined/"[undefined]" は agent を 1 体も起動せず throw して run を殺す(sc-pfn4 の canonical args 契約。read-only の軽量用途=diff 供給 + doImplement/autoFix なし でも同じ=diff だけ渡す ad-hoc 直叩きは通らない)。sentinel "(current worktree)" も worker-cell 実行では別 prefix で throw する。',
   // (sc-pfn4) 必須 args の【静的】宣言。body の const REQUIRED_ARGS と同一集合であること(engine の二面宣言
   // 要求。片面/不一致は rc=2 DECL_MISMATCH)。集合は body 側の宣言コメントに理由を書く(ここは mirror)。
   requiredArgs: ['worktree'],
@@ -129,8 +129,8 @@ export const meta = {
 //      「guard 段が high に留まったか」を一次監査できる(receivedArgs/schemaHealth と対称の audit 面)。
 // (12) args 約 4KB 上限とファイル渡し(sc-mbcm・orch-v7pf=un-cw0z 中継の吸収): Workflow tool へ渡す args は
 //      【全体で約 4KB】に切り詰められる実測がある(uns un-cw0z)。切り詰めは骨格からは検知できない
-//      (途中で切れた JSON は (8) の parse 失敗 escalate になるのが唯一の観測面で、有効 JSON のまま
-//      フィールドが欠ける形は silent)。よって呼出元が inline args を小さく保つのが一次対策で、大きな
+//      (途中で切れた JSON は (8) の canonical block が [SCARGS fail-fast] で throw して run を殺すのが唯一の
+//      観測面で、有効 JSON のままフィールドが欠ける形は silent)。よって呼出元が inline args を小さく保つのが一次対策で、大きな
 //      供給物は参照渡しにする: 大きい diff → baseRef((9) の snapshot 合成が worktree で直接取得)/
 //      大きい文脈(goal・acceptance の詳細・review 前提資料) → contextFile(readable な path)。
 //      contextFile は ctxBlock 経由で classify/plan/implement/review/fix の各 prompt へ「まず Read せよ」
