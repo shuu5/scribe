@@ -143,25 +143,79 @@ setup() {
   [[ "$output" == *"K selfTestFinal.ran true"* ]]
 }
 
-# ── 返り値 shape の一貫性: 早期 return(defensive parse 失敗)でも selfTestBaseline/Final(skip)が載る ──
-@test "sc-jx8: defensive parse 失敗の早期 return でも selfTestBaseline/Final(skip)が返り値に載る(shape 一貫性)" {
+# ── (sc-pfn4) defensive parse 失敗は【早期 return でなく throw】で run を殺す(canonical block・P0-2) ──
+# 旧形は escalate=true の return で「返り値 shape の一貫性」(selfTestBaseline/Final の skip 搭載)を見ていた。
+# canonical cutover で return path 自体が消え、不変条件は「agent を 1 体も起動せず run が死ぬ」へ移る。
+# よって assert は rc の exact 一致(=1)+ DRIVER_ERROR + canonical marker + agent 0 起動の 4 点で書く
+# (「status が 0 でない」で書かない=126/127 を RED 扱いしない規律)。
+@test "sc-pfn4: defensive parse 失敗は canonical block が throw して run を殺す(rc=1・canonical marker・agent 0 起動)" {
   run env CQ_ARGS_STRING='{bad json,,' node "$DRIVER" run
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"K escalate true"* ]]
-  [[ "$output" == *"K selfTestBaseline.present true"* ]]
-  [[ "$output" == *"K selfTestBaseline.skipped true"* ]]
-  [[ "$output" == *"K selfTestFinal.present true"* ]]
-  [[ "$output" == *"K selfTestFinal.skipped true"* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DRIVER_ERROR"* ]]
+  [[ "$output" == *"[SCARGS fail-fast]"* ]]
+  [[ "$output" == *"parse 不能"* ]]
+  # agent が 1 体も起動していない(fail-fast より前に仕事を始めていない)。
+  [[ "$output" == *"DRIVER_AGENT_CALLS 0"* ]]
+  # 旧 return path が残存していない(escalate return へ後戻りしていない)。
+  [[ "$output" != *"K escalate true"* ]]
 }
 
-# ── 返り値 shape の一貫性: 早期 return(args fail-fast=必須欠落)でも selfTestBaseline/Final(skip)が載る ──
-@test "sc-jx8: args fail-fast の早期 return でも selfTestBaseline/Final(skip)が返り値に載る(agent 未起動)" {
+# ── (sc-pfn4) 必須 args(worktree)欠落も canonical block の throw(旧 args fail-fast return の置換) ──────
+@test "sc-pfn4: 必須 args(worktree)欠落は canonical block が throw して run を殺す(rc=1・canonical marker・agent 0 起動)" {
   run env CQ_ARGS='{"autoFix":true}' node "$DRIVER" run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DRIVER_ERROR"* ]]
+  [[ "$output" == *"[SCARGS fail-fast]"* ]]
+  [[ "$output" == *"必須 args 欠落/未解決: worktree"* ]]
+  [[ "$output" == *"DRIVER_AGENT_CALLS 0"* ]]
+  [[ "$output" != *"K escalate true"* ]]
+}
+
+# ── (sc-pfn4) block の【外】の意味的 fail-fast: canonical marker を含まない別 prefix で throw する ─────
+# 3 面: (a) sentinel '(current worktree)' 拒否(block の不在判定は sentinel を素通りさせるため block 外が要る)
+#       (b) goal / acceptance のいずれか(平坦な AND では block に表現不能) (c) autoFix 時の selfTestCmd。
+# canonical marker を含めない別 prefix は engine の帰属弁別面(preamble 由来 throw と骨格固有の意味検証を
+# 混同させない)なので、marker の【不在】も併せて assert する。
+@test "sc-pfn4 P2: sentinel '(current worktree)' は block 外の意味的 fail-fast が throw で拒否する(canonical marker を含まない)" {
+  run env CQ_ARGS='{"worktree":"(current worktree)","goal":"do x","selfTestCmd":"bats tests/x.bats","autoFix":true}' node "$DRIVER" run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DRIVER_ERROR"* ]]
+  [[ "$output" == *"[cell-quality args fail-fast]"* ]]
+  [[ "$output" == *"DRIVER_AGENT_CALLS 0"* ]]
+  # canonical marker は含まない(帰属を弁別できる形)。
+  [[ "$output" != *"[SCARGS fail-fast]"* ]]
+}
+
+@test "sc-pfn4 P2: goal/acceptance 双方欠落(worker-cell)は block 外の意味的 fail-fast が throw する" {
+  run env CQ_ARGS='{"worktree":"/tmp/wt","doImplement":true}' node "$DRIVER" run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DRIVER_ERROR"* ]]
+  [[ "$output" == *"[cell-quality args fail-fast]"* ]]
+  [[ "$output" == *"goal/acceptance のいずれか"* ]]
+  [[ "$output" == *"DRIVER_AGENT_CALLS 0"* ]]
+  [[ "$output" != *"[SCARGS fail-fast]"* ]]
+}
+
+@test "sc-pfn4 P2: autoFix 要求で selfTestCmd 欠落は block 外の意味的 fail-fast が throw する" {
+  run env CQ_ARGS='{"worktree":"/tmp/wt","goal":"do x","autoFix":true}' node "$DRIVER" run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DRIVER_ERROR"* ]]
+  [[ "$output" == *"[cell-quality args fail-fast]"* ]]
+  [[ "$output" == *"selfTestCmd(autoFix 時)"* ]]
+  [[ "$output" == *"DRIVER_AGENT_CALLS 0"* ]]
+  [[ "$output" != *"[SCARGS fail-fast]"* ]]
+}
+
+# ── (sc-pfn4) 対照: 発火条件は isWorkerCell のまま(無条件化していない) ────────────────────────────
+# 無条件化すると正常 args の positive control でも必ず throw し、engine が二面宣言を機械照合できる走行が
+# 1 つも無くなる(POSITIVE_THROW_UNATTRIBUTED)。read-only 軽量用途(doImplement/autoFix なし)で worktree だけを
+# 与えた run が throw せず agent へ到達することを behavioral に固定する。
+@test "sc-pfn4 P2 対照: read-only 軽量用途(worktree のみ)は意味的 fail-fast を発火せず agent へ到達する" {
+  run env CQ_ARGS='{"worktree":"/tmp/wt","diff":"diff --git a/x b/x"}' node "$DRIVER" run
   [ "$status" -eq 0 ]
-  [[ "$output" == *"K escalate true"* ]]
-  [[ "$output" == *"K selfTestBaseline.skipped true"* ]]
-  [[ "$output" == *"K selfTestFinal.skipped true"* ]]
-  [[ "$output" == *"K selftestAgentCalls 0"* ]]
+  [[ "$output" != *"DRIVER_ERROR"* ]]
+  # agent が実際に起動している(classify 段が走った)。
+  [[ "$output" == *"K effortStage.classify medium"* ]]
 }
 
 # ── 構造 pin(source-level): baseline/final の常時実行機構と情報ログ専用性 ────────────────────────
@@ -342,4 +396,162 @@ setup() {
   grep -q 'effort: effortSummary,' "$WF"
   # CLAUDE_EFFORT(非正規名)を WF が使わない(念のため・WF は env を書かないが方針として)。
   ! grep -q 'CLAUDE_EFFORT\b' "$WF"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# (sc-pfn4) canonical args 契約 cutover の teeth
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── P2(5): 二面宣言の集合一致(engine の DECL_MISMATCH を bwrap 非依存で先取りする) ──────────────────
+# engine の DECL_MISMATCH 判定は --probe-args 指定時に評価されない(wf-args-probe.mjs の分岐)。cell 内で回せる
+# probe 走行は骨格別 legacy allowlist 経由=--probe-args 付きゆえ、二面宣言の集合一致は engine 走行の rc=0 では
+# 一切保証されない(完全不一致でも rc=0 になることを合成 fixture で実測済み)。よって bwrap 非依存の独立 tooth で
+# 集合一致そのものを pin する。
+@test "sc-pfn4 P2: meta の必須 args 宣言と body の const REQUIRED_ARGS が同一集合(二面宣言)" {
+  run node -e '
+    const fs = require("fs")
+    const s = fs.readFileSync(process.argv[1], "utf8")
+    const m = /requiredArgs:\s*\[([^\]]*)\]/.exec(s)
+    const b = /const\s+REQUIRED_ARGS\s*=\s*\[([^\]]*)\]/.exec(s)
+    if (!m || !b) { console.log("DECL_MISSING meta=" + !!m + " body=" + !!b); process.exit(1) }
+    const parse = (t) => [...t.matchAll(/[\x27"]([^\x27"]*)[\x27"]/g)].map((x) => x[1]).sort()
+    const A = parse(m[1]), B = parse(b[1])
+    console.log("META " + JSON.stringify(A))
+    console.log("BODY " + JSON.stringify(B))
+    console.log(JSON.stringify(A) === JSON.stringify(B) ? "SETS_MATCH" : "SETS_DIFFER")
+  ' "$WF"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SETS_MATCH"* ]]
+  # 集合の実体も pin する(goal / acceptance を含めない=「いずれか」要件は平坦な AND で表現不能ゆえ block 外)。
+  [[ "$output" == *'META ["worktree"]'* ]]
+  [[ "$output" == *'BODY ["worktree"]'* ]]
+}
+
+# ── P6: byte-pin の bwrap 非依存な代替 tooth(複製 block を切り出し sha256 を snippet と直接比較) ──────
+# engine の bytePin は probe 走行(bwrap 封じ込め)を伴うため、封じ込めが使えない cell では走らない。block の
+# byte 同一性そのものは probe 不要で確かめられるので、独立 tooth として置く(SNIPPET_BLOCK_DRIFT の先取り)。
+@test "sc-pfn4 P6: WF へ複製した SCARGS block が canonical snippet と sha256 一致(bwrap 非依存)" {
+  local snippet="$REPO_ROOT/workflows/lib/args-preamble.snippet.js"
+  [ -f "$snippet" ]
+  local wfb="$BATS_TEST_TMPDIR/wf-block.txt"
+  local snb="$BATS_TEST_TMPDIR/sn-block.txt"
+  awk '/^\/\/SCARGS_BLOCK_START$/{f=1} f{print} /^\/\/SCARGS_BLOCK_END$/{if(f) exit}' "$WF" > "$wfb"
+  awk '/^\/\/SCARGS_BLOCK_START$/{f=1} f{print} /^\/\/SCARGS_BLOCK_END$/{if(f) exit}' "$snippet" > "$snb"
+  # 切り出せている(空でない・marker 両端が在る)。
+  [ -s "$wfb" ]
+  [ -s "$snb" ]
+  run head -n 1 "$wfb"
+  [ "$output" = "//SCARGS_BLOCK_START" ]
+  run tail -n 1 "$wfb"
+  [ "$output" = "//SCARGS_BLOCK_END" ]
+  # marker 行はそれぞれちょうど 1 本(engine の MARKER_MALFORMED 相当を先取り)。
+  [ "$(grep -c '^//SCARGS_BLOCK_START$' "$WF")" -eq 1 ]
+  [ "$(grep -c '^//SCARGS_BLOCK_END$' "$WF")" -eq 1 ]
+  # sha256 の直接比較(1 byte でも動けば RED)。
+  local wfsha snsha
+  wfsha="$(sha256sum "$wfb" | awk '{print $1}')"
+  snsha="$(sha256sum "$snb" | awk '{print $1}')"
+  [ -n "$wfsha" ]
+  [ "$wfsha" = "$snsha" ]
+  # snippet 側は 1 byte も編集していない(self-pin と同じ値=波0 で焼いた canonical sha)。
+  # ※ここは末尾改行込みの file sha ではなく engine と同じ「改行 join・末尾改行なし」の block sha を取る。
+  run node -e '
+    const fs = require("fs"), c = require("crypto")
+    const lines = fs.readFileSync(process.argv[1], "utf8").split("\n")
+    const s = lines.findIndex((l) => l.trim() === "//SCARGS_BLOCK_START")
+    const e = lines.findIndex((l) => l.trim() === "//SCARGS_BLOCK_END")
+    const block = lines.slice(s, e + 1).join("\n")
+    console.log(c.createHash("sha256").update(block, "utf8").digest("hex"))
+  ' "$snippet"
+  [ "$status" -eq 0 ]
+  [ "$output" = "67602a094a1f3c3eeaeaf0ad1d735640a8e8b3db3752985085ee7685c2ce699d" ]
+}
+
+# ── P3: receivedArgs.roAgentType(block の後の property 代入)が監査面として載り上書きに追随する ────────
+# cutover 前は block 内に相当する field が在ったが、canonical block は全 WF で byte 一致でなければならないため
+# WF 固有 field は block の【後】で property 代入する。この代入を落としても既存 tooth は全 green のままだった
+# (現行 tests に receivedArgs.roAgentType を assert する tooth は 0 本=無 guard 条項)ので専用 tooth で塞ぐ。
+@test "sc-pfn4 P3: receivedArgs.roAgentType が既定 scribe:explore で載り args.roAgentType の上書きに追随する" {
+  run env CQ_ARGS="$ARGS_WORKER" node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"roAgentType":"scribe:explore"'* ]]
+  # 上書き(escape hatch 'none')に追随する=解決値が載っている(literal 固定でない)。
+  run env CQ_ARGS='{"taskTitle":"cell","worktree":"/tmp/wt","goal":"do x","selfTestCmd":"bats tests/x.bats","autoFix":true,"taskType":"testable","roAgentType":"none"}' node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"roAgentType":"none"'* ]]
+  # 任意の型指定にも追随する(既定/none の 2 値だけを返す実装への退行を塞ぐ)。
+  run env CQ_ARGS='{"taskTitle":"cell","worktree":"/tmp/wt","goal":"do x","selfTestCmd":"bats tests/x.bats","autoFix":true,"taskType":"testable","roAgentType":"general-purpose"}' node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"roAgentType":"general-purpose"'* ]]
+}
+
+# ── P4: 監査 3 field が「載っていない return path が 0 本」(behavioral + 直下限定の構造 pin) ────────────
+# cutover で早期 return が消え result-level の return path は 1 本になった。grep による return path 列挙は
+# 到達不能 return の dead code 温存でも通ってしまうため、behavioral(複数シナリオの RESULT を実際に読む)で
+# 網羅を確かめ、加えて監査 field が helper 関数の return に紛れていない(result 直下にのみ在る)ことを pin する。
+@test "sc-pfn4 P4: 監査 3 field(receivedArgs/schemaHealth/roFallbackActive)が全シナリオの RESULT に載る" {
+  # (1) 正常収束
+  run env CQ_ARGS="$ARGS_WORKER" node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"K converged true"* ]]
+  [[ "$output" == *'"receivedArgs":{'* ]]
+  [[ "$output" == *'"schemaHealth":{'* ]]
+  [[ "$output" == *'"roFallbackActive":'* ]]
+  # (2) escalate(Fix の self-test 失敗で fail-closed)
+  run env CQ_ARGS="$ARGS_WORKER" \
+    CQ_REVIEW_FINDINGS='[{"title":"bug A","severity":"critical","location":"x:1","rationale":"boom"}]' \
+    CQ_VERIFY_REFUTED=false CQ_FIX_SELFTEST_PASSED=false node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"K escalate true"* ]]
+  [[ "$output" == *'"receivedArgs":{'* ]]
+  [[ "$output" == *'"schemaHealth":{'* ]]
+  [[ "$output" == *'"roFallbackActive":'* ]]
+  # (3) roAgentType 上書き(fallback 経路の最終状態が載る)
+  run env CQ_ARGS="$ARGS_WORKER" CQ_RO_NOTFOUND=true node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"K roFallbackActive true"* ]]
+  [[ "$output" == *'"receivedArgs":{'* ]]
+  [[ "$output" == *'"schemaHealth":{'* ]]
+  [[ "$output" == *'"roFallbackActive":true'* ]]
+}
+
+@test "sc-pfn4 P4: 監査 3 field は result 直下にのみ在る(helper 関数の return に載せない)" {
+  # result-level の return は 1 本のみ=各 field はちょうど 1 箇所。helper(runSelfTest / dimension 合成等)の
+  # return に紛れ込むと呼出元の監査面が二重化し「どの object を読めばよいか」が壊れる。
+  [ "$(grep -cE '^[[:space:]]*receivedArgs,' "$WF")" -eq 1 ]
+  [ "$(grep -cE '^[[:space:]]*schemaHealth: \{' "$WF")" -eq 1 ]
+  [ "$(grep -cE '^[[:space:]]*roFallbackActive,' "$WF")" -eq 1 ]
+  # 旧早期 return の literal 形(escalate return 形の残骸)が残っていない。
+  [ "$(grep -c 'roFallbackActive: false' "$WF")" -eq 0 ]
+  # helper の return 行に監査 field が現れない(直下限定の裏取り: 該当行はいずれも result 組立の内側)。
+  ! grep -nE '^[[:space:]]*return \{.*receivedArgs' "$WF"
+  ! grep -nE '^[[:space:]]*return \{.*schemaHealth' "$WF"
+  ! grep -nE '^[[:space:]]*return \{.*roFallbackActive' "$WF"
+}
+
+# ── P5: 変異注入 — canonical block の必須 args 判定を除去すると対応 tooth が RED になる(非空虚性) ───────
+# mutant_fingerprint: `if (__scargsParseFailed || __scargsMissing.length > 0) {` → `if (false) {`
+# 変異は BATS_TEST_TMPDIR の copy 木へ当てる(実 file を変異させたまま commit しない)。driver は自分の位置から
+# ../workflows/cell-quality.workflow.js を読むので、copy 木は tests/ と workflows/ の 2 段を作る。
+@test "sc-pfn4 P5: 変異注入(canonical block の必須 args 判定を除去)で canonical marker の tooth が RED になる" {
+  local mut="$BATS_TEST_TMPDIR/mut"
+  mkdir -p "$mut/tests" "$mut/workflows"
+  cp "$DRIVER" "$mut/tests/"
+  sed 's/if (__scargsParseFailed || __scargsMissing.length > 0) {/if (false) {/' "$WF" > "$mut/workflows/cell-quality.workflow.js"
+  # 変異が実際に当たったこと(diff 非空 = 1 行の置換)を rc と diff で確認する。
+  run diff "$WF" "$mut/workflows/cell-quality.workflow.js"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"if (false) {"* ]]
+
+  # base(未変異): 必須 args 欠落は canonical marker 付きで throw する。
+  run env CQ_ARGS='{"autoFix":true}' node "$DRIVER" run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"[SCARGS fail-fast]"* ]]
+
+  # 変異後: canonical block が黙って通り、block 外の意味的 fail-fast まで落ちる=canonical marker が消える
+  # (=上の tooth が RED になる)。agent は依然 0 起動だが「preamble が必須 args を見ている」証拠は失われる。
+  run env CQ_ARGS='{"autoFix":true}' node "$mut/tests/cell-quality-selftest.driver.mjs" run
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"[SCARGS fail-fast]"* ]]
+  [[ "$output" == *"DRIVER_AGENT_CALLS 0"* ]]
 }

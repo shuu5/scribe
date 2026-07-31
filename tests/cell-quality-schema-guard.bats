@@ -140,7 +140,12 @@ setup() {
     # (sc-j32 errata) 長さヒューリスティックは撤去済=`t.length < 2` を含まない・`t.length < 1` を使う。
     ! grep -q 't.length < 2' "$f"
     grep -q 't.length < 1' "$f"
-    # 全 return 経路に schemaHealth を載せる(下限)。
-    [ "$(grep -c 'schemaHealth: {' "$f")" -ge 3 ]
   done
+  # (sc-pfn4) 「全 return 経路に schemaHealth を載せる」下限は per-file に分離する。cell-quality は canonical
+  # cutover で早期 return 2 本が throw 化し result-level の return path が 1 本になったため、下限 3 のままでは
+  # 到達不能 return を dead code として温存しない限り満たせない。よって WF は実在数(1)を exact 固定し、
+  # prebake(非接触)は現行実測(5)に対する下限 3 をそのまま維持する(prebake 側の閾値は 1 も下げない)。
+  # 「載っていない return path が 0 本」は tests/cell-quality-selftest.bats の behavioral tooth が別に pin する。
+  [ "$(grep -c 'schemaHealth: {' "$WF")" -eq 1 ]
+  [ "$(grep -c 'schemaHealth: {' "$PREBAKE")" -ge 3 ]
 }
