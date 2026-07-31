@@ -1002,3 +1002,67 @@ plant_cap_mutant() {
     grep -q 'severity-limited' <<< "$(kval "$output" capDroppedReasons)"
   done
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [H] gate errata（自己点検 WF の指摘反映・sc-k33c）
+#   H1 = K1c の決定論式が locale 非依存であること（旧: localeCompare + 恒真 0 の dead comparator）
+#   H2 = K8「cap 判定コードは 1 ブロックに閉じ」に terminal 判定 / capReport 組立 / capNote 生成も含めること
+# ─────────────────────────────────────────────────────────────────────────────
+
+@test "sc-k33c H1 (K1c): tie-break が locale 非依存の code-unit 順で、dimension キー比較が dead comparator でない" {
+  # localeCompare は ICU/locale 依存でホストが変わると順序が変わりうる＝「決定論式」を満たさない。
+  # comparator から localeCompare の【呼出し】が消えていること（静的・解説コメント中の語は許容するため
+  # 呼出し形 `localeCompare(` で見る）。
+  run grep -n 'localeCompare(' "$WF"
+  [ "$status" -ne 0 ]
+  # 第2キーが「要素ごとの dim 同士」の比較であること（旧実装は dimKey 同士＝恒真 0 の no-op だった）。
+  run grep -F -q -- 'if (a.dim !== b.dim) return a.dim < b.dim ? -1 : 1' "$WF"
+  [ "$status" -eq 0 ]
+
+  # behavioral: 同 severity で title が "B-item"(0x42) と "a-item"(0x61) のとき、code-unit 順なら "B-item" が
+  # 先に admit される（en_US の照合順なら "a-item" が先＝旧実装との弁別点）。LC_ALL を振っても結果は不変。
+  local F='[{"title":"a-item","severity":"critical","location":"x:1","rationale":"r"},{"title":"B-item","severity":"critical","location":"x:2","rationale":"r"}]'
+  local out_c out_en
+  run env LC_ALL=C CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":1,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$F" \
+      CQ_VERIFY_REFUTED=false node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  out_c="$(kval "$output" capDroppedTitles)"
+  # 落ちるのは "a-item"（= admit されたのは "B-item"）＝code-unit 順。
+  [ "$out_c" = "a-item;a-item;a-item;a-item" ]
+
+  run env LC_ALL=en_US.UTF-8 CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":1,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$F" \
+      CQ_VERIFY_REFUTED=false node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  out_en="$(kval "$output" capDroppedTitles)"
+  [ "$out_en" = "$out_c" ]
+}
+
+@test "sc-k33c H2 (K8): terminal 判定 / capReport 組立 / capNote 生成も SCCAP ブロック内に閉じている" {
+  local s e body outside
+  s="$(grep -n '^//SCCAP_BLOCK_START$' "$WF" | cut -d: -f1)"
+  e="$(grep -n '^//SCCAP_BLOCK_END$' "$WF" | cut -d: -f1)"
+  body="$(sed -n "${s},${e}p" "$WF")"
+  outside="$(sed -n "1,$((s - 1))p;$((e + 1)),\$p" "$WF")"
+
+  # 判定本体はブロック内に 1 個だけ在る。
+  grep -q 'const capFinalize = ' <<< "$body"
+  [ "$(grep -c 'const capFinalize = ' "$WF")" -eq 1 ]
+  # capReport の組立と capNote の文言生成もブロック内（外側には literal が無い）。
+  grep -q "unit: 'agent-calls'" <<< "$body"
+  ! grep -q "unit: 'agent-calls'" <<< "$outside"
+  grep -q '※cap 発火' <<< "$body"
+  ! grep -q '※cap 発火' <<< "$outside"
+  # 外側に残るのは「呼んで適用するだけ」の薄い call site（capFinalize 呼出しはちょうど 1 箇所）。
+  [ "$(grep -F -c -- 'capFinalize({ converged, escalate, escalateReason })' "$WF")" -eq 1 ]
+  grep -q 'capFinalize({ converged, escalate, escalateReason })' <<< "$outside"
+
+  # 実走で terminal の意味論が保たれている（リファクタで挙動を変えていない）。
+  run env CQ_ARGS="$(cq_args '{"totalBudget":8}')" CQ_REVIEW_FINDINGS="$FINDINGS_MIX" \
+      CQ_VERIFY_REFUTED=false node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" capExceeded)" = "true" ]
+  [ "$(kval "$output" converged)" = "false" ]
+  [ "$(kval "$output" escalate)" = "true" ]
+  [ "$(kval "$output" gateHasCapNote)" = "true" ]
+  [ "$(kval "$output" capUnit)" = "agent-calls" ]
+}

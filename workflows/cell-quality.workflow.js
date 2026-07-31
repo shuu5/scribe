@@ -610,16 +610,21 @@ const capVerifyQuotaPerDim = (dimCount) => {
 // 観点単位で呼ぶため dimension key は定数だが、比較器に含めて cross-dimension でも同じ全順序になるようにする。
 const capOrderFindings = (findings, dimKey) =>
   findings
-    .map((f, i) => ({ f, i }))
+    .map((f, i) => ({ f, i, dim: String((f && f.dimension) || dimKey || '') }))
     .sort((a, b) => {
       const sa = CAP_SEVERITY_RANK[a.f && a.f.severity] !== undefined ? CAP_SEVERITY_RANK[a.f.severity] : 4
       const sb = CAP_SEVERITY_RANK[b.f && b.f.severity] !== undefined ? CAP_SEVERITY_RANK[b.f.severity] : 4
       if (sa !== sb) return sa - sb
-      const d = String(dimKey || '').localeCompare(String(dimKey || ''))
-      if (d !== 0) return d
-      const t = String((a.f && a.f.title) || '').localeCompare(String((b.f && b.f.title) || ''))
-      if (t !== 0) return t
-      return a.i - b.i
+      // 第2キー: dimension key 昇順。**比較対象は要素ごとの dim**(finding.dimension があればそれ・無ければ
+      // 呼出し時の観点 key)。旧実装は dimKey 同士を比べており恒真 0 の dead comparator だった(=第2キーが
+      // 実装されていない)。観点単位で呼ぶ限り実値は定数だが、比較器としては全順序を成立させる。
+      if (a.dim !== b.dim) return a.dim < b.dim ? -1 : 1
+      // 第3キー: title 昇順。**locale 非依存の code-unit 順**で比較する(localeCompare は ICU/locale 依存で
+      // ホストが変わると順序が変わりうる=K1c が要求する「決定論式」を満たさない)。
+      const ta = String((a.f && a.f.title) || '')
+      const tb = String((b.f && b.f.title) || '')
+      if (ta !== tb) return ta < tb ? -1 : 1
+      return a.i - b.i // 第4キー: 元順(安定ソート)
     })
     .map((x) => x.f)
 // 層2-③ 縮退順の本体: (1) perRoundVerifyTopK(観点単位 top-K)→ (2) 予算枠で critical/major 限定 →
@@ -737,6 +742,59 @@ const capReclassify = (stage, fallback, opts) => (e) => {
   const reason = capClassify(e)
   if (reason) capRecordException(stage, reason, e, opts)
   return typeof fallback === 'function' ? fallback() : fallback
+}
+
+// ── terminal 判定 + fail-loud 表面の確定(K8: cap の判定コードは本ブロックに閉じる) ────────────────
+// 呼出サイト(WF 末尾)は本関数を呼んで返り値を適用するだけ = cap の判定ロジックがブロック外へ散らない
+// (旧実装は terminal 判定 / capReport 組立 / capNote 生成の 3 つがブロック外に在り K8 の閉包に反していた)。
+// 不変条件: cap が発火した run は「幅を落として走った」= 見ていない観点/finding が在るので **converged を
+// 立てない**(clean と cap 縮退を混同させない)。escalate は **blocking 級を落としたときだけ**立てる
+// (minor/nit を perRoundVerifyTopK で落としただけの run まで人手判断へ送らない=escalate の安売り防止)。
+// self-test final(免除段)まで走り終えた後に呼ぶ = spentEstimate が実際の総本数を反映する。
+const capFinalize = (state) => {
+  let converged = state.converged
+  let escalate = state.escalate
+  let escalateReason = state.escalateReason
+  const droppedBlocking = capDropped.filter((d) => CAP_BLOCKING_DROP_SEVERITIES.has(d.severity)).length
+  if (capExceeded) {
+    converged = false
+    if (droppedBlocking > 0 && !escalate) {
+      escalate = true
+      escalateReason =
+        escalateReason ||
+        `cap 発火(reason=${capReason})で blocking 級 ${droppedBlocking} 件(critical/major/観点丸ごと欠落)を verify/fix せず落とした。落とした先に blocking が無かったとは主張できない(fail-closed)=人手確認。`
+    }
+  }
+  // token は **情報ログ専用**(判定は agent 本数)。budget.total は呼出元が turn budget を設定しないと null な
+  // ので null ガードする(null を 0 と読んで「予算ゼロ」に誤断定しない)。
+  const budgetTotal = budget && budget.total != null ? budget.total : null
+  const tokenEnd = budget && typeof budget.spent === 'function' ? budget.spent() : null
+  const tokenDelta = capTokenStart !== null && tokenEnd !== null ? tokenEnd - capTokenStart : null
+  log(
+    `[cap-token] budget.total=${budgetTotal === null ? 'null(未設定)' : budgetTotal} spent-delta=${tokenDelta === null ? 'n/a' : tokenDelta} / cap 判定は agent 本数(limit=${totalBudget || '無 cap'} spent≈${capSpent})で行い、token は情報ログ併走のみ(判定に使わない)。`
+  )
+  const capReport = {
+    limit: totalBudget, // 0 = 無 cap(opt-in 既定)
+    unit: 'agent-calls', // 【単位契約】totalBudget の単位は agent 本数(token ではない)
+    spentEstimate: capSpent, // 免除段(classify/self-test/snapshot/plan/implement)も含む起動本数の見積り
+    stages: capStages, // どの段でどれだけ落としたか([{round,stage,requested,admitted,dropped,reason}])
+    reason: capReason || '', // 'quota'(harness token budget 例外)|'cap'(自前 admission)|'error'(harness agent cap 例外)
+    droppedAgents: capDropped.length, // 起動しなかった agent 相当数(= capDropped[] の件数)
+    droppedBlocking, // うち blocking 級(critical/major/severity 不明)= escalate の駆動値
+    historyCount: history.length, // (項目3) history 件数も capReport から辿れる
+    // (sc-k33c errata) self-test 段(情報ログ専用=B4)で捕捉した cap 系例外。**terminal も round gate も駆動しない**
+    // ゆえ capExceeded/capReason/capDropped[] には載らず、可視化はここだけ(監視専用段が終端判定を反転させない)。
+    selfTestExceptions: capSelfTestExceptions,
+    tokenDelta, // 情報ログ専用(判定に使わない)
+    budgetTotal, // null = 呼出元が turn budget を設定していない(層3 は実機では発火しない)
+  }
+  // 4 つ目の note。cap が発火した run は幅を落として走った=見ていない観点/finding が在るので、収束/escalate に
+  // 関わらず注記して silent ship させない(unvNote/machNote/schemaNote と同じ思想)。呼出サイトで 3 分岐とも
+  // schemaNote の【直後・末尾】へ連結する(CONVERGED/ESCALATE/OPEN の prefix と本文は不変)。
+  const capNote = capExceeded
+    ? ` ※cap 発火(reason=${capReport.reason}, limit=${capReport.limit} ${capReport.unit}, spentEstimate=${capReport.spentEstimate}, dropped=${capReport.droppedAgents}(うち blocking 級 ${capReport.droppedBlocking}))= 幅を落として走った run。capReport/capDropped を直読し、落とした観点/finding を人手確認(網羅性を主張しない)。`
+    : ''
+  return { converged, escalate, escalateReason, capReport, capNote, capDroppedBlocking: droppedBlocking }
 }
 //SCCAP_BLOCK_END
 
@@ -1657,43 +1715,14 @@ if (selfTestFinal.skipped) {
 }
 
 // ── (sc-k33c) cap の terminal 判定 + fail-loud 表面の確定 ────────────────────────
-// 不変条件: cap が発火した run は「幅を落として走った」= 見ていない観点/finding が在るので **converged を
-// 立てない**(clean と cap 縮退を混同させない)。escalate は **blocking 級を落としたときだけ**立てる
-// (minor/nit を perRoundVerifyTopK で落としただけの run まで人手判断へ送らない=escalate の安売り防止)。
-// self-test final(免除段)まで走り終えた後に集計する = spentEstimate が実際の総本数を反映する。
-const capDroppedBlocking = capDropped.filter((d) => CAP_BLOCKING_DROP_SEVERITIES.has(d.severity)).length
-if (capExceeded) {
-  converged = false
-  if (capDroppedBlocking > 0 && !escalate) {
-    escalate = true
-    escalateReason =
-      escalateReason ||
-      `cap 発火(reason=${capReason})で blocking 級 ${capDroppedBlocking} 件(critical/major/観点丸ごと欠落)を verify/fix せず落とした。落とした先に blocking が無かったとは主張できない(fail-closed)=人手確認。`
-  }
-}
-// token は **情報ログ専用**(判定は agent 本数)。budget.total は呼出元が turn budget を設定しないと null なので
-// null ガードする(null を 0 と読んで「予算ゼロ」に誤断定しない)。
-const capBudgetTotal = budget && budget.total != null ? budget.total : null
-const capTokenEnd = budget && typeof budget.spent === 'function' ? budget.spent() : null
-const capTokenDelta = capTokenStart !== null && capTokenEnd !== null ? capTokenEnd - capTokenStart : null
-log(
-  `[cap-token] budget.total=${capBudgetTotal === null ? 'null(未設定)' : capBudgetTotal} spent-delta=${capTokenDelta === null ? 'n/a' : capTokenDelta} / cap 判定は agent 本数(limit=${totalBudget || '無 cap'} spent≈${capSpent})で行い、token は情報ログ併走のみ(判定に使わない)。`
-)
-const capReport = {
-  limit: totalBudget, // 0 = 無 cap(opt-in 既定)
-  unit: 'agent-calls', // 【単位契約】totalBudget の単位は agent 本数(token ではない)
-  spentEstimate: capSpent, // 免除段(classify/self-test/snapshot/plan/implement)も含む起動本数の見積り
-  stages: capStages, // どの段でどれだけ落としたか([{round,stage,requested,admitted,dropped,reason}])
-  reason: capReason || '', // 'quota'(harness token budget 例外)|'cap'(自前 admission)|'error'(harness agent cap 例外)
-  droppedAgents: capDropped.length, // 起動しなかった agent 相当数(= capDropped[] の件数)
-  droppedBlocking: capDroppedBlocking, // うち blocking 級(critical/major/severity 不明)= escalate の駆動値
-  historyCount: history.length, // (項目3) history 件数も capReport から辿れる
-  // (sc-k33c errata) self-test 段(情報ログ専用=B4)で捕捉した cap 系例外。**terminal も round gate も駆動しない**
-  // ゆえ capExceeded/capReason/capDropped[] には載らず、可視化はここだけ(監視専用段が終端判定を反転させない)。
-  selfTestExceptions: capSelfTestExceptions,
-  tokenDelta: capTokenDelta, // 情報ログ専用(判定に使わない)
-  budgetTotal: capBudgetTotal, // null = 呼出元が turn budget を設定していない(層3 は実機では発火しない)
-}
+// 判定ロジックは SCCAP ブロック内の capFinalize に閉じている(K8)。ここは「self-test final まで走り終えた
+// 時点で 1 回呼び、返り値を適用する」だけの薄い呼出サイト = cap 判定コードがブロック外へ散らない。
+const capFinal = capFinalize({ converged, escalate, escalateReason })
+converged = capFinal.converged
+escalate = capFinal.escalate
+escalateReason = capFinal.escalateReason
+const capReport = capFinal.capReport
+const capDroppedBlocking = capFinal.capDroppedBlocking
 
 // ── 返り値: 呼出元(worker/admin)が一次監査する。verdict を鵜呑みにしない ──────────
 const result = {
@@ -1752,12 +1781,11 @@ const schemaNote =
   schemaHealth.nullDeaths.length || schemaHealth.degenerate.length
     ? ` ※schema 健全性: nullDeaths=${schemaHealth.nullDeaths.length}, degenerate=${schemaHealth.degenerate.length}(StructuredOutput の retry 超過/試し打ち検知=当該 agent の出力は不採用・schemaHealth を直読して人手確認)。`
     : ''
-// (sc-k33c) 4 つ目の note。cap が発火した run は幅を落として走った=見ていない観点/finding が在るので、
-// 収束/escalate に関わらず注記して silent ship させない(unvNote/machNote/schemaNote と同じ思想)。
-// 3 分岐とも schemaNote の【直後・末尾】へ連結する(CONVERGED/ESCALATE/OPEN の prefix と本文は不変)。
-const capNote = capExceeded
-  ? ` ※cap 発火(reason=${capReport.reason}, limit=${capReport.limit} ${capReport.unit}, spentEstimate=${capReport.spentEstimate}, dropped=${capReport.droppedAgents}(うち blocking 級 ${capReport.droppedBlocking}))= 幅を落として走った run。capReport/capDropped を直読し、落とした観点/finding を人手確認(網羅性を主張しない)。`
-  : ''
+// (sc-k33c) 4 つ目の note。文言生成は capFinalize(SCCAP ブロック内)が持ち、ここは 3 分岐へ連結するだけ。
+// cap が発火した run は幅を落として走った=見ていない観点/finding が在るので、収束/escalate に関わらず注記して
+// silent ship させない(unvNote/machNote/schemaNote と同じ思想)。連結位置は schemaNote の【直後・末尾】で、
+// CONVERGED/ESCALATE/OPEN の prefix と本文は不変。
+const capNote = capFinal.capNote
 result.gate = escalate
   ? 'ESCALATE: 未収束/self-test 失敗/machinery 失敗。silent ship 禁止 — 人間が判断すること。' + unvNote + machNote + schemaNote + capNote
   : converged
