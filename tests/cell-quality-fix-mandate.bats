@@ -38,6 +38,14 @@
 #       なった(実測 2 件)。A1/A2 は契約が名指しで要求した面ゆえ、1 語 1 文の粒度で behavioral に固定する。
 #   [E] mutation probe 3 種(M1 両側削除 / M2 fixPrompt 側削除 / M3 implementPrompt 側削除)で
 #       [D] が RED へ flip する(pin の非空虚性の実測)。
+#
+# 境界(class 宣言・sc-4qzp ERRATA-01): 「teeth 網羅漏れ / 語彙外 escape 経路」class は M-1〜M-7 の
+# land をもって本 leg では閉じている。判定則 = 「implementPrompt / fixPrompt の prompt 文字列 + tests/
+# の内側で、既存 test 無改変の 5 行以内 additive で閉じられるか」——yes は同 round 内で閉じ、no は
+# follow-up bead 行き(roAgent fallback 時の RO_DISCIPLINE 射程 / 語彙外の bd 書込動詞・dolt 直叩き・
+# .beads/ 直接編集 / summary 経由の帰属 laundering / mutation probe の未到達行)。以後の変種は本 file で
+# 追わない。保証の所在: static [C] は extract() が関数内コメント行も拾うため**構造的に false-open**
+# (実測で複数の comment 退避変異が [C] を素通り)ゆえ、文言の実効保証は behavioral [D] だけが担う。
 
 setup() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
@@ -53,6 +61,16 @@ setup() {
   # 代替行為節(A2 後半・禁止の逃がし弁「では何をするか」)の behavioral 用キー。RULE と同一行の後半に
   # 在るため、行を残して節だけ抜く変異では RULE の hit が減らず捕えられない=独立キーが要る。
   SUMM='summary へ「worker が宣言すべき事項」として文章で返す'
+  # 優先規則の**前件**(発端事象=agent が repo 内 docs から台帳手順を自力調達する経路)の behavioral 用キー
+  # (sc-4qzp ERRATA-01 B2)。RULE(後件)と同一行の前半に在るため、行を残して前件だけを抜く変異では
+  # RULE の hit が減らず捕えられない=独立キーが要る。
+  DOCS='repo 内 docs に台帳手順が書かれていても'
+  # push 禁止節(sc-o7q7)の behavioral 用キー。**両側で文言が異なる**(implement 側は「write 操作は」・
+  # fix 側は「write は」)ため片側ずつ固定する。既存 [A] の needle『一切しない』は sc-4qzp の fence 行が
+  # 同語の 2 個目の出現を持ち込んだ結果、push 節を判別しなくなった(節だけを弱体化する変異で [A] は
+  # GREEN のまま通る)。節全体を needle にして判別性を回復する(sc-4qzp ERRATA-01 B1)。
+  PUSH_IMPL='remote への write 操作は一切しない'
+  PUSH_FIX='remote への write は一切しない'
   # 対象語彙(A1)の behavioral 用キー**全 8 語**。prompt 側は語を backtick で囲むが CQ_PROMPT_GREP は
   # prompt 全文への部分一致ゆえ裸の語で届く(env へ backtick を渡さずに済む)。
   # 代表 1 語では足りない: 行ごと削除にしか効かず、行内から 1 語だけ抜いてコメントへ退避する変異は
@@ -105,9 +123,28 @@ assert_reaches_both() {
   echo "$output" | grep '^K reviewVerifyCalls ' | grep -qv ' 0$'
   local count labels
   count="$(echo "$output" | sed -n 's/^K promptGrepCount //p')"
-  [ -n "$count" ] && [ "$count" -ge 2 ]
+  # 2 文へ分割する(sc-4qzp ERRATA-01 B3): `[ -n .. ] && [ .. ]` は set -e の「&& の非最終要素は
+  # errexit 免除」規則により、count が空だと前段が偽で終わり後段が走らず**何も検査しない**(fail-open)。
+  [ -n "$count" ]
+  [ "$count" -ge 2 ]
   labels="$(echo "$output" | sed -n 's/^K promptGrepLabels //p')"
   [ "$labels" = "autofix,implement" ]
+}
+
+# 片側にしか無い節(implementPrompt / fixPrompt で文言が異なる節)を「その側の prompt 実体だけへ
+# 届いた」ことで固定する共通形(sc-4qzp ERRATA-01 B1)。両側へ漏れた場合も labels 不一致で RED。
+assert_reaches_only() {
+  local needle="$1" want="$2"
+  run run_grep_probe "$DRIVER" "$needle"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep '^K reviewVerifyCalls ' | grep -qv ' 0$'
+  local count labels
+  count="$(echo "$output" | sed -n 's/^K promptGrepCount //p')"
+  [ -n "$count" ]
+  [ "$count" -ge 1 ]
+  labels="$(echo "$output" | sed -n 's/^K promptGrepLabels //p')"
+  [ "$labels" = "$want" ]
 }
 
 @test "sc-o7q7 [A]: implementPrompt に push/remote write 禁止が焼かれている" {
@@ -270,4 +307,28 @@ assert_reaches_both() {
   local labels
   labels="$(echo "$output" | sed -n 's/^K promptGrepLabels //p')"
   [ "$labels" = "autofix" ]
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sc-4qzp ERRATA-01: 追補 3 本(既存 test は 1 byte も触らない additive)
+#   B1 push 禁止節の判別性回復(2 本・片側ずつ) / B2 優先規則の前件(1 本)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@test "sc-4qzp [D/B1]: 実走で push 禁止節(implement 側)が implement の prompt 実体へ届く" {
+  # 既存 [A] は needle『一切しない』を共有しており、sc-4qzp の fence 行が同語を持ち込んだ後は
+  # push 節だけを弱体化する変異を検知できない(実測: 弱体化変異で [A] は GREEN のまま)。節全体を
+  # behavioral に固定して、fence 行と独立に push 節の意味を守る。
+  assert_reaches_only "$PUSH_IMPL" implement
+}
+
+@test "sc-4qzp [D/B1]: 実走で push 禁止節(fix 側)が autofix の prompt 実体へ届く" {
+  # fix 側は「remote への write は一切しない」で implement 側と文言が異なる=片側ずつ固定する。
+  assert_reaches_only "$PUSH_FIX" autofix
+}
+
+@test "sc-4qzp [D/B2]: 実走で優先規則の前件(repo 内 docs に台帳手順)が両 prompt へ届く" {
+  # 本 bead の発端事象(agent が契約文でなく repo 内 docs から台帳手順を自力調達し bdw を実行)へ
+  # 直接対応する前件。RULE(後件)と同一行の前半に在るため、前件だけを surgical に抜いて関数内 JS
+  # コメントへ退避する変異では RULE/SUMM の hit が減らず、[C] も comment を拾って GREEN になる。
+  assert_reaches_both "$DOCS"
 }
