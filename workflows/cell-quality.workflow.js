@@ -464,6 +464,282 @@ const doImplement = A.doImplement === true
 let taskType = typeof A.taskType === 'string' ? A.taskType : '' // 空なら classify する
 let refinedAcceptance = acceptance // Plan で精緻化されたら更新(review/verify/fix の ctxBlock に伝播)
 
+//SCCAP_BLOCK_START
+// ── (sc-k33c) 3 層 cap: 幅(fan-out)の制御。cap の判定コードはこの 1 ブロックに閉じる ────────────────
+// 【単位契約(verbatim)】totalBudget の単位は **agent 本数** である(token ではない)。token(budget.spent())は
+// 情報ログとしてのみ併走させ、admission の判定には一切使わない(判定=本数 / 情報=token)。turn token budget は
+// 呼出元が設定しないと budget.total=null で観測できず、本数なら WF 自身が数えられる=判定面として決定論的。
+//
+// 層1(args 正規化・L456 隣の maxConcurrency と同じ Number.isInteger イディオム): ただし maxConcurrency の
+//   「不正値は既定へ黙って倒す」ではなく **不正値は fail-fast(throw)** にする(silent fallback 禁止=「cap を
+//   頼んだのに無 cap で走る」fail-open を作らない)。未指定(undefined/null)だけが「無 cap=現状維持」で、これが
+//   cap 機構全体の opt-in 既定(数値既定を変えない fence)。この fail-fast は【全モード】で発火する
+//   (isWorkerCell 条件を付けない)。goal/acceptance の「いずれか」要件は従来どおり isWorkerCell ゲート側に残す。
+// 層2(admission control 4 点): round 頭 / review 前 / verify 前 / fix 前。snapshot・self-test・classify は
+//   **免除**(監査面=落とすと gate が状態を直読できなくなる)。ただし総数保証のため消費は計上する(capAccount)。
+//   縮退順は「verify を critical/major に限定 → severity top-K(決定論 tie-break) → loud drop」。
+//   effort 降格と dimensions 削減は不採用(裁定済み)。
+// 層3(cap 系例外の正規化): 無防備 call site の throw で run が result を返さず消える現状を解消する。
+//   判定は name **または** message の実測指紋(AND 禁止)。どちらにも非一致なら cap ではない=従来の失敗正規化/
+//   透過(machinery 失敗)へ倒す fail-closed。
+const CAP_SEVERITY_RANK = { critical: 0, major: 1, minor: 2, nit: 3 }
+const capIsBlocking = (f) => !!f && (f.severity === 'critical' || f.severity === 'major')
+// 落とした対象のうち「blocking 級」= critical/major、および severity 不明(観点丸ごと欠落 / 例外停止)。
+// 不明を blocking 級に数えるのは fail-closed(欠落した観点に blocking が無かったと主張できないため)。
+const CAP_BLOCKING_DROP_SEVERITIES = new Set(['critical', 'major', 'unknown'])
+
+// ── 層1: 新 args の正規化 + fail-fast ────────────────────────────────────────────
+const __capIntArg = (raw, name) => {
+  if (raw === undefined || raw === null) return 0 // 未指定 = 無 cap(opt-in 既定=現状維持)
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0) {
+    throw new Error(
+      `[cell-quality cap args fail-fast] ${name} は正整数(単位=agent 本数)で渡すこと。received=${JSON.stringify(raw)}(type=${Array.isArray(raw) ? 'array' : typeof raw})。` +
+        ' 不正値を既定へ黙って倒すと「cap を頼んだのに無 cap で走る」silent fail-open になるため fail-fast する(sc-k33c 層1)。'
+    )
+  }
+  return raw
+}
+const totalBudget = __capIntArg(A.totalBudget, 'totalBudget') // 0 = 無 cap。単位 = agent 本数
+const perRoundVerifyTopK = __capIntArg(A.perRoundVerifyTopK, 'perRoundVerifyTopK') // 0 = 無 cap。観点(dimension)単位の top-K
+const CAP_ON = totalBudget > 0
+// 免除段(admission を通さない段)の最小本数: self-test baseline+final(selfTestCmd 供給時のみ 2)+ classify
+// (taskType 未指定時 1)+ plan(doPlan 時 1)+ implement(doImplement 時 1)+ round1 snapshot(1)。
+// totalBudget がこれ + 1(gated 段が最低 1 本走る余地)を下回ると「実呼出し総数 ≤ totalBudget」を保証できない
+// ので fail-fast する(保証できない cap を黙って受けて、守れない約束を返り値に載せない)。
+const CAP_EXEMPT_FLOOR = (selfTestCmd ? 2 : 0) + (taskType ? 0 : 1) + (doPlan ? 1 : 0) + (doImplement ? 1 : 0) + 1
+if (CAP_ON && totalBudget < CAP_EXEMPT_FLOOR + 1) {
+  throw new Error(
+    `[cell-quality cap args fail-fast] totalBudget=${totalBudget} は本 run の免除段下限(${CAP_EXEMPT_FLOOR} 本: self-test baseline/final・classify・plan・implement・round1 snapshot のうち発火する段)+ gated 段 1 本を下回る。` +
+      ' 免除段(監査面)は admission で落とさない設計ゆえ、この値では「実呼出し総数 ≤ totalBudget」を保証できない(sc-k33c 層1・保証できない cap は受けない)。'
+  )
+}
+// 終盤の監査面(self-test final)1 本を常に予約し、gated 段がそれを食い潰さないようにする。
+const CAP_EXEMPT_RESERVE = selfTestCmd ? 1 : 0
+
+// ── cap 状態(返り値の fail-loud 表面へそのまま載る) ──────────────────────────────
+let capExceeded = false
+let capReason = '' // 'cap'(自前 totalBudget の admission)|'quota'(harness の token budget 例外)|'error'(harness の agent cap 例外)
+let capSpent = 0 // 起動した agent 本数の見積り(免除段も計上する=総数保証のため)
+const capStages = [] // [{round, stage, requested, admitted, dropped, reason}] = どの段でどれだけ落としたか
+const capDropped = [] // 縮退で落とした対象。**unverified とは別枠**(verdict 取得失敗とは意味が違う=二重計上しない)
+const capTokenStart = budget && typeof budget.spent === 'function' ? budget.spent() : null
+
+// 免除段(classify / self-test / snapshot / plan / implement)= 拒否しないが総数保証のため計上する。
+const capAccount = (n, stage) => {
+  capSpent += n
+  return n
+}
+// 落とした対象を loud に列挙する(silent に消さない)。severity 不明は 'unknown'(blocking 級として fail-closed)。
+const capDrop = (stage, dimension, title, severity, reason) => {
+  capDropped.push({ stage, dimension: dimension || '', title: String(title || '(no title)').slice(0, 120), severity: severity || 'unknown', reason })
+}
+const capMarkExceeded = (reason) => {
+  capExceeded = true
+  if (!capReason) capReason = reason
+}
+// admission: want 本のうち予算内に収まる本数を返す(0=全落とし)。免除段の予約分は残量から差し引く。
+const capAdmit = (want, stage, round) => {
+  // (sc-k33c errata) cap 未指定(opt-in OFF)でも **消費は計上する**。ここで早期 return して加算を飛ばすと
+  // review(既定 4 本/round)と fix(1 本/round)が capReport.spentEstimate から丸ごと欠落し、cap を使わない
+  // 全 run(= 実運用の 100%)で「起動本数の見積り」が系統的に過小になる。spentEstimate は totalBudget の
+  // 実運用値を決める calibration の一次データ(M0)かつ下流 sc-46kv が bd へ焼く値ゆえ、on/off いずれでも
+  // 「spentEstimate == 実 agent 呼出し総数」を保つ(判定は CAP_ON のときだけ効く=既定路の制御フローは不変)。
+  if (!CAP_ON) {
+    capSpent += want
+    return want
+  }
+  const remaining = totalBudget - capSpent - CAP_EXEMPT_RESERVE
+  const admitted = Math.max(0, Math.min(want, remaining))
+  capSpent += admitted
+  if (admitted < want) {
+    capMarkExceeded('cap')
+    capStages.push({ round: round || 0, stage, requested: want, admitted, dropped: want - admitted, reason: 'cap' })
+    log(`[cap] ${stage}${round ? ` r${round}` : ''}: 予算不足で縮退(requested=${want} admitted=${admitted} dropped=${want - admitted} / limit=${totalBudget} agent 本数・spent≈${capSpent})。落とした分は capDropped[] に列挙する(silent に消さない)。`)
+  }
+  return admitted
+}
+// round 丸ごとの欠落を capDropped[] へ loud に列挙する(観点 1 つの欠落より強い blocking 級の事象なのに
+// capStages にしか痕跡が無いと、terminal の escalate 条件〔capDroppedBlocking>0〕が立たず fail-open になる)。
+// severity='unknown' = 落とした先に blocking が無かったとは主張できない(コード自身の fail-closed 規約と同じ)。
+const capDropRound = (round, reason) => {
+  const dims = Array.isArray(dimensions) && dimensions.length ? dimensions : [{ key: '(dimensions 未解決)' }]
+  for (const d of dims) {
+    capDrop('round', d.key, `(round r${round} を丸ごと回さず観点 ${d.key} を review/verify していない)`, 'unknown', reason)
+  }
+}
+// 層2-① round 頭: この round の snapshot(免除 1)+ review 最低 1 本が入らなければ round に入らない。
+const capRoundGate = (round) => {
+  // (sc-k33c errata) **CAP_ON ガードを最初に置く**。cap を頼んでいない run(totalBudget 未指定)の制御フローは
+  // 例外経路でも 1 mm も変えない(K2' = cap 未指定時の agent 呼出し列が base 木と完全一致する)。以前はこの
+  // 早期 return が CAP_ON より前に在り、指紋に部分一致した machinery 例外 1 件で既定構成の run から review
+  // 段が丸ごと消える単一障害点になっていた(cap 未指定 run で rounds 3→1・agent 17→7 本の実測差)。
+  // (sc-k33c errata 追記) 「1 mm も変えない」の射程は **制御フロー(= agent 呼出し列)** に限る。終端状態は
+  // 別: cap 指紋を持つ例外を捕捉した run は cap 未指定でも capExceeded=true ゆえ converged を立てない
+  // (fail-closed 側への **意図した非互換**。escalate は blocking 級 drop があるときだけ=K1 項目5)。
+  // 差分は tests/cell-quality-cap.bats の "terminal 非互換の明示 pin" tooth が base 木対照で固定している。
+  if (!CAP_ON) return true
+  // 例外由来の cap(quota/error)は「実際に走れなかった」事実ゆえ、次 round を回しても同じ throw を繰り返す。
+  // 自前 admission 由来('cap')は topK 縮退等で立つこともあるので、これだけでは打ち切らない(残量で判定する)。
+  if (capReason === 'quota' || capReason === 'error') {
+    capDropRound(round, 'round-gate-exception')
+    log(`[cap] round r${round}: 直前に cap 系例外(reason=${capReason})を捕捉済み。次 round を回さず打ち切る(収束は主張しない)。落とした round 分は capDropped[] に列挙する。`)
+    return false
+  }
+  const need = 2
+  const remaining = totalBudget - capSpent - CAP_EXEMPT_RESERVE
+  if (remaining < need) {
+    capMarkExceeded('cap')
+    capStages.push({ round, stage: 'round', requested: need, admitted: 0, dropped: need, reason: 'cap' })
+    // (sc-k33c errata) capStages へ 1 行積むだけでは capDropped[]=[] / droppedBlocking=0 となり、gate 文が
+    // 「capDropped を直読して落とした観点を人手確認せよ」と促すのに中身が空という自己矛盾になっていた。
+    capDropRound(round, 'round-gate')
+    log(`[cap] round r${round}: 残 ${remaining} 本では 1 round(snapshot+review 最低 1)を回せない(limit=${totalBudget} agent 本数・spent≈${capSpent})。round に入らず打ち切る(収束は主張しない)。落とした round 分は capDropped[] に列挙する。`)
+    return false
+  }
+  return true
+}
+// 層2-③ verify の観点別固定枠: **共有カウンタ先着順にしない**(到着順で食い合うと stage1 の解決順で admit 集合が
+// 変わり非決定になる=K1c 禁止)。round 頭で残量を観点数で等分した固定枠を配る=解決順を入れ替えても同じ集合。
+const capVerifyQuotaPerDim = (dimCount) => {
+  if (!CAP_ON) return Infinity
+  const reserveFix = canAutoFix ? 1 : 0
+  const avail = Math.max(0, totalBudget - capSpent - CAP_EXEMPT_RESERVE - reserveFix)
+  return dimCount > 0 ? Math.floor(avail / dimCount) : 0
+}
+// 決定論 tie-break: severity 降順(critical→nit) → dimension key 昇順 → title 安定順(昇順・同値は元順)。
+// 観点単位で呼ぶため dimension key は定数だが、比較器に含めて cross-dimension でも同じ全順序になるようにする。
+const capOrderFindings = (findings, dimKey) =>
+  findings
+    .map((f, i) => ({ f, i }))
+    .sort((a, b) => {
+      const sa = CAP_SEVERITY_RANK[a.f && a.f.severity] !== undefined ? CAP_SEVERITY_RANK[a.f.severity] : 4
+      const sb = CAP_SEVERITY_RANK[b.f && b.f.severity] !== undefined ? CAP_SEVERITY_RANK[b.f.severity] : 4
+      if (sa !== sb) return sa - sb
+      const d = String(dimKey || '').localeCompare(String(dimKey || ''))
+      if (d !== 0) return d
+      const t = String((a.f && a.f.title) || '').localeCompare(String((b.f && b.f.title) || ''))
+      if (t !== 0) return t
+      return a.i - b.i
+    })
+    .map((x) => x.f)
+// 層2-③ 縮退順の本体: (1) perRoundVerifyTopK(観点単位 top-K)→ (2) 予算枠で critical/major 限定 →
+// (3) severity top-K(決定論 tie-break)→ (4) loud drop(枠 0)。落とした分は capDropped[] へ列挙する。
+const capSelectVerify = (findings, dimKey, round, quota) => {
+  // 【後方互換の要】実際に 1 件も落とさない round では **並べ替えもしない** = 既定経路(cap 未指定)の verify
+  // 呼出し列が base 木と 1 mm も変わらない(severity 順への恒常ソートは呼出し列を変える退行だった=K2' 実測)。
+  const needTopK = perRoundVerifyTopK > 0 && findings.length > perRoundVerifyTopK
+  const needBudget = CAP_ON && findings.length > quota
+  if (!needTopK && !needBudget) {
+    capSpent += findings.length
+    return findings
+  }
+  const ordered = capOrderFindings(findings, dimKey)
+  let admit = ordered
+  const dropAll = (list, reason) => {
+    for (const f of list) capDrop('verify', dimKey, f && f.title, f && f.severity, reason)
+  }
+  if (perRoundVerifyTopK > 0 && admit.length > perRoundVerifyTopK) {
+    const cut = admit.slice(perRoundVerifyTopK)
+    dropAll(cut, 'perRoundVerifyTopK')
+    admit = admit.slice(0, perRoundVerifyTopK)
+    capMarkExceeded('cap')
+    capStages.push({ round, stage: `verify:${dimKey}`, requested: ordered.length, admitted: admit.length, dropped: cut.length, reason: 'cap' })
+    log(`[cap] verify:${dimKey} r${round}: perRoundVerifyTopK=${perRoundVerifyTopK} で ${cut.length} 件を verify せず落とした(観点単位 top-K・決定論 tie-break)。capDropped[] を直読すること。`)
+  }
+  if (CAP_ON && admit.length > quota) {
+    const before = admit.length
+    const blockingOnly = admit.filter(capIsBlocking)
+    // (縮退順 1) verify を critical/major に限定する。blocking が 1 件も無い round で限定すると admit=0 に
+    // なり「枠が余っているのに何も verify しない」退行になるので、blocking が在るときだけ限定する。
+    if (blockingOnly.length > 0 && blockingOnly.length < admit.length) {
+      dropAll(admit.filter((f) => !capIsBlocking(f)), 'severity-limited')
+      admit = blockingOnly
+    }
+    if (admit.length > quota) {
+      dropAll(admit.slice(quota), quota === 0 ? 'budget-drop' : 'severity-topk')
+      admit = admit.slice(0, quota)
+    }
+    capMarkExceeded('cap')
+    capStages.push({ round, stage: `verify:${dimKey}`, requested: before, admitted: admit.length, dropped: before - admit.length, reason: 'cap' })
+    log(`[cap] verify:${dimKey} r${round}: 予算枠 ${quota} 本へ縮退(要求 ${before} → admit ${admit.length})。縮退順=critical/major 限定 → severity top-K → loud drop。落とした分は capDropped[]。`)
+  }
+  capSpent += admit.length
+  return admit
+}
+
+// ── 層3: cap 系例外の判定と正規化 ───────────────────────────────────────────────
+// name **または** message で判定する(AND 禁止=片方一致で cap 扱い)。message 指紋は tests/ に literal で
+// drift pin される(実機の文言が変わったら tooth が RED になる)。どちらにも非一致 = cap ではない。
+const CAP_ERROR_NAMES = { WorkflowBudgetExceededError: 'quota', WorkflowAgentCapError: 'error' }
+const CAP_MESSAGE_FINGERPRINTS = [
+  { pat: 'budget exceeded', reason: 'quota' },
+  { pat: 'token budget', reason: 'quota' },
+  { pat: 'agent cap', reason: 'error' },
+  { pat: 'agent limit', reason: 'error' },
+  { pat: 'exceeded the agent', reason: 'error' },
+]
+const capClassify = (e) => {
+  const name = e && e.name ? String(e.name) : ''
+  if (CAP_ERROR_NAMES[name]) return CAP_ERROR_NAMES[name]
+  const msg = (e && e.message ? String(e.message) : String(e == null ? '' : e)).toLowerCase()
+  for (const fp of CAP_MESSAGE_FINGERPRINTS) if (msg.includes(fp.pat)) return fp.reason
+  return '' // cap 系でない = 呼出サイトの従来経路へ(fail-closed)
+}
+// (sc-k33c errata) self-test 段(監視専用)で捕捉した cap 系例外の情報欄。**terminal 判定も round gate も
+// 駆動しない**(B4 不変条件「self-test の返り値は情報ログ専用で converged/escalate を一切駆動しない」)。
+const capSelfTestExceptions = []
+// informOnly=true(self-test 段専用): 可視化だけ行い capExceeded / capReason / capDropped[] を触らない。
+// これらを触ると (a) capExceeded → converged 強制 false、(b) capDropped の severity='unknown' →
+// droppedBlocking≥1 → escalate 強制 true、(c) capReason='quota' → capRoundGate 早期打切り、の 3 経路で
+// 監視専用段が終端判定を反転させてしまう(実測: clean 収束 run が selftest:final の例外 1 発で ESCALATE 化)。
+// (sc-k33c errata) alreadySurfaced=true(verify 要素段 専用): capExceeded / capReason / capStages と log は
+// 打つが **capDropped[] へは積まない**。理由は 2 つ。(a) この段の verify agent は **実際に起動しており**、
+// 例外を捕捉した finding は従来どおり verdict:null へ正規化されて unverified[] という一次面に載る。ここで
+// capDrop も打つと同一事象が capDropped と unverified の両面へ二重計上され、コード自身の規約
+// 「capDropped[] は unverified とは別枠(verdict 取得失敗 ≠ そもそも verify を起動しなかった)」(K3-3)と
+// escalateReason の「verify/fix せず落とした」が事実に反する。(b) capDrop の severity='unknown' は
+// CAP_BLOCKING_DROP_SEVERITIES に入るため droppedBlocking を押し上げ、「blocking 級を落とした時のみ
+// escalate」(K1 項目5)を破る。実測: cap 未指定(実運用 100% の既定路)・minor 1 件・verify: の quota 例外で
+// base=CONVERGED / HEAD=ESCALATE と終端が反転していた(同じ「nit/minor を verify できなかった」事象を
+// perRoundVerifyTopK 経由で起こすと f.severity が使われ escalate しない＝経路で終端が食い違っていた)。
+// 修正後の終端は converged=false / escalate=false(gate=OPEN)= K1 項目5 の literal どおり。
+// review 段(観点丸ごと欠落＝findings 自体が取れず一次面が無い)と self-test 段(informOnly)は現行のまま。
+const capRecordException = (stage, reason, e, opts) => {
+  if (opts && opts.informOnly === true) {
+    capSelfTestExceptions.push({ stage, reason, name: (e && e.name) || '' })
+    log(`[cap] ${stage}: cap 系例外(reason=${reason} name=${(e && e.name) || ''})を捕捉したが、self-test は情報ログ専用段ゆえ converged/escalate も round gate も駆動しない(B4 不変条件)。capReport.selfTestExceptions で可視化する。`)
+    return
+  }
+  capExceeded = true
+  capReason = reason // 例外(実際に走れなかった)は自前 admission より強い事実ゆえ上書きする
+  capStages.push({ round: 0, stage, requested: 1, admitted: 0, dropped: 1, reason })
+  const alreadySurfaced = !!(opts && opts.alreadySurfaced === true)
+  if (!alreadySurfaced) capDrop(stage, '', `(${stage} が cap 系例外で停止)`, 'unknown', reason)
+  log(
+    `[cap] ${stage}: cap 系例外(reason=${reason} name=${(e && e.name) || ''})を捕捉し capExceeded へ正規化した。run を消さず result を返す(sc-k33c 層3)。` +
+      (alreadySurfaced
+        ? ' 当該 finding は従来どおり verdict:null → unverified[] に載る一次面を持つので capDropped[] へは積まない(二重計上禁止=K3-3・severity 不明の捏造で escalate を安売りしない=K1 項目5)。'
+        : '')
+  )
+}
+// 無防備だった 6 call site 用: cap 系なら正規化値を返し、cap 系でなければ **再 throw**(従来挙動を変えない)。
+const capCatch = (stage, fallback) => (e) => {
+  const reason = capClassify(e)
+  if (!reason) throw e
+  capRecordException(stage, reason, e)
+  return typeof fallback === 'function' ? fallback() : fallback
+}
+// 既存 3 catch(review / verify / runSelfTest)用: 従来の失敗正規化は温存しつつ、cap 系だけ別勘定にする
+// (machinery 失敗と cap 縮退を混同させない)。非 cap でも従来どおり正規化値を返す(= .catch の意味論は不変)。
+// opts.informOnly=true(self-test 段)は可視化のみ = terminal/round gate を駆動しない(B4)。
+// opts.alreadySurfaced=true(verify 要素段)は capDropped[] へ積まない = unverified との二重計上を作らない(K3-3)。
+const capReclassify = (stage, fallback, opts) => (e) => {
+  const reason = capClassify(e)
+  if (reason) capRecordException(stage, reason, e, opts)
+  return typeof fallback === 'function' ? fallback() : fallback
+}
+//SCCAP_BLOCK_END
+
 // ── (1) per-stage model 上書き + fable→opus 降格(新方針=dynamic WF から fable 全廃) ─────────────
 // fable 判定は per-stage model の解決(下)より前に置く必要がある(降格を解決値へ適用するため)。
 // 判定は **部分一致** `/fable/i`= ツール層(scribe-{gate,selftest}-args.sh / scribe-spawn.sh の `*fable*`)と
@@ -883,6 +1159,7 @@ async function runSelfTest(when) {
   if (!selfTestCmd) {
     return { ran: false, skipped: true, skipReason: 'selfTestCmd 未指定(graceful skip=fail-open)', passed: null, exitCode: null, rawLog: '' }
   }
+  capAccount(1, `self-test:${when}`) // (sc-k33c 層2) self-test は admission 免除(監査面)。総数保証のため計上のみ。
   const r = await roAgent(selfTestRunPrompt(when), {
     label: `selftest:${when}`,
     phase: 'Self-test',
@@ -891,7 +1168,11 @@ async function runSelfTest(when) {
     model: 'sonnet',
     effort: SELFTEST_EFFORT, // (sc-94z ②) self-test = medium 固定(guard 連鎖の一部ゆえ low でなく medium 止まり)
     schema: SELFTEST_RUN_SCHEMA,
-  }).catch(() => null)
+    // (sc-k33c 層3-K1b(i)) 既存 catch を cap 再分類へ。従来の失敗正規化(null → 下の !r 経路)は 1 mm も変えない。
+    // informOnly=true: self-test は **情報ログ専用段**(B4)ゆえ、ここで捕捉した cap 例外は capExceeded /
+    // capDropped / capReason を触らず capReport.selfTestExceptions に載せるだけにする(converged/escalate と
+    // round gate を監視専用段が反転させない)。
+  }).catch(capReclassify(`self-test:${when}`, null, { informOnly: true }))
   if (!r) {
     // agent 失敗/skip(schema 枯渇/terminal death)。fail-open で WF は続行するが、実行不能を JSON に明示する
     // (gate/orchestrator が「self-test 状態が取れなかった」を actor 報告に頼らず読めるように)。
@@ -951,6 +1232,7 @@ if (isWorkerCell) {
 phase('Classify')
 let verifyStrategy = ''
 if (!taskType) {
+  capAccount(1, 'classify') // (sc-k33c 層2) classify は admission 免除(監査面)。計上のみ。
   const c = await schemaAgent(roAgent, classifyPrompt(), {
     label: 'classify',
     phase: 'Classify',
@@ -958,6 +1240,8 @@ if (!taskType) {
     effort: CLASSIFY_EFFORT, // (sc-94z ③) classify = medium 固定(誤分類は劣化止まり=gate 捕捉圏内)
     schema: CLASSIFY_SCHEMA,
   }, degClassify) // (sc-j32) SCHEMA_DISCIPLINE 前置 + null/degenerate → null(下の (c && c.taskType) fallback へ合流)
+    // (sc-k33c 層3) 無防備 call site: cap 系例外を null(既存 fallback 経路)へ正規化する。非 cap は再 throw=従来どおり。
+    .catch(capCatch('classify', null))
   taskType = (c && c.taskType) || 'executable'
   log(`task-type = ${taskType}${c && c.rationale ? ` (${c.rationale})` : ''}`)
 } else {
@@ -968,6 +1252,7 @@ verifyStrategy = VERIFY_STRATEGY[taskType] || VERIFY_STRATEGY.executable
 // ── 1. Plan(任意): 受入基準の導出/精緻化 ─────────────────────────────────────
 if (doPlan) {
   phase('Plan')
+  capAccount(1, 'plan') // (sc-k33c 層2) plan は admission 4 点に含まれない(実装系)。計上のみ。
   const p = await schemaAgent(roAgent, planPrompt(), {
     label: 'plan',
     phase: 'Plan',
@@ -975,6 +1260,8 @@ if (doPlan) {
     effort: CELL_EFFORT, // (sc-94z ④) plan = cell effort に従う(args.effort=実装系の段に効く cell effort)
     schema: PLAN_SCHEMA,
   }, degPlan) // (sc-j32) null/degenerate → null(下の (p && p.acceptance) で精緻化スキップへ合流)
+    // (sc-k33c 層3) 無防備 call site: cap 系例外を null(既存 fallback 経路)へ正規化する。非 cap は再 throw=従来どおり。
+    .catch(capCatch('plan', null))
   if (p && p.acceptance) {
     refinedAcceptance = p.acceptance
     log('受入基準を精緻化した')
@@ -994,12 +1281,14 @@ if (selfTestBaseline.skipped) {
 // ── 2. Implement(任意): worktree で実装 ───────────────────────────────────────
 if (doImplement) {
   phase('Implement')
+  capAccount(1, 'implement') // (sc-k33c 層2) implement は admission 4 点に含まれない(実装系)。計上のみ。
   const impl = await agent(implementPrompt(refinedAcceptance), {
     label: 'implement',
     phase: 'Implement',
     model: stageModel, // 編集するので roAgent(read-only agentType)を使わず agent() 直呼び(全ツール)
     effort: CELL_EFFORT, // (sc-94z ④) implement = cell effort に従う(args.effort=実装系の段に効く cell effort)
-  })
+    // (sc-k33c 層3) 無防備 call site: cap 系例外を null(下の impl ? ... : '(no output)' 経路)へ正規化する。
+  }).catch(capCatch('implement', null))
   log(`implement: ${impl ? String(impl).slice(0, 120) : '(no output)'}`)
 }
 
@@ -1034,6 +1323,14 @@ const staticDiffProvided = !!(diff && diff.trim())
 while (round < effectiveCap) {
   round++
 
+  // ── (sc-k33c 層2-①) admission 4 点の 1 つ目 = round 頭 ────────────────────────
+  // このラウンドの snapshot(免除 1 本)+ review 最低 1 本すら予算に入らないなら round に入らない。
+  // round を消費しなかったので rounds カウンタを戻してから抜ける(実行していない round を計上しない)。
+  if (!capRoundGate(round)) {
+    round--
+    break
+  }
+
   // (2) snapshot: スコープ固定用に diff を inline 取得(静的 diff 指定かつ autoFix off なら再取得しない)
   phase('Review')
   let roundDiff = diff
@@ -1045,12 +1342,14 @@ while (round < effectiveCap) {
   // ミス/真の空)なら snapshot 失敗としてマークし、後段の収束判定で clean 扱いから除外する(silent ship 防止)。
   let snapshotFailed = false
   if (!roundDiff || canAutoFix) {
+    capAccount(1, 'snapshot') // (sc-k33c 層2) snapshot は admission 免除(監査面)。計上のみ。
     const snap = await roAgent(snapshotPrompt(), {
       label: `snapshot r${round}`,
       phase: 'Review',
       model: stageModel, // roAgent が RO agentType('scribe:explore')注入 + not found fallback(read-only 段)
       effort: SNAPSHOT_EFFORT, // (sc-94z) snapshot = medium 固定(mechanical read-only=git diff 収集・失敗は snapshotFailed 網が gate で拾う=self-test と同区分)
-    })
+      // (sc-k33c 層3) 無防備 call site: cap 系例外を null(下の snapOk=false → snapshotFailed 網)へ正規化する。
+    }).catch(capCatch(`snapshot r${round}`, null))
     // snapshot agent には「生 diff のみ・空なら EMPTY_DIFF の一語」を指示しているが、LLM は説明文を前置しがち
     // (例: "Both (a) and (b) are empty.\n\nEMPTY_DIFF")。exact-match(snap.trim()!=='EMPTY_DIFF')だと説明文付きの
     // 空応答を取りこぼし、roundDiff に説明文が入って snapshotFailed=false → false converged になる(= un-2yy が
@@ -1101,8 +1400,33 @@ while (round < effectiveCap) {
   // → review/verify の両方に .catch を付け、失敗を「観測可能な値」へ正規化する:
   //   - review throw → {findings:[], __reviewFailed:true}(null 返却と合わせて「観点欠落」として集計)
   //   - verify throw → {...f, verdict:null}(unverified に乗せ、本物 blocking の消滅を防ぎ unvNote を立てる)
-  const perDim = await pipeline(
-    dimensions,
+  // ── (sc-k33c 層2-②) admission 4 点の 2 つ目 = review 前【all-or-nothing】────────
+  // fence(K8「dimensions 削減は不採用」)と先行裁定 un-mpv/un-aq5(上の dimensions 定義直下のコメント)に従い、
+  // **観点は 1 つも切り捨てない**。旧実装は dimensions.slice(0, admitted) で配列末尾から切っており、配列順が
+  // 「必須4 → worker が --add-dimension で明示指定した追加観点」ゆえ、予算逼迫時に最初に消えるのがユーザー
+  // 意図の追加観点と completeness-critic という、まさに un-aq5 gate F1 で撤廃された挙動を復活させていた
+  // (「配列そのものは削らず本数だけ絞る」は挙動上同一の言い換え)。加えて args 供給の totalBudget が D3/D4 の
+  // 「admin gate は必須4観点固定」floor を縮める経路になっていた。
+  // → 全観点分の枠が確保できなければ **この round に入らない**(幅の制御は verify 側 quota に閉じる)。
+  const __capReviewAdmitted = capAdmit(dimensions.length, 'review', round)
+  if (__capReviewAdmitted < dimensions.length) {
+    capSpent -= __capReviewAdmitted // 部分 admit は使わないので予約を戻す(spentEstimate を実本数に保つ)
+    capDropRound(round, 'budget-drop')
+    log(`[cap] review r${round}: 全 ${dimensions.length} 観点分の枠(admit=${__capReviewAdmitted})が確保できないため観点を切り捨てず round を打ち切る(dimensions 削減は不採用の裁定=K8 fence)。落とした round 分は capDropped[]。`)
+    break
+  }
+  const roundDims = dimensions
+  // ── (sc-k33c 層2-③) admission 4 点の 3 つ目 = verify 前の観点別【固定枠】 ────────
+  // 共有カウンタ先着順にしない(到着順で食い合うと stage1 の解決順で admit 集合が変わり非決定になる)。
+  // round 頭で残量を観点数で等分した固定枠を配るので、解決順を入れ替えても admit 集合は同一(K1c 決定論)。
+  const verifyQuota = capVerifyQuotaPerDim(roundDims.length)
+  // (sc-k33c 層3) pipeline 呼出し【自体】の入口 throw を try/catch で包む(.catch だけでは同期 throw を
+  // 取りこぼす)。cap 系なら「観点は落とした」として capDropped[] へ列挙し reviewFailed は立てない(誤帰属封鎖)。
+  // 非 cap は capCatch が再 throw する = 従来どおり run が死ぬ(現状維持)。
+  let perDim
+  try {
+    perDim = await pipeline(
+    roundDims,
     (d) =>
       schemaAgent(runAgent, reviewPrompt(d, round, roundDiff), {
         label: `review:${d.key} r${round}`,
@@ -1110,13 +1434,24 @@ while (round < effectiveCap) {
         model: reviewModel, // 既定=MODEL(opus)。fable 指定時のみ runAgent が ≤2 cap を適用。runAgent 内 roAgent が RO agentType 注入 + fallback
         effort: reviewEffort, // (sc-94z ①) review = guard 段ゆえ既定 high 固定(cell effort 一括下げから独立)・reviewEffort knob で xhigh opt-in
         schema: FINDINGS_SCHEMA,
-      }, degFindings).catch(() => ({ findings: [], __reviewFailed: true })), // (sc-j32) null/degenerate → null → 下の reviewFailed=!review へ合流(machinery 失敗=escalate)
-    (review, d) => {
+        // (sc-k33c 層3-K1b(i)) 既存 catch を cap 再分類へ。従来の正規化値(__reviewFailed)は 1 mm も変えない。
+      }, degFindings).catch(capReclassify(`review:${d.key}`, () => ({ findings: [], __reviewFailed: true }))), // (sc-j32) null/degenerate → null → 下の reviewFailed=!review へ合流(machinery 失敗=escalate)
+    async (review, d) => {
       // review が null(skip/枯渇)/__reviewFailed(throw)のいずれも「観点が実行できなかった」=痕跡を残す。
       const reviewFailed = !review || review.__reviewFailed === true
       const findings = (review && review.findings) || []
-      return parallel(
-        findings.map((f) => () =>
+      // (sc-k33c 層2-③) 縮退順(perRoundVerifyTopK → critical/major 限定 → severity top-K → loud drop)を
+      // 観点単位の固定枠で適用する。落とした finding は capDropped[] へ列挙し **unverified には積まない**
+      // (verdict 取得失敗=unverified と、そもそも verify を起動しなかった=capDropped は別事象・二重計上しない)。
+      const admitted = capSelectVerify(findings, d.key, round, verifyQuota)
+      // (sc-k33c 層3-K1b(ii)) parallel 呼出し【自体】の入口 throw を catch で包む。包まないと cap 例外が
+      // pipeline に要素 null 化として吸われ、上の dimResults フォールバックで reviewFailed=true へ **誤帰属**
+      // する(review は成功していたのに「観点が実行できなかった」と記録される)。cap 系は reviewFailed を
+      // 立てずに verified:[] で返し、非 cap は再 throw して従来経路(pipeline の null 化)を 1 mm も変えない。
+      let verifiedArr
+      try {
+        verifiedArr = await parallel(
+        admitted.map((f) => () =>
           schemaAgent(runAgent, verifyPrompt(f, d.key, roundDiff), {
             label: `verify:${d.key}:${shortTitle(f)} r${round}`,
             phase: 'Verify',
@@ -1125,15 +1460,34 @@ while (round < effectiveCap) {
             schema: VERDICT_SCHEMA,
           }, degVerdict) // (sc-j32) null/degenerate → null → verdict:null(unverified=verdict 鵜呑み禁止へ合流)
             .then((v) => ({ ...f, dimension: d.key, verdict: v }))
-            .catch(() => ({ ...f, dimension: d.key, verdict: null }))
+            // (sc-k33c 層3-K1b(i)) 既存 catch を cap 再分類へ。従来の正規化値(verdict:null)は変えない。
+            // (sc-k33c errata) alreadySurfaced=true: この finding は verdict:null → **unverified[] に載る**
+            // ので capDropped[] へは積まない(二重計上禁止=K3-3)。積むと severity='unknown' が
+            // droppedBlocking を押し上げ、cap を一切頼んでいない既定路の終端が CONVERGED→ESCALATE へ
+            // 反転する(K1 項目5「blocking 級を落とした時のみ escalate」違反・base 対照で実測)。
+            .catch(capReclassify(`verify:${d.key}`, () => ({ ...f, dimension: d.key, verdict: null }), { alreadySurfaced: true }))
         )
-      ).then((verifiedArr) => ({ dimension: d.key, reviewFailed, verified: verifiedArr.filter(Boolean) }))
+        )
+      } catch (e) {
+        if (!capClassify(e)) throw e // 非 cap = 従来どおり pipeline が要素を null 化する(誤帰属の現状維持)
+        capRecordException(`verify-entry:${d.key}`, capClassify(e), e)
+        return { dimension: d.key, reviewFailed, verified: [] }
+      }
+      return { dimension: d.key, reviewFailed, verified: verifiedArr.filter(Boolean) }
     }
-  )
+    )
+  } catch (e) {
+    perDim = capCatch('pipeline', () =>
+      roundDims.map((d) => {
+        capDrop('review', d.key, `(観点 ${d.key} を pipeline 入口 throw で落とした)`, 'unknown', 'entry-throw')
+        return { dimension: d.key, reviewFailed: false, verified: [] }
+      })
+    )(e)
+  }
 
   // pipeline 要素が万一 null(stage2 自体の脱落)でも観点欠落として扱う(no-op-without-trace を作らない)。
   const dimResults = perDim.map((r, i) =>
-    r || { dimension: (dimensions[i] && dimensions[i].key) || `dim${i}`, reviewFailed: true, verified: [] }
+    r || { dimension: (roundDims[i] && roundDims[i].key) || `dim${i}`, reviewFailed: true, verified: [] }
   )
   const reviewFailedCount = dimResults.filter((r) => r.reviewFailed).length
   const verified = dimResults.flatMap((r) => r.verified || []).filter(Boolean)
@@ -1201,6 +1555,21 @@ while (round < effectiveCap) {
     break
   }
 
+  // ── (sc-k33c 層2-④) admission 4 点の 4 つ目 = fix 前 ─────────────────────────
+  // fix 1 本すら予算に入らないなら fix を起動せず打ち切る。confirmed blocking を抱えたまま落とすので
+  // これは必ず blocking 級 drop(= 後段 terminal で escalate)になる。silent に「修正済み」へ倒さない。
+  // 【到達性の明示(sc-k33c errata)】この分岐は **通常は到達しない防御的 guard** である: capVerifyQuotaPerDim
+  // が `reserveFix = canAutoFix ? 1 : 0` を先に差し引いてから観点別枠を floor 分配するため、verify を通って
+  // blocking が生まれた時点で fix 用の 1 本が必ず残る(totalBudget=4..30 を全掃引しても本 log は 0 hit)。
+  // つまり K1 が数える admission 4 点のうち fix 前の実効保証は **reserve 側(reserveFix)** が担っており、
+  // ここは reserve が将来壊れた場合に silent ship させないための二重化。teeth は reserve 側に置く
+  // (「予算が逼迫しても fix 1 本は必ず確保される」の behavioral pin)。
+  if (capAdmit(1, 'fix', round) < 1) {
+    for (const f of blocking) capDrop('fix', f.dimension || '', f.title, f.severity, 'budget-drop')
+    log(`[cap] fix r${round}: 予算不足で autoFix を起動できない(confirmed blocking=${blocking.length} 件を未修正のまま残す)。収束は主張しない。`)
+    break
+  }
+
   // gated autoFix: confirmed blocking のみ + self-test fail-closed + amend
   phase('Fix')
   const fix = await schemaAgent(agent, fixPrompt(blocking, roundDiff), {
@@ -1210,6 +1579,8 @@ while (round < effectiveCap) {
     effort: FIX_EFFORT, // (sc-94z ①) fix = guard 段ゆえ high 固定(knob 無し・cell effort 一括下げから独立)
     schema: FIX_SCHEMA,
   }, degFix) // (sc-j32) null/degenerate(summary=test 等)→ null → 下の if(!fix) escalate へ合流(fail-closed)
+    // (sc-k33c 層3) 無防備 call site: cap 系例外を null(既存の escalate 経路)へ正規化する。非 cap は再 throw。
+    .catch(capCatch(`autofix r${round}`, null))
   if (!fix) {
     escalate = true
     escalateReason = `round ${round}: autoFix agent 失敗/skip`
@@ -1230,7 +1601,11 @@ const lastH = history[history.length - 1] || {}
 if (canAutoFix && !LIGHT_TYPES.has(taskType)) {
   // loop モード: zeroStreak>=2 で converged 済み。未達 & cap 到達なら escalate(silent ship 禁止)。
   // F3/F4: machinery 失敗で真にクリーンな round を確保できなかった場合も同じく escalate へ倒す。
-  if (!converged && !escalate && round >= effectiveCap && zeroStreak < 2) {
+  // (sc-k33c errata) `round >= effectiveCap` だけだと **cap 由来の早期打切り**(round gate / review 前
+  // all-or-nothing / fix 前 admission による break)が hard-cap 網を迂回し、未修正 confirmed blocking を
+  // 抱えたまま converged=false かつ escalate=false という base に存在しなかった終端状態へ落ちる。
+  // cap で早期に打ち切った未収束 loop run は「hard cap 到達・未収束」と同じ強度で扱う(silent ship 禁止)。
+  if (!converged && !escalate && (round >= effectiveCap || capExceeded) && zeroStreak < 2) {
     escalate = true
     // un-2f1: snapshot 空が全 round で続いた = Implement/Fix が round1 で commit し `git diff HEAD` が空になった
     // 可能性が高い(snapshot は base...HEAD 合成へ移行済だが、base 推定が外れる/commit が base より前等の縁では
@@ -1246,7 +1621,11 @@ if (canAutoFix && !LIGHT_TYPES.has(taskType)) {
               ? `。snapshot 空=commit 済 or レビュー対象不在の可能性`
               : '')
         : `critical/major が 2 連続ゼロに至らず`
-    escalateReason = escalateReason || `hard cap ${effectiveCap} 到達・未収束(${why})`
+    // cap 由来の早期打切りは「hard cap 到達」と書くと事実に反する(round < effectiveCap)ので弁別して書く。
+    const capEarlyBreak = capExceeded && round < effectiveCap
+    escalateReason =
+      escalateReason ||
+      `${capEarlyBreak ? `cap 由来の早期打切り(round ${round}/${effectiveCap}・reason=${capReason || 'cap'})` : `hard cap ${effectiveCap} 到達`}・未収束(${why})`
   }
 } else {
   // single モード(autoFix off / light): この 1 ラウンドが真にクリーン(blocking=0 かつ machinery 健全)なら converged。
@@ -1275,6 +1654,45 @@ if (selfTestFinal.skipped) {
   log('self-test final: skip(selfTestCmd 未指定=fail-open)')
 } else {
   log(`self-test final: ran=${selfTestFinal.ran} passed=${selfTestFinal.passed}${selfTestFinal.error ? ' (runner agent 失敗)' : ''}`)
+}
+
+// ── (sc-k33c) cap の terminal 判定 + fail-loud 表面の確定 ────────────────────────
+// 不変条件: cap が発火した run は「幅を落として走った」= 見ていない観点/finding が在るので **converged を
+// 立てない**(clean と cap 縮退を混同させない)。escalate は **blocking 級を落としたときだけ**立てる
+// (minor/nit を perRoundVerifyTopK で落としただけの run まで人手判断へ送らない=escalate の安売り防止)。
+// self-test final(免除段)まで走り終えた後に集計する = spentEstimate が実際の総本数を反映する。
+const capDroppedBlocking = capDropped.filter((d) => CAP_BLOCKING_DROP_SEVERITIES.has(d.severity)).length
+if (capExceeded) {
+  converged = false
+  if (capDroppedBlocking > 0 && !escalate) {
+    escalate = true
+    escalateReason =
+      escalateReason ||
+      `cap 発火(reason=${capReason})で blocking 級 ${capDroppedBlocking} 件(critical/major/観点丸ごと欠落)を verify/fix せず落とした。落とした先に blocking が無かったとは主張できない(fail-closed)=人手確認。`
+  }
+}
+// token は **情報ログ専用**(判定は agent 本数)。budget.total は呼出元が turn budget を設定しないと null なので
+// null ガードする(null を 0 と読んで「予算ゼロ」に誤断定しない)。
+const capBudgetTotal = budget && budget.total != null ? budget.total : null
+const capTokenEnd = budget && typeof budget.spent === 'function' ? budget.spent() : null
+const capTokenDelta = capTokenStart !== null && capTokenEnd !== null ? capTokenEnd - capTokenStart : null
+log(
+  `[cap-token] budget.total=${capBudgetTotal === null ? 'null(未設定)' : capBudgetTotal} spent-delta=${capTokenDelta === null ? 'n/a' : capTokenDelta} / cap 判定は agent 本数(limit=${totalBudget || '無 cap'} spent≈${capSpent})で行い、token は情報ログ併走のみ(判定に使わない)。`
+)
+const capReport = {
+  limit: totalBudget, // 0 = 無 cap(opt-in 既定)
+  unit: 'agent-calls', // 【単位契約】totalBudget の単位は agent 本数(token ではない)
+  spentEstimate: capSpent, // 免除段(classify/self-test/snapshot/plan/implement)も含む起動本数の見積り
+  stages: capStages, // どの段でどれだけ落としたか([{round,stage,requested,admitted,dropped,reason}])
+  reason: capReason || '', // 'quota'(harness token budget 例外)|'cap'(自前 admission)|'error'(harness agent cap 例外)
+  droppedAgents: capDropped.length, // 起動しなかった agent 相当数(= capDropped[] の件数)
+  droppedBlocking: capDroppedBlocking, // うち blocking 級(critical/major/severity 不明)= escalate の駆動値
+  historyCount: history.length, // (項目3) history 件数も capReport から辿れる
+  // (sc-k33c errata) self-test 段(情報ログ専用=B4)で捕捉した cap 系例外。**terminal も round gate も駆動しない**
+  // ゆえ capExceeded/capReason/capDropped[] には載らず、可視化はここだけ(監視専用段が終端判定を反転させない)。
+  selfTestExceptions: capSelfTestExceptions,
+  tokenDelta: capTokenDelta, // 情報ログ専用(判定に使わない)
+  budgetTotal: capBudgetTotal, // null = 呼出元が turn budget を設定していない(層3 は実機では発火しない)
 }
 
 // ── 返り値: 呼出元(worker/admin)が一次監査する。verdict を鵜呑みにしない ──────────
@@ -1313,6 +1731,11 @@ const result = {
   // (sc-j32) schema 強制 agent の健全性(retry 超過の null 死 / placeholder 試し打ち検知)。receivedArgs と対称の
   // 一次監査面: 非空なら当該 schema agent の出力は不採用(既存の失敗経路へ倒れている)=呼出元/gate が人手確認する。
   schemaHealth: { nullDeaths: schemaHealth.nullDeaths.slice(), degenerate: schemaHealth.degenerate.slice() },
+  // (sc-k33c) 3 層 cap の fail-loud 表面。capExceeded=true の run は「幅を落として走った」= converged を
+  // 立てない。capDropped[] は **unverified とは別枠**(verdict 取得失敗 ≠ そもそも verify を起動しなかった)。
+  capExceeded,
+  capReport,
+  capDropped,
   roFallbackActive, // (sc-7bv/sc-xyw) read-only agentType fallback が最終的に発火したか(true=agentType 解決不能で降格した run)。receivedArgs.roAgentType は「解決した型」だけで発火有無は読めないため別途載せる。
 }
 
@@ -1329,11 +1752,17 @@ const schemaNote =
   schemaHealth.nullDeaths.length || schemaHealth.degenerate.length
     ? ` ※schema 健全性: nullDeaths=${schemaHealth.nullDeaths.length}, degenerate=${schemaHealth.degenerate.length}(StructuredOutput の retry 超過/試し打ち検知=当該 agent の出力は不採用・schemaHealth を直読して人手確認)。`
     : ''
+// (sc-k33c) 4 つ目の note。cap が発火した run は幅を落として走った=見ていない観点/finding が在るので、
+// 収束/escalate に関わらず注記して silent ship させない(unvNote/machNote/schemaNote と同じ思想)。
+// 3 分岐とも schemaNote の【直後・末尾】へ連結する(CONVERGED/ESCALATE/OPEN の prefix と本文は不変)。
+const capNote = capExceeded
+  ? ` ※cap 発火(reason=${capReport.reason}, limit=${capReport.limit} ${capReport.unit}, spentEstimate=${capReport.spentEstimate}, dropped=${capReport.droppedAgents}(うち blocking 級 ${capReport.droppedBlocking}))= 幅を落として走った run。capReport/capDropped を直読し、落とした観点/finding を人手確認(網羅性を主張しない)。`
+  : ''
 result.gate = escalate
-  ? 'ESCALATE: 未収束/self-test 失敗/machinery 失敗。silent ship 禁止 — 人間が判断すること。' + unvNote + machNote + schemaNote
+  ? 'ESCALATE: 未収束/self-test 失敗/machinery 失敗。silent ship 禁止 — 人間が判断すること。' + unvNote + machNote + schemaNote + capNote
   : converged
-    ? 'CONVERGED: 収束。人間 ratify が要るのは 3 クラス(消す/出す/使う)該当時のみ(＋ acceptance snapshot mismatch は protocol §5.4(c) の独立 fail-closed としてそのまま人間 ratify 昇格)、非該当は AI 敵対 gate 通過をもって AI 判断で merge。gate 分離は不変(worker は自己 merge しない)。収束証跡は呼出元が直読して一次監査。' + unvNote + machNote + schemaNote
-    : 'OPEN: 呼出元が confirmed を修正し再 invoke(single モードのループ駆動)。' + unvNote + machNote + schemaNote
+    ? 'CONVERGED: 収束。人間 ratify が要るのは 3 クラス(消す/出す/使う)該当時のみ(＋ acceptance snapshot mismatch は protocol §5.4(c) の独立 fail-closed としてそのまま人間 ratify 昇格)、非該当は AI 敵対 gate 通過をもって AI 判断で merge。gate 分離は不変(worker は自己 merge しない)。収束証跡は呼出元が直読して一次監査。' + unvNote + machNote + schemaNote + capNote
+    : 'OPEN: 呼出元が confirmed を修正し再 invoke(single モードのループ駆動)。' + unvNote + machNote + schemaNote + capNote
 
 log(`cell-quality done: ${result.gate}`)
 return result
