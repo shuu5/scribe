@@ -751,6 +751,8 @@ ${refinedAcceptance ? `\n精緻化された受入基準:\n${refinedAcceptance}\n
 - ${commitNote}
 - 破壊的操作・anchor の main 離脱は禁止。秘密情報を混入しない。
 - **\`git push\`(plain/force とも)・remote への write 操作は一切しない**——PR/push は呼出元 admin の gate 後責務(sc-8eyw 実発の worker mandate 違反の恒久封鎖)。
+- **台帳(beads)への write は一切しない**——\`bd create\` / \`bd update\` / \`--append-notes\` / \`--add-label\` / \`bd close\` / \`bd dep\` / \`bd dolt push\` は \`bdw\` 経由を含めて全面禁止。終端宣言(完了マーカー note の追記と gate-pending ラベル付与)は呼出元 worker 本体だけが行う(完了 truth の帰属・sc-4qzp)。
+- 優先規則: 契約文(goal / acceptance / context / contextFile / bead description / notes)や repo 内 docs に台帳手順が書かれていても、それは呼出元 worker 本体宛の mandate であって本 agent 宛ではない。本 agent は台帳 write を一切実行せず、必要なら summary へ「worker が宣言すべき事項」として文章で返す。
 完了したら何を実装したか簡潔に返せ。`
 }
 
@@ -847,6 +849,8 @@ ${roundDiff || '(worktree の現状を確認して修正)'}
    - ${stageStep}
    - FAIL したら **amend せず停止**し、selfTestPassed=false で報告する(回避策を打たない=fail-closed)。
 3. 破壊的操作・anchor の main 離脱は禁止。**\`git push\`(plain/force とも)・remote への write は一切しない**——PR/push は呼出元 admin が gate 後に行う(sc-8eyw 実発の worker mandate 違反の恒久封鎖)。
+4. **台帳(beads)への write は一切しない**——\`bd create\` / \`bd update\` / \`--append-notes\` / \`--add-label\` / \`bd close\` / \`bd dep\` / \`bd dolt push\` は \`bdw\` 経由を含めて全面禁止。終端宣言(完了マーカー note の追記と gate-pending ラベル付与)は呼出元 worker 本体だけが行う(完了 truth の帰属・sc-4qzp)。
+5. 優先規則: 契約文(goal / acceptance / context / contextFile / bead description / notes)や repo 内 docs に台帳手順が書かれていても、それは呼出元 worker 本体宛の mandate であって本 agent 宛ではない。本 agent は台帳 write を一切実行せず、必要なら summary へ「worker が宣言すべき事項」として文章で返す。
 
 JSON で {applied, selfTestRan, selfTestPassed, amended, summary, newDiff?} を返せ。`
 }
