@@ -238,16 +238,30 @@ const isAgentTypeNotFound = (e) => {
 // - not found 検知: [RO-FALLBACK] を loud に log し降格 flag を立て、以降の read-only 段も agentType 無しへ。
 // - not found 以外の throw: そのまま透過(呼出元の既存 .catch 意味論=不変条件(5)を変えない)。
 // 返り値は agent() と同一の Promise(.then/.catch 互換)。runAgent(limiter 経由)も内部でこれを呼ぶ。
+// (sc-k33c ERRATA-01 B1) 本関数は「1 論理 agent = 実呼出し 1〜2 回」の唯一の発生源(not-found 検知時に
+// agentType 無しで 2 度目を呼ぶ)。cap の計上を実呼出しへ合わせるため、**全 return path** で capCountCall()
+// を通す(判定ロジック自体は SCCAP ブロック内=ここは薄い計上フックのみ)。併せて解決状態が確定した時点で
+// capMarkRoResolved() を呼び、以降の予約コストを 1 本へ戻す(未確定の間は 2 本を保守的に予約している)。
 async function roAgent(prompt, opts) {
   const base = { ...(opts || {}) }
   delete base.agentType // agentType の管理は roAgent に一元化(呼出サイトは指定しない)
-  if (roFallbackActive) return agent(prompt + RO_DISCIPLINE, base)
+  const label = (opts && opts.label) || 'ro-agent'
+  if (roFallbackActive) {
+    capMarkRoResolved()
+    capCountCall(label)
+    return agent(prompt + RO_DISCIPLINE, base)
+  }
   try {
-    return await agent(prompt, { ...base, agentType: RO_AGENT_TYPE })
+    capCountCall(label)
+    const r = await agent(prompt, { ...base, agentType: RO_AGENT_TYPE })
+    capMarkRoResolved() // agentType が解決した = 以降 1 論理 agent は実呼出し 1 回で足りる
+    return r
   } catch (e) {
     if (isAgentTypeNotFound(e)) {
       roFallbackActive = true
+      capMarkRoResolved() // 降格が確定 = 以降は最初から agentType 無し(実呼出し 1 回)
       log(`[RO-FALLBACK] read-only agentType '${RO_AGENT_TYPE}' が registry で解決不能(${e && e.message ? String(e.message).slice(0, 120) : 'not found'})。agentType 省略へ後退し read-only 規律を prompt で代替する。以降の read-only 段も降格(scribe plugin 未ロード session / registry drift の可能性=merge 後の fresh session で解消)。`)
+      capCountCall(label) // fallback の 2 度目の実呼出し(旧実装が取りこぼしていた 1 本)
       return agent(prompt + RO_DISCIPLINE, base)
     }
     throw e // not found 以外は透過(既存 .catch 意味論を保つ)
@@ -480,7 +494,8 @@ let refinedAcceptance = acceptance // Plan で精緻化されたら更新(review
 //   縮退順は「verify を critical/major に限定 → severity top-K(決定論 tie-break) → loud drop」。
 //   effort 降格と dimensions 削減は不採用(裁定済み)。
 // 層3(cap 系例外の正規化): 無防備 call site の throw で run が result を返さず消える現状を解消する。
-//   判定は name **または** message の実測指紋(AND 禁止)。どちらにも非一致なら cap ではない=従来の失敗正規化/
+//   判定は name **または** message の指紋(AND 禁止)。指紋は **未実測の保守的な列挙**であって実機文言の実測
+//   ではない(実機の cap 例外を観測できていない=K9 留保(5))。どちらにも非一致なら cap ではない=従来の失敗正規化/
 //   透過(machinery 失敗)へ倒す fail-closed。
 const CAP_SEVERITY_RANK = { critical: 0, major: 1, minor: 2, nit: 3 }
 const capIsBlocking = (f) => !!f && (f.severity === 'critical' || f.severity === 'major')
@@ -519,14 +534,44 @@ const CAP_EXEMPT_RESERVE = selfTestCmd ? 1 : 0
 // ── cap 状態(返り値の fail-loud 表面へそのまま載る) ──────────────────────────────
 let capExceeded = false
 let capReason = '' // 'cap'(自前 totalBudget の admission)|'quota'(harness の token budget 例外)|'error'(harness の agent cap 例外)
-let capSpent = 0 // 起動した agent 本数の見積り(免除段も計上する=総数保証のため)
+// (sc-k33c ERRATA-01 B1) 計上を 2 本立てにする。旧実装は 1 本の counter を「admission の予約」と「起動本数の
+// 見積り」に兼用しており、roAgent の not-found fallback(WF 上部・agentType 付き呼出しが失敗したあと agentType
+// 無しで **2 度目の実呼出し**をする)を取りこぼした。結果 (a) 実呼出し総数 > totalBudget(gate 実測: RO fallback +
+// totalBudget=7 で実呼出し 8)、(b) spentEstimate < 実呼出し総数(cap OFF でも 33 実呼出しに対し 32)。
+//   - capSpent  = **実際に agent() を呼んだ回数**。capCountCall() が実呼出しの現場でだけ加算する。
+//                 これが capReport.spentEstimate であり「spentEstimate == 実呼出し総数」を構造的に保証する。
+//   - capBooked = admission の予約(論理段の帳簿)。判定はこちらで行う。1 論理 agent の予約コストは
+//                 capCallCost()= RO agentType の解決状態が未確定なら 2(fallback の 2 度目呼出し分)・確定後は 1。
+// 各 agent の実コスト ≤ 予約コストなので **capSpent ≤ capBooked ≤ totalBudget** が成り立つ(= 実呼出し総数の
+// 上限保証)。予約は起動前に積む(fallback が起きても予約済みの枠内に収まる)。
+let capSpent = 0 // 実呼出し回数(capCountCall のみが加算)= spentEstimate
+let capBooked = 0 // admission の予約(判定用の帳簿)
 const capStages = [] // [{round, stage, requested, admitted, dropped, reason}] = どの段でどれだけ落としたか
 const capDropped = [] // 縮退で落とした対象。**unverified とは別枠**(verdict 取得失敗とは意味が違う=二重計上しない)
 const capTokenStart = budget && typeof budget.spent === 'function' ? budget.spent() : null
 
-// 免除段(classify / self-test / snapshot / plan / implement)= 拒否しないが総数保証のため計上する。
+// RO agentType の解決状態。roAgent が「agentType 付きで成功」or「fallback へ降格済み」を通知したら確定＝
+// 以降 1 論理 agent の実呼出しは 1 回に収まる。未確定の間は 2 回(probe + fallback)を予約する(保守側)。
+let capRoResolved = RO_FORCE_NONE // 'none' 強制は最初から agentType を付けない=常に 1 回
+const capMarkRoResolved = () => {
+  capRoResolved = true
+}
+const capCallCost = () => (capRoResolved ? 1 : 2)
+// 実呼出しの現場から呼ぶ唯一の計上点(roAgent の全 return path + agent() 直呼び段)。
+const capCountCall = (stage) => {
+  capSpent += 1
+  return capSpent
+}
+// agent() 直呼び段(implement / fix)用の薄いラッパ: 実呼出しを計上してから素の agent() を呼ぶ。
+const capAgent = (prompt, opts) => {
+  capCountCall((opts && opts.label) || 'agent')
+  return agent(prompt, opts)
+}
+
+// 免除段(classify / self-test / snapshot / plan / implement)= 拒否しないが、予約だけは積む(総数保証のため)。
+// 実呼出しの計上は capCountCall が行うので、ここでは帳簿(capBooked)だけを動かす。
 const capAccount = (n, stage) => {
-  capSpent += n
+  capBooked += n * capCallCost()
   return n
 }
 // 落とした対象を loud に列挙する(silent に消さない)。severity 不明は 'unknown'(blocking 級として fail-closed)。
@@ -537,24 +582,34 @@ const capMarkExceeded = (reason) => {
   capExceeded = true
   if (!capReason) capReason = reason
 }
+// 帳簿を実測へ同期する。**in-flight の agent が 1 体も無い地点でだけ**呼んでよい(= admission の各点。
+// WF は段の間で必ず await するので、round 頭 / review 前 / fix 前では実呼出しが確定している)。これを入れないと
+// 「RO 解決前に 2 本で予約した免除段が、実際は 1 本で済んだ」分の過剰予約が恒久的に残り、予算が実質目減りする
+// (= 同じ totalBudget で従来より admit が減る退行)。verify 枠の計算点では review が未起動＝予約が生きている
+// ので **同期しない**(そこで同期すると review の予約が消えて二重に admit できてしまう)。
+const capReconcile = () => {
+  capBooked = capSpent
+}
 // admission: want 本のうち予算内に収まる本数を返す(0=全落とし)。免除段の予約分は残量から差し引く。
 const capAdmit = (want, stage, round) => {
+  capReconcile()
   // (sc-k33c errata) cap 未指定(opt-in OFF)でも **消費は計上する**。ここで早期 return して加算を飛ばすと
   // review(既定 4 本/round)と fix(1 本/round)が capReport.spentEstimate から丸ごと欠落し、cap を使わない
   // 全 run(= 実運用の 100%)で「起動本数の見積り」が系統的に過小になる。spentEstimate は totalBudget の
   // 実運用値を決める calibration の一次データ(M0)かつ下流 sc-46kv が bd へ焼く値ゆえ、on/off いずれでも
   // 「spentEstimate == 実 agent 呼出し総数」を保つ(判定は CAP_ON のときだけ効く=既定路の制御フローは不変)。
   if (!CAP_ON) {
-    capSpent += want
+    capBooked += want * capCallCost()
     return want
   }
-  const remaining = totalBudget - capSpent - CAP_EXEMPT_RESERVE
-  const admitted = Math.max(0, Math.min(want, remaining))
-  capSpent += admitted
+  const cost = capCallCost()
+  const remaining = totalBudget - capBooked - CAP_EXEMPT_RESERVE * cost
+  const admitted = Math.max(0, Math.min(want, Math.floor(remaining / cost)))
+  capBooked += admitted * cost
   if (admitted < want) {
     capMarkExceeded('cap')
     capStages.push({ round: round || 0, stage, requested: want, admitted, dropped: want - admitted, reason: 'cap' })
-    log(`[cap] ${stage}${round ? ` r${round}` : ''}: 予算不足で縮退(requested=${want} admitted=${admitted} dropped=${want - admitted} / limit=${totalBudget} agent 本数・spent≈${capSpent})。落とした分は capDropped[] に列挙する(silent に消さない)。`)
+    log(`[cap] ${stage}${round ? ` r${round}` : ''}: 予算不足で縮退(requested=${want} admitted=${admitted} dropped=${want - admitted} / limit=${totalBudget} agent 本数・booked=${capBooked} spent=${capSpent})。落とした分は capDropped[] に列挙する(silent に消さない)。`)
   }
   return admitted
 }
@@ -578,6 +633,7 @@ const capRoundGate = (round) => {
   // (fail-closed 側への **意図した非互換**。escalate は blocking 級 drop があるときだけ=K1 項目5)。
   // 差分は tests/cell-quality-cap.bats の "terminal 非互換の明示 pin" tooth が base 木対照で固定している。
   if (!CAP_ON) return true
+  capReconcile()
   // 例外由来の cap(quota/error)は「実際に走れなかった」事実ゆえ、次 round を回しても同じ throw を繰り返す。
   // 自前 admission 由来('cap')は topK 縮退等で立つこともあるので、これだけでは打ち切らない(残量で判定する)。
   if (capReason === 'quota' || capReason === 'error') {
@@ -585,15 +641,16 @@ const capRoundGate = (round) => {
     log(`[cap] round r${round}: 直前に cap 系例外(reason=${capReason})を捕捉済み。次 round を回さず打ち切る(収束は主張しない)。落とした round 分は capDropped[] に列挙する。`)
     return false
   }
-  const need = 2
-  const remaining = totalBudget - capSpent - CAP_EXEMPT_RESERVE
+  const gateCost = capCallCost()
+  const need = 2 * gateCost // このラウンドの snapshot(免除 1)+ review 最低 1 本の【予約コスト】
+  const remaining = totalBudget - capBooked - CAP_EXEMPT_RESERVE * gateCost
   if (remaining < need) {
     capMarkExceeded('cap')
     capStages.push({ round, stage: 'round', requested: need, admitted: 0, dropped: need, reason: 'cap' })
     // (sc-k33c errata) capStages へ 1 行積むだけでは capDropped[]=[] / droppedBlocking=0 となり、gate 文が
     // 「capDropped を直読して落とした観点を人手確認せよ」と促すのに中身が空という自己矛盾になっていた。
     capDropRound(round, 'round-gate')
-    log(`[cap] round r${round}: 残 ${remaining} 本では 1 round(snapshot+review 最低 1)を回せない(limit=${totalBudget} agent 本数・spent≈${capSpent})。round に入らず打ち切る(収束は主張しない)。落とした round 分は capDropped[] に列挙する。`)
+    log(`[cap] round r${round}: 残 ${remaining} 本では 1 round(snapshot+review 最低 1)を回せない(limit=${totalBudget} agent 本数・booked=${capBooked} spent=${capSpent})。round に入らず打ち切る(収束は主張しない)。落とした round 分は capDropped[] に列挙する。`)
     return false
   }
   return true
@@ -602,9 +659,11 @@ const capRoundGate = (round) => {
 // 変わり非決定になる=K1c 禁止)。round 頭で残量を観点数で等分した固定枠を配る=解決順を入れ替えても同じ集合。
 const capVerifyQuotaPerDim = (dimCount) => {
   if (!CAP_ON) return Infinity
+  const cost = capCallCost()
   const reserveFix = canAutoFix ? 1 : 0
-  const avail = Math.max(0, totalBudget - capSpent - CAP_EXEMPT_RESERVE - reserveFix)
-  return dimCount > 0 ? Math.floor(avail / dimCount) : 0
+  const avail = Math.max(0, totalBudget - capBooked - (CAP_EXEMPT_RESERVE + reserveFix) * cost)
+  // 枠は【本数】で返す(予約コストで割る)。呼出元は「観点あたり何本 verify してよいか」として使う。
+  return dimCount > 0 ? Math.floor(avail / cost / dimCount) : 0
 }
 // 決定論 tie-break: severity 降順(critical→nit) → dimension key 昇順 → title 安定順(昇順・同値は元順)。
 // 観点単位で呼ぶため dimension key は定数だが、比較器に含めて cross-dimension でも同じ全順序になるようにする。
@@ -635,7 +694,7 @@ const capSelectVerify = (findings, dimKey, round, quota) => {
   const needTopK = perRoundVerifyTopK > 0 && findings.length > perRoundVerifyTopK
   const needBudget = CAP_ON && findings.length > quota
   if (!needTopK && !needBudget) {
-    capSpent += findings.length
+    capBooked += findings.length * capCallCost()
     return findings
   }
   const ordered = capOrderFindings(findings, dimKey)
@@ -668,26 +727,34 @@ const capSelectVerify = (findings, dimKey, round, quota) => {
     capStages.push({ round, stage: `verify:${dimKey}`, requested: before, admitted: admit.length, dropped: before - admit.length, reason: 'cap' })
     log(`[cap] verify:${dimKey} r${round}: 予算枠 ${quota} 本へ縮退(要求 ${before} → admit ${admit.length})。縮退順=critical/major 限定 → severity top-K → loud drop。落とした分は capDropped[]。`)
   }
-  capSpent += admit.length
+  capBooked += admit.length * capCallCost()
   return admit
 }
 
 // ── 層3: cap 系例外の判定と正規化 ───────────────────────────────────────────────
 // name **または** message で判定する(AND 禁止=片方一致で cap 扱い)。message 指紋は tests/ に literal で
-// drift pin される(実機の文言が変わったら tooth が RED になる)。どちらにも非一致 = cap ではない。
+// literal 化される。★この pin が検知できるのは **自リポ内の literal 改変**だけで、実機文言の drift は検知
+// できない(tests は WF の literal と突き合わせるだけで実機と突き合わせていない)。指紋自体が未実測の保守的
+// 列挙である点は K9 留保(5)と follow-up(実機指紋の確定)に記録してある。どちらにも非一致 = cap ではない。
 const CAP_ERROR_NAMES = { WorkflowBudgetExceededError: 'quota', WorkflowAgentCapError: 'error' }
+// (sc-k33c ERRATA-01 B2) 指紋は **語境界一致**(\b…\b)で見る。旧実装は素の substring 一致で、cap でない
+// machinery 例外を capExceeded へ吸い込んだ(gate 実測: 'agent capability probe returned malformed payload' が
+// reason='error' に化け、既定路の fail-closed 再 throw が exit 0 / ESCALATE へ迂回した)。'agent cap' が
+// 'agent capability' / 'agent capacity' に、'budget exceeded' が 'budget exceededness' に部分一致していた。
+// 語境界にすると これらの near-miss は非一致になり、cap でない例外は従来経路(再 throw / 既存の失敗正規化)へ
+// 倒れる=fail-closed が保たれる。
 const CAP_MESSAGE_FINGERPRINTS = [
-  { pat: 'budget exceeded', reason: 'quota' },
-  { pat: 'token budget', reason: 'quota' },
-  { pat: 'agent cap', reason: 'error' },
-  { pat: 'agent limit', reason: 'error' },
-  { pat: 'exceeded the agent', reason: 'error' },
+  { re: /\bbudget exceeded\b/, reason: 'quota' },
+  { re: /\btoken budget\b/, reason: 'quota' },
+  { re: /\bagent cap\b/, reason: 'error' },
+  { re: /\bagent limit\b/, reason: 'error' },
+  { re: /\bexceeded the agent\b/, reason: 'error' },
 ]
 const capClassify = (e) => {
   const name = e && e.name ? String(e.name) : ''
   if (CAP_ERROR_NAMES[name]) return CAP_ERROR_NAMES[name]
   const msg = (e && e.message ? String(e.message) : String(e == null ? '' : e)).toLowerCase()
-  for (const fp of CAP_MESSAGE_FINGERPRINTS) if (msg.includes(fp.pat)) return fp.reason
+  for (const fp of CAP_MESSAGE_FINGERPRINTS) if (fp.re.test(msg)) return fp.reason
   return '' // cap 系でない = 呼出サイトの従来経路へ(fail-closed)
 }
 // (sc-k33c errata) self-test 段(監視専用)で捕捉した cap 系例外の情報欄。**terminal 判定も round gate も
@@ -734,6 +801,17 @@ const capCatch = (stage, fallback) => (e) => {
   capRecordException(stage, reason, e)
   return typeof fallback === 'function' ? fallback() : fallback
 }
+// (sc-k33c ERRATA-01 B5) 同期 throw を try/catch で受けた場所から使う入口。意味は capCatch と同じで、
+// **capClassify は 1 回しか走らない**(呼出サイトで判定を再実装して classify を 2 度呼ぶ形を禁止する)。
+// これを置くことで「cap の判定コードは SCCAP ブロックに閉じる」(K8)を try/catch 側でも守れる。
+const capCatchSync = (stage, fallback, opts) => capCatch(stage, fallback, opts)
+// loop モードの終端で使う 2 つの判定/文言生成(呼出サイトは結果を使うだけ)。
+//  - capTerminatedEarly: cap 由来の早期打切り(hard cap 未達なのに打ち切った)か。hard-cap 網へ合流させる述語。
+//  - capLoopEscalate: escalateReason の文言生成。cap 由来の早期打切りを「hard cap 到達」と書くと事実に反する
+//    (round < effectiveCap)ので弁別して書く。
+const capTerminatedEarly = (round, effectiveCap) => capExceeded && round < effectiveCap
+const capLoopEscalate = (round, effectiveCap, why) =>
+  `${capTerminatedEarly(round, effectiveCap) ? `cap 由来の早期打切り(round ${round}/${effectiveCap}・reason=${capReason || 'cap'})` : `hard cap ${effectiveCap} 到達`}・未収束(${why})`
 // 既存 3 catch(review / verify / runSelfTest)用: 従来の失敗正規化は温存しつつ、cap 系だけ別勘定にする
 // (machinery 失敗と cap 縮退を混同させない)。非 cap でも従来どおり正規化値を返す(= .catch の意味論は不変)。
 // opts.informOnly=true(self-test 段)は可視化のみ = terminal/round gate を駆動しない(B4)。
@@ -771,7 +849,7 @@ const capFinalize = (state) => {
   const tokenEnd = budget && typeof budget.spent === 'function' ? budget.spent() : null
   const tokenDelta = capTokenStart !== null && tokenEnd !== null ? tokenEnd - capTokenStart : null
   log(
-    `[cap-token] budget.total=${budgetTotal === null ? 'null(未設定)' : budgetTotal} spent-delta=${tokenDelta === null ? 'n/a' : tokenDelta} / cap 判定は agent 本数(limit=${totalBudget || '無 cap'} spent≈${capSpent})で行い、token は情報ログ併走のみ(判定に使わない)。`
+    `[cap-token] budget.total=${budgetTotal === null ? 'null(未設定)' : budgetTotal} spent-delta=${tokenDelta === null ? 'n/a' : tokenDelta} / cap 判定は agent 本数(limit=${totalBudget || '無 cap'} booked=${capBooked} spent=${capSpent})で行い、token は情報ログ併走のみ(判定に使わない)。`
   )
   const capReport = {
     limit: totalBudget, // 0 = 無 cap(opt-in 既定)
@@ -1340,7 +1418,8 @@ if (selfTestBaseline.skipped) {
 if (doImplement) {
   phase('Implement')
   capAccount(1, 'implement') // (sc-k33c 層2) implement は admission 4 点に含まれない(実装系)。計上のみ。
-  const impl = await agent(implementPrompt(refinedAcceptance), {
+  // (sc-k33c ERRATA-01 B1) roAgent を通らない直呼び段は capAgent(実呼出し計上つき agent)を使う。
+  const impl = await capAgent(implementPrompt(refinedAcceptance), {
     label: 'implement',
     phase: 'Implement',
     model: stageModel, // 編集するので roAgent(read-only agentType)を使わず agent() 直呼び(全ツール)
@@ -1468,7 +1547,7 @@ while (round < effectiveCap) {
   // → 全観点分の枠が確保できなければ **この round に入らない**(幅の制御は verify 側 quota に閉じる)。
   const __capReviewAdmitted = capAdmit(dimensions.length, 'review', round)
   if (__capReviewAdmitted < dimensions.length) {
-    capSpent -= __capReviewAdmitted // 部分 admit は使わないので予約を戻す(spentEstimate を実本数に保つ)
+    capBooked -= __capReviewAdmitted * capCallCost() // 部分 admit は使わないので【予約】を戻す(実呼出しは capCountCall が数えるので spentEstimate には影響しない)
     capDropRound(round, 'budget-drop')
     log(`[cap] review r${round}: 全 ${dimensions.length} 観点分の枠(admit=${__capReviewAdmitted})が確保できないため観点を切り捨てず round を打ち切る(dimensions 削減は不採用の裁定=K8 fence)。落とした round 分は capDropped[]。`)
     break
@@ -1527,9 +1606,10 @@ while (round < effectiveCap) {
         )
         )
       } catch (e) {
-        if (!capClassify(e)) throw e // 非 cap = 従来どおり pipeline が要素を null 化する(誤帰属の現状維持)
-        capRecordException(`verify-entry:${d.key}`, capClassify(e), e)
-        return { dimension: d.key, reviewFailed, verified: [] }
+        // (sc-k33c ERRATA-01 B5) 判定は SCCAP ブロック内の capCatchSync に一本化する(旧実装はここで capCatch の
+        // 中身を再実装し capClassify を 2 度呼んでいた)。cap 系なら reviewFailed を立てずに verified:[] で返し
+        // (誤帰属封鎖)、非 cap は capCatchSync が再 throw する = 従来どおり pipeline が要素を null 化する。
+        return capCatchSync(`verify-entry:${d.key}`, () => ({ dimension: d.key, reviewFailed, verified: [] }))(e)
       }
       return { dimension: d.key, reviewFailed, verified: verifiedArr.filter(Boolean) }
     }
@@ -1630,7 +1710,8 @@ while (round < effectiveCap) {
 
   // gated autoFix: confirmed blocking のみ + self-test fail-closed + amend
   phase('Fix')
-  const fix = await schemaAgent(agent, fixPrompt(blocking, roundDiff), {
+  // (sc-k33c ERRATA-01 B1) runner は capAgent(実呼出し計上つき)= schemaAgent 経由でも計上が漏れない。
+  const fix = await schemaAgent(capAgent, fixPrompt(blocking, roundDiff), {
     label: `autofix r${round}`,
     phase: 'Fix',
     model: stageModel, // 編集するので roAgent(read-only agentType)を使わず agent() 直呼び(全ツール)
@@ -1663,7 +1744,7 @@ if (canAutoFix && !LIGHT_TYPES.has(taskType)) {
   // all-or-nothing / fix 前 admission による break)が hard-cap 網を迂回し、未修正 confirmed blocking を
   // 抱えたまま converged=false かつ escalate=false という base に存在しなかった終端状態へ落ちる。
   // cap で早期に打ち切った未収束 loop run は「hard cap 到達・未収束」と同じ強度で扱う(silent ship 禁止)。
-  if (!converged && !escalate && (round >= effectiveCap || capExceeded) && zeroStreak < 2) {
+  if (!converged && !escalate && (round >= effectiveCap || capTerminatedEarly(round, effectiveCap)) && zeroStreak < 2) {
     escalate = true
     // un-2f1: snapshot 空が全 round で続いた = Implement/Fix が round1 で commit し `git diff HEAD` が空になった
     // 可能性が高い(snapshot は base...HEAD 合成へ移行済だが、base 推定が外れる/commit が base より前等の縁では
@@ -1679,11 +1760,9 @@ if (canAutoFix && !LIGHT_TYPES.has(taskType)) {
               ? `。snapshot 空=commit 済 or レビュー対象不在の可能性`
               : '')
         : `critical/major が 2 連続ゼロに至らず`
-    // cap 由来の早期打切りは「hard cap 到達」と書くと事実に反する(round < effectiveCap)ので弁別して書く。
-    const capEarlyBreak = capExceeded && round < effectiveCap
-    escalateReason =
-      escalateReason ||
-      `${capEarlyBreak ? `cap 由来の早期打切り(round ${round}/${effectiveCap}・reason=${capReason || 'cap'})` : `hard cap ${effectiveCap} 到達`}・未収束(${why})`
+    // (sc-k33c ERRATA-01 B5) 文言生成は SCCAP ブロック内の capLoopEscalate が持つ(cap 由来の早期打切りと
+    // hard cap 到達の弁別もそこ)。ここは結果を使うだけ = cap の判定コードがブロック外へ散らない(K8)。
+    escalateReason = escalateReason || capLoopEscalate(round, effectiveCap, why)
   }
 } else {
   // single モード(autoFix off / light): この 1 ラウンドが真にクリーン(blocking=0 かつ machinery 健全)なら converged。

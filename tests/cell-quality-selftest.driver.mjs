@@ -56,6 +56,13 @@ function makeCapError(kind) {
     // 指紋('budget exceeded'/'token budget'/'agent cap'/'agent limit'/'exceeded the agent')を含まない文言。
     return new Error('stub machinery failure: deliberately fingerprint-free (not a cap condition)')
   }
+  // (sc-k33c ERRATA-01 B2) near-miss: 指紋の **語の途中に一致してしまう** 実在しうる machinery 文言。
+  // 素の substring 一致だと cap と誤判定され fail-closed 再 throw が迂回される(gate 実測の退行形)。
+  // 語境界一致なら非 cap のままであることを negative tooth で固定する。CQ_THROW_KIND で選ぶ。
+  if (kind === 'near-capability') return new Error('agent capability probe returned malformed payload')
+  if (kind === 'near-capacity') return new Error('agent capacity planner returned no route')
+  if (kind === 'near-exceededness') return new Error('budget exceededness metric unavailable')
+  if (kind === 'near-limitless') return new Error('agent limitless mode is not supported here')
   if (CAP_ERR_MODE === 'message') {
     // name は 'Error' のまま = message 指紋だけで cap と判定できるか(OR の右辺)を駆動する。
     return new Error(kind === 'quota' ? 'workflow token budget exhausted for this turn' : 'workflow agent cap reached')

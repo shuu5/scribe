@@ -61,7 +61,11 @@ setup() {
   #   が求める「base 木から driver 実走で生成」を満たす）の不変 SHA を既定にする。本リポの既存流儀
   #   （tests/blob-revive-guard.bats は fixture の origin/main を update-ref で **固定** する）とも揃う。
   #   ※この pin は更新しない（origin/main へ戻すと上の (a)(b) が再発する）。
-  CAP_BASE_REF="${SC_K33C_BASE_REF:-46958e5}"
+  # 【契約 literal からの意図的逸脱・admin ratify 済み】契約 K2' は `git show origin/main:...` と literal で
+  # 書いているが、上記 (a)(b) のとおり可動 ref では land 後に guard が自己破壊するため、同じ木を指す不変 SHA
+  # へ固定した（＝逸脱は「base 木から driver 実走で生成する」という K2' の目的を守るためのもの）。
+  # SHA は短縮形でなく 40 桁で持つ（短縮は将来の衝突・曖昧解決に晒される＝pin の意味が弱まる）。
+  CAP_BASE_REF="${SC_K33C_BASE_REF:-46958e5d4e08b760c0960c52eb3cd4f4f3099be7}"
 }
 
 # base 木（cap 実装前）の WF + driver を dir へ materialize する。
@@ -150,13 +154,20 @@ plant_cap_mutant() {
   [ "$status" -eq 0 ]
   run grep -F -q -- 'WorkflowAgentCapError' "$WF"
   [ "$status" -eq 0 ]
-  # message 側の実測指紋（実機の文言が変わったらこの tooth が RED になる＝drift 検知面）。
+  # message 側の指紋。★**未実測の保守的な列挙**であり、この tooth が検知できるのは自リポ内 literal の改変
+  # だけ（実機文言との突合はしていない＝実機 drift は検知できない）。実機指紋の確定は follow-up 側の仕事。
+  # （ERRATA-01 B2）語境界一致（\b…\b）へ絞ったので、pin も正規表現 literal の形で見る。
   local fp
   for fp in 'budget exceeded' 'token budget' 'agent cap' 'agent limit' 'exceeded the agent'; do
     echo "# fingerprint: $fp"
-    run grep -F -q -- "{ pat: '$fp'" "$WF"
+    run grep -F -q -- "{ re: /\\b$fp\\b/" "$WF"
     [ "$status" -eq 0 ]
   done
+  # 素の substring 一致（旧形）へ戻す退行を静的にも塞ぐ。
+  run grep -F -q -- 'msg.includes(fp.pat)' "$WF"
+  [ "$status" -ne 0 ]
+  run grep -F -q -- 'fp.re.test(msg)' "$WF"
+  [ "$status" -eq 0 ]
   # AND 禁止: name 一致で即 return（message を見ずに確定する）経路が在る＝OR 構造の機械証跡。
   run grep -F -q -- 'if (CAP_ERROR_NAMES[name]) return CAP_ERROR_NAMES[name]' "$WF"
   [ "$status" -eq 0 ]
@@ -254,6 +265,10 @@ plant_cap_mutant() {
     seq_count="$(awk -F'|' '{print NF}' <<< "$(kval "$out" callSeq)")"
     [ "$total" -eq "$seq_count" ]
     [ "$total" -le "$n" ]
+    # (ERRATA-01 B3) 縮退が実際に起きているこの予算域で **spentEstimate == 実呼出し総数** も押さえる。
+    # ★ `capSpentEstimate -eq $n`（= totalBudget）形は誤り: 縮退で早く打ち切った run では
+    #   spentEstimate < totalBudget が正常（HEAD 実測で tb=5/6/8 が該当）。正は実呼出し数との一致。
+    [ "$(kval "$out" capSpentEstimate)" -eq "$total" ]
     # 非空虚: cap 無しなら総数はこれを超える（＝この tooth は「元から N 以下」で受かっていない）。
     [ "$(kval "$out" capExceeded)" = "true" ]
     # 落とした分は必ず capDropped[] に列挙される（capStages だけに痕跡が残る fail-open を作らない）。
@@ -638,7 +653,9 @@ plant_cap_mutant() {
 
 @test "sc-k33c MU8 (K1b(ii)): parallel 入口の cap 判定を無条件 throw 化すると reviewFailed へ誤帰属する" {
   local mut="$BATS_TEST_TMPDIR/mu8"
-  plant_cap_mutant "$mut" "if (!capClassify(e)) throw e // 非 cap" "throw e // 変異: 無条件 throw // 非 cap"
+  # mutant_fingerprint（ERRATA-01 B5 で判定を capCatchSync へ移送したため変異点も移動した）:
+  #   `return capCatchSync(\`verify-entry:${d.key}\`, ...)` の直前へ無条件 throw を挿入する。
+  plant_cap_mutant "$mut" "return capCatchSync(\`verify-entry:" "throw e; return capCatchSync(\`verify-entry:"
   # 変異前: reviewFailed は 0（誤帰属しない）。
   run env CQ_ARGS="$(cq_args '{"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_MIX" \
       CQ_THROW_AT_STAGE=parallel node "$DRIVER" run
@@ -937,7 +954,8 @@ plant_cap_mutant() {
   # static: reserve が quota 計算から差し引かれている（この 1 行が消えると fix が予算に食われる）。
   run grep -F -q -- 'const reserveFix = canAutoFix ? 1 : 0' "$WF"
   [ "$status" -eq 0 ]
-  run grep -F -q -- '- CAP_EXEMPT_RESERVE - reserveFix' "$WF"
+  # (ERRATA-01 B1) 予約は「本数 × 実呼出しコスト」で引く形になった（RO fallback の 2 度目呼出しを予約へ含める）。
+  run grep -F -q -- '(CAP_EXEMPT_RESERVE + reserveFix) * cost' "$WF"
   [ "$status" -eq 0 ]
   # behavioral: confirmed blocking が立つ小〜中予算を掃引しても autoFix は必ず 1 本起動し、
   # 「予算不足で autoFix を起動できない」ログは 1 度も出ない（＝reserve が効いている）。
@@ -1056,6 +1074,22 @@ plant_cap_mutant() {
   [ "$(grep -F -c -- 'capFinalize({ converged, escalate, escalateReason })' "$WF")" -eq 1 ]
   grep -q 'capFinalize({ converged, escalate, escalateReason })' <<< "$outside"
 
+  # (ERRATA-01 B5) ブロック外に **判定コード** が残っていないこと。解説コメントは許容するので行頭 // を落として
+  # から見る（旧実装は parallel 入口で capCatch の中身を再実装し capClassify を 2 度呼び、terminal では
+  # capEarlyBreak / escalateReason の文言をブロック外で組み立てていた）。
+  local outside_code
+  outside_code="$(grep -v '^[[:space:]]*//' <<< "$outside")"
+  ! grep -q 'capClassify(' <<< "$outside_code"
+  ! grep -q 'capRecordException(' <<< "$outside_code"
+  ! grep -q 'cap 由来の早期打切り' <<< "$outside_code"
+  ! grep -q 'capEarlyBreak' <<< "$outside_code"
+  # 同期 throw 側の入口もブロック内に在り、呼出サイトはそれを使うだけ。
+  grep -q 'const capCatchSync = ' <<< "$body"
+  grep -q 'capCatchSync(`verify-entry:' <<< "$outside_code"
+  # loop 終端の判定/文言もブロック内。
+  grep -q 'const capTerminatedEarly = ' <<< "$body"
+  grep -q 'const capLoopEscalate = ' <<< "$body"
+
   # 実走で terminal の意味論が保たれている（リファクタで挙動を変えていない）。
   run env CQ_ARGS="$(cq_args '{"totalBudget":8}')" CQ_REVIEW_FINDINGS="$FINDINGS_MIX" \
       CQ_VERIFY_REFUTED=false node "$DRIVER" run
@@ -1065,4 +1099,188 @@ plant_cap_mutant() {
   [ "$(kval "$output" escalate)" = "true" ]
   [ "$(kval "$output" gateHasCapNote)" = "true" ]
   [ "$(kval "$output" capUnit)" = "agent-calls" ]
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [I] ERRATA-01 B1: cap 中核保証を roAgent fallback 経路込みで成立させる
+#   目的 = (i) 実呼出し総数 ≤ totalBudget  (ii) capReport.spentEstimate == 実呼出し総数
+#   機序 = roAgent は not-found 検知後に agentType 無しで **2 度目の実呼出し** をする。旧実装は論理段だけを
+#          計上していたため cap ON で総数超過（gate 実測: CQ_RO_NOTFOUND=true + totalBudget=7 → 実 8）、
+#          cap OFF でも spentEstimate が 1 本少なかった（33 実呼出しに対し 32）。
+# ─────────────────────────────────────────────────────────────────────────────
+
+@test "sc-k33c I-B1: RO fallback 経路でも 実呼出し ≤ totalBudget かつ spentEstimate == 実呼出し（cap ON 掃引）" {
+  local n out actual spent
+  for n in 5 6 7 8 12 16; do
+    echo "# totalBudget=$n (CQ_RO_NOTFOUND=true)"
+    run env CQ_ARGS="$(cq_args "{\"totalBudget\":$n}")" CQ_RO_NOTFOUND=true \
+        CQ_REVIEW_FINDINGS="$FINDINGS_MIX" CQ_VERIFY_REFUTED=false node "$DRIVER" run
+    [ "$status" -eq 0 ]
+    out="$output"
+    actual="$(kval "$out" agentCallTotal)"
+    spent="$(kval "$out" capSpentEstimate)"
+    # (i) 実呼出し総数が cap を破らない。
+    [ "$actual" -le "$n" ]
+    # (ii) spentEstimate は実呼出し総数と一致する（論理段の見積りではない）。
+    [ "$spent" -eq "$actual" ]
+    # fallback が実際に発火している run であること（空虚な green を作らない）。
+    [ "$(kval "$out" roFallbackActive)" = "true" ]
+  done
+}
+
+@test "sc-k33c I-B1: cap OFF でも spentEstimate == 実呼出し（RO fallback の 2 度目呼出しを取りこぼさない）" {
+  local out
+  run env CQ_ARGS="$(cq_args '{}')" CQ_RO_NOTFOUND=true CQ_REVIEW_FINDINGS="$FINDINGS_MIX" \
+      CQ_VERIFY_REFUTED=false node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" roFallbackActive)" = "true" ]
+  [ "$(kval "$output" capSpentEstimate)" -eq "$(kval "$output" agentCallTotal)" ]
+  # 対照: fallback 無しでも一致する（一致 pin が fallback 専用の特別扱いになっていない）。
+  run env CQ_ARGS="$(cq_args '{}')" CQ_REVIEW_FINDINGS="$FINDINGS_MIX" CQ_VERIFY_REFUTED=false node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" roFallbackActive)" = "false" ]
+  [ "$(kval "$output" capSpentEstimate)" -eq "$(kval "$output" agentCallTotal)" ]
+}
+
+@test "sc-k33c MU14: roAgent fallback の 2 度目呼出しの計上を外すと spentEstimate が実呼出しから外れる" {
+  # mutant_fingerprint: `capCountCall(label) // fallback の 2 度目の実呼出し` → 削除
+  local mut="$BATS_TEST_TMPDIR/mu14"
+  plant_cap_mutant "$mut" "capCountCall(label) // fallback の 2 度目の実呼出し" "// 変異: 計上を外した"
+  run env CQ_ARGS="$(cq_args '{}')" CQ_RO_NOTFOUND=true CQ_REVIEW_FINDINGS="$FINDINGS_MIX" \
+      CQ_VERIFY_REFUTED=false node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  # 変異後は spentEstimate < 実呼出し（＝旧実装の取りこぼしが復活する）。
+  [ "$(kval "$output" capSpentEstimate)" -lt "$(kval "$output" agentCallTotal)" ]
+}
+
+@test "sc-k33c MU15: 予約コスト（capCallCost）を 1 固定にすると RO 未解決の並列 admission で総数が cap を破る" {
+  # mutant_fingerprint: `const capCallCost = () => (capRoResolved ? 1 : 2)` → `const capCallCost = () => 1`
+  #
+  # 発火条件（実測で特定）: RO agentType の解決状態が **未確定のまま** 並列 admission へ入る経路。
+  # worker-cell 形（self-test baseline や snapshot が先に走る）では先頭の RO 呼出しが解決を確定させるため
+  # 到達しない。single モード（静的 diff 供給 + autoFix off ＝ snapshot も self-test も走らない）では
+  # review 4 観点が最初の RO 呼出しになり、4 本が同時に not-found → それぞれ 2 度目を呼ぶ（実 8 本）。
+  local single_args='{"taskTitle":"c","worktree":"/tmp/wt","diff":"diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n","taskType":"testable"'
+  local mut="$BATS_TEST_TMPDIR/mu15"
+  plant_cap_mutant "$mut" "const capCallCost = () => (capRoResolved ? 1 : 2)" "const capCallCost = () => 1"
+
+  local n out over=0
+  for n in 4 5 6; do
+    echo "# totalBudget=$n"
+    # HEAD: 4 観点分の枠（1 本あたり 2 本ぶん）が取れないので round を回さない＝実呼出し 0（cap を破らない）。
+    run env CQ_ARGS="${single_args},\"totalBudget\":$n}" CQ_RO_NOTFOUND=true node "$DRIVER" run
+    [ "$status" -eq 0 ]
+    [ "$(kval "$output" agentCallTotal)" -le "$n" ]
+    # 変異後: 1 本ぶんしか予約しないので 4 観点を admit し、実 8 本で cap を破る。
+    run env CQ_ARGS="${single_args},\"totalBudget\":$n}" CQ_RO_NOTFOUND=true node "$mut/tests/driver.mjs" run
+    [ "$status" -eq 0 ]
+    out="$output"
+    if [ "$(kval "$out" agentCallTotal)" -gt "$n" ]; then over=1; echo "# violation at totalBudget=$n: actual=$(kval "$out" agentCallTotal)"; fi
+  done
+  [ "$over" -eq 1 ]
+}
+
+@test "sc-k33c I-B1: RO 未解決の並列 admission でも 実呼出し ≤ totalBudget（single モード・境界の両側）" {
+  local single_args='{"taskTitle":"c","worktree":"/tmp/wt","diff":"diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n","taskType":"testable"'
+  local n
+  for n in 4 5 6 8 12; do
+    echo "# totalBudget=$n"
+    run env CQ_ARGS="${single_args},\"totalBudget\":$n}" CQ_RO_NOTFOUND=true node "$DRIVER" run
+    [ "$status" -eq 0 ]
+    [ "$(kval "$output" agentCallTotal)" -le "$n" ]
+    [ "$(kval "$output" capSpentEstimate)" -eq "$(kval "$output" agentCallTotal)" ]
+  done
+  # 枠が足りる側（8）では実際に 4 観点 × 2 実呼出し = 8 本走る（空虚に 0 本で通していない）。
+  run env CQ_ARGS="${single_args},\"totalBudget\":8}" CQ_RO_NOTFOUND=true node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" agentCallTotal)" -eq 8 ]
+  # fallback 下では 1 論理 review = 実呼出し 2 本（同じ label が 2 度記録される）＝4 観点で 8 本。
+  # これが「論理段の計上では取りこぼす 1 本ずつ」の正体で、B1 の予約コスト 2 はこれを見込んでいる。
+  [ "$(kval "$output" reviewCallCount)" -eq 8 ]
+  [ "$(kval "$output" roFallbackActive)" = "true" ]
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [J] ERRATA-01 B2: 指紋の過剰一致（fail-closed 迂回）の封鎖
+#   目的 = cap でない machinery 例外が capExceeded へ吸われないこと。
+#   gate 実測の退行形 = 'agent capability probe returned malformed payload' が reason='error' に吸収され、
+#   既定路（無防備 call site）の fail-closed 再 throw が exit 0 / ESCALATE へ化けていた。
+# ─────────────────────────────────────────────────────────────────────────────
+
+@test "sc-k33c J-B2: 指紋の near-miss は cap 判定されず fail-closed 再 throw に倒れる（negative tooth）" {
+  local kind
+  for kind in near-capability near-capacity near-exceededness near-limitless; do
+    echo "# near-miss kind: $kind"
+    # 無防備 call site（snapshot）へ near-miss 文言の例外を投げる。cap でないので capCatch は再 throw し、
+    # run は従来どおり死ぬ（＝fail-closed）。cap へ吸われていれば exit 0 + capExceeded=true になる。
+    run env CQ_ARGS="$(cq_args '{}')" CQ_THROW_AT_LABEL='snapshot' CQ_THROW_KIND="$kind" node "$DRIVER" run
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'DRIVER_ERROR'* ]]
+  done
+  # 対照: 語境界に一致する本物の cap 文言は従来どおり cap として捕捉される（negative tooth が
+  # 「何でも非 cap にする」退行で通っていない＝非空虚性）。
+  run env CQ_ARGS="$(cq_args '{}')" CQ_THROW_AT_LABEL='snapshot' CQ_THROW_KIND=error \
+      CQ_CAP_ERR_MODE=message node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" capExceeded)" = "true" ]
+  [ "$(kval "$output" capReason)" = "error" ]
+}
+
+@test "sc-k33c MU16: 指紋を素の substring 一致へ戻すと near-miss が cap へ吸われ fail-closed が迂回される" {
+  # mutant_fingerprint: `if (fp.re.test(msg)) return fp.reason` → `if (msg.includes(String(fp.re).slice(3, -3))) ...`
+  # （語境界 \b…\b を外した素の部分一致へ戻す変異＝gate が実測した退行そのもの）
+  local mut="$BATS_TEST_TMPDIR/mu16"
+  plant_cap_mutant "$mut" "if (fp.re.test(msg)) return fp.reason" \
+      "if (msg.includes(String(fp.re).slice(3, -3))) return fp.reason"
+  # 変異後: 'agent capability …' が reason='error' として吸われ、run が死なずに終わる（fail-closed 迂回）。
+  run env CQ_ARGS="$(cq_args '{}')" CQ_THROW_AT_LABEL='snapshot' CQ_THROW_KIND=near-capability \
+      node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" capExceeded)" = "true" ]
+  [ "$(kval "$output" capReason)" = "error" ]
+}
+
+@test "sc-k33c MU17 (B3): admission が実呼出し counter を触ると縮退域で spentEstimate が実本数から外れる" {
+  # mutant_fingerprint: `capBooked += admitted * cost` → `capBooked += admitted * cost; capSpent += admitted`
+  # （＝旧実装の「予約と実本数を 1 本の counter で兼用する」形へ戻す変異。K3-1 掃引の spentEstimate 一致
+  #   assert が縮退発生域で効くことの非空虚性を示す）
+  local mut="$BATS_TEST_TMPDIR/mu17"
+  plant_cap_mutant "$mut" "capBooked += admitted \* cost" "capBooked += admitted * cost; capSpent += admitted"
+  local n out
+  for n in 5 8 12; do
+    echo "# totalBudget=$n"
+    run env CQ_ARGS="$(cq_args "{\"totalBudget\":$n}")" CQ_REVIEW_FINDINGS="$FINDINGS_MIX" \
+        CQ_VERIFY_REFUTED=false node "$mut/tests/driver.mjs" run
+    [ "$status" -eq 0 ]
+    out="$output"
+    # 変異後は spentEstimate > 実呼出し（K3-1 掃引の一致 assert が RED になる形）。
+    [ "$(kval "$out" capSpentEstimate)" -gt "$(kval "$out" agentCallTotal)" ]
+  done
+}
+
+@test "sc-k33c MU13 (B4): perRoundVerifyTopK の cut を無効化すると観点単位 top-K と capDropped が消える" {
+  # mutant_fingerprint: `if (perRoundVerifyTopK > 0 && admit.length > perRoundVerifyTopK) {` → `if (false) {`
+  #
+  # (ERRATA-01 B4) 旧 note の「K3-2↔MU12 / K3-3↔MU11」は誤対応だった（gate 実測: MU12 は tooth 10 を、
+  # MU11 は tooth 11 を RED にしない）。K3-2 / K3-3 の実 catcher はこの変異で、変異木で cap.bats を全数
+  # 走らせると not ok 10 / 11 / 12 / 45 が立つ（本 worker も同一結果を実測）。ここでは同じ変異を driver
+  # 実走で behavioral に固定する（bats 全数の入れ子実行はしない）。
+  local mut="$BATS_TEST_TMPDIR/mu13"
+  plant_cap_mutant "$mut" "if (perRoundVerifyTopK > 0 \&\& admit.length > perRoundVerifyTopK) {" "if (false) {"
+
+  # HEAD: perRoundVerifyTopK=2・対象 3 件 → 各観点 2 本・BBB が capDropped[] へ。
+  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":2,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_MIX" \
+      CQ_VERIFY_REFUTED=false node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" verifyByDim)" = "completeness-critic=2,correctness=2,integration-ops=2,robustness-security=2" ]
+  [ "$(kval "$output" capDroppedTitles)" = "BBB;BBB;BBB;BBB" ]
+  [ "$(kval "$output" capExceeded)" = "true" ]
+
+  # 変異後: cut が起きず 3 本すべて verify され、capDropped は空・cap も発火しない（top-K が死ぬ）。
+  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":2,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_MIX" \
+      CQ_VERIFY_REFUTED=false node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" verifyByDim)" = "completeness-critic=3,correctness=3,integration-ops=3,robustness-security=3" ]
+  [ "$(kval "$output" capDroppedCount)" -eq 0 ]
+  [ "$(kval "$output" capExceeded)" = "false" ]
 }
