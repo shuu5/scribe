@@ -3,7 +3,10 @@ export const meta = {
   description:
     '1 issue = 1 実装セルの品質WF: task-type routing → [Plan] → [Implement] → perspective-diverse な Opus review → 各 finding を独立 Opus が adversarial refute-verify → gated autoFix(confirmed のみ+self-test fail-closed+amend) → loop-until-dry 収束。返り値を呼出元(worker/admin)が一次監査する薄 gate 設計。固有物は args で差し込む(骨格は再利用)。',
   whenToUse:
-    'worker worktree で substantive な per-issue 実装の品質を担保したいとき。固有物(taskTitle/worktree/goal/acceptance/diff/baseRef/contextFile/selfTestCmd/dimensions/model/maxRounds/autoFix/doPlan/doImplement/taskType/target/context/probe/roAgentType)は args で渡す。★args は Workflow tool 経路で【全体約 4KB】に切り詰められる実測がある(un-cw0z)ため inline を小さく保つこと: 大きい diff は baseRef(commit 済差分を snapshot 合成が worktree で直接取得=インライン転記不要)、大きい文脈は contextFile(readable な path を渡し各段 agent が Read)で渡す。autoFix は既定 off(共有 fail-safe)、worker cell 文脈は autoFix:true を渡す。roAgentType は read-only 段の agentType 上書き escape hatch(既定 scribe:explore・"none" で agentType 無し強制)。',
+    'worker worktree で substantive な per-issue 実装の品質を担保したいとき。固有物(taskTitle/worktree/goal/acceptance/diff/baseRef/contextFile/selfTestCmd/dimensions/model/maxRounds/autoFix/doPlan/doImplement/taskType/target/context/probe/roAgentType)は args で渡す。★args は Workflow tool 経路で【全体約 4KB】に切り詰められる実測がある(un-cw0z)ため inline を小さく保つこと: 大きい diff は baseRef(commit 済差分を snapshot 合成が worktree で直接取得=インライン転記不要)、大きい文脈は contextFile(readable な path を渡し各段 agent が Read)で渡す。autoFix は既定 off(共有 fail-safe)、worker cell 文脈は autoFix:true を渡す。roAgentType は read-only 段の agentType 上書き escape hatch(既定 scribe:explore・"none" で agentType 無し強制)。★worktree は【必須】= 欠落/空/undefined/"[undefined]" は agent を 1 体も起動せず throw して run を殺す(sc-pfn4 の canonical args 契約。read-only の軽量用途=diff 供給 + doImplement/autoFix なし でも同じ=diff だけ渡す ad-hoc 直叩きは通らない)。sentinel "(current worktree)" も worker-cell 実行では別 prefix で throw する。',
+  // (sc-pfn4) 必須 args の【静的】宣言。body の const REQUIRED_ARGS と同一集合であること(engine の二面宣言
+  // 要求。片面/不一致は rc=2 DECL_MISMATCH)。集合は body 側の宣言コメントに理由を書く(ここは mirror)。
+  requiredArgs: ['worktree'],
   // phases は phase() 呼び出し / opts.phase と同名で対応させる(タイトル完全一致でグループ化)。
   // substantive な全 agent は model:'opus'(args.model 既定)= read-only agent(scribe:explore)の frontmatter 弱モデル退化を根治。
   phases: [
@@ -83,15 +86,18 @@ export const meta = {
 //      limiter・runAgent)は降格漏れ時の最終防壁=defense-in-depth として残置するが、降格後は fable agent が
 //      流れず通常経路は no-op(fableCapped は常に false)。理由(cap 残置): fable は実コスト 2×Opus 超で、
 //      ハーネスに fable 専用の自動同時実行制限が無い(verified)。
-//  (7) args fail-fast(un-8c4 吸収): worker-cell 実行(doImplement か autoFix 要求)で必須 args
-//      (worktree・goal/acceptance のいずれか・autoFix 時 selfTestCmd)を欠く場合、agent を一切起動せず
-//      escalate=true + 明示 reason で即 return(silent 暴走根治)。読み取り専用の軽量用途(diff 供給+
-//      single モード=doImplement/autoFix なし)はゲート対象外=従来の柔軟性を保つ。
-//  (8) defensive args parse(un-2yy 吸収): args の string/object は呼び出し側 serialization 依存で
-//      非決定的(object 到達もあれば JSON 文字列化して届くこともある)。冒頭で typeof args==='string' なら
-//      JSON.parse して吸収する。parse 失敗(壊れた JSON 等)は scope/契約が一切不明=agent を一切起動せず
-//      escalate=true + 明示 reason で即 return する。さらに返り値へ receivedArgs 要約(キー一覧 + 受信型)を
-//      載せ、呼出元が「何が届いたか」を一次監査できるようにする(非決定的 serialization の可視化)。
+//  (7) args fail-fast(un-8c4 吸収 → sc-pfn4 で throw 形へ cutover): 必須 args(worktree)は canonical block が
+//      【無条件】に見て欠落なら即 throw する = 読み取り専用の軽量用途(diff 供給 + single モード)も worktree
+//      必須になった(「diff だけ渡す ad-hoc 直叩き経路」を殺す仕様変更)。worker-cell 固有の契約
+//      (goal/acceptance のいずれか・autoFix 時 selfTestCmd・sentinel '(current worktree)' 拒否)は block の
+//      【外】で意味的に fail-fast し、canonical marker を含まない別 prefix で throw する。いずれも agent を
+//      一切起動しない。旧 escalate=true return 形は「undefined を掴んだまま完走」を止められず廃止(P0-2)。
+//  (8) defensive args parse(un-2yy 吸収 → sc-pfn4 で canonical block へ移管): args の string/object は
+//      呼び出し側 serialization 依存で非決定的(object 到達もあれば JSON 文字列化して届くこともある)。block が
+//      typeof args==='string' なら JSON.parse して吸収し、parse 失敗(壊れた JSON 等)は scope/契約が一切不明=
+//      agent を一切起動せず throw する。block は receivedArgs 要約(受信型 + キー一覧 + 各キーの型)も組み立て、
+//      呼出元が「何が届いたか」を一次監査できるようにする(非決定的 serialization の可視化)。WF 固有の監査
+//      field(roAgentType)は block を 1 byte も汚さないよう block の後で property 代入する。
 //      加えて single モード(autoFix off)でも、静的 diff 未指定 + snapshot=EMPTY_DIFF は「レビュー対象不在」=
 //      machinery 失敗扱いにして converged を立てず escalate へ倒す(clean と区別)。
 //  (9) snapshot 合成で round 内 commit に頑健化(un-2f1 吸収): Implement/Fix agent が round1 で commit すると
@@ -123,8 +129,8 @@ export const meta = {
 //      「guard 段が high に留まったか」を一次監査できる(receivedArgs/schemaHealth と対称の audit 面)。
 // (12) args 約 4KB 上限とファイル渡し(sc-mbcm・orch-v7pf=un-cw0z 中継の吸収): Workflow tool へ渡す args は
 //      【全体で約 4KB】に切り詰められる実測がある(uns un-cw0z)。切り詰めは骨格からは検知できない
-//      (途中で切れた JSON は (8) の parse 失敗 escalate になるのが唯一の観測面で、有効 JSON のまま
-//      フィールドが欠ける形は silent)。よって呼出元が inline args を小さく保つのが一次対策で、大きな
+//      (途中で切れた JSON は (8) の canonical block が [SCARGS fail-fast] で throw して run を殺すのが唯一の
+//      観測面で、有効 JSON のままフィールドが欠ける形は silent)。よって呼出元が inline args を小さく保つのが一次対策で、大きな
 //      供給物は参照渡しにする: 大きい diff → baseRef((9) の snapshot 合成が worktree で直接取得)/
 //      大きい文脈(goal・acceptance の詳細・review 前提資料) → contextFile(readable な path)。
 //      contextFile は ctxBlock 経由で classify/plan/implement/review/fix の各 prompt へ「まず Read せよ」
@@ -134,64 +140,67 @@ export const meta = {
 //      許可し不正値は '' へ倒す(空白入り path は非対応=呼出元が安全な path を選ぶ)。
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ── (8) defensive args parse(un-2yy): string で届いたら JSON.parse、object はそのまま ──────────
-// 受信型を記録(parse 前)= 呼出元の serialization 経路を返り値で可視化する。
-const __rawArgsType = args === null ? 'null' : Array.isArray(args) ? 'array' : typeof args
-let A
+// ── (sc-pfn4) args 受け取り規律: canonical preamble の verbatim 複製 ──────────────────────────────
+// 本 WF の必須 args【動的】宣言。meta の同名 field と同一集合であること(engine が二面宣言 + 集合一致を要求し、
+// 片面/不一致は rc=2 DECL_MISMATCH)。集合を worktree 1 本に絞る理由:
+//   - worktree: scope そのもの。欠けたまま走ると「どの木を読むか」が不定で全段が無意味になる(un-8c4)。
+//     ここで【無条件】必須にすることで「diff だけ渡す ad-hoc 直叩き経路」を殺す(P0-2 の throw 形 fail-fast)。
+//   - taskTitle は既定値を持つ非致命 arg ゆえ含めない。
+//   - goal / acceptance は「いずれか」要件で平坦な AND では表現不能・selfTestCmd は autoFix 時のみ必須ゆえ、
+//     どちらも block の【外】で意味的 fail-fast する(下記 isWorkerCell ゲート・canonical marker を含まない別 prefix)。
+const REQUIRED_ARGS = ['worktree']
+
+//SCARGS_BLOCK_START
+// (1) defensive parse と正規化: string 到達（呼出元が args を JSON 文字列化した経路）は JSON.parse で吸収し、
+//     object でないもの（'null' / '42' / 配列）は空 object へ倒す。parse 失敗は黙って {} にせず (3) で throw する。
+const __scargsRawType = args === null ? 'null' : Array.isArray(args) ? 'array' : typeof args
+let __scargsParseFailed = false
+let __scargsParseError = ''
+let A = {}
 if (typeof args === 'string') {
-  // string 到達 = 呼出元が args を JSON 文字列化した経路。parse して object へ正規化する。
   try {
-    const parsed = JSON.parse(args)
-    // JSON.parse は 'null'/'42'/'"x"' 等も成功させる → object でなければ args 不在と同義で扱う。
-    A = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    const __scargsParsed = JSON.parse(args)
+    A = __scargsParsed && typeof __scargsParsed === 'object' && !Array.isArray(__scargsParsed) ? __scargsParsed : {}
   } catch (e) {
-    // parse 失敗 = scope/契約が一切判定不能。agent を一切起動せず即 escalate(silent 暴走根治)。
-    // un-y4t: taskTitle が確定できない経路でも、最初の log で「これは cell-quality の run である」と
-    // 識別可能にする(同名 WF 並走時の進行ビュー識別。meta.name は純リテラル制約で run ごとに変えられない=
-    // ハーネス制約ゆえ log 行が達成可能な上限)。taskTitle 不明のため起動マーカーのみを冠する。
-    log('[args parse 失敗] cell-quality 起動: args の JSON.parse に失敗(taskTitle 不明)')
-    const reason = `defensive parse 失敗: string args の JSON.parse が失敗(${e && e.message ? e.message : 'invalid JSON'})。scope/契約が不明のまま実装/レビューさせない。呼出元が args の serialization を修正して再 invoke すること。`
-    log(`fail-fast: ${reason}`)
-    return {
-      taskTitle: '(untitled cell)',
-      taskType: '',
-      verifyStrategy: '',
-      mode: 'single',
-      converged: false,
-      escalate: true,
-      escalateReason: reason,
-      rounds: 0,
-      maxRounds: 0,
-      autoFix: false, // 起動前に中断=自動修正は一切走っていない
-      reviewModel: 'opus',
-      verifyModel: 'opus',
-      // (sc-94z) per-stage effort 解決前の早期中断=既定をリテラルで(return shape 一貫性)。guard 段は high・mechanical 段は medium。
-      effort: { cell: 'high', review: 'high', verify: 'high', fix: 'high', classify: 'medium', selfTest: 'medium', snapshot: 'medium' },
-      fableCapped: false,
-      maxConcurrency: 0, // (D2) args 不明=cap 計算前。0=無 cap
-      opusCapped: false,
-      blocking: [],
-      minor: [],
-      refuted: [],
-      unverified: [],
-      history: [],
-      diff: '',
-      machineryFailedLastRound: false,
-      // (10) sc-jx8: 起動前中断=self-test は一切走っていない。返り値 shape の一貫性のため skip を明示。
-      selfTestBaseline: { ran: false, skipped: true, skipReason: 'WF 起動前に中断(args parse 失敗)', passed: null, exitCode: null, rawLog: '' },
-      selfTestFinal: { ran: false, skipped: true, skipReason: 'WF 起動前に中断(args parse 失敗)', passed: null, exitCode: null, rawLog: '' },
-      receivedArgs: { type: __rawArgsType, parseFailed: true, keys: [] },
-      // (sc-j32) schema-guard block 定義前の早期中断=schema agent 未起動=集計は空。返り値 shape 一貫性のため literal で明示。
-      schemaHealth: { nullDeaths: [], degenerate: [] },
-      // (sc-7bv/sc-xyw) read-only agentType fallback の最終状態。ここは roAgent helper 定義前の早期中断=
-      // read-only agent を一度も起動していない=fallback は評価すらされていない → literal false で一貫させる。
-      roFallbackActive: false,
-      gate: `ESCALATE: ${reason}`,
-    }
+    __scargsParseFailed = true
+    __scargsParseError = e && e.message ? e.message : 'invalid JSON'
   }
-} else {
-  A = args && typeof args === 'object' && !Array.isArray(args) ? args : {}
+} else if (args && typeof args === 'object' && !Array.isArray(args)) {
+  A = args
 }
+
+// (2) receivedArgs: 「何が届いたか」を呼出元が一次監査するための要約。field 名は **type** に統一する
+//     （rawType 等に割れると監査 harness が読めない＝sc-4t3t で統一を確定）。
+const receivedArgs = {
+  type: __scargsRawType,
+  parseFailed: __scargsParseFailed,
+  keys: Object.keys(A),
+  keyTypes: Object.fromEntries(Object.keys(A).map((k) => [k, Array.isArray(A[k]) ? 'array' : typeof A[k]])),
+}
+
+// (3) 必須 args fail-fast（throw 形）: 欠落 / literal "undefined" / 空文字 / "[undefined]" / 空配列を等しく
+//     「不在」と判定する。非空判定だけでは literal "undefined" が素通りする（mandate-verify.workflow.js:50 の実測）。
+const __scargsAbsent = (v) => {
+  if (v === undefined || v === null) return true
+  if (typeof v === 'string') {
+    const t = v.trim()
+    return t === '' || t === 'undefined' || t === '[undefined]'
+  }
+  if (Array.isArray(v)) return v.length === 0
+  return false
+}
+const __scargsMissing = REQUIRED_ARGS.filter((k) => __scargsAbsent(A[k]))
+if (__scargsParseFailed || __scargsMissing.length > 0) {
+  const __scargsReason = __scargsParseFailed
+    ? 'args が JSON 文字列として届いたが parse 不能: ' + __scargsParseError
+    : '必須 args 欠落/未解決: ' + __scargsMissing.join(' / ')
+  throw new Error('[SCARGS fail-fast] ' + __scargsReason + ' / received=' + JSON.stringify(receivedArgs))
+}
+//SCARGS_BLOCK_END
+
+// ↑ ここまでが canonical block の verbatim 複製(workflows/lib/args-preamble.snippet.js が SSOT)。1 byte でも
+// 変えると engine が SNIPPET_BLOCK_DRIFT で落ちる。block 内へ WF 固有の field を足さない(足すなら block の後で
+// property 代入する = 下記 receivedArgs.roAgentType)。
 
 // ── (sc-7bv) read-only agent 起動 helper: builtin 'Explore' 消失(harness breaking change)への恒久 fix ──
 // 旧 read-only 段(classify/plan/snapshot/review/verify/self-test 実行)は builtin の read-only agent 型 'Explore'(書込
@@ -204,6 +213,10 @@ if (typeof args === 'string') {
 const _rawRoAgentType = typeof A.roAgentType === 'string' ? A.roAgentType.trim() : ''
 const RO_AGENT_TYPE = _rawRoAgentType || 'scribe:explore'
 const RO_FORCE_NONE = RO_AGENT_TYPE === 'none' // 'none' = 最初から agentType を付けない強制
+// (sc-pfn4) canonical block は全 WF で byte 一致でなければならない = WF 固有の監査 field は block の【後】で
+// property 代入して足す。roAgentType(解決した read-only agentType)は呼出元の一次監査面ゆえ receivedArgs に載せる
+// (block 内へ field を足すと SNIPPET_BLOCK_DRIFT・落とすと roAgentType の監査面が消える)。
+receivedArgs.roAgentType = RO_AGENT_TYPE
 let roFallbackActive = RO_FORCE_NONE // not found を一度検知したら以降降格(flag・並行 race は同じ降格へ収束=無害)
 
 // fallback 時、agentType の構造強制(書込ツール非所持)を prompt の read-only 規律で代替する(前置文)。
@@ -308,15 +321,6 @@ async function schemaAgent(runner, prompt, opts, degenerate) {
   return r
 }
 //SCJ32_BLOCK_END
-
-// receivedArgs 要約: キー一覧 + 各キーの受信型 + 生の受信型(parse 前)。呼出元監査用に返り値へ載せる。
-const receivedArgs = {
-  type: __rawArgsType, // 'string'(parse 済)/'object'/'undefined'/'null'/'array' 等(parse 前の生型)
-  parseFailed: false,
-  keys: Object.keys(A),
-  keyTypes: Object.fromEntries(Object.keys(A).map((k) => [k, Array.isArray(A[k]) ? 'array' : typeof A[k]])),
-  roAgentType: RO_AGENT_TYPE, // (sc-7bv) 解決した read-only agentType(既定 'scribe:explore' / override / 'none')
-}
 
 // ── args(固有物)。骨格は不変、ここだけ差し替える ───────────────────────────
 // un-2yy: defensive parse は args 容器(string/object)を正規化するが、個別フィールドの型までは保証しない。
@@ -907,12 +911,22 @@ const isBlocking = (f) => f && (f.severity === 'critical' || f.severity === 'maj
 const isMinor = (f) => f && (f.severity === 'minor' || f.severity === 'nit')
 const shortTitle = (f) => (f && f.title ? String(f.title).slice(0, 32) : 'finding')
 
-// ── (2) args fail-fast(un-8c4 吸収): worker-cell の必須 args 欠落を【agent 起動前】に検出 ────────
+// ── (2) 意味的 args fail-fast(un-8c4 吸収): worker-cell 固有の契約欠落を【agent 起動前】に検出 ────────
 // 不変条件: doImplement か autoFix を要求する worker-cell は worktree(scope)と goal/acceptance(契約)を
 // 必ず持つ。autoFix 要求時はさらに selfTestCmd(fail-closed ゲート)が要る。欠けたまま走ると scope 不定・
-// gate 不在で編集が暴走する(un-8c4: args 未着→全デフォルト化→自動 amend の rabbit-hole)。よって agent を
-// 一切起動せず escalate=true + 明示 reason で即 return する。読み取り専用の軽量用途(diff 供給 + single
-// モード = doImplement/autoFix なし)はこのゲート対象外=必須 args を課さず従来の柔軟性を保つ。
+// gate 不在で編集が暴走する(un-8c4: args 未着→全デフォルト化→自動 amend の rabbit-hole)。
+//
+// (sc-pfn4) ここは canonical block の【外】に置く意味的 fail-fast で、block とは役割が違う:
+//   - worktree の「不在」は block(REQUIRED_ARGS)が【無条件】に見る = doImplement/autoFix を伴わない
+//     読み取り専用の軽量用途(diff 供給 + single モード)でも worktree は必須になった。すなわち「diff だけ
+//     渡す ad-hoc 直叩き経路」は throw で殺される(P0-2 の仕様変更・従来の『ゲート対象外』は撤回)。
+//   - block が見られないのは (a) sentinel '(current worktree)' の拒否(block の不在判定は空/undefined/
+//     '[undefined]'/空配列しか見ないので sentinel は素通りする=un-8c4 guard の silent 弱体化を防ぐ)、
+//     (b) 「goal / acceptance のいずれか」(平坦な AND では表現不能)、(c) autoFix 時のみ必須の selfTestCmd。
+//   - 発火条件は isWorkerCell のまま(無条件化しない)。無条件化すると正常 args の positive control でも
+//     必ず throw し、engine が二面宣言を機械照合できる走行が 1 つも無くなる(POSITIVE_THROW_UNATTRIBUTED)。
+//   - throw の message には canonical marker('[SCARGS fail-fast]')を含めない別 prefix を使う = engine が
+//     「preamble 由来の throw」と「骨格固有の意味検証由来の throw」を帰属で弁別できるようにする。
 const isWorkerCell = doImplement || wantAutoFix
 if (isWorkerCell) {
   const missing = []
@@ -924,39 +938,12 @@ if (isWorkerCell) {
   if (missing.length) {
     const reason = `必須 args 欠落(worker-cell=doImplement/autoFix): ${missing.join(' / ')}。scope/契約/gate 不在のまま実装させない(un-8c4 silent 暴走根治)。`
     log(`fail-fast: ${reason}`)
-    // F3: 通常 result とフィールドを揃える(呼出元監査の一貫性)。rounds は 0(agent 未起動)。
-    return {
-      taskTitle,
-      taskType,
-      verifyStrategy: '',
-      mode: wantAutoFix ? 'loop' : 'single',
-      converged: false,
-      escalate: true,
-      escalateReason: reason,
-      rounds: 0,
-      maxRounds,
-      autoFix: false, // 起動前に中断=自動修正は一切走っていない
-      reviewModel,
-      verifyModel,
-      effort: effortSummary, // (sc-94z) 解決した per-stage effort(監査用・return shape 一貫性)
-      fableCapped: isFable(reviewModel) || isFable(verifyModel),
-      maxConcurrency, // (D2) opus 経路 cap(監査用)。0=無 cap
-      opusCapped: maxConcurrency > 0,
-      blocking: [],
-      minor: [],
-      refuted: [],
-      unverified: [],
-      history: [],
-      diff: '',
-      machineryFailedLastRound: false,
-      // (10) sc-jx8: 必須 args 欠落で agent 未起動=self-test は走っていない。返り値 shape 一貫性のため skip を明示。
-      selfTestBaseline: { ran: false, skipped: true, skipReason: 'args fail-fast(必須 args 欠落)で agent 未起動', passed: null, exitCode: null, rawLog: '' },
-      selfTestFinal: { ran: false, skipped: true, skipReason: 'args fail-fast(必須 args 欠落)で agent 未起動', passed: null, exitCode: null, rawLog: '' },
-      receivedArgs, // 何が届いたか(キー一覧 + 受信型)を呼出元監査用に明示
-      schemaHealth: { nullDeaths: schemaHealth.nullDeaths.slice(), degenerate: schemaHealth.degenerate.slice() }, // (sc-j32) fail-fast=schema agent 未起動ゆえ空。返り値 shape 一貫性
-      roFallbackActive, // (sc-xyw) read-only agentType fallback の最終状態(fail-fast=agent 未起動ゆえ RO_FORCE_NONE 以外は false)
-      gate: `ESCALATE: ${reason} 呼出元/人間が args を補って再 invoke すること。`,
-    }
+    // (sc-pfn4) escalate return 形をやめ throw で run を殺す(P0-2)。return 形は「undefined を掴んだまま完走」を
+    // 構造的に止められず、呼出元が返り値を読まない経路では silent に流れる。prefix は canonical marker と
+    // 別語にする(engine の帰属弁別面)。agent は 1 体も起動していない。
+    throw new Error(
+      '[cell-quality args fail-fast] ' + reason + ' 呼出元/人間が args を補って再 invoke すること。 / received=' + JSON.stringify(receivedArgs)
+    )
   }
 }
 
