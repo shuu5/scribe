@@ -77,6 +77,12 @@ const envStr = (name, dflt) => {
   return v === undefined || v === '' ? dflt : v
 }
 
+// (sc-pfn4) throw 経路の観測面: WF が args fail-fast で throw すると runWorkflow はローカルの calls/logs を
+// 返せず「agent が 1 体も起動していない」を外から確認できなかった。集計器を外側スコープへ持ち上げ、
+// 成功経路は従来どおり(この object を経由するだけ・stdout は byte 同一)・throw 経路では entrypoint の
+// .catch が同じ集計器から DRIVER_AGENT_CALLS / DRIVER_CALLSEQ を stderr へ出す。
+const collected = { calls: [], logs: [], agentTypeCalls: [], promptCalls: [], effortCalls: [] }
+
 async function runWorkflow() {
   // CQ_ARGS_STRING が設定されていれば「そのままの string」を args として渡す(WF の defensive parse 経路を踏む)。
   // 通常は CQ_ARGS(JSON)を object にして渡す。
@@ -96,11 +102,12 @@ async function runWorkflow() {
   const FIX_SUMMARY = envStr('CQ_FIX_SUMMARY', 'stub autofix')
   const SNAPSHOT = envStr('CQ_SNAPSHOT', 'diff --git a/x b/x\n@@ -1 +1 @@\n-old\n+new\n')
 
-  const calls = [] // agent 呼び出しの label を順に記録(ordering/回数の assert 用)
-  const logs = []
-  const agentTypeCalls = [] // (sc-xyw) agentType が付いた呼出しの記録({label, agentType})=降格の後続伝播を検証する
-  const effortCalls = [] // (sc-dc9) 各 agent 呼出しの opts.effort を記録({label, effort})=全 agent に effort が pin されたか検証する
-  const promptCalls = [] // (sc-xyw errata) 各呼出しの prompt に RO_DISCIPLINE 前置が付いたかを記録({label, hasDiscipline})=降格後の read-only 規律代替(中核安全機構)を behavioral に検証する
+  // (sc-pfn4) 実体は外側スコープの collected(throw 経路でも読めるようにするため)。以降の使い方・意味は不変。
+  const calls = collected.calls // agent 呼び出しの label を順に記録(ordering/回数の assert 用)
+  const logs = collected.logs
+  const agentTypeCalls = collected.agentTypeCalls // (sc-xyw) agentType が付いた呼出しの記録({label, agentType})=降格の後続伝播を検証する
+  const effortCalls = collected.effortCalls // (sc-dc9) 各 agent 呼出しの opts.effort を記録({label, effort})=全 agent に effort が pin されたか検証する
+  const promptCalls = collected.promptCalls // (sc-xyw errata) 各呼出しの prompt に RO_DISCIPLINE 前置が付いたかを記録({label, hasDiscipline})=降格後の read-only 規律代替(中核安全機構)を behavioral に検証する
   const RO_NOTFOUND = envBool('CQ_RO_NOTFOUND', false) // (sc-xyw) true=agentType 付き呼出しを probe 形状 not found で reject し roAgent fallback を発火させる
 
   const agentStub = (prompt, opts) => {
@@ -283,6 +290,10 @@ if (mode === 'emit-wrapped') {
     })
     .catch((e) => {
       console.error(`DRIVER_ERROR: ${e && e.stack ? e.stack : e}`)
+      // (sc-pfn4) throw 経路の観測面: 「agent が 1 体も起動していない」(=fail-fast より前に仕事を始めていない)
+      // を bats が機械 assert できるようにする。成功経路の stdout(K 行 / RESULT 行)には一切足さない。
+      console.error(`DRIVER_AGENT_CALLS ${collected.calls.length}`)
+      console.error(`DRIVER_CALLSEQ ${collected.calls.join('|')}`)
       process.exit(1)
     })
 } else {

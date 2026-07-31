@@ -349,8 +349,17 @@ EOF
 # ── T8 ───────────────────────────────────────────────────────────────────────
 # inventory: invariant=3 骨格は legacy 面（骨格別 verbatim probe args）で agentCalls=0
 #          | polarity=positive
-#          | mutant_fingerprint=cell-quality の isWorkerCell gate を除去（`if (isWorkerCell)` → `if (false)`）
-#            → cell-quality の legacy 判定が rc 0→1（AGENT_STARTED_BEFORE_FAILFAST）
+#          | mutant_fingerprint=cell-quality の canonical block の欠落判定【と】block 外の意味的 fail-fast gate を
+#            同時に除去（`if (__scargsParseFailed || __scargsMissing.length > 0) {` → `if (false) {` かつ
+#            `if (isWorkerCell) {` → `if (false) {`）→ 病的 probe args `{"doImplement":true}` が classify agent へ
+#            到達し cell-quality の legacy 判定が rc 0→1（AGENT_STARTED_BEFORE_FAILFAST）
+#            ※ sc-pfn4 の canonical cutover 前は `if (isWorkerCell)` gate の除去【単独】が変異点だった。cutover 後は
+#              probe args `{"doImplement":true}` が【block の】必須 args(worktree)欠落でも throw するため、block 側の
+#              判定除去も要る＝変異点が 2 箇所の複合になった（block 側は必要条件だが十分条件ではない）。
+#            ※ block 側だけを除去しても T8 は flip しない（実測: block は素通りするが block 外の
+#              `if (isWorkerCell)` が `[cell-quality args fail-fast] …worktree / goal/acceptance のいずれか` で
+#              throw し、DRIVER_AGENT_CALLS 0 / CALLSEQ 空のまま死ぬ＝agentCalls=0 は保たれ legacy 面は rc=0）。
+#              「単一変異で足りる」と読んで green を見た者は T8 を空虚と誤結論するので、この 2 行を削らない。
 @test "sc-4t3t T8: 骨格 (A) legacy — 骨格別 verbatim probe args で 3 本とも agentCalls=0（rc=0）" {
   require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   local pass=""
@@ -377,7 +386,9 @@ EOF
   require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   # 波1（sc-k33c 項目6 / C1a・L1c）が canonical snippet へ置換した瞬間にここが RED になる向き＝退行検知でなく
   # 「置換が land した」ことの tripwire。RED になったら EXPECTED_CANONICAL_RED から当該骨格を外す。
-  local expected="cell-quality mandate-verify needs-user-prebake"
+  # (sc-pfn4 / L1a-A) cell-quality が canonical block へ cutover され throw 形になった＝tripwire が設計どおり
+  # 発火したので集合から外す。残る 2 本（mandate-verify / needs-user-prebake）は未 cutover ゆえ RED が正。
+  local expected="mandate-verify needs-user-prebake"
   local red=""
   run "$ENGINE" --mode skeleton --file "$SKEL_CELL_QUALITY" --expect canonical --probe-args "$ARGS_CELL_QUALITY" --label cell-quality
   if [ "$status" -eq 1 ] && [[ "$output" == *"VIOLATION NO_THROW_ON_MISSING_ARGS"* ]]; then red="$red cell-quality"; fi

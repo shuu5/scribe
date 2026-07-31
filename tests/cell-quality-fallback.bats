@@ -74,25 +74,33 @@ setup() {
   [ "$atc" -gt 1 ]
 }
 
-# ── acceptance 3: roFallbackActive が全 return 経路(通常/defensive-parse 失敗/args fail-fast)で返り値に載る ──
-@test "sc-xyw acceptance3: roFallbackActive が全 return 経路(通常/defensive-parse 失敗/args fail-fast)で返り値 JSON に載る" {
-  # 通常経路
+# ── acceptance 3(sc-pfn4 で throw 形へ改修): roFallbackActive の搭載面と、消えた早期 return の throw 化 ──
+# cutover 前は defensive-parse 失敗 / args fail-fast も escalate=true の【早期 return】で、そこにも
+# roFallbackActive が載ることを見ていた。canonical cutover でその 2 経路は throw になり return path 自体が
+# 消えたので、acceptance 3 は「実在する return path(=result-level の 1 本)に載る」+「消えた 2 経路は agent を
+# 1 体も起動せず run が死ぬ」の 2 本立てへ書き換える(下限を下げるのでなく、消えた面の不変条件を移す)。
+@test "sc-xyw acceptance3(sc-pfn4 改修): roFallbackActive が実在 return path に載り、消えた 2 経路は throw で死ぬ" {
+  # 通常経路(実在する唯一の result-level return)
   run env CQ_ARGS="$ARGS_WORKER" node "$DRIVER" run
   [ "$status" -eq 0 ]
   [[ "$output" == *"K roFallbackActive false"* ]]
   [[ "$output" == *'"roFallbackActive"'* ]]
-  # defensive parse 失敗の早期 return(roAgent helper 定義前=fallback 未評価ゆえ literal false)
+  # fallback 発火経路でも最終降格状態が載る(true 側も実走で固定=literal false への退行を塞ぐ)。
+  run env CQ_ARGS="$ARGS_WORKER" CQ_RO_NOTFOUND=true node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"roFallbackActive":true'* ]]
+  # 旧・defensive parse 失敗の早期 return → canonical block の throw(rc=1・canonical marker・agent 0 起動)
   run env CQ_ARGS_STRING='{bad json,,' node "$DRIVER" run
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"K escalate true"* ]]
-  [[ "$output" == *"K roFallbackActive false"* ]]
-  [[ "$output" == *'"roFallbackActive"'* ]]
-  # args fail-fast の早期 return(必須 args 欠落)
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DRIVER_ERROR"* ]]
+  [[ "$output" == *"[SCARGS fail-fast]"* ]]
+  [[ "$output" == *"DRIVER_AGENT_CALLS 0"* ]]
+  # 旧・args fail-fast の早期 return(必須 args 欠落)→ 同上
   run env CQ_ARGS='{"autoFix":true}' node "$DRIVER" run
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"K escalate true"* ]]
-  [[ "$output" == *"K roFallbackActive false"* ]]
-  [[ "$output" == *'"roFallbackActive"'* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DRIVER_ERROR"* ]]
+  [[ "$output" == *"[SCARGS fail-fast]"* ]]
+  [[ "$output" == *"DRIVER_AGENT_CALLS 0"* ]]
 }
 
 # ── 構造 pin(両骨格・source-level): fallback 機構と全 return 経路への roFallbackActive 搭載 ──────────────────
@@ -103,13 +111,20 @@ setup() {
     grep -q 'let roFallbackActive' "$f"
     grep -q '\[RO-FALLBACK\]' "$f"
     grep -q 'isAgentTypeNotFound' "$f"
-    # 早期中断経路(helper 定義前)= literal false。
-    grep -q 'roFallbackActive: false' "$f"
     # 変数 shorthand(helper 定義後の各 return)。
     grep -Eq '^[[:space:]]*roFallbackActive,' "$f"
   done
-  # 各骨格の shorthand 出現数(全 return 経路カバレッジの下限): cell-quality 2 経路以上・prebake 4 経路以上。
-  [ "$(grep -cE '^[[:space:]]*roFallbackActive,' "$WF")" -ge 2 ]
+  # (sc-pfn4) 早期中断経路(helper 定義前)の literal false は prebake 専用の面になった。cell-quality は canonical
+  # cutover で helper 定義前の早期 return が throw へ置換され、literal 形の return path が 0 本になったため
+  # (WF から assert を削除するのでなく PREBAKE 側へ移設する=prebake 側の面は 1 byte も緩めない)。
+  grep -q 'roFallbackActive: false' "$PREBAKE"
+  [ "$(grep -c 'roFallbackActive: false' "$WF")" -eq 0 ]
+  # (sc-pfn4) shorthand 出現数は per-file に分離し、それぞれ実在 return path 数へ焼き直す。
+  #   cell-quality: cutover 後の result-level return は 1 本のみ(早期 return 2 本が throw 化)= 実在数 1 で exact 固定。
+  #     「載っていない return path が 0 本」は tests/cell-quality-selftest.bats の behavioral tooth が別に pin する
+  #     (下限だけを下げると到達不能 return の dead code 温存で grep pin だけ通る抜け道が残るため)。
+  #   prebake: 非接触ゆえ現行実測(4)の下限を維持する。
+  [ "$(grep -cE '^[[:space:]]*roFallbackActive,' "$WF")" -eq 1 ]
   [ "$(grep -cE '^[[:space:]]*roFallbackActive,' "$PREBAKE")" -ge 4 ]
   # meta.whenToUse に roAgentType(acceptance 2)。
   grep -A2 'whenToUse:' "$WF" | grep -q 'roAgentType'
