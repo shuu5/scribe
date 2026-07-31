@@ -42,16 +42,55 @@ function emitWrapped() {
     `async function __cqrun(${INJECTED.join(', ')}) {\n${body}\n}\n`
 }
 
+// ── (sc-k33c) cap 系例外の stub 生成: name 経路と message 経路を **排他的に** 作り分ける ────────────
+// WF 側の判定は「name **または** message の指紋」(AND 禁止)。AND に退行すると片方だけでは検知できなくなる
+// ため、mode='name' は message に指紋を一切含めず / mode='message' は name を既定の 'Error' のまま にする。
+// kind: 'quota'(turn token budget 枯渇) | 'error'(harness の agent 本数上限) | 'plain'(cap ではない例外)。
+// (sc-k33c errata) 'plain' = name にも message にも cap 指紋を **一切** 含まない machinery 例外。capCatch の
+// fail-closed 再 throw(`if (!reason) throw e`)を behavioral に駆動できる唯一の経路。これが無いと「6 つの新
+// call site が非 cap 例外まで飲み込む完全 fail-open」への退行に検知面が無い(CQ_THROW_KIND の 'quota'/'error'
+// は両方 makeCapError＝常に cap 指紋を持つため、fail-closed 分岐を一度も踏めなかった)。
+const CAP_ERR_MODE = process.env.CQ_CAP_ERR_MODE || 'name'
+function makeCapError(kind) {
+  if (kind === 'plain') {
+    // 指紋('budget exceeded'/'token budget'/'agent cap'/'agent limit'/'exceeded the agent')を含まない文言。
+    return new Error('stub machinery failure: deliberately fingerprint-free (not a cap condition)')
+  }
+  // (sc-k33c ERRATA-01 B2) near-miss: 指紋の **語の途中に一致してしまう** 実在しうる machinery 文言。
+  // 素の substring 一致だと cap と誤判定され fail-closed 再 throw が迂回される(gate 実測の退行形)。
+  // 語境界一致なら非 cap のままであることを negative tooth で固定する。CQ_THROW_KIND で選ぶ。
+  if (kind === 'near-capability') return new Error('agent capability probe returned malformed payload')
+  if (kind === 'near-capacity') return new Error('agent capacity planner returned no route')
+  if (kind === 'near-exceededness') return new Error('budget exceededness metric unavailable')
+  if (kind === 'near-limitless') return new Error('agent limitless mode is not supported here')
+  if (CAP_ERR_MODE === 'message') {
+    // name は 'Error' のまま = message 指紋だけで cap と判定できるか(OR の右辺)を駆動する。
+    return new Error(kind === 'quota' ? 'workflow token budget exhausted for this turn' : 'workflow agent cap reached')
+  }
+  // message には指紋を一切含めない = name だけで cap と判定できるか(OR の左辺)を駆動する。
+  const e = new Error('stub throw (no fingerprint in this message)')
+  e.name = kind === 'quota' ? 'WorkflowBudgetExceededError' : 'WorkflowAgentCapError'
+  return e
+}
+// (sc-k33c K1b(iv)) CQ_THROW_AT_STAGE: 'pipeline' / 'parallel' = 入口の【同期 throw】を再現する
+// (harness の reject 形より厳しい形で WF の try/catch 包みを駆動する)。'element-budget' = 要素側(verify agent)
+// が budget 例外を投げる形 = parallel が要素を null 化する経路の再現。
+const THROW_AT_STAGE = process.env.CQ_THROW_AT_STAGE || ''
+
 // ── Workflow の parallel/pipeline セマンティクスを忠実に再現 ─────────────────────
 // parallel: barrier。thunk が throw したら null に正規化(reject は伝播しない)。
 function makeParallel() {
-  return (thunks) => Promise.all(thunks.map((t) => Promise.resolve().then(t).catch(() => null)))
+  return (thunks) => {
+    if (THROW_AT_STAGE === 'parallel') throw makeCapError('quota')
+    return Promise.all(thunks.map((t) => Promise.resolve().then(t).catch(() => null)))
+  }
 }
 // pipeline: 各 item を全 stage に通す(barrier 無し)。stage が throw したら item は null 化し以降 stage を skip。
 // stage callback は (prevResult, originalItem, index)。stage1 の prevResult は item 自身。
 function makePipeline() {
-  return (items, ...stages) =>
-    Promise.all(
+  return (items, ...stages) => {
+    if (THROW_AT_STAGE === 'pipeline') throw makeCapError('error')
+    return Promise.all(
       items.map(async (item, index) => {
         let cur = item
         for (let s = 0; s < stages.length; s++) {
@@ -64,6 +103,7 @@ function makePipeline() {
         return cur
       })
     )
+  }
 }
 
 // ── stub scenario を環境変数から読む ─────────────────────────────────────────────
@@ -109,6 +149,15 @@ async function runWorkflow() {
   const effortCalls = collected.effortCalls // (sc-dc9) 各 agent 呼出しの opts.effort を記録({label, effort})=全 agent に effort が pin されたか検証する
   const promptCalls = collected.promptCalls // (sc-xyw errata) 各呼出しの prompt に RO_DISCIPLINE 前置が付いたかを記録({label, hasDiscipline})=降格後の read-only 規律代替(中核安全機構)を behavioral に検証する
   const RO_NOTFOUND = envBool('CQ_RO_NOTFOUND', false) // (sc-xyw) true=agentType 付き呼出しを probe 形状 not found で reject し roAgent fallback を発火させる
+  // (sc-k33c) cap の決定論 knob。既定はすべて「無効(=現状維持)」= 既存 bats は 1 本も影響を受けない。
+  const BUDGET_THROW_AT = Number(process.env.CQ_BUDGET_THROW_AT || 0) // N 本目の agent で quota 例外
+  const AGENT_CAP_AT = Number(process.env.CQ_AGENT_CAP || 0) // N 本目の agent で agent-cap 例外
+  const SPEND_PER_AGENT = Number(process.env.CQ_SPEND_PER_AGENT || 0) // budget.spent() の 1 本あたり増分(token 情報ログ用)
+  const BUDGET_TOTAL = process.env.CQ_BUDGET_TOTAL ? Number(process.env.CQ_BUDGET_TOTAL) : null // budget.total(null=未設定)
+  const THROW_AT_LABEL = envStr('CQ_THROW_AT_LABEL', '') // label prefix 指定で cap 例外を投げる
+  const THROW_KIND = envStr('CQ_THROW_KIND', 'quota') // 'quota' | 'error' | 'plain'(=cap 指紋なし=fail-closed 駆動)
+  const REVIEW_ORDER = envStr('CQ_REVIEW_ORDER', '') // 'reverse' = review の解決順を反転(K1c 決定論の駆動)
+  let reviewSeq = 0
 
   const agentStub = (prompt, opts) => {
     const label = (opts && opts.label) || ''
@@ -120,6 +169,15 @@ async function runWorkflow() {
     // この前置マーカー(agentType 構造強制の代替)が付いた呼出しを記録し、消失(=完全 fail-open 退行)を behavioral に検出する。
     // (sc-mbcm) prompt 全文も保持する=CQ_PROMPT_GREP 軸(contextFile 注入等 prompt-level 配線の behavioral 検証)が読む。
     promptCalls.push({ label, hasDiscipline: /agentType 構造強制の代替/.test(String(prompt == null ? '' : prompt)), prompt: String(prompt == null ? '' : prompt) })
+    // (sc-k33c) cap 系例外の注入: N 本目の agent 呼出しで budget/agent-cap 例外を投げる(1-indexed)。
+    // 層3(cap 系例外 → capExceeded 正規化)を stub で end-to-end 駆動する唯一の経路(実機の turn token budget は
+    // 呼出元が設定しないと発火しないため=K9 の「層3 は stub 検証のみ」)。
+    // CQ_THROW_AT_LABEL: label prefix 指定で cap 例外を投げる(呼出し番号を数えずに 6 call site を個別に狙える
+    // = 変異注入 tooth が call 順の変化に脆くならない)。kind は CQ_THROW_KIND('quota'|'error')。
+    if (THROW_AT_LABEL && label.startsWith(THROW_AT_LABEL)) return Promise.reject(makeCapError(THROW_KIND))
+    if (BUDGET_THROW_AT > 0 && calls.length === BUDGET_THROW_AT) return Promise.reject(makeCapError('quota'))
+    if (AGENT_CAP_AT > 0 && calls.length === AGENT_CAP_AT) return Promise.reject(makeCapError('error'))
+    if (THROW_AT_STAGE === 'element-budget' && label.startsWith('verify:')) return Promise.reject(makeCapError('quota'))
     // (sc-xyw) fallback シナリオ: agentType 付き呼出しは probe verified の "not found" 形状で reject する。
     // roAgent は isAgentTypeNotFound を検知 → [RO-FALLBACK] を log → 降格 flag を立て → agentType 無しで再呼出しする
     // (=再呼出しは agentType 無しゆえここを通らず resolve)。降格が後続へ伝播していれば以降の read-only 段も最初から
@@ -142,7 +200,17 @@ async function runWorkflow() {
     if (label.startsWith('plan')) return Promise.resolve({ acceptance: 'stub acceptance', notes: '' })
     if (label.startsWith('implement')) return Promise.resolve('stub implement done')
     if (label.startsWith('snapshot')) return Promise.resolve(SNAPSHOT)
-    if (label.startsWith('review:')) return Promise.resolve({ findings: REVIEW_FINDINGS })
+    if (label.startsWith('review:')) {
+      const res = { findings: REVIEW_FINDINGS }
+      // (sc-k33c K1c) stage1(review)の解決順を反転させる knob。pipeline は barrier 無しゆえ観点は到着順に
+      // stage2 へ流れる = 共有カウンタ先着順 admission だと admit 集合が解決順で変わる(非決定)。観点別固定枠
+      // なら反転しても admit 集合は同一 — その決定論を behavioral に駆動するための人工遅延。
+      if (REVIEW_ORDER === 'reverse') {
+        const i = reviewSeq++
+        return new Promise((r) => setTimeout(() => r(res), (8 - i) * 5))
+      }
+      return Promise.resolve(res)
+    }
     if (label.startsWith('verify:')) return Promise.resolve({ refuted: VERIFY_REFUTED, confidence: 'high', reasoning: 'stub' })
     if (label.startsWith('autofix')) {
       return Promise.resolve({ applied: ['stub fix'], selfTestRan: true, selfTestPassed: FIX_SELFTEST_PASSED, amended: FIX_SELFTEST_PASSED, summary: FIX_SUMMARY, newDiff: SNAPSHOT })
@@ -157,7 +225,13 @@ async function runWorkflow() {
     log: (m) => logs.push(String(m)),
     phase: () => {},
     args: wfArgs,
-    budget: { total: null, spent: () => 0, remaining: () => Infinity },
+    // (sc-k33c) budget stub: total は CQ_BUDGET_TOTAL(未設定=null=実機の既定)。spent() は「起動した agent 本数 ×
+    // CQ_SPEND_PER_AGENT」= token 情報ログ(判定に使わない)の delta を決定論的に駆動する。
+    budget: {
+      total: BUDGET_TOTAL,
+      spent: () => calls.length * SPEND_PER_AGENT,
+      remaining: () => (BUDGET_TOTAL === null ? Infinity : Math.max(0, BUDGET_TOTAL - calls.length * SPEND_PER_AGENT)),
+    },
     workflow: async () => null,
   }
 
@@ -275,6 +349,49 @@ function printResult(result, calls, logs, agentTypeCalls, promptCalls, effortCal
   // 引き上げ warn したか(behavioral)。floor-clamp は '許可外'(allowlist 外)とは別経路(allowlist 内だが下げ拒否)
   // ゆえ専用マーカー '下限フロア' で弁別する。これが消える(silent に下げる)退行を behavioral に捕える。
   K('effortFloorClamped', (logs || []).some((l) => String(l).includes('下限フロア')))
+  // ── (sc-k33c) cap の behavioral 観測軸 ───────────────────────────────────────
+  // callSeq: agent 呼出し label の | 連結。K2'(後方互換)の golden 比較と K3(本数 assert)の一次データ。
+  // label には round 番号が入る(例 'review:correctness r1')ので、呼出し列の同一性がそのまま比較できる。
+  K('callSeq', calls.join('|'))
+  K('agentCallTotal', calls.length)
+  const cr = result.capReport && typeof result.capReport === 'object' ? result.capReport : {}
+  const cd = Array.isArray(result.capDropped) ? result.capDropped : []
+  K('capExceeded', result.capExceeded === true)
+  K('capReason', String(cr.reason === undefined ? '<none>' : cr.reason || '<empty>'))
+  K('capLimit', cr.limit)
+  K('capUnit', cr.unit)
+  K('capSpentEstimate', cr.spentEstimate)
+  K('capDroppedAgents', cr.droppedAgents)
+  K('capDroppedBlocking', cr.droppedBlocking)
+  K('capHistoryCount', cr.historyCount)
+  // (sc-k33c errata) self-test 段(情報ログ専用=B4)で捕捉した cap 例外の件数。terminal/round gate を駆動せず
+  // ここだけに載る = 「可視化は残しつつ converged/escalate を反転させない」の behavioral 観測軸。
+  K('capSelfTestExceptions', Array.isArray(cr.selfTestExceptions) ? cr.selfTestExceptions.length : -1)
+  K('capStagesCount', Array.isArray(cr.stages) ? cr.stages.length : -1)
+  K('capBudgetTotal', cr.budgetTotal === null ? 'null' : cr.budgetTotal)
+  K('capTokenDelta', cr.tokenDelta === null ? 'null' : cr.tokenDelta)
+  K('capDroppedCount', cd.length)
+  K('capDroppedReasons', Array.from(new Set(cd.map((d) => String(d && d.reason)))).sort().join(','))
+  // capDroppedTitles: 落とした対象の決定論 pin(順序に依らない集合比較用に sort する)。
+  K('capDroppedTitles', cd.map((d) => String(d && d.title)).sort().join(';'))
+  // verifyLabels: 実際に verify を起動した label の集合(sort 済)= stage1 の解決順を入れ替えても同一であること
+  // (K1c の決定論 pin)を集合比較する。verifyByDim: 観点別の verify 本数(観点単位 top-K の behavioral 面)。
+  const verifyCalls = calls.filter((c) => c.startsWith('verify:'))
+  K('verifyLabels', verifyCalls.slice().sort().join(';'))
+  K('verifyCallCount', verifyCalls.length)
+  const byDim = {}
+  for (const c of verifyCalls) {
+    const dim = c.split(':')[1] || '?'
+    byDim[dim] = (byDim[dim] || 0) + 1
+  }
+  K('verifyByDim', Object.keys(byDim).sort().map((k) => `${k}=${byDim[k]}`).join(','))
+  K('reviewCallCount', calls.filter((c) => c.startsWith('review:')).length)
+  K('unverifiedCount', Array.isArray(result.unverified) ? result.unverified.length : -1)
+  // unverifiedTitles: capDropped[] と **同じ finding が二重計上されていない** ことを集合で比較するための軸。
+  K('unverifiedTitles', Array.isArray(result.unverified) ? Array.from(new Set(result.unverified.map((f) => String(f && f.title)))).sort().join(';') : '')
+  K('blockingCount', Array.isArray(result.blocking) ? result.blocking.length : -1)
+  K('minorCount', Array.isArray(result.minor) ? result.minor.length : -1)
+  K('gateHasCapNote', gate.includes('※cap 発火'))
   console.log(`ESCALATE_REASON ${String(result.escalateReason || '')}`)
   console.log(`RESULT ${JSON.stringify(result)}`)
 }
