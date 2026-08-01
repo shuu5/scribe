@@ -77,7 +77,8 @@ _write_fixtures() {
   {"label":"black2","email":null,"ok":true,"stale":false,"error":null,
    "five_hour_pct":43,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
    "seven_day_pct":97,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
-  {"label":"black3","email":null,"ok":false,"stale":true,"error":"認証切れ(/login 要)",
+  {"label":"black3","email":null,"ok":false,"stale":true,"error":"HTTP 429","error_code":"429",
+   "attempted":true,
    "five_hour_pct":10,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
    "seven_day_pct":20,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
   {"label":"black4","email":null,"ok":true,"stale":false,"error":null,
@@ -86,6 +87,11 @@ _write_fixtures() {
   {"label":"phito","email":null,"ok":false,"stale":true,"error":"認証切れ(/login 要)"}
 ] }
 JSON
+  # sc-7czu: black3 を「一過性 429 で degrade（snapshot cache の実データ有り）」＝**復帰クラス**へ更新した。
+  #   ラベルは現状維持（PUBLIC repo へ露出を増やさない）。これで GOLDEN が「healthy 3 件 + 復帰クラス
+  #   1 件 + データ無し stale 1 件（phito）」の三分類を全部含む否定対照になり、tier 順序を pin できる。
+  #   black3 の score は 80（h5=90 / h7=80）で healthy 最上位 black4 の 4 を大きく上回る＝score 減点では
+  #   追い越しを止められないことの実データ。phito は error_code を持たないので従来どおり除外される。
 
   ZERO="$BATS_TEST_TMPDIR/zero.json"
   cat > "$ZERO" <<JSON
@@ -149,16 +155,20 @@ JSON
 JSON
 
   # --- sc-j8zv fixtures（実アカウント名・実残量は書かない＝本 repo は PUBLIC）-------------------
-  # incident 署名: claude-usage が live fetch に失敗して snapshot cache へ degrade した形。
-  #   ok=false/stale=true だが **pct/resets_at の実データは載っている**・rc=0（＝「直に叩くと値が返る」）。
-  #   これが「usage は正常に見えるのに適格 0」の実体（sc-j8zv 根因）。error_code=429 は一過性 rate limit。
+  # (A) 上流劣化の実例＝「usage 側に健全 account が 1 件も無い」形。
+  # ★sc-7czu で入力を差し替えた: 旧版は全件 429 だったが、429 は本 fix で**復帰クラス**（候補に残す）に
+  #   なったため「全 stale」はもう (A) の実例ではない（適格が残ってしまい (A) の pin が空虚化する）。
+  #   ∴ 全件 dead（nologin＝再 login が要る回復しないクラス）へ置換して (A) の意味論を保つ。
+  #   snapshot cache の実データは載せたまま（＝「直に叩くと値が返る」ことは健全の証拠ではない、を pin）。
   DEGRADED="$BATS_TEST_TMPDIR/degraded.json"
   cat > "$DEGRADED" <<JSON
 { "accounts": [
-  {"label":"acctA","ok":false,"stale":true,"error":"HTTP 429","error_code":"429",
+  {"label":"acctA","ok":false,"stale":true,"error":"未ログイン","error_code":"nologin",
+   "attempted":false,"skip_reason":"no_credentials",
    "five_hour_pct":10,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
    "seven_day_pct":20,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
-  {"label":"acctB","ok":false,"stale":true,"error":"HTTP 429","error_code":"429",
+  {"label":"acctB","ok":false,"stale":true,"error":"未ログイン","error_code":"nologin",
+   "attempted":false,"skip_reason":"no_credentials",
    "five_hour_pct":30,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
    "seven_day_pct":40,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"}
 ] }
@@ -205,6 +215,11 @@ JSON
   #   good1 = 健全 × 改行入り label → 行注入で偽 label 'EVIL' を最上位候補にできた（実測・fix 前）
   #   victim = ok=false/stale=true（使用不可）× TAB 入り label → 列注入で col2="1" に見せられた（同上）
   # ＝外部データが「呼出元の使う config dir」を決められる fail-open。fix 後は 1 account = 1 行 × 10 列。
+  # ★sc-7czu: victim に error_code="nologin"（回復しない死亡クラス）を明示した。旧版は「error_code が
+  #   無いから除外される」に暗黙依存しており、stale 復帰の allowlist 導入で victim が候補化すると
+  #   本 teeth が「期待件数を 2→3 に書き換える」形で骨抜きにされうる。新 semantics でも**確実に除外
+  #   される class** を victim にすることで、3 つの assertion（偽 label が picks に出ない / 使用不可
+  #   account が col2="1" に化けない / 1 account = 1 行 × 10 列）を無傷のまま維持する。
   TSVINJECT="$BATS_TEST_TMPDIR/tsvinject.json"
   cat > "$TSVINJECT" <<'JSON'
 { "accounts": [
@@ -212,7 +227,8 @@ JSON
    "seven_day_pct":0,"seven_day_resets_at":null},
   {"label":"good2","ok":true,"stale":false,"five_hour_pct":0,"five_hour_resets_at":null,
    "seven_day_pct":50,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
-  {"label":"victim\t1\t100","ok":false,"stale":true,"five_hour_pct":0,"five_hour_resets_at":null,
+  {"label":"victim\t1\t100","ok":false,"stale":true,"error":"未ログイン","error_code":"nologin",
+   "skip_reason":"no_credentials","five_hour_pct":0,"five_hour_resets_at":null,
    "seven_day_pct":0,"seven_day_resets_at":null}
 ] }
 JSON
@@ -262,6 +278,115 @@ JSON
 
   # usage 側は適格だが preflight 全滅を作る fixture（非 default のみ＝~/.claude へ写像されない）。
   # config dir を一切作らなければ全候補 preflight 不通過 → resolve 末尾 fail-loud を引く（facet⑤②(b)）。
+  # --- sc-7czu fixtures（匿名ラベル・合成値のみ＝実 label / 実 pct / 実 token 期限は書かない）--------
+  # 三分類の全クラスを 1 入力に含む形。上流 shape は claude-usage の出力契約から写した（live 実行はしない）。
+  #   healthy = ok∧非stale（tier=0・**score は最下位の 1**）
+  #   revExp  = 失効 token の pre-flight skip（skip_reason=token_expired / error_code=expired・score 99）
+  #   rev429  = 一過性 HTTP 429（error_code=429 / attempted=true・score 98）
+  #   dead    = credential 不在（skip_reason=no_token / error_code=notoken・回復しない）
+  # score が healthy << 復帰クラス なのは意図（tier が無ければ復帰クラスが 1-2 位を占める＝pool 半減の
+  # 是正が「順位の乗っ取り」に化ける形。tier 化の否定対照）。
+  CLASSES="$BATS_TEST_TMPDIR/classes.json"
+  cat > "$CLASSES" <<JSON
+{ "accounts": [
+  {"label":"healthy","ok":true,"stale":false,"error":null,"error_code":null,"attempted":true,
+   "skip_reason":null,"token_expires_at":null,
+   "five_hour_pct":99,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":99,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
+  {"label":"revExp","ok":false,"stale":true,"error":"token 期限切れ(skip)","error_code":"expired",
+   "attempted":false,"skip_reason":"token_expired","token_expires_at":"2026-07-08T09:00:00+00:00",
+   "five_hour_pct":1,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":1,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
+  {"label":"rev429","ok":false,"stale":true,"error":"HTTP 429","error_code":"429",
+   "attempted":true,"skip_reason":null,"token_expires_at":null,
+   "five_hour_pct":2,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":2,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
+  {"label":"dead","ok":false,"stale":true,"error":"token 不在","error_code":"notoken",
+   "attempted":false,"skip_reason":"no_token","token_expires_at":null,
+   "five_hour_pct":0,"five_hour_resets_at":null,"seven_day_pct":0,"seven_day_resets_at":null}
+] }
+JSON
+
+  # allowlist の境界（HTTP status 系）: 5xx=復帰 / 401・403=除外。全て「stale=true」で来る＝stale フラグ
+  # では層別できないことを同時に pin する。
+  HTTPCLASS="$BATS_TEST_TMPDIR/httpclass.json"
+  cat > "$HTTPCLASS" <<JSON
+{ "accounts": [
+  {"label":"s503","ok":false,"stale":true,"error":"HTTP 503","error_code":"503","attempted":true,
+   "five_hour_pct":10,"five_hour_resets_at":null,"seven_day_pct":10,"seven_day_resets_at":null},
+  {"label":"s401","ok":false,"stale":true,"error":"HTTP 401","error_code":"401","attempted":true,
+   "five_hour_pct":10,"five_hour_resets_at":null,"seven_day_pct":10,"seven_day_resets_at":null},
+  {"label":"s403","ok":false,"stale":true,"error":"HTTP 403","error_code":"403","attempted":true,
+   "five_hour_pct":10,"five_hour_resets_at":null,"seven_day_pct":10,"seven_day_resets_at":null},
+  {"label":"sUnk","ok":false,"stale":true,"error":"???","error_code":"zzz","attempted":true,
+   "five_hour_pct":10,"five_hour_resets_at":null,"seven_day_pct":10,"seven_day_resets_at":null}
+] }
+JSON
+
+  # 復帰クラスだが **採点不能**（snapshot が無く pct キー自体が無い＝claude-usage の to_json は data が
+  # ある行にだけ pct を載せる、が上流の正常形）。除外はするが `malformed:` へ落としてはならない
+  # （malformed: は shape 契約変更の疑いを数える予約語彙＝通常運転で踏む形を流すと偽警報が常時点灯する）。
+  REVNODATA="$BATS_TEST_TMPDIR/revnodata.json"
+  cat > "$REVNODATA" <<JSON
+{ "accounts": [
+  {"label":"acctA","ok":true,"stale":false,"five_hour_pct":10,"five_hour_resets_at":null,
+   "seven_day_pct":10,"seven_day_resets_at":null},
+  {"label":"acctNoData","ok":false,"stale":false,"error":"token 期限切れ(skip)","error_code":"expired",
+   "attempted":false,"skip_reason":"token_expired"}
+] }
+JSON
+
+  # T1（sc-7czu §4）: healthy が全滅（score キー欠落）しつつ **採点可能な復帰クラスが eligible** に残る形。
+  # 旧 exit 4 条件「eligible == 0」だと rc=4 が rc=0 へ落ちて teeth が死ぬ（この fixture がその disarm 検知）。
+  T1DROP="$BATS_TEST_TMPDIR/t1drop.json"
+  cat > "$T1DROP" <<JSON
+{ "accounts": [
+  {"label":"acctA","ok":true,"stale":false,"five_hour_pct":10,"five_hour_resets_at":null,"seven_day_resets_at":null},
+  {"label":"acctB","ok":true,"stale":false,"five_hour_pct":20,"five_hour_resets_at":null,"seven_day_resets_at":null},
+  {"label":"acctR","ok":false,"stale":true,"error":"HTTP 429","error_code":"429","attempted":true,
+   "five_hour_pct":30,"five_hour_resets_at":null,"seven_day_pct":30,"seven_day_resets_at":null}
+] }
+JSON
+
+  # T1B（sc-7czu self-review）: T1 と同型だが healthy 行と復帰行が **同一 label**。label は上流の一意性
+  # 保証が無い（claude-usage の discover_accounts は auth 台帳の逆引きで label を決め dedup しないため、
+  # 同一 account を 2 経路で発見すると同名行が 2 つ出る）ので、「healthy 由来の適格」を label 一致で
+  # 数えると rc=4 が rc=0 へ落ちる（exit 4 の teeth を label 衝突だけで disarm できてしまう）。
+  T1SAME="$BATS_TEST_TMPDIR/t1same.json"
+  cat > "$T1SAME" <<JSON
+{ "accounts": [
+  {"label":"acctA","ok":true,"stale":false,"five_hour_pct":10,"five_hour_resets_at":null,"seven_day_resets_at":null},
+  {"label":"acctA","ok":false,"stale":true,"error":"HTTP 429","error_code":"429","attempted":true,
+   "five_hour_pct":30,"five_hour_resets_at":null,"seven_day_pct":30,"seven_day_resets_at":null}
+] }
+JSON
+
+  # T2（sc-7czu §4）: healthy が **0 件** かつ復帰クラスが eligible。exit 0 のまま (A) の error_code
+  # 内訳診断が出続けることを pin する（適格が出た途端に (A) が黙ると、健全 0 件という事実が消える）。
+  T2ONLY="$BATS_TEST_TMPDIR/t2only.json"
+  cat > "$T2ONLY" <<JSON
+{ "accounts": [
+  {"label":"acctR","ok":false,"stale":true,"error":"HTTP 429","error_code":"429","attempted":true,
+   "five_hour_pct":30,"five_hour_resets_at":null,"seven_day_pct":30,"seven_day_resets_at":null},
+  {"label":"acctD","ok":false,"stale":true,"error":"未ログイン","error_code":"nologin",
+   "attempted":false,"skip_reason":"no_credentials",
+   "five_hour_pct":40,"five_hour_resets_at":null,"seven_day_pct":40,"seven_day_resets_at":null}
+] }
+JSON
+
+  # 新 field（error_code / attempted / skip_reason / token_expires_at）を **1 つも持たない** 旧版
+  # claude-usage の出力形。optional 扱いが崩れて必須キー化すると全 account が malformed 除外され
+  # pool 0 + 偽 shape-drift 警報 + spawn 全停止になるため、従来と同一出力であることを pin する。
+  LEGACY="$BATS_TEST_TMPDIR/legacy.json"
+  cat > "$LEGACY" <<JSON
+{ "accounts": [
+  {"label":"good","ok":true,"stale":false,"error":null,
+   "five_hour_pct":10,"five_hour_resets_at":null,"seven_day_pct":20,"seven_day_resets_at":null},
+  {"label":"old","ok":false,"stale":true,"error":"取得不能",
+   "five_hour_pct":5,"five_hour_resets_at":null,"seven_day_pct":5,"seven_day_resets_at":null}
+] }
+JSON
+
   PFAIL="$BATS_TEST_TMPDIR/pfail.json"
   cat > "$PFAIL" <<JSON
 { "accounts": [
@@ -294,11 +419,11 @@ mk_cfg() {
 # selector 単体（純粋計算・fs 非接触）
 # ============================================================================
 
-@test "sc-1rq selector: GOLDEN ランキング=black4>black2>default・black3/phito(stale)除外" {
+@test "sc-1rq selector: GOLDEN ランキング=black4>black2>default>black3(復帰クラス)・phito(データ無し)除外" {
+  # ★sc-7czu で期待値が動いた: black3 は一過性 429 の**復帰クラス**ゆえ候補に残る（tier=1 で末尾）。
   local got; got="$(walk "$GOLDEN" | paste -sd, -)"
-  [ "$got" = "black4,black2,default" ]
-  # 除外アカは walk に載らない
-  [[ "$(walk "$GOLDEN")" != *black3* ]]
+  [ "$got" = "black4,black2,default,black3" ]
+  # 除外アカは walk に載らない（phito は error_code を持たない＝判定不能ゆえ fail-closed 除外）
   [[ "$(walk "$GOLDEN")" != *phito* ]]
 }
 
@@ -315,8 +440,24 @@ mk_cfg() {
   [ "$_h5" = "100" ]       # resets_at null → 満残量
 }
 
-@test "sc-1rq selector: 除外理由に stale が入る（black3）" {
-  [[ "$(row_of black3)" == *stale* ]]
+# ── sc-7czu N1 ───────────────────────────────────────────────────────────────
+# inventory: invariant=復帰クラス(429)は col2=1 で候補に残り col10 に demoted:stale(429) を持つ／
+#            データ無し stale(phito) は col2=0 のまま除外され reason は malformed: でない
+#          | polarity=positive(black3) + negative(phito)
+#          | mutant_fingerprint=`_revival_of` の 429 分岐を削除 → black3 の col2 が 0 になり本 tooth が RED
+@test "sc-7czu: black3(429)=eligible+demoted マーカー / phito(データ無し)=除外かつ malformed 誤分類しない" {
+  # ★旧 tooth「除外理由に stale が入る（black3）」を置換した（sc-7czu §7 vacuous 是正）。旧形は
+  #   `row_of black3` の**行全体**部分一致で "stale" を探しており、eligible フラグを見ていないため
+  #   col2 が反転しても緑のままだった（＝vacuous）。列を指定して pin し直す。
+  local r; r="$(row_of black3)"
+  [ "$(awk -F'\t' '{print $2}' <<<"$r")" = "1" ]                    # 復帰クラスは候補に残る
+  [[ "$(awk -F'\t' '{print $10}' <<<"$r")" == "demoted:stale(429)" ]]
+  # 降格は順位に影響するので advisory:（=影響しないと自己宣言した接頭辞）へは載せない。
+  [[ "$(awk -F'\t' '{print $10}' <<<"$r")" != *advisory:* ]]
+  local p; p="$(sel "$GOLDEN" | awk -F'\t' '$1=="phito"')"
+  [ "$(awk -F'\t' '{print $2}' <<<"$p")" = "0" ]                    # error_code 欠落 → fail-closed 除外
+  [[ "$(awk -F'\t' '{print $10}' <<<"$p")" != malformed:* ]]        # shape ドリフト警報の予約語彙を汚さない
+  [[ "$(awk -F'\t' '{print $10}' <<<"$p")" == unknown:* ]]
 }
 
 @test "sc-1rq selector[a]: API故障=JSON不正 → exit3・stdout空（理由は stderr）" {
@@ -400,7 +541,7 @@ mk_cfg() {
 @test "sc-1rq selector: stdin seam（--stdin < fixture）でも同一ランキング" {
   local got
   got="$(SCRIBE_USAGE_NOW="$NOW" python3 "$SEL" --stdin < "$GOLDEN" | awk -F'\t' '$2=="1"{print $1}' | paste -sd, -)"
-  [ "$got" = "black4,black2,default" ]
+  [ "$got" = "black4,black2,default,black3" ]   # sc-7czu: black3(429)=復帰クラスが末尾に加わった
 }
 
 # ============================================================================
@@ -605,8 +746,12 @@ mk_cfg() {
     "$SPAWN" --repo "$ANCHOR" --anchor "$ANCHOR" --account auto zz-note
   local notes; notes="$(cat "$NOTE_LOG" 2>/dev/null || true)"
   [[ "$notes" == *"chosen=black4"* ]]
-  [[ "$notes" == *default* ]]     # snapshot は候補全員（適格）
-  [[ "$notes" == *black3* ]]      # snapshot は除外アカも含む
+  # ★sc-7czu §7 vacuous 是正: 旧形は `*default*` / `*black3*` の**素の部分一致**で、eligible 列が
+  #   反転しても（さらに label が診断文へ出るだけでも）緑になった。呼出元 snapshot は
+  #   `label|eligible|score|…` 形式なので col2 まで含めて pin する。
+  [[ "$notes" == *"default|1|"* ]]   # snapshot は候補全員（適格）
+  [[ "$notes" == *"black3|1|"* ]]    # 復帰クラスも候補として載る（sc-7czu で 0→1 へ動いた）
+  [[ "$notes" == *"phito|0|"* ]]     # snapshot は除外アカも含む
 }
 
 # ============================================================================
@@ -632,13 +777,15 @@ mk_cfg() {
   [ "$(awk -F'\t' '$2=="0"' <<<"$output" | wc -l)" -eq 2 ]
 }
 
-@test "sc-j8zv teeth(A): 上流劣化(全 stale・実データ有り rc=0) → exit 0 のまま + error_code 内訳診断" {
-  # incident 署名そのもの: usage を直に叩けば値が返る（degrade は cache 実データを載せる）が全 stale。
+@test "sc-j8zv teeth(A): 上流劣化(全 dead・実データ有り rc=0) → exit 0 のまま + error_code 内訳診断" {
+  # incident 署名そのもの: usage を直に叩けば値が返る（degrade は cache 実データを載せる）が健全 0 件。
+  # ★sc-7czu で実例入力を「全 429」→「全 nologin」へ置換した（429 は復帰クラスになり (A) の実例では
+  #   なくなったため）。pin する不変条件は変えない: exit 0 / error_code 内訳 / 健全の証拠ではない注記。
   run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$DEGRADED")" python3 "$SEL"
   [ "$status" -eq 0 ]                                  # (B) と別コード＝機械弁別できる
   [ -z "$(awk -F'\t' '$2=="1"' <<<"$output")" ]        # 適格 0 件は従来どおり
   [[ "$stderr" == *"上流劣化"* ]]
-  [[ "$stderr" == *"429=2"* ]]                          # error_code 内訳（一過性 rate limit と読める）
+  [[ "$stderr" == *"nologin=2"* ]]                      # error_code 内訳（要 re-login と読める）
   [[ "$stderr" == *"健全の証拠ではない"* ]]             # rc=0/値あり を健全と誤読させない注記
   [[ "$stderr" != *"selector 誤判定"* ]]                # (B) の文言を誤って出さない
 }
@@ -687,7 +834,9 @@ mk_cfg() {
 
 @test "sc-j8zv: 枯渇 advisory は col10 のみ（eligible/順位/exit を変えない＝選定 semantics 不変）" {
   # GOLDEN の default は 7d pct=100（枯渇）だが従来どおり 3 位の適格のまま。
-  [ "$(walk "$GOLDEN" | paste -sd, -)" = "black4,black2,default" ]
+  # ★sc-7czu で期待値が動いた（black3=復帰クラスが末尾に加わった）。枯渇 advisory 側の 3 本
+  #   （col2=1 / score=0 / advisory:depleted）の検知力は落とさない。
+  [ "$(walk "$GOLDEN" | paste -sd, -)" = "black4,black2,default,black3" ]
   local r; r="$(row_of default)"
   [[ "$r" == *"advisory:depleted"* ]]
   [ "$(awk -F'\t' '{print $2}' <<<"$r")" = "1" ]
@@ -708,7 +857,8 @@ mk_cfg() {
   [[ "$output" != *"適格アカウントが 0 件"* ]]           # (A) の誤帰属メッセージへ落ちない
 }
 
-@test "sc-j8zv spawn: 上流劣化(全 stale)は従来どおり『適格0件』fail-loud（(A) の意味論を変えない）" {
+@test "sc-j8zv spawn: 上流劣化(全 dead)は従来どおり『適格0件』fail-loud（(A) の意味論を変えない）" {
+  # ★sc-7czu: fixture を全 429→全 nologin へ置換したが、呼出元から見た意味論（適格0件で fail-loud）は不変。
   run env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$DEGRADED")" SCRIBE_ACCOUNTS_BASE="$ABASE" \
     BEADS_BDW="$BDW_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$NOOP" \
     "$SPAWN" --repo "$ANCHOR" --anchor "$ANCHOR" --account auto zz-degraded
@@ -838,6 +988,219 @@ mk_cfg() {
   local notes; notes="$(cat "$NOTE_LOG" 2>/dev/null || true)"
   [[ "$notes" != *"account-select: chosen="* ]]          # 呼出元 snapshot は notes に無い（現状）
   [[ "$output" == *"account-select: origin=selector rc=4"* ]]  # selector 側の監査は pane へ素通しで残る
+}
+
+# ============================================================================
+# sc-7czu: stale を候補に残し tier で降格・死亡のみ除外（実効 pool 半減の解消）
+#   欠陥: 適格条件が `ok∧非stale` だけだったため、1 回の認証付き呼出や時間経過で回復する account まで
+#         恒常的に候補外へ落ち、実効 pool が半減していた（stale は「live fetch 失敗→snapshot degrade」の
+#         印であって認証切れとは限らない）。
+#   是正: 三分類（healthy / 復帰クラス / 除外）+ 並べ替えキー (tier, -score, label)。
+#   ★各 tooth に assertion inventory row（invariant / polarity / mutant_fingerprint）を併記する
+#     （書式 SSOT = tests/wf-args-lint.bats）。
+# ============================================================================
+
+# ── sc-7czu T-CLASS ──────────────────────────────────────────────────────────
+# inventory: invariant=クラス判定 — skip_reason=token_expired と error_code=429 は eligible=1／
+#            skip_reason=no_token は eligible=0／healthy は復帰クラスの全部より上位
+#          | polarity=positive(revExp,rev429) + negative(dead)
+#          | mutant_fingerprint=`_REVIVAL_SKIP_REASONS` へ "no_token" を追加 → dead が eligible=1 になり RED
+@test "sc-7czu T-CLASS: 復帰=token_expired/429 は eligible=1・死亡=no_token は 0・healthy が全部より上位" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$CLASSES")" python3 "$SEL"
+  [ "$status" -eq 0 ]
+  local el; el() { awk -F'\t' -v l="$1" '$1==l{print $2}' <<<"$output"; }
+  [ "$(el healthy)" = "1" ]
+  [ "$(el revExp)" = "1" ]   # (i) 失効 token の pre-flight skip = CC 側 refresh で回復する生存クラス
+  [ "$(el rev429)" = "1" ]   # (ii) 一過性 HTTP 429 = sc-j8zv incident の実体
+  [ "$(el dead)" = "0" ]     # (iii) credential 不在 = 回復しない＝従来どおり除外
+  # (iv) 順位保証: healthy は score 1 と最下位なのに、score 99/98 の復帰クラスより上に来る（tier 化）。
+  #      ★「1 位でない」ではなく walk 順の**完全一致**で pin する（2 位を許すと lazy walk / 先頭 1 件
+  #        採用で即採用され、保証にならない）。
+  [ "$(awk -F'\t' '$2=="1"{print $1}' <<<"$output" | paste -sd, -)" = "healthy,revExp,rev429" ]
+}
+
+# ── sc-7czu T-TIER ───────────────────────────────────────────────────────────
+# inventory: invariant=healthy な eligible が 1 件でもあれば eligible な stale は「その全部より下」
+#          | polarity=negative-control(GOLDEN の stale は score 80・healthy 最上位は score 4)
+#          | mutant_fingerprint=`eligible.sort` の key を (-e[1], e[2]) へ戻す → black3 が 1 位になり RED
+@test "sc-7czu T-TIER: GOLDEN で eligible な stale は全 healthy より下（score 減点では成立しない否定対照）" {
+  # black3 は score 80、healthy 最上位 black4 は score 4。**いかなる固定減点でも**追い越しは残る
+  # （headroom はクランプせず 100-pct は非有界・resets_at が過去なら 100 に張り付く）＝tier 化の根拠。
+  local picks; picks="$(walk "$GOLDEN")"
+  [ "$(paste -sd, - <<<"$picks")" = "black4,black2,default,black3" ]
+  # score 値そのものは 1 文字も変えない（減点していないことを col3 で直接 pin する）。
+  local r; r="$(row_of black3)"
+  [ "$(awk -F'\t' '{print $3}' <<<"$r")" = "80" ]   # min(h5=90, h7=80)
+  [ "$(awk -F'\t' '{print $4}' <<<"$r")" = "90" ]   # 100-10
+  [ "$(awk -F'\t' '{print $5}' <<<"$r")" = "80" ]   # 100-20
+  # healthy 最上位の score は black3 より小さいのに上位＝tier が第一キーである証拠。
+  [ "$(awk -F'\t' '{print $3}' <<<"$(row_of black4)")" = "4" ]
+}
+
+# ── sc-7czu T-HTTP ───────────────────────────────────────────────────────────
+# inventory: invariant=HTTP status の allowlist 境界（5xx=復帰 / 401・403=除外 / 未知語彙=除外）
+#          | polarity=positive(503) + negative(401,403,zzz)
+#          | mutant_fingerprint=`_revival_of` の HTTP 判定を `st >= 400` へ緩める → s401/s403 が RED
+@test "sc-7czu T-HTTP: 5xx は復帰・401/403 と未知語彙は除外（全て stale=true＝フラグで層別しない）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$HTTPCLASS")" python3 "$SEL"
+  local el; el() { awk -F'\t' -v l="$1" '$1==l{print $2}' <<<"$output"; }
+  [ "$(el s503)" = "1" ]
+  [ "$(el s401)" = "0" ]
+  [ "$(el s403)" = "0" ]
+  [ "$(el sUnk)" = "0" ]     # 未知語彙は fail-closed（「知らないコード＝たぶん生きてる」に倒さない）
+  # 除外理由は由来が分かる形（dead: / unknown:）で、shape ドリフト警報の予約語彙 malformed: を使わない。
+  [[ "$(awk -F'\t' '$1=="s401"{print $10}' <<<"$output")" == dead:401* ]]
+  [[ "$(awk -F'\t' '$1=="sUnk"{print $10}' <<<"$output")" == unknown:zzz* ]]
+  [ "$(grep -c 'malformed:' <<<"$output" || true)" -eq 0 ]
+}
+
+# ── sc-7czu T-NODATA ─────────────────────────────────────────────────────────
+# inventory: invariant=復帰クラスだが採点不能なら除外し、reason は stale-nodata:（malformed: 禁止）／
+#            _SCORE_KEYS 欠落検査は緩めない（緩めると headroom(None,None)=100 で 1 位に化ける）
+#          | polarity=negative
+#          | mutant_fingerprint=`missing` 検査を tier==1 で skip → acctNoData が score 100 の 1 位になり RED
+@test "sc-7czu T-NODATA: 復帰クラス×データ無しは除外・reason は stale-nodata:（malformed: へ落とさない）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$REVNODATA")" python3 "$SEL"
+  [ "$status" -eq 0 ]
+  local row; row="$(awk -F'\t' '$1=="acctNoData"' <<<"$output")"
+  [ "$(awk -F'\t' '{print $2}' <<<"$row")" = "0" ]
+  [[ "$(awk -F'\t' '{print $10}' <<<"$row")" == stale-nodata:* ]]
+  [[ "$(awk -F'\t' '{print $10}' <<<"$row")" != malformed:* ]]
+  # 予約語彙を汚していない＝「shape 契約変更の疑い」偽警報が出ない（通常運転で必ず踏む形）。
+  [[ "$stderr" != *"shape 契約変更"* ]]
+  # healthy 側は無傷（1 位のまま）。
+  [ "$(awk -F'\t' '$2=="1"{print $1}' <<<"$output")" = "acctA" ]
+}
+
+# ── sc-7czu T-MALFORM-PIN ────────────────────────────────────────────────────
+# inventory: invariant=データ無し stale（GOLDEN phito / ZERO a / ONLYDEF other）が malformed: に落ちない
+#          | polarity=negative
+#          | mutant_fingerprint=`_dead_reason` の返り値を "malformed:dead" にする → 3 入力とも RED
+@test "sc-7czu T-MALFORM-PIN: データ無し stale は malformed: へ落ちない（偽 shape-drift 警報を出さない）" {
+  local out
+  out="$(sel "$GOLDEN")"
+  [[ "$(awk -F'\t' '$1=="phito"{print $10}' <<<"$out")" != malformed:* ]]
+  out="$(sel "$ZERO")"
+  [[ "$(awk -F'\t' '$1=="a"{print $10}' <<<"$out")" != malformed:* ]]
+  out="$(sel "$ONLYDEF")"
+  [[ "$(awk -F'\t' '$1=="other"{print $10}' <<<"$out")" != malformed:* ]]
+}
+
+# ── sc-7czu T1 ───────────────────────────────────────────────────────────────
+# inventory: invariant=healthy が全滅していれば、採点可能な stale が eligible に残っていても exit 4 + 犯人ラベル
+#          | polarity=positive(exit 4 が維持される)
+#          | mutant_fingerprint=`_diagnose` の条件を `if not eligible:` へ戻す → status が 0 になり RED
+@test "sc-7czu T1: healthy 全滅 × 採点可能な stale が eligible → 依然 exit 4（旧条件だと rc=0 へ落ちる）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$T1DROP")" python3 "$SEL"
+  [ "$status" -eq 4 ]
+  [ "$(awk -F'\t' '$2=="1"{print $1}' <<<"$output")" = "acctR" ]   # stale 復帰クラスは適格として残る
+  [[ "$stderr" == *"selector 誤判定"* ]]
+  [[ "$stderr" == *acctA* ]]                                       # 犯人ラベルを名指しする
+  [[ "$stderr" == *acctB* ]]
+  [[ "$stderr" == *"malformed:欠落"* ]]
+  [[ "$stderr" == *"account-select: origin=selector rc=4 reason=misjudge"* ]]
+}
+
+# ── sc-7czu T1B ──────────────────────────────────────────────────────────────
+# inventory: invariant=healthy 由来の適格は accounts の位置 index で数える＝healthy 行と復帰行が同一
+#            label でも exit 4 + reason=misjudge が生き残る（label 衝突で teeth を disarm できない）
+#          | polarity=positive(exit 4 が維持される)
+#          | mutant_fingerprint=`healthy_elig` を label 集合の所属判定
+#            （`[lab for lab in healthy_labels if lab in elig_set]`）へ戻す → status が 0 になり RED
+@test "sc-7czu T1B: healthy 全滅 × 同一 label の stale が eligible → 依然 exit 4（label 一致では数えない）" {
+  # label は上流の一意性保証が無い（同一 account が 2 経路で発見されると同名行が 2 つ出る）。label 代理で
+  # 「healthy 由来の適格」を数えると、healthy 行が全滅していても同名の tier=1 行だけで rc=4 が rc=0 へ落ちる。
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$T1SAME")" python3 "$SEL"
+  [ "$status" -eq 4 ]
+  [ "$(awk -F'\t' '$2=="1"{print $10}' <<<"$output")" = "demoted:stale(429)" ]  # 復帰行は適格のまま
+  [ "$(awk -F'\t' '$2=="0"{print $1}' <<<"$output")" = "acctA" ]                # healthy 行は全滅
+  [[ "$stderr" == *"selector 誤判定"* ]]
+  [[ "$stderr" == *"malformed:欠落"* ]]                                         # 犯人の除外理由を名指しする
+  [[ "$stderr" == *"account-select: origin=selector rc=4 reason=misjudge"* ]]
+}
+
+# ── sc-7czu T2 ───────────────────────────────────────────────────────────────
+# inventory: invariant=healthy 0 件なら、stale が eligible でも (A) の error_code 内訳診断が exit 0 で出続け、
+#            かつ**新 boot-path 固有の補償 warn**（適格 N 件はいずれも復帰クラス＝健全な候補は 0 件）が出る
+#          | polarity=positive((A) 診断が黙らない)
+#          | mutant_fingerprint=`if not healthy_labels:` ブロックを `if not eligible:` 配下へ戻す → 診断が消え RED /
+#            selector :552-556 の `if elig_labels:` warn ブロックを丸ごと削除 → 「健全な候補は 0 件」が消え RED
+@test "sc-7czu T2: healthy 0 件 × stale が eligible → exit 0 のまま (A) error_code 内訳診断が出続ける" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$T2ONLY")" python3 "$SEL"
+  [ "$status" -eq 0 ]
+  [ "$(awk -F'\t' '$2=="1"{print $1}' <<<"$output")" = "acctR" ]
+  [[ "$stderr" == *"上流劣化"* ]]
+  [[ "$stderr" == *"429=1"* ]]
+  [[ "$stderr" == *"nologin=1"* ]]
+  [[ "$stderr" == *"健全の証拠ではない"* ]]
+  # ★sc-7czu self-review: 本 diff は healthy=0 のとき呼出元の挙動を「loud die」から「degraded account で
+  #   続行」へ変える。その唯一の補償が本 warn なので、**件数込み**で pin する（従来の (A) 行だけを見る
+  #   assertion では warn を丸ごと削除しても緑のままだった＝生存 mutant を実測）。
+  [[ "$stderr" == *"適格 1 件はいずれも stale 復帰クラス"* ]]
+  [[ "$stderr" == *"健全な候補は 0 件"* ]]
+  [[ "$stderr" != *"selector 誤判定"* ]]     # 健全 0 件は (B) ではない
+  [[ "$stderr" != *"origin=selector"* ]]     # exit 0 では監査ブロックを出さない（二重記録しない）
+}
+
+# ── sc-7czu T2-SPAWN ─────────────────────────────────────────────────────────
+# inventory: invariant=healthy 0 件 × 復帰クラスのみの pool でも呼出元は die せず tier=1 を採用し、
+#            その degraded 由来（demoted:stale(429)）と補償 warn（健全な候補は 0 件）が pane / 監査 note に残る
+#          | polarity=positive(新 boot-path が silent にならない)
+#          | mutant_fingerprint=selector :552-556 の `if elig_labels:` warn ブロック削除 → 「健全な候補は 0 件」
+#            が消え RED / col10 の demoted: マーカー生成を落とす → 監査 note の assertion が RED
+@test "sc-7czu T2-SPAWN: healthy 0 件 × 復帰クラスのみ → 呼出元は die せず採用し degraded 由来が監査に残る" {
+  # ★sc-7czu self-review: 本 diff は呼出元の die 条件（eligible 行の有無）を素通しで変える＝復帰クラスが
+  #   eligible=1 化した瞬間、admin/worker は snapshot cache 由来の古い残量で採点された stale account 上で
+  #   起動する。selector 単体 tooth（T2）だけでは「呼出元がこの新経路をどう扱うか」が 1 本も pin されない
+  #   ので、spawn 段でも留める（degraded-only pool 上の silent 起動を機械で検知できる状態にする）。
+  : > "$NOTE_LOG"
+  mk_cfg "$ABASE/acctR"
+  run env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$T2ONLY")" SCRIBE_ACCOUNTS_BASE="$ABASE" \
+    BEADS_BDW="$BDW_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$NOOP" \
+    "$SPAWN" --repo "$ANCHOR" --anchor "$ANCHOR" --account auto zz-degraded-only
+  [[ "$output" != *"適格アカウントが 0 件"* ]]          # (A) の die へ落ちない（＝新経路で続行する）
+  [[ "$output" == *"健全な候補は 0 件"* ]]              # 補償 warn が pane まで届く（loud channel の実効性）
+  local notes; notes="$(cat "$NOTE_LOG" 2>/dev/null || true)"
+  [[ "$notes" == *"chosen=acctR"* ]]                    # 復帰クラスが実際に採用される
+  [[ "$notes" == *"acctR|1|"* ]]
+  [[ "$notes" == *"demoted:stale(429)"* ]]              # degraded 由来である旨が durable な監査に残る
+  [[ "$notes" == *"acctD|0|"* ]]                        # 死亡アカは除外のまま snapshot に載る
+}
+
+# ── sc-7czu T-OPTIONAL ───────────────────────────────────────────────────────
+# inventory: invariant=新 field(error_code/attempted/skip_reason/token_expires_at)を 1 つも持たない
+#            旧版 claude-usage 出力でも従来と同一の出力（optional 扱いが崩れて必須キー化しない）
+#          | polarity=negative(回帰網)
+#          | mutant_fingerprint=`_SCORE_KEYS` へ "error_code" を追加 → good が malformed 除外され RED
+#            （★`_UNIVERSAL_KEYS` への追加は**生存 mutant**＝当該定数は宣言のみで未参照。selector 側に
+#              その旨の注記を入れた。実際に検査を増やす経路は _SCORE_KEYS だけなのでそちらを fingerprint
+#              に採る）
+@test "sc-7czu T-OPTIONAL: 新 field を 1 つも持たない入力でも従来と同一出力（必須キー化していない）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$LEGACY")" python3 "$SEL"
+  [ "$status" -eq 0 ]
+  [ "$(awk -F'\t' '$2=="1"{print $1}' <<<"$output")" = "good" ]     # healthy は従来どおり適格
+  [ "$(awk -F'\t' '$1=="old"{print $2}' <<<"$output")" = "0" ]      # 判定不能は従来どおり除外
+  [ "$(grep -c 'malformed:' <<<"$output" || true)" -eq 0 ]          # pool 0 + 偽 shape-drift 警報にしない
+  [[ "$stderr" != *"shape 契約変更"* ]]
+}
+
+# ── sc-7czu T-COL10 ──────────────────────────────────────────────────────────
+# inventory: invariant=demoted と advisory が同時成立しても col10 は 1 セル（半角空白区切り・11 列目を作らない）
+#          | polarity=positive
+#          | mutant_fingerprint=区切りを "\t" にする → 列数が 11 になり本 tooth が RED
+@test "sc-7czu T-COL10: demoted と枯渇 advisory の同時成立でも 10 列・半角空白区切り" {
+  local both='{"accounts":[
+    {"label":"h","ok":true,"stale":false,"five_hour_pct":0,"five_hour_resets_at":null,
+     "seven_day_pct":0,"seven_day_resets_at":null},
+    {"label":"sd","ok":false,"stale":true,"error":"HTTP 429","error_code":"429","attempted":true,
+     "five_hour_pct":100,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+     "seven_day_pct":100,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"}]}'
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$both" python3 "$SEL"
+  [ "$status" -eq 0 ]
+  [ "$(awk -F'\t' '{print NF}' <<<"$output" | sort -u | paste -sd, -)" = "10" ]
+  [ "$(awk -F'\t' '$1=="sd"{print $10}' <<<"$output")" = "demoted:stale(429) advisory:depleted(headroom=0)" ]
+  # 既存の部分一致 assertion（advisory:depleted(headroom=0) / advisory:depleted）を壊さない順序。
+  [[ "$output" == *"advisory:depleted(headroom=0)"* ]]
 }
 
 @test "sc-1rq: 出荷物 bash/python 構文（両 deliverable）" {

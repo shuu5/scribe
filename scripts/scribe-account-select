@@ -15,13 +15,18 @@
 #   ※ 現在時刻は env SCRIBE_USAGE_NOW（ISO8601）で上書き可（resets_at 比較のテスト決定性）。
 #
 # 出力（stdout・TSV・ヘッダ無し・1 行 1 アカウント）:
-#   適格候補を maximin ランキング（score 降順・同点は label 辞書順）で先に、続けて除外アカウントを
-#   label 辞書順で並べる。列:
+#   適格候補を maximin ランキング（**tier 昇順 → score 降順 → label 辞書順**）で先に、続けて除外
+#   アカウントを label 辞書順で並べる。列:
 #     1 label   2 eligible(1|0)  3 score  4 h5  5 h7  6 pct5  7 pct7  8 resets5  9 resets7  10 reason
 #   ・h5/h7 = 積極解釈込みの実効残量%（=maximin が使った値。resets_at が null/過去なら 100）。
 #   ・score = min(h5, h7)。除外行は 3-5 空・reason に除外理由。
-#   ・reason は eligible=0 では**除外理由**、eligible=1 では **advisory マーカー**（sc-j8zv・接頭辞
-#     `advisory:`＝選定にも順位にも影響しない注記。呼出元の監査 snapshot に載って横断 grep できる）。
+#   ・reason は eligible=0 では**除外理由**、eligible=1 では **マーカー列**（複数マーカーは**半角空白**
+#     区切り。TAB / 改行 / `\` / `|` は使わない＝_tsv の可逆 escape と監査 snapshot の cell separator に
+#     衝突させない）。マーカーは 2 種あり、**順位への影響が有る/無いで接頭辞を分ける**（sc-7czu）:
+#       `advisory:` = 選定にも順位にも**影響しない**注記（sc-j8zv・例 advisory:depleted(headroom=0)）。
+#       `demoted:`  = 順位に**影響する**降格の記録（sc-7czu・例 demoted:stale(429)＝tier=1 へ降格した
+#                     stale 復帰クラス。score は snapshot cache 由来の古い値である旨をここに残す）。
+#     ★`advisory:` の「影響しない」自己宣言を守るため、降格を advisory: に載せてはならない。
 #   ・呼出元の lazy walk は `awk -F'\t' '$2=="1"{print $1}'` で上位順ラベル列を得る（jq 不要）。
 #   ・★不変条件（sc-j8zv self-review）: **1 account = 1 行 × 10 列**。外部（claude-usage）由来の
 #     label / reason / 生 pct・resets_at は _tsv で `\n` `\r` `\t` `\\` を**可逆 escape** してから
@@ -34,7 +39,10 @@
 #   3 = **API 故障**（claude-usage 不在/非0/JSON 不正/accounts 不在 or 非 list/空）。stdout 空 +
 #       stderr に理由（呼出元は loud-warn + 主アカ fallback・facet⑤①）。
 #   4 = **selector 誤判定**（sc-j8zv teeth）= usage 自身が健全（ok∧非stale）と報告した account が 1 件以上
-#       あるのに適格 0 件。stdout は通常どおり TSV（監査を殺さない）+ stderr に犯人ラベルと除外理由。
+#       あるのに、**その健全 account 由来の適格が 0 件**（sc-7czu で「適格 0 件」から言い直した：
+#       stale 復帰クラス（tier=1）が採点できると旧条件は発火せず rc=4 が rc=0 へ落ちて teeth が死ぬ。
+#       不変条件そのもの＝「健全 account は採点できるはず」は 1 文字も変えていない）。
+#       stdout は通常どおり TSV（監査を殺さない）+ stderr に犯人ラベルと除外理由。
 #       上流劣化（exit 0 の適格 0 件）と**別コードで機械弁別できる**のが本コードの存在理由（下記 sc-j8zv 節）。
 #   2 = 使い方エラー（引数不正）。
 #
@@ -117,6 +125,24 @@
 #   ∴ 監査 snapshot の `eligible=N` を「N 個すぐ使える」と読まないこと。N は preflight 前の上限であって
 #     可用数ではない（この読み替えを怠ると、preflight 全滅の fail-loud が「selector が嘘をついた」に誤帰属される）。
 #
+# ★三分類（sc-7czu・旧「生存 / 死亡」二分類を置換）: 実効 pool の半減を解消する。
+#   旧実装は適格条件を `ok is True ∧ stale is False` だけで判定し、stale を残らず候補外にしていた。
+#   しかし stale は「live fetch に失敗して snapshot cache へ degrade した」印であって**認証切れとは
+#   限らない**（一過性 429 も失効 token の pre-flight skip も、回復しない credential 不在も、すべて
+#   同じ stale=true で来る＝実測）。結果、1 回の認証付き呼出や時間経過で回復する account まで恒常的に
+#   候補外へ落ち、実効 pool が半減していた。∴ 分類を 3 つにする:
+#     (i)   healthy（ok∧非stale）→ **tier=0** の候補。
+#     (ii)  復帰クラス（下記 allowlist）かつ採点可能 → **tier=1** の候補（col10 に demoted:stale(<code>)）。
+#     (iii) 死亡・未知・判定不能・復帰クラスだが採点不能 → 除外（reason で由来が分かる形）。
+#   ★順位保証は **tier 化**で行い、score 値には一切触れない（減点しない）。並べ替えキーは
+#     (tier, -score, label)＝healthy な候補が 1 件でもあれば stale 候補は**その全部より下**に来る。
+#     「score から定数を引く」形では保証にならない: headroom はクランプせず（100−pct は pct<0 で 100 超）、
+#     resets_at が過去だと headroom() が 100 を返して張り付くため、いかなる固定減点でも追い越しが残る。
+#     さらに減点値を col3 score へ書くと DEPLETED_HEADROOM 判定が全 stale で誤発火し、平常運転で
+#     「枯渇警告」が出続ける（loud チャネルの摩耗）。∴ col3 score / col4-5 h5,h7 の定義は不変。
+#   ★tier=1 の score は **snapshot cache 由来の古い値**で算出される（live fetch が失敗した行ゆえ）。
+#     この事実は col10 の demoted: マーカーに残す（監査面で後から層別できるようにする）。
+#
 # ★VERIFIED セマンティクス（sc-1rq 契約・admin が uns ソース直読で確認）:
 #   ・five_hour_pct/seven_day_pct = utilization(使用率%・int or null)。**残量% = 100 − pct**。
 #     取り違え（pct を残量とみなす）= maximin が枯渇寸前アカを選ぶ逆選択バグ → 必ず 100−pct。
@@ -134,6 +160,10 @@ USAGE_CMD_DEFAULT = "claude-usage"
 
 # selector が要求する必須キー（B-lite・facet⑧a）。dict.get デフォルト埋めは禁止（欠落が「読めた風」に
 # 化け誤選定するため）＝存在検査は `key in acct` で行う。
+# ★注記（sc-7czu の mutation 実証で判明・既存の事実で本 cell では挙動を変えない）: 本定数は
+#   **宣言のみで参照されていない**（実際の存在検査は main の label/ok/stale 分岐に手書きされている）。
+#   ∴ ここへキーを足しても検査は増えない＝「必須キーの SSOT」として読まないこと。整理の可否は admin
+#   起票候補（notes へ回す）。
 _UNIVERSAL_KEYS = ("label", "ok", "stale")
 # 適格アカのみに要求するスコア算出キー（ok=false のアカは data 欠落が正常＝claude-usage の to_json 契約）。
 _SCORE_KEYS = (
@@ -146,14 +176,38 @@ _SCORE_KEYS = (
 
 # sc-j8zv: 「枯渇（残量が尽きた）」と見なす実効残量%の境界（advisory 専用・**選定は変えない**）。
 # 0 = 100% 消費済み＝その窓では確実に使えない、という事実だけを線にする（「0 に近い」の閾値化＝どこから
-# 避けるかは availability と safety のトレードオフで、既定 semantics「stale のみ除外・枯渇は減点」を
+# 避けるかは availability と safety のトレードオフで、枯渇を候補から落とすか否かという選定 semantics を
 # 動かす設計判断ゆえ本 cell では踏み込まない＝admin 起票候補として notes へ回す）。
 DEPLETED_HEADROOM = 0.0
 
 # stderr 診断へ載せる error_code の受理文字集合（closed vocabulary の想定だが外部プロセス由来ゆえ
-# 防御的に allowlist する。upstream 契約は net/nosrc/shape/nologin/credbad/credfmt/notoken/err と
+# 防御的に allowlist する。upstream 契約は net/nosrc/shape/nologin/credbad/credfmt/notoken/expired/err と
 # HTTP status の 10 進表記）。
 _CODE_OK_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+
+# --- 復帰 / 死亡クラスの弁別（sc-7czu）--------------------------------------------------------
+# ★stale フラグで層別しない: 死亡 account も stale=true で来る（実測）。回復性は additive field
+#   （error_code / skip_reason）の **allowlist** だけで判定する。
+# ★expiresAt / token_expires_at では判定しない: 上流 claude-usage の pre-flight skip は fail-open 規律
+#   により expiresAt<=0 を skip しない（判定不能は必ず fetch 側へ倒す）ため、token_expires_at=null が
+#   「credential 不在」「credential 破損」と弁別できない。さらに本 selector は **fs 非接触が契約**ゆえ
+#   .credentials.json の直読は禁止（SCRIBE_USAGE_JSON seam の外＝bats で検証できない）。
+# 復帰クラス（候補として残す・tier=1 降格付き）は次の 2 つだけ:
+#   (i)  skip_reason=="token_expired"（error_code=="expired"）= 失効 accessToken の pre-flight skip。
+#        HTTP を 1 件も撃っていない生存クラスで、CC 側の refresh が通れば回復する。
+#   (ii) error_code が HTTP status の 10 進表記で **429 または 5xx** = 一過性 degrade。これは sc-j8zv
+#        incident の実体そのもの（probe 36 req 中 429=29）で、**allowlist から外すと「pool 半減が
+#        直っていないのに既存 teeth が 1 本も赤くならない」偽 DONE が成立する**（必須項目）。
+# 除外（従来どおり）= nologin / credbad / credfmt / notoken・401 / 403・net / nosrc / shape / err・
+#   未知語彙・field 欠落。**判定不能は必ず除外側へ倒す**（fail-closed）。
+#   理由: 呼出元 preflight は credentials file の**存在**しか見ず token 妥当性を検査しない。死亡 account
+#   を誤って候補に残すと、admin spawn 経路は lazy walk せず先頭 1 件を採る形もあるため「次候補へ降りる」
+#   のではなく **無人セッションが login TUI で凍結する**（誤 alive 判定のコストは非対称）。
+# allowlist をこれ以上広げるときは根拠を bd notes に残すこと。
+_REVIVAL_SKIP_REASONS = frozenset(("token_expired",))
+_REVIVAL_CODES = frozenset(("expired",))
+# 上流 closed vocabulary のうち「回復しない」側（allowlist の否定を読み手へ明示するための表）。
+_DEAD_CODES = frozenset(("net", "nosrc", "shape", "nologin", "credbad", "credfmt", "notoken", "err"))
 
 
 def _api_failure(reason):
@@ -182,6 +236,52 @@ def _sanitize_code(v):
     if len(v) > 16 or any(c not in _CODE_OK_CHARS for c in v):
         return None
     return v
+
+
+def _http_status(code):
+    """error_code が HTTP status の 10 進表記（3 桁 ASCII 数字）なら int、それ以外は None。
+
+    str.isdigit() は全角数字等も True にするため使わない（外部プロセス由来ゆえ ASCII へ閉じる）。
+    """
+    if not isinstance(code, str) or len(code) != 3:
+        return None
+    if any(c not in "0123456789" for c in code):
+        return None
+    return int(code)
+
+
+def _revival_of(acct):
+    """復帰クラス（候補に残す）判定。返り値 (revivable, 表示用 code)。
+
+    ★additive field（error_code / skip_reason）**だけ**を見る（sc-7czu）。これらは optional 扱いで
+      _UNIVERSAL_KEYS にも _SCORE_KEYS にも足さない: 必須キー化すると旧版 claude-usage を積んだ host で
+      全 account が malformed 除外され、pool 0 + 偽 shape-drift 警報 + spawn 全停止になる。上流は
+      「consumer は未知キーを無視する」前提で additive 進化しているので、欠落・型不正・未知語彙は
+      「復帰しない（従来どおり除外）」へ倒すだけにする＝fail-closed。
+    """
+    code = _sanitize_code(acct.get("error_code"))
+    skip = acct.get("skip_reason")
+    skip = skip if isinstance(skip, str) else None
+    if skip in _REVIVAL_SKIP_REASONS or code in _REVIVAL_CODES:
+        return True, (code or skip)
+    st = _http_status(code)
+    if st == 429 or (st is not None and 500 <= st <= 599):
+        return True, code
+    return False, code
+
+
+def _dead_reason(code):
+    """復帰しない account の除外理由（由来が分かる形・**`malformed:` を使わない**）。
+
+    `malformed:` は _diagnose が「claude-usage の shape 契約変更の疑い」warn の計数源に使う予約語彙
+    （sc-j8zv）。通常運転で必ず踏む「死亡 account が居る」形をそこへ流すと偽警報が常時点灯し、本物の
+    shape ドリフト兆候が埋もれる。∴ 死亡は dead: / 未知は unknown: で別語彙にする。
+    """
+    if code is None:
+        return "unknown:error_code 欠落/型不正"
+    if code in _DEAD_CODES or _http_status(code) is not None:
+        return "dead:%s" % code
+    return "unknown:%s" % code
 
 
 def _degradation_codes(accounts):
@@ -368,9 +468,15 @@ def _indeterminate_is_upstream(row):
 def _diagnose(accounts, eligible, excluded):
     """sc-j8zv teeth: 「適格 0 件」の種別を機械弁別して (exit code, reason) を返す。
 
-    不変条件（本 selector が自ら検査する）: **eligible ⊆ healthy**（適格判定は ok∧非stale を含む）ゆえ
-      healthy > 0 かつ eligible == 0 なら、健全と申告された account を残らず本体が落としたことになる。
+    不変条件（本 selector が自ら検査する）: **healthy な account は採点できるはず**ゆえ、healthy > 0 かつ
+      healthy 由来の eligible == 0 なら、健全と申告された account を残らず本体が落としたことになる。
       これは上流劣化 (A) では起こりえないので exit 4 で fail-loud。
+      ★sc-7czu: 旧条件は「eligible == 0」だった（当時は eligible ⊆ healthy が成り立っていた）。stale 復帰
+      クラス（tier=1）が候補に入るとその包含が破れ、**採点可能な stale が 1 件でもあれば rc=4 が rc=0 に
+      落ちて teeth が死ぬ**。∴ 条件を healthy_eligible == 0 へ言い直す（不変条件の言い直しであって
+      「healthy の定義」は変えない）。exit code 語彙（0/2/3/4）の意味も不変。
+      ★_usage_healthy（teeth 判定器）の述語を「生存（ok または stale）」へ広げてはならない: データ無しの
+      stale が常時 exit 4 を発火させ、呼出元の die で --account auto が全停止する。
     ただし exit 4 の**犯人は 1 種類ではない**（self-review 2026-07-27）: 除外理由で層別し、
       (B)  `malformed:` 等 = 本 selector の欠陥 or shape 契約変更 → reason=misjudge
       (B') `indeterminate:` × 窓あり×pct=null = 上流が utilization を返していない（設計どおりの
@@ -380,16 +486,28 @@ def _diagnose(accounts, eligible, excluded):
       (B')=上流の utilization 欠落 を分け、後者を「ドリフトの兆候」と数えない（loud チャネルの摩耗防止）。
       最上位候補が枯渇していれば warn（選定は変えない・要求③の可視化）。
     """
-    healthy_labels = [_label_of(a) for a in accounts if _usage_healthy(a)]
-    elig_labels = [e[1] for e in eligible]
-    elig_set = set(elig_labels)
+    healthy_idx = [i for i, a in enumerate(accounts) if _usage_healthy(a)]
+    healthy_labels = [_label_of(accounts[i]) for i in healthy_idx]
+    elig_labels = [e[2] for e in eligible]
+    # healthy 由来の適格（sc-7czu）。★数えるのは accounts の**位置 index** であって label ではない
+    #   （sc-7czu self-review）: label は上流の一意性保証が無い（claude-usage の discover_accounts は
+    #   auth 台帳の逆引き resolve_label で label を決め dedup しない＝同一 account を 2 経路で発見すると
+    #   同名行が 2 つ出る。label が型不正で _label_of が '?' へ畳む経路もある）。label 一致で数えると
+    #   healthy 行が全滅していても同名の tier=1 行が eligible に居るだけで healthy_elig が非空になり、
+    #   rc=4 が rc=0 へ落ちて teeth が死ぬ（＝本 fix が塞ぐべき disarm そのもの）。
+    #   index は eligible 行が自分の出自として持ち回る値ゆえ、本体の tier 計算・並べ替えには依存しない
+    #   （＝「本体のバグが判定器を道連れにしない」設計は不変・_usage_healthy を分離したのと同じ理由）。
+    elig_idx = {e[10] for e in eligible}
+    healthy_elig = [i for i in healthy_idx if i in elig_idx]
     row_by_label = {}
     for row in excluded:
         row_by_label.setdefault(row[0], row)
     defect_drops, upstream_drops = [], []
-    for lab in healthy_labels:
-        if lab in elig_set:
+    for i, lab in zip(healthy_idx, healthy_labels):
+        if i in elig_idx:
             continue
+        # 除外理由の引き当てだけは label キー（excluded 行は index を持たない）。これは**診断文言と
+        # (B)/(B') 層別のための best-effort** であって rc の発火条件ではない（rc は上の index 判定で確定）。
         row = row_by_label.get(lab)
         why = row[1] if row is not None else "(除外理由不明)"
         if row is not None and str(why).startswith("indeterminate:") \
@@ -398,34 +516,44 @@ def _diagnose(accounts, eligible, excluded):
         else:
             defect_drops.append((lab, why))
 
-    if not eligible:
-        if healthy_labels:
-            if not defect_drops:
-                _warn("★適格 0 件・上流 utilization 欠落（sc-j8zv teeth・exit 4）: usage が健全（ok∧非"
-                      "stale）と報告した account が %d 件ありますが、いずれも **窓ありなのに "
-                      "utilization(pct) が null** で残量を判定できず fail-closed 除外しました。"
-                      % len(healthy_labels))
-                # ★文言規約: 犯人弁別の grep token「selector 誤判定」は (B) 専用に予約する（本 (B') の
-                #   文面へ「…と混同しない」の形でも書かない＝横断 grep が誤 hit して弁別が壊れるため。
-                #   機械弁別は reason=upstream-utilization-missing / exit 4 の組で行う）。
-                _warn("  = **selector の欠陥ではありません**（上流 claude-usage の norm_pct は "
-                      "utilization が欠落/非数値なら null を返す＝健全申告のまま起こりうる形）。選定は"
-                      "できないので exit 4 で fail-loud にしますが、見るべきは上流の utilization であって "
-                      "本 selector のパース/型検査/残量算出ではない（reason=upstream-utilization-missing）。")
-                _warn("  判定不能だった健全 account: %s" % _join_drops(upstream_drops))
-                return 4, "upstream-utilization-missing"
-            _warn("★selector 誤判定（sc-j8zv teeth・exit 4）: usage が健全（ok∧非stale）と報告した "
-                  "account が %d 件あるのに適格 0 件です。" % len(healthy_labels))
-            _warn("  = 上流劣化ではなく本 selector 側の欠陥（パース/型検査/残量算出）か claude-usage の "
-                  "shape 契約変更です。上流劣化による正当な適格 0 件は exit 0 で返る（両者を混同しない）。")
-            _warn("  落とされた健全 account: %s" % _join_drops(defect_drops))
-            if upstream_drops:
-                _warn("  （参考・欠陥の証拠には数えない）上流が utilization を返さず判定不能だった "
-                      "account: %s" % _join_drops(upstream_drops))
-            return 4, "misjudge"
+    if healthy_labels and not healthy_elig:
+        if not defect_drops:
+            _warn("★健全 account 由来の適格 0 件・上流 utilization 欠落（sc-j8zv teeth・exit 4）: usage が"
+                  "健全（ok∧非stale）と報告した account が %d 件ありますが、いずれも **窓ありなのに "
+                  "utilization(pct) が null** で残量を判定できず fail-closed 除外しました。"
+                  % len(healthy_labels))
+            # ★文言規約: 犯人弁別の grep token「selector 誤判定」は (B) 専用に予約する（本 (B') の
+            #   文面へ「…と混同しない」の形でも書かない＝横断 grep が誤 hit して弁別が壊れるため。
+            #   機械弁別は reason=upstream-utilization-missing / exit 4 の組で行う）。
+            _warn("  = **selector の欠陥ではありません**（上流 claude-usage の norm_pct は "
+                  "utilization が欠落/非数値なら null を返す＝健全申告のまま起こりうる形）。選定は"
+                  "できないので exit 4 で fail-loud にしますが、見るべきは上流の utilization であって "
+                  "本 selector のパース/型検査/残量算出ではない（reason=upstream-utilization-missing）。")
+            _warn("  判定不能だった健全 account: %s" % _join_drops(upstream_drops))
+            return 4, "upstream-utilization-missing"
+        _warn("★selector 誤判定（sc-j8zv teeth・exit 4）: usage が健全（ok∧非stale）と報告した "
+              "account が %d 件あるのに、その全てが除外され健全 account 由来の適格が 0 件です"
+              "（stale 復帰クラスの適格 %d 件は本判定に数えない・sc-7czu）。"
+              % (len(healthy_labels), len(elig_labels)))
+        _warn("  = 上流劣化ではなく本 selector 側の欠陥（パース/型検査/残量算出）か claude-usage の "
+              "shape 契約変更です。上流劣化による正当な適格 0 件は exit 0 で返る（両者を混同しない）。")
+        _warn("  落とされた健全 account: %s" % _join_drops(defect_drops))
+        if upstream_drops:
+            _warn("  （参考・欠陥の証拠には数えない）上流が utilization を返さず判定不能だった "
+                  "account: %s" % _join_drops(upstream_drops))
+        return 4, "misjudge"
+
+    if not healthy_labels:
+        # (A) 上流劣化。★sc-7czu: stale 復帰クラス（tier=1）が適格として残っていても本診断は**出し続ける**
+        #     （健全 account が 1 件も無いという事実は変わらず、error_code 内訳がその原因を弁別する材料）。
         codes = _degradation_codes(accounts)
-        _warn("適格 0 件（上流劣化・exit 0）: usage 側に健全（ok∧非stale）な account が 1 件もありません "
+        _warn("上流劣化（exit 0）: usage 側に健全（ok∧非stale）な account が 1 件もありません "
               "（accounts=%d）。selector の判定は正しく、原因は claude-usage 側です。" % len(accounts))
+        if elig_labels:
+            _warn("  ★適格 %d 件はいずれも stale 復帰クラス（tier=1）＝**健全な候補は 0 件**です"
+                  "（sc-7czu）。採点は snapshot cache 由来の古い残量で行われているので、下の "
+                  "error_code 内訳を見て健全化（一過性なら時間をおく / 401・403 なら再 login）を"
+                  "怠らないこと。" % len(elig_labels))
         if codes:
             _warn("  error_code 内訳: %s（429 主体=一過性 rate limit ゆえ時間をおいて再試行 / "
                   "401・403 主体=当該 account の再 login / nosrc・net=取得元不達）" % codes)
@@ -437,7 +565,8 @@ def _diagnose(accounts, eligible, excluded):
         if malformed:
             _warn("  ★ただし malformed 除外が %d 件あります＝claude-usage の shape 契約変更（ok/stale の"
                   "型ドリフト等）の疑い。上流劣化と断ずる前に生 JSON を確認せよ。" % malformed)
-        return 0, ""
+        if not eligible:
+            return 0, ""
 
     if defect_drops:
         _warn("warn: usage は健全と報告したのに selector が除外した account があります"
@@ -449,7 +578,9 @@ def _diagnose(accounts, eligible, excluded):
         _warn("info: 上流が窓ありなのに utilization を返しておらず、残量判定不能で fail-closed 除外した "
               "account があります（適格は %d 件あるので継続・**selector の欠陥ではない**・shape ドリフト"
               "としても数えない・sc-j8zv）: %s" % (len(elig_labels), _join_drops(upstream_drops)))
-    top_score, top_label = eligible[0][0], eligible[0][1]
+    if not eligible:
+        return 0, ""
+    top_score, top_label = eligible[0][1], eligible[0][2]
     if top_score <= DEPLETED_HEADROOM:
         # label は claude-usage 由来ゆえ **必ず _flat**（_join_drops / _cell と同じ扱い）。ここは exit 4 の
         # 異常系ではなく **exit 0 の happy path**（floor が無い現行 semantics では枯渇が最上位になりうる）
@@ -457,8 +588,8 @@ def _diagnose(accounts, eligible, excluded):
         # 「selector は chosen= 行を決して出さない」という自己宣言が最も踏まれる経路で破れる。
         _warn("warn: 枯渇警告（sc-j8zv・要求③）: 最上位候補 '%s' の実効残量（maximin score）が %s です"
               "＝その窓では実質使えません。" % (_flat(top_label), _fmt_num(top_score)))
-        _warn("  現行 semantics は『stale のみ除外・枯渇は減点』で **floor が無い**ため枯渇 account も "
-              "選定されます（選定は本 warn では変えない）。floor 導入の可否は admin 裁定事項。")
+        _warn("  現行 semantics は残量に **floor が無い**ため枯渇 account も選定されます（選定は本 warn "
+              "では変えない）。floor 導入の可否は admin 裁定事項。")
     return 0, ""
 
 
@@ -506,10 +637,12 @@ def main(argv):
         _api_failure("claude-usage が 0 アカウントを返しました（未セットアップ/発見不能）")
 
     now = _now(argv)
-    eligible = []  # (score, label, h5, h7, pct5, pct7, r5, r7)
+    # 末尾 idx = accounts 内の位置。_diagnose が「healthy 由来の適格」を label ではなく出自で数えるための
+    # もので（label 一意性は上流の保証ではない・sc-7czu self-review）、並べ替えキーにも出力にも使わない。
+    eligible = []  # (tier, score, label, h5, h7, pct5, pct7, r5, r7, demoted_code, idx)
     excluded = []  # (label, reason, pct5, pct7, r5, r7)
 
-    for acct in accounts:
+    for idx, acct in enumerate(accounts):
         if not isinstance(acct, dict):
             excluded.append(("?", "malformed:非 object", None, None, None, None))
             continue
@@ -522,51 +655,77 @@ def main(argv):
                 or "stale" not in acct or not isinstance(acct["stale"], bool):
             excluded.append((label, "malformed:ok/stale 欠落/型不正", None, None, None, None))
             continue
-        # --- 適格 (usage 側・facet②): ok==true ∧ stale==false ---
+        # --- 三分類（sc-7czu）: healthy(tier=0) / 復帰クラス(tier=1) / 除外 ---
+        tier, dcode = 0, None
         if acct["ok"] is not True or acct["stale"] is not False:
-            why = "stale(認証切れ/フォールバック)" if acct["stale"] else (
-                "not-ok:%s" % (acct.get("error") or "取得不能"))
-            excluded.append((label, why, acct.get("five_hour_pct"),
-                             acct.get("seven_day_pct"), acct.get("five_hour_resets_at"),
-                             acct.get("seven_day_resets_at")))
-            continue
-        # --- B-lite (2): 適格アカのスコア算出キーの存在+型 ---
+            revivable, code = _revival_of(acct)
+            if not revivable:
+                why = _dead_reason(code)
+                err = acct.get("error")
+                if isinstance(err, str) and err:
+                    # 上流の error 文字列は監査価値があるので落とさない（外部由来ゆえ _tsv が無害化する）。
+                    why = "%s not-ok:%s" % (why, err)
+                excluded.append((label, why, acct.get("five_hour_pct"),
+                                 acct.get("seven_day_pct"), acct.get("five_hour_resets_at"),
+                                 acct.get("seven_day_resets_at")))
+                continue
+            tier, dcode = 1, (code or "?")
+        # --- B-lite (2): スコア算出キーの存在+型 ---
+        # ★この存在検査は緩めない（sc-7czu 禁止事項）: 緩めると pct/resets_at が両方 None の死亡アカで
+        #   headroom(None, None) が「窓なし=満残量 100」を返し、**score 100 の 1 位**になる。
+        #   tier=1（復帰クラス）は not-ok 行ゆえ pct キー自体が無いのが上流の正常形（claude-usage の
+        #   to_json は data がある行にだけ pct を載せる）なので、**reason の語彙だけ**を分ける:
+        #   `malformed:` は _diagnose が shape 契約変更の疑いを数える予約語彙で、通常運転で必ず踏む形を
+        #   そこへ流すと偽警報が常時点灯するため tier=1 では `stale-nodata:` を使う。
+        bad = "malformed:" if tier == 0 else "stale-nodata:"
         missing = [k for k in _SCORE_KEYS if k not in acct]
         if missing:
-            excluded.append((label, "malformed:欠落 %s" % ",".join(missing),
+            excluded.append((label, "%s欠落 %s" % (bad, ",".join(missing)),
                              None, None, None, None))
             continue
         p5, p7 = acct["five_hour_pct"], acct["seven_day_pct"]
         r5, r7 = acct["five_hour_resets_at"], acct["seven_day_resets_at"]
         if not _is_pct(p5) or not _is_pct(p7):
-            excluded.append((label, "malformed:pct 型不正", p5 if _is_pct(p5) else None,
+            excluded.append((label, "%spct 型不正" % bad, p5 if _is_pct(p5) else None,
                              p7 if _is_pct(p7) else None, r5, r7))
             continue
         if not (r5 is None or isinstance(r5, str)) or not (r7 is None or isinstance(r7, str)):
-            excluded.append((label, "malformed:resets_at 型不正", p5, p7, None, None))
+            excluded.append((label, "%sresets_at 型不正" % bad, p5, p7, None, None))
             continue
         # --- 残量算出 + maximin score ---
         h5 = headroom(p5, r5, now)
         h7 = headroom(p7, r7, now)
         if h5 is None or h7 is None:
-            excluded.append((label, "indeterminate:残量判定不能", p5, p7, r5, r7))
+            # tier=0 の `indeterminate:` は (B') 層別（_diagnose）の入力語彙ゆえ温存する。
+            excluded.append((label, "indeterminate:残量判定不能" if tier == 0
+                             else "stale-nodata:残量判定不能", p5, p7, r5, r7))
             continue
         score = min(h5, h7)
-        eligible.append((score, label, h5, h7, p5, p7, r5, r7))
+        eligible.append((tier, score, label, h5, h7, p5, p7, r5, r7, dcode, idx))
 
-    # maximin ランキング: score 降順・同点 label 辞書順・主アカ優先バイアスなし（facet③）。
-    eligible.sort(key=lambda e: (-e[0], e[1]))
+    # maximin ランキング: **tier 昇順** → score 降順 → 同点 label 辞書順（主アカ優先バイアスなし・facet③）。
+    # ★tier を第一キーに置くのが sc-7czu の順位保証: healthy な候補が 1 件でもあれば stale 復帰クラスは
+    #   その**全部より下**に来る（「最上位にならない」では 2 位を許し、呼出元の lazy walk / 先頭 1 件採用で
+    #   即採用されるため保証にならない）。score 値そのものは加減算しない＝col3/col4/col5 の定義は不変。
+    eligible.sort(key=lambda e: (e[0], -e[1], e[2]))
     excluded.sort(key=lambda e: e[0])
 
     out = []
-    for score, label, h5, h7, p5, p7, r5, r7 in eligible:
+    for tier, score, label, h5, h7, p5, p7, r5, r7, dcode, _idx in eligible:
+        # col10 のマーカー列（複数は半角空白区切り・sc-7czu）。順位への影響の有無で接頭辞を分ける。
+        marks = []
+        if tier != 0:
+            # sc-7czu: tier=1 へ**降格**した stale 復帰クラス。score は live 値ではなく snapshot cache
+            # 由来の古い値である旨をここに残す（監査面で後から層別できる）。順位に影響するので
+            # `advisory:`（＝影響しないと自己宣言している接頭辞）には載せない。
+            marks.append("demoted:stale(%s)" % dcode)
         # sc-j8zv（要求③）: 枯渇（実効残量 0）でも適格のままだが、その事実を col10 の advisory として
         # 残す。呼出元の監査 snapshot（bd notes / stderr）にそのまま載る＝worktree 消滅後も横断 grep で
         # 「枯渇アカが選ばれていた」ことを追える（pane 頼みにしない）。eligible フラグ・順位・exit code は
-        # 一切変えない（選定 semantics は admin 裁定事項ゆえ本 cell では動かさない）。
-        advisory = ""
+        # 一切変えない（枯渇を候補から落とすか否かは admin 裁定事項ゆえ本 cell では動かさない）。
         if score <= DEPLETED_HEADROOM:
-            advisory = "advisory:depleted(headroom=%s)" % _fmt_num(score)
+            marks.append("advisory:depleted(headroom=%s)" % _fmt_num(score))
+        advisory = " ".join(marks)
         # 外部由来セル（label / 除外行の生 pct・resets_at / reason）は _tsv で無害化してから join する
         # （行注入・列注入の両方を塞ぐ・well-formed な入力では no-op）。
         out.append("\t".join(_tsv(c) for c in [
