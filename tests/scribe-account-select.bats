@@ -355,6 +355,50 @@ JSON
 ] }
 JSON
 
+  # sc-7czu ERRATA-01(1): healthy(tier=0) 行に降格マークが**付かない**ことの否定対照。
+  #   枯渇 healthy（hZero）を必ず含める: 既存の枯渇 tooth は col10 を**部分一致**で見るため、
+  #   降格分岐が無効化されて `demoted:stale(None) advisory:depleted(...)` になっても緑のまま通る。
+  HEALTHYMARK="$BATS_TEST_TMPDIR/healthymark.json"
+  cat > "$HEALTHYMARK" <<JSON
+{ "accounts": [
+  {"label":"hOK","ok":true,"stale":false,
+   "five_hour_pct":20,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":30,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
+  {"label":"hZero","ok":true,"stale":false,
+   "five_hour_pct":100,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":100,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
+  {"label":"rev","ok":false,"stale":true,"error":"HTTP 429","error_code":"429","attempted":true,
+   "five_hour_pct":5,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":5,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"}
+] }
+JSON
+
+  # sc-7czu ERRATA-01(2): tier=1 の除外 4 分岐（_SCORE_KEYS 欠落 / pct 型不正 / resets_at 型不正 /
+  #   残量判定不能）× tier=0 の同分岐。予約語彙の割り当てを両側から pin するための入力。
+  #   healthy な適格（hAnchor）を必ず 1 件残す＝exit 4 へ落とさず「語彙」だけを観測する。
+  VOCAB4="$BATS_TEST_TMPDIR/vocab4.json"
+  cat > "$VOCAB4" <<JSON
+{ "accounts": [
+  {"label":"hAnchor","ok":true,"stale":false,"five_hour_pct":10,"five_hour_resets_at":null,
+   "seven_day_pct":10,"seven_day_resets_at":null},
+  {"label":"r1miss","ok":false,"stale":true,"error":"HTTP 429","error_code":"429","attempted":true},
+  {"label":"r2badpct","ok":false,"stale":true,"error":"HTTP 429","error_code":"429","attempted":true,
+   "five_hour_pct":"x","five_hour_resets_at":null,"seven_day_pct":10,"seven_day_resets_at":null},
+  {"label":"r3badreset","ok":false,"stale":true,"error":"HTTP 429","error_code":"429","attempted":true,
+   "five_hour_pct":10,"five_hour_resets_at":123,"seven_day_pct":10,"seven_day_resets_at":null},
+  {"label":"r4indet","ok":false,"stale":true,"error":"HTTP 429","error_code":"429","attempted":true,
+   "five_hour_pct":null,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":10,"seven_day_resets_at":null},
+  {"label":"h2badpct","ok":true,"stale":false,
+   "five_hour_pct":"x","five_hour_resets_at":null,"seven_day_pct":10,"seven_day_resets_at":null},
+  {"label":"h3badreset","ok":true,"stale":false,
+   "five_hour_pct":10,"five_hour_resets_at":123,"seven_day_pct":10,"seven_day_resets_at":null},
+  {"label":"h4indet","ok":true,"stale":false,
+   "five_hour_pct":null,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":10,"seven_day_resets_at":null}
+] }
+JSON
+
   # T1（sc-7czu §4）: healthy が全滅（score キー欠落）しつつ **採点可能な復帰クラスが eligible** に残る形。
   # 旧 exit 4 条件「eligible == 0」だと rc=4 が rc=0 へ落ちて teeth が死ぬ（この fixture がその disarm 検知）。
   T1DROP="$BATS_TEST_TMPDIR/t1drop.json"
@@ -1121,6 +1165,64 @@ mk_cfg() {
   [[ "$stderr" != *"shape 契約変更"* ]]
   # healthy 側は無傷（1 位のまま）。
   [ "$(awk -F'\t' '$2=="1"{print $1}' <<<"$output")" = "acctA" ]
+}
+
+# ── sc-7czu T-HEALTHY-NOMARK（ERRATA-01(1)）─────────────────────────────────
+# inventory: invariant=降格マーカーは tier=1 の行に**だけ**付く — healthy(tier=0) の col10 は
+#            「マーカー無し」または枯渇 advisory **のみ**で、demoted: を含まない
+#          | polarity=negative(hOK,hZero) + positive(rev)
+#          | mutant_fingerprint=`marks.append("demoted:stale(%s)" % dcode)` の直上 `if tier != 0:` を
+#            無効化（常に append）→ healthy 全行が demoted:stale(None) を持ち hOK/hZero の完全一致が RED /
+#            同 append を削除 → rev の完全一致が RED
+#            （★hZero が要る理由: 既存の枯渇 tooth は col10 を**部分一致**で見るため、降格分岐が
+#              無効化されて "demoted:stale(None) advisory:depleted(headroom=0)" になっても緑で通る。
+#              T-COL10 も復帰クラス行の完全一致と NF==10 しか見ず healthy 行の col10 を観測しない
+#              ＝この変異は 65 tooth 全 green で生存していた・gate wf_bf02d050-1ff 実測）
+@test "sc-7czu T-HEALTHY-NOMARK: healthy 行の col10 に demoted: は付かない（降格は tier=1 限定）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$HEALTHYMARK")" python3 "$SEL"
+  [ "$status" -eq 0 ]
+  local c10; c10() { awk -F'\t' -v l="$1" '$1==l{print $10}' <<<"$output"; }
+  # 全員 eligible（本 tooth は col10 だけを論点にする＝選定は動かない）。
+  [ "$(awk -F'\t' '$2=="1"{print $1}' <<<"$output" | paste -sd, -)" = "hOK,hZero,rev" ]
+  # ★完全一致で pin する（部分一致だと降格マークが**増えて**も通る＝この tooth の存在理由が消える）。
+  [ "$(c10 hOK)" = "" ]                                        # 無印 healthy: マーカーは 1 つも付かない
+  [ "$(c10 hZero)" = "advisory:depleted(headroom=0)" ]         # 枯渇 healthy: advisory **のみ**
+  [ "$(c10 rev)" = "demoted:stale(429)" ]                      # positive 対照（マーカー削除も RED にする）
+  # demoted: を持つ行は tier=1 の 1 行だけ（行数で数えて healthy への波及を塞ぐ）。
+  [ "$(grep -c 'demoted:' <<<"$output")" -eq 1 ]
+  [ "$(awk -F'\t' '{print NF}' <<<"$output" | sort -u | paste -sd, -)" = "10" ]
+}
+
+# ── sc-7czu T-VOCAB4（ERRATA-01(2)）─────────────────────────────────────────
+# inventory: invariant=tier=1（復帰クラス）の除外は **4 分岐すべて** `stale-nodata:` で、予約語彙
+#            `malformed:` を 1 分岐も使わない（契約 §5(iii)）／裏返しに tier=0 は `malformed:`（型系）と
+#            `indeterminate:`（残量判定不能・(B') 層別の入力語彙）を保つ
+#          | polarity=positive(r1miss,r2badpct,r3badreset,r4indet) + negative(h2badpct,h3badreset,h4indet)
+#          | mutant_fingerprint=`"%spct 型不正" % bad` → `"malformed:pct 型不正"` で r2badpct が RED /
+#            `"%sresets_at 型不正" % bad` → `"malformed:resets_at 型不正"` で r3badreset が RED /
+#            残量判定不能の `... if tier == 0 else "stale-nodata:残量判定不能"` を `"malformed:残量判定不能"`
+#            へ潰すと r4indet と h4indet が RED / `bad = "malformed:" if tier == 0 else "stale-nodata:"` を
+#            `bad = "stale-nodata:"` へ潰すと h2badpct/h3badreset が RED
+#            （★従来は _SCORE_KEYS 欠落分岐しか pin しておらず、残る 3 分岐を malformed: へ退行させる
+#              変異が生存していた・gate wf_bf02d050-1ff 実測）
+@test "sc-7czu T-VOCAB4: tier=1 の除外 4 分岐すべてが stale-nodata:（malformed: を 1 分岐も使わない）" {
+  run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$VOCAB4")" python3 "$SEL"
+  [ "$status" -eq 0 ]                       # healthy な適格が 1 件残る＝exit 4 ではない（語彙だけを観測）
+  local c10; c10() { awk -F'\t' -v l="$1" '$1==l{print $10}' <<<"$output"; }
+  local el;  el()  { awk -F'\t' -v l="$1" '$1==l{print $2}'  <<<"$output"; }
+  # --- tier=1 の 4 分岐（採点不能はいずれも除外・語彙は stale-nodata: に統一）---
+  [ "$(el r1miss)" = "0" ];     [[ "$(c10 r1miss)" == "stale-nodata:欠落 "* ]]   # (a) _SCORE_KEYS 欠落
+  [ "$(el r2badpct)" = "0" ];   [ "$(c10 r2badpct)"  = "stale-nodata:pct 型不正" ]        # (b)
+  [ "$(el r3badreset)" = "0" ]; [ "$(c10 r3badreset)" = "stale-nodata:resets_at 型不正" ] # (c)
+  [ "$(el r4indet)" = "0" ];    [ "$(c10 r4indet)"   = "stale-nodata:残量判定不能" ]      # (d)
+  # --- 裏返し: tier=0 は予約語彙を保つ（`bad` を無条件 stale-nodata: へ潰す変異を塞ぐ）---
+  [ "$(c10 h2badpct)"   = "malformed:pct 型不正" ]
+  [ "$(c10 h3badreset)" = "malformed:resets_at 型不正" ]
+  [ "$(c10 h4indet)"    = "indeterminate:残量判定不能" ]   # (B') 層別の入力語彙ゆえ malformed: にしない
+  # malformed: を名乗る行は tier=0 の 2 件だけ（tier=1 側への漏れを行数で塞ぐ）。
+  [ "$(grep -c 'malformed:' <<<"$output")" -eq 2 ]
+  # 予約語彙を汚していない＝復帰クラスの通常運転で shape ドリフト警報を焚かない。
+  [[ "$stderr" != *"shape 契約変更"* ]]
 }
 
 # ── sc-7czu T-MALFORM-PIN ────────────────────────────────────────────────────
