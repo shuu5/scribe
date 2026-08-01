@@ -491,6 +491,59 @@ plant_driver_mutant() {
   [ "$(kval "$output" gatePrefix)" = "CONVERGED" ]
 }
 
+# ── L-B9（否定対照 6・ERRATA-01）─────────────────────────────────────────────
+# inventory: invariant=最終 round が blocking=0 でも **snapshotFailed** なら converged を立てず escalate
+#            （契約 ■5 (iii) の machineryFailed は「reviewFailed=0 **かつ** snapshotFailed=false」の連言。
+#            L-B2 は reviewFailed 側だけを駆動しており snapshotFailed 側は無検証だった＝受入 (2)(iii) の半分。
+#            レビュー対象不在〔EMPTY_DIFF〕は「直す対象が無い」machinery 異常であって clean ではない）
+#          | polarity=negative / mutant-RED（現 main で既に GREEN ゆえ baseline-RED を要求しない）
+#          | mutant_fingerprint=(a) machineryFailed 合成式から snapshotFailed を落とす
+#            `reviewFailedCount > 0 || snapshotFailed` → `reviewFailedCount > 0`
+#            → zeroStreak が積まれ rounds=2 でループ内 converged が立ち CONVERGED で RED
+#            / (b) 昇格連言の literal 置換 `capTerminatedEarly(round, effectiveCap) && zeroStreak >= 1`
+#            → `... && lastH.confirmedBlocking === 0`（machineryFailed 連言外し）→ 昇格が発火し CONVERGED で RED
+#            （どちらも実走で確認する）
+@test "sc-pyab L-B9: 最終 round が blocking=0 でも snapshotFailed なら converged を立てない" {
+  local a
+  a="$(lq_args '{}')"
+  # snapshot が EMPTY_DIFF＝レビュー対象不在。全 round で review は 0 件（findings 空）ゆえ blocking=0 だが
+  # snapshotFailed=true が立ち続ける＝「blocking 0 だが machinery 異常」modality を非 cap 経路で駆動する
+  # （cap 例外で駆動すると capExceeded が terminal を先に倒し、machineryFailed 側の連言を観測できない）。
+  run env CQ_ARGS="$a" CQ_SNAPSHOT='EMPTY_DIFF' CQ_REVIEW_FINDINGS='[]' CQ_VERIFY_REFUTED=true node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  # 前提の非空虚性: hard cap へ自然到達し（rounds=3・cap 非発火）、最終 round は blocking 0 ∧ reviewFailed 0 ∧
+  # snapshotFailed=true ＝ `snapshotFailed` だけが昇格を止めている状態に居る。
+  [ "$(kval "$output" rounds)" -eq 3 ]
+  [ "$(kval "$output" capExceeded)" = "false" ]
+  local last
+  last="$(node -e 'const m=process.argv[1].match(/RESULT (.*)$/m);const h=JSON.parse(m[1]).history;const l=h[h.length-1];console.log(`${l.confirmedBlocking},${l.reviewFailed},${l.snapshotFailed}`)' "$output")"
+  [ "$last" = "0,0,true" ]
+  [ "$(kval "$output" converged)" = "false" ]
+  [ "$(kval "$output" escalate)" = "true" ]
+  [ "$(kval "$output" gatePrefix)" = "ESCALATE" ]
+
+  # 変異(a): machineryFailed の合成式から snapshotFailed を落とすと、対象不在の round が「真にクリーン」と
+  # 誤読されて zeroStreak が積まれ、rounds=2 でループ内 converged が立つ（＝レビューを一度もしていない run が
+  # CONVERGED で ship される）。※ sed の delimiter は `|` なのでパターン中の `||` は `\|\|` と書く。
+  local mut="$BATS_TEST_TMPDIR/mu-b9a"
+  plant_wf_mutant "$mut" 'reviewFailedCount > 0 \|\| snapshotFailed' 'reviewFailedCount > 0'
+  run env CQ_ARGS="$a" CQ_SNAPSHOT='EMPTY_DIFF' CQ_REVIEW_FINDINGS='[]' CQ_VERIFY_REFUTED=true node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" converged)" = "true" ]
+  [ "$(kval "$output" gatePrefix)" = "CONVERGED" ]
+
+  # 変異(b): 系統A の昇格連言を lastH.confirmedBlocking === 0 の単独条件へ過剰一般化すると、zeroStreak が
+  # 含意していた machinery 健全性が外れ、snapshotFailed のまま hard cap 到達 run が昇格する。
+  local mutb="$BATS_TEST_TMPDIR/mu-b9b"
+  plant_wf_mutant "$mutb" 'capTerminatedEarly(round, effectiveCap) \&\& zeroStreak >= 1' \
+      'capTerminatedEarly(round, effectiveCap) \&\& lastH.confirmedBlocking === 0'
+  run env CQ_ARGS="$a" CQ_SNAPSHOT='EMPTY_DIFF' CQ_REVIEW_FINDINGS='[]' CQ_VERIFY_REFUTED=true node "$mutb/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" rounds)" -eq 3 ]
+  [ "$(kval "$output" converged)" = "true" ]
+  [ "$(kval "$output" gatePrefix)" = "CONVERGED" ]
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # [L-C] driver の round 別 stub knob（項目4）
 # ─────────────────────────────────────────────────────────────────────────────
