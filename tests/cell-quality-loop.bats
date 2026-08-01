@@ -9,15 +9,19 @@
 #         後置）は否定対照が捕える。
 #   [L-C] driver の round 別 stub knob（項目4）: 未設定時の挙動が **byte 単位で従来と同一**であること。
 #
-# 【本 file が持たないもの = churn（契約 ■6 / acceptance (2)）】
-#   churn（正味前進なし round の loud 打切り）は **本 leg では未実装**。契約どおりの述語
-#   （当 round blocking>0 ∧ dedup キー基準で前 round 集合と完全一致 ∧ 新規 confirmed 0）を実装すると、
-#   tests/cell-quality-cap.bats の "K2': cap 未指定時の agent 呼出し列が base 木と完全一致する" の
-#   scenario 'autofix'（全 round 同一 findings・全 confirmed）で round 2 に発火し、callSeq が base 木
-#   （不変 SHA 46958e5d…）と一致しなくなる（実測: rounds 3→2 / agentCallTotal 56→37 / RED 1 本・他 54 本は green）。
-#   ＝ landed guard の期待値変更が要るため、契約 ■BLOCKED の規律に従い worker は独自判断で実装せず admin へ
-#   返した（詳細は bd sc-pyab の STATUS: blocked note）。**skip でこの穴を隠さない**（skip は空虚 green を作る）。
-#   churn が land する際は「churn 打切り run は最終 round ではない」を系統A の連言へ足すこと（下記 L-B4 参照）。
+# 【本 file が持たないもの = churn（旧契約 ■6・admin 裁定で Leg-2 へ移送済み）】
+#   churn（正味前進なし round の loud 打切り）は **本 leg の scope 外**。受入条件 v2（2026-08-01 の churn 移送
+#   裁定）が旧 v1 を supersede し、churn は Leg-2 = bd sc-psuq（review barrier 化 + global dedup + global
+#   severity top-K）へ移された。よって本 file に churn の tooth は **意図して 1 本も無い**（穴の放置ではなく
+#   scope 分界。skip も置かない＝skip は空虚 green を作る）。
+#   移送の根拠（worker 実測 → admin 裁定）: 契約どおりの述語（当 round blocking>0 ∧ dedup キー基準で前 round
+#   集合と完全一致 ∧ 新規 confirmed 0）を実装すると、tests/cell-quality-cap.bats の
+#   "K2': cap 未指定時の agent 呼出し列が base 木と完全一致する" の scenario 'autofix'（全 round 同一 findings・
+#   全 confirmed）で round 2 に発火し、callSeq が base 木（不変 SHA 46958e5d…）と一致しなくなる
+#   （実測: rounds 3→2 / agentCallTotal 56→37 / RED 1 本・他 54 本は green）。churn は **ループを早期終端させて
+#   agent 呼出し列を変える**ため、landed guard K2' の期待値変更＝Leg-2 の K2' 再契約と同じ裁定束に入る。
+#   （対して本 leg の系統A は呼出し列を変えず終端 flag のみ変えるので K2' を割らない＝両者の弁別根拠。）
+#   churn が Leg-2 で land する際は「churn 打切り run は最終 round ではない」を系統A の連言へ足すこと（L-B4 参照）。
 #
 # 規律（protocol §2 / cap.bats と同じ）:
 #   - 各 tooth に assertion inventory row（invariant / polarity / mutant_fingerprint）を併記する。
@@ -91,10 +95,12 @@ plant_driver_mutant() {
 # ── L-A1 ─────────────────────────────────────────────────────────────────────
 # inventory: invariant=severity rubric literal が review と verify の **両方**の prompt へ届く
 #          | polarity=positive（RED→GREEN: 実装前は verify に rubric が無く promptGrepLabels が review のみ）
-#          | mutant_fingerprint=WF の `${SEVERITY_RUBRIC}` 行を削除 → promptGrepCount 0 で本 tooth が RED
+#          | mutant_fingerprint=WF の `${SEVERITY_RUBRIC}` 補間 2 箇所を削除（rubric 欠落）→ promptGrepCount 0
+#            かつ labels から review: / verify: が消えて RED（**実走で確認する**＝文書化だけの指紋にしない）
 @test "sc-pyab L-A1: severity rubric literal が review / verify 双方の prompt へ焼かれている" {
+  local rubric='severity は acceptance / fence を脅かすかを唯一の基準に付与する'
   run env CQ_ARGS="$(lq_args '{}')" CQ_REVIEW_FINDINGS="$FINDING_BLOCKING" CQ_VERIFY_REFUTED=true \
-      CQ_PROMPT_GREP='severity は acceptance / fence を脅かすかを唯一の基準に付与する' node "$DRIVER" run
+      CQ_PROMPT_GREP="$rubric" node "$DRIVER" run
   [ "$status" -eq 0 ]
   local labels
   labels="$(kval "$output" promptGrepLabels)"
@@ -102,6 +108,20 @@ plant_driver_mutant() {
   [[ "$labels" == *"review:"* ]]
   [[ "$labels" == *"verify:"* ]]
   # 非空虚性: verify 段が実際に走っている（0 本なら上の判定は空虚に通りうる）。
+  [ "$(kval "$output" verifyCallCount)" -gt 0 ]
+
+  # 変異（rubric 欠落）: 補間 2 箇所を削除すると rubric literal がどの prompt にも届かなくなる。
+  # const 定義そのものは残る＝「定義は在るが焼かれていない」という最も見落としやすい退行形を駆動する。
+  local mut="$BATS_TEST_TMPDIR/mu-a1"
+  plant_wf_mutant "$mut" '\${SEVERITY_RUBRIC}' ''
+  run env CQ_ARGS="$(lq_args '{}')" CQ_REVIEW_FINDINGS="$FINDING_BLOCKING" CQ_VERIFY_REFUTED=true \
+      CQ_PROMPT_GREP="$rubric" node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" promptGrepCount)" -eq 0 ]
+  labels="$(kval "$output" promptGrepLabels)"
+  [[ "$labels" != *"review:"* ]]
+  [[ "$labels" != *"verify:"* ]]
+  # 変異木でも verify 段は走っている（＝rubric が消えたことだけを観測している）。
   [ "$(kval "$output" verifyCallCount)" -gt 0 ]
 }
 
@@ -247,31 +267,55 @@ plant_driver_mutant() {
 }
 
 # ── L-B3（否定対照 2）────────────────────────────────────────────────────────
-# inventory: invariant=最終 round が blocking=0 でも capExceeded=true なら converged を立てない
-#            （＝系統A の昇格は capFinalize **より前**に置き、cap の fail-closed に必ず負ける）
+# inventory: invariant=最終 round が真にクリーン（blocking 0 ∧ unverified 0 ∧ machinery 健全）でも
+#            capExceeded=true なら系統A の昇格をしない＝終端は **escalate 網**（gatePrefix=ESCALATE）で
+#            確定する（cap 発火 run は「幅を落として走った」＝真にクリーンだと主張できない）
 #          | polarity=negative / mutant-RED
-#          | mutant_fingerprint=`converged = capFinal.converged` → `converged = capFinal.converged ? true : converged`
-#            （ループ側で立った converged を capFinalize の後に復活させる形＝系統A 昇格を後置した場合と等価。
-#            `||` は sed 区切り文字と衝突するため三項で書く）→ converged=true で RED
-@test "sc-pyab L-B3: 最終 round が clean でも capExceeded なら converged を立てない（capFinalize が勝つ）" {
+#          | mutant_fingerprint=昇格の連言から `!capExceeded && ` を削除 → 昇格が converged=true を立てて
+#            直下の escalate 網（zeroStreak < 2）を丸ごと skip し、capFinalize が converged だけを剥がすため
+#            converged=false ∧ escalate=false = **gatePrefix OPEN**（sc-k33c errata が封鎖した loop-mode
+#            fail-open）へ落ちる＝本 tooth が RED（実走で確認する）
+#
+# 【シナリオ選定の load-bearing な注意】throw を round 限定しない（CQ_THROW_AT_ROUND 未設定）と、全 round の
+# verify が落ちて毎 round が blocking 0 ∧ machineryFailed false になり zeroStreak が 2 に達して **rounds=2 で
+# ループ内 converged が立つ**（実測）。その run は round < effectiveCap ゆえ系統A の昇格 if を評価すらせず、
+# capFinalize が zeroStreak 由来の converged を落とすだけの経路になる＝`!capExceeded` 連言の behavioral tooth に
+# ならない（空虚 tooth）。よって throw は **round1 に限定**し、round2 で blocking を再検出して zeroStreak を
+# 0 へ戻してから round3 で初めてクリーンにする＝hard cap へ自然到達した最終 round で昇格 if が実際に評価される
+# 状態を作る（実測 rounds=3 / capExceeded=true / 最終 round は blocking 0・unverified 0・reviewFailed 0）。
+@test "sc-pyab L-B3: 最終 round が clean でも capExceeded なら converged を立てず escalate（昇格が cap 網に負ける）" {
   local a
   a="$(lq_args '{}')"
-  # verify 段で cap 指紋例外 → capExceeded=true。round3 は findings 空＝verify を起動せず真にクリーン。
+  # round1 の verify だけ cap 指紋例外 → capExceeded=true かつ round1 は unverified 行き（blocking 0）。
+  # round2 は既定どおり blocking 4 を confirm（zeroStreak を 0 へ戻す）。round3 は findings 空＝真にクリーン。
   run env CQ_ARGS="$a" CQ_REVIEW_FINDINGS="$FINDING_BLOCKING" CQ_VERIFY_REFUTED=false \
-      CQ_REVIEW_FINDINGS_BY_ROUND='{"3":[]}' CQ_THROW_AT_LABEL='verify:' CQ_THROW_KIND=quota node "$DRIVER" run
+      CQ_REVIEW_FINDINGS_BY_ROUND='{"3":[]}' CQ_THROW_AT_LABEL='verify:' CQ_THROW_AT_ROUND=1 \
+      CQ_THROW_KIND=quota node "$DRIVER" run
   [ "$status" -eq 0 ]
+  # 前提の非空虚性: hard cap へ自然到達し（rounds=3）、最終 round は `!capExceeded` 以外の昇格連言をすべて
+  # 満たす（blocking 0 / unverified 0 / reviewFailed 0）＝昇格 if が実際に評価され `!capExceeded` だけで落ちる。
+  [ "$(kval "$output" rounds)" -eq 3 ]
   [ "$(kval "$output" capExceeded)" = "true" ]
+  local last
+  last="$(node -e 'const m=process.argv[1].match(/RESULT (.*)$/m);const h=JSON.parse(m[1]).history;const l=h[h.length-1];console.log(`${l.confirmedBlocking},${l.unverified},${l.reviewFailed}`)' "$output")"
+  [ "$last" = "0,0,0" ]
   [ "$(kval "$output" converged)" = "false" ]
+  # converged=false だけでは capFinalize の落とし直しと区別できない（OPEN 退行を見逃す）ため終端も pin する。
+  [ "$(kval "$output" escalate)" = "true" ]
+  [ "$(kval "$output" gatePrefix)" = "ESCALATE" ]
 
-  # 変異: capFinalize の結果を（昇格由来であれ zeroStreak 由来であれ）ループ側の converged が上書きする形に
-  # すると、cap の fail-closed（capExceeded → converged=false）が骨抜きになる。
+  # 変異: 昇格の連言から `!capExceeded` を外すと、cap 発火 run を「真にクリーン」と誤読して converged=true を
+  # 立て、直下の escalate 網を飛ばす。capFinalize が converged を false へ戻すので終端は
+  # converged=false ∧ escalate=false = gatePrefix OPEN（fail-open）になる。
   local mut="$BATS_TEST_TMPDIR/mu-b3"
-  plant_wf_mutant "$mut" 'converged = capFinal.converged' 'converged = capFinal.converged ? true : converged'
+  plant_wf_mutant "$mut" '!capExceeded \&\& ' ''
   run env CQ_ARGS="$a" CQ_REVIEW_FINDINGS="$FINDING_BLOCKING" CQ_VERIFY_REFUTED=false \
-      CQ_REVIEW_FINDINGS_BY_ROUND='{"3":[]}' CQ_THROW_AT_LABEL='verify:' CQ_THROW_KIND=quota node "$mut/tests/driver.mjs" run
+      CQ_REVIEW_FINDINGS_BY_ROUND='{"3":[]}' CQ_THROW_AT_LABEL='verify:' CQ_THROW_AT_ROUND=1 \
+      CQ_THROW_KIND=quota node "$mut/tests/driver.mjs" run
   [ "$status" -eq 0 ]
   [ "$(kval "$output" capExceeded)" = "true" ]
-  [ "$(kval "$output" converged)" = "true" ]
+  [ "$(kval "$output" escalate)" = "false" ]
+  [ "$(kval "$output" gatePrefix)" = "OPEN" ]
 }
 
 # ── L-B4（否定対照 3）────────────────────────────────────────────────────────
@@ -443,7 +487,8 @@ plant_driver_mutant() {
 #            比較ゆえ、既定挙動が 1 mm でも変わると base 対照が false RED になる）
 #          | polarity=positive
 #          | mutant_fingerprint=`byRound(REVIEW_FINDINGS_BY_ROUND, label, REVIEW_FINDINGS)`
-#            → `byRound(REVIEW_FINDINGS_BY_ROUND, label, [])`（既定を変える）→ 出力差分で RED
+#            → `byRound(REVIEW_FINDINGS_BY_ROUND, label, [])`（knob 未設定時の既定を変える）→ 対照 driver と
+#            出力が食い違い RED（**実走で確認する**＝この変異こそ cap.bats base 対照 3 本を false RED にする形）
 @test "sc-pyab L-C1: round 別 knob 未設定時の driver 出力は導入前と byte 一致（cap.bats base 対照を割らない）" {
   local prev="$BATS_TEST_TMPDIR/prevdrv"
   mkdir -p "$prev/tests" "$prev/workflows"
@@ -476,6 +521,20 @@ plant_driver_mutant() {
     [ -n "$prev_out" ]
     [ "$prev_out" = "$head_out" ]
   done
+
+  # 変異（driver knob 既定変更）: 未設定時の既定を [] へ変えると、対照 driver との byte 一致が崩れる。
+  # ＝本 tooth が「既定不変」を実際に守っている証拠であり、同時に cap.bats の base 木対照 3 本
+  # （HEAD driver を base 木へ cp する現物対現物比較）が false RED になる形そのもの。
+  local mut="$BATS_TEST_TMPDIR/mu-c1"
+  plant_driver_mutant "$mut" 'byRound(REVIEW_FINDINGS_BY_ROUND, label, REVIEW_FINDINGS)' \
+      'byRound(REVIEW_FINDINGS_BY_ROUND, label, [])'
+  a="$(lq_args '{}')"
+  run env CQ_ARGS="$a" CQ_REVIEW_FINDINGS="$FINDING_BLOCKING" CQ_VERIFY_REFUTED=false node "$prev/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  prev_out="$output"
+  run env CQ_ARGS="$a" CQ_REVIEW_FINDINGS="$FINDING_BLOCKING" CQ_VERIFY_REFUTED=false node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  [ "$prev_out" != "$output" ]
 }
 
 # ── L-C2 ─────────────────────────────────────────────────────────────────────
