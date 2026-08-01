@@ -307,8 +307,12 @@ JSON
 ] }
 JSON
 
-  # allowlist の境界（HTTP status 系）: 5xx=復帰 / 401・403=除外。全て「stale=true」で来る＝stale フラグ
-  # では層別できないことを同時に pin する。
+  # allowlist の境界（HTTP status 系）: 5xx=復帰 / 401・403・その他の非 5xx=除外。全て「stale=true」で
+  # 来る＝stale フラグでは層別できないことを同時に pin する。
+  # ★sc-7czu self-review: s404 は「401/403 以外の非 5xx」の代表。これが無いと allowlist の否定側が
+  #   401/403 の 2 値にしか掛からず、HTTP 判定を `st not in (401,403)`（＝全 status を復帰扱い）へ
+  #   緩める fail-open 変異が全 tooth green のまま生存する（実測で生存を確認した）。allowlist 型
+  #   （「429/5xx **のみ**」）を閉じ側から pin するために必須の行。
   HTTPCLASS="$BATS_TEST_TMPDIR/httpclass.json"
   cat > "$HTTPCLASS" <<JSON
 { "accounts": [
@@ -317,6 +321,8 @@ JSON
   {"label":"s401","ok":false,"stale":true,"error":"HTTP 401","error_code":"401","attempted":true,
    "five_hour_pct":10,"five_hour_resets_at":null,"seven_day_pct":10,"seven_day_resets_at":null},
   {"label":"s403","ok":false,"stale":true,"error":"HTTP 403","error_code":"403","attempted":true,
+   "five_hour_pct":10,"five_hour_resets_at":null,"seven_day_pct":10,"seven_day_resets_at":null},
+  {"label":"s404","ok":false,"stale":true,"error":"HTTP 404","error_code":"404","attempted":true,
    "five_hour_pct":10,"five_hour_resets_at":null,"seven_day_pct":10,"seven_day_resets_at":null},
   {"label":"sUnk","ok":false,"stale":true,"error":"???","error_code":"zzz","attempted":true,
    "five_hour_pct":10,"five_hour_resets_at":null,"seven_day_pct":10,"seven_day_resets_at":null}
@@ -1038,18 +1044,24 @@ mk_cfg() {
 }
 
 # ── sc-7czu T-HTTP ───────────────────────────────────────────────────────────
-# inventory: invariant=HTTP status の allowlist 境界（5xx=復帰 / 401・403=除外 / 未知語彙=除外）
-#          | polarity=positive(503) + negative(401,403,zzz)
-#          | mutant_fingerprint=`_revival_of` の HTTP 判定を `st >= 400` へ緩める → s401/s403 が RED
-@test "sc-7czu T-HTTP: 5xx は復帰・401/403 と未知語彙は除外（全て stale=true＝フラグで層別しない）" {
+# inventory: invariant=HTTP status の allowlist 境界（429/5xx **のみ**復帰 / 401・403・その他の非 5xx・
+#            未知語彙は除外）
+#          | polarity=positive(503) + negative(401,403,404,zzz)
+#          | mutant_fingerprint=`_revival_of` の HTTP 判定を `st >= 400` へ緩める → s401/s403 が RED /
+#            同判定を `st is not None and st not in (401, 403)` へ緩める（＝401/403 以外の全 status を
+#            復帰扱い＝allowlist を否定側から破壊する fail-open 変異）→ s404 が RED
+#            （★s404 行が無いと後者の変異は全 tooth green のまま生存する＝実測。sc-7czu self-review）
+@test "sc-7czu T-HTTP: 429/5xx のみ復帰・401/403/404 と未知語彙は除外（全て stale=true＝フラグで層別しない）" {
   run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$HTTPCLASS")" python3 "$SEL"
   local el; el() { awk -F'\t' -v l="$1" '$1==l{print $2}' <<<"$output"; }
   [ "$(el s503)" = "1" ]
   [ "$(el s401)" = "0" ]
   [ "$(el s403)" = "0" ]
+  [ "$(el s404)" = "0" ]     # 401/403 以外の非 5xx も復帰しない＝allowlist は「429/5xx のみ」で閉じる
   [ "$(el sUnk)" = "0" ]     # 未知語彙は fail-closed（「知らないコード＝たぶん生きてる」に倒さない）
   # 除外理由は由来が分かる形（dead: / unknown:）で、shape ドリフト警報の予約語彙 malformed: を使わない。
   [[ "$(awk -F'\t' '$1=="s401"{print $10}' <<<"$output")" == dead:401* ]]
+  [[ "$(awk -F'\t' '$1=="s404"{print $10}' <<<"$output")" == dead:404* ]]
   [[ "$(awk -F'\t' '$1=="sUnk"{print $10}' <<<"$output")" == unknown:zzz* ]]
   [ "$(grep -c 'malformed:' <<<"$output" || true)" -eq 0 ]
 }
