@@ -90,6 +90,10 @@
 #   rc=0 で実データが返る」ことは **usage 健全の証拠ではない**（degrade の見え方そのもの）。実測 2026-07-26 の
 #   一過性 HTTP 429（upstream 計測: probe 36 req 中 429=29 / 200=7）で全 account が同時に degrade し、
 #   eligible=0 → spawn fail-loud に至ったのが incident の実体（upstream ヘッダ un-qfht も同じ因果を明記）。
+#   ▼★sc-7czu 以後の読み替え（この段落は incident 当時の挙動の記録であって現行挙動ではない）: 429 は
+#     下記 allowlist の**復帰クラス**になったので、同じ入力でも eligible=0 にはならず tier=1 の候補が残る
+#     （＝この incident の spawn fail-loud 自体は再発しない）。ただし (A)/(B)/(B') の層別と exit 4 の
+#     不変条件はそのまま有効で、健全 0 件の事実は (A) 診断として出し続ける（下記 _diagnose 参照）。
 #   ∴ 「適格 0 件」には性質の違う 2 種がある:
 #     (A) 上流劣化（usage 側に健全 account が 1 件も無い）= selector は正しい。exit 0 のまま + stderr に
 #         error_code 内訳を出して「429=一過性 / 401 等=要 re-login」を弁別可能にする（誤って「全アカウント

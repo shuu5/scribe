@@ -301,6 +301,14 @@ JSON
    "attempted":true,"skip_reason":null,"token_expires_at":null,
    "five_hour_pct":2,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
    "seven_day_pct":2,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
+  {"label":"revCodeOnly","ok":false,"stale":true,"error":"token 期限切れ","error_code":"expired",
+   "attempted":false,"token_expires_at":"2026-07-08T09:00:00+00:00",
+   "five_hour_pct":3,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":3,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
+  {"label":"revSkipOnly","ok":false,"stale":true,"error":"token 期限切れ(skip)",
+   "attempted":false,"skip_reason":"token_expired","token_expires_at":"2026-07-08T09:00:00+00:00",
+   "five_hour_pct":4,"five_hour_resets_at":"2026-07-08T15:00:00+00:00",
+   "seven_day_pct":4,"seven_day_resets_at":"2026-07-14T00:00:00+00:00"},
   {"label":"dead","ok":false,"stale":true,"error":"token 不在","error_code":"notoken",
    "attempted":false,"skip_reason":"no_token","token_expires_at":null,
    "five_hour_pct":0,"five_hour_resets_at":null,"seven_day_pct":0,"seven_day_resets_at":null}
@@ -309,6 +317,9 @@ JSON
 
   # allowlist の境界（HTTP status 系）: 5xx=復帰 / 401・403・その他の非 5xx=除外。全て「stale=true」で
   # 来る＝stale フラグでは層別できないことを同時に pin する。
+  # ★sc-7czu WF 指摘: s600 は**上限側**（`500 <= st <= 599` の `<= 599`）の否定対照。これが無いと
+  #   `500 <= st` へ緩める（＝3 桁の 600-999 を全部復帰扱いにする）変異が全 tooth green で生存する
+  #   ＝実測。s404 を下限/非 5xx 側の必須行と論じた同じ論法を上限側にも適用して網の非対称を消す。
   # ★sc-7czu self-review: s404 は「401/403 以外の非 5xx」の代表。これが無いと allowlist の否定側が
   #   401/403 の 2 値にしか掛からず、HTTP 判定を `st not in (401,403)`（＝全 status を復帰扱い）へ
   #   緩める fail-open 変異が全 tooth green のまま生存する（実測で生存を確認した）。allowlist 型
@@ -323,6 +334,8 @@ JSON
   {"label":"s403","ok":false,"stale":true,"error":"HTTP 403","error_code":"403","attempted":true,
    "five_hour_pct":10,"five_hour_resets_at":null,"seven_day_pct":10,"seven_day_resets_at":null},
   {"label":"s404","ok":false,"stale":true,"error":"HTTP 404","error_code":"404","attempted":true,
+   "five_hour_pct":10,"five_hour_resets_at":null,"seven_day_pct":10,"seven_day_resets_at":null},
+  {"label":"s600","ok":false,"stale":true,"error":"HTTP 600","error_code":"600","attempted":true,
    "five_hour_pct":10,"five_hour_resets_at":null,"seven_day_pct":10,"seven_day_resets_at":null},
   {"label":"sUnk","ok":false,"stale":true,"error":"???","error_code":"zzz","attempted":true,
    "five_hour_pct":10,"five_hour_resets_at":null,"seven_day_pct":10,"seven_day_resets_at":null}
@@ -744,7 +757,9 @@ mk_cfg() {
   [[ "$notes" == *"fallback=yes"* ]]
 }
 
-@test "sc-1rq spawn: 正常採用時 監査 note — 接頭辞 + chosen=black4 + 候補全員(default/除外black3)snapshot" {
+# ★sc-7czu で title も改訂: 本 tooth の body は「black3=復帰クラスで col2=1」「除外側の pin は phito」へ
+#   動いており、旧 title の「除外black3」は逆の不変条件を述べていた（bats の失敗レポートは title で読まれる）。
+@test "sc-1rq spawn: 正常採用時 監査 note — 接頭辞 + chosen=black4 + 候補全員(default/black3=復帰クラス)・除外 phito snapshot" {
   : > "$NOTE_LOG"
   mk_cfg "$ABASE/black4"; mk_cfg "$ABASE/black2"
   run env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$GOLDEN")" SCRIBE_ACCOUNTS_BASE="$ABASE" \
@@ -824,8 +839,12 @@ mk_cfg() {
 }
 
 @test "sc-j8zv 要求③ characterization: 枯渇(残量0)でも eligible=1 のまま（floor 無し）+ advisory + 枯渇 warn" {
-  # ★現行 semantics（stale のみ除外・枯渇は減点）を明示的に pin する。floor を入れる/入れないは admin
-  #   裁定事項ゆえ本 cell では選定を変えない。将来 floor を入れるなら本テストを意図的に書き換えること
+  # ★現行 semantics「枯渇（実効残量 0）でも eligible=1・**floor 無し**」を明示的に pin する。floor を
+  #   入れる/入れないは admin 裁定事項ゆえ本 cell では選定を変えない。将来 floor を入れるなら本テストを
+  #   意図的に書き換えること
+  #   （旧コメントは「stale のみ除外・枯渇は減点」だったが sc-7czu で事実に反する記述になったため改訂:
+  #    stale は除外されず復帰クラスは tier=1 の候補になり、「減点」も禁止＝tier 化で順位を付ける。
+  #    selector 側の同語句は本 fix で 2 箇所とも中立表現へ書き換え済みで、ここだけが取り残されていた）
   #   （黙って挙動が反転したらここが RED になる＝gap が機械可視のまま残る）。
   run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$DEPLETED")" python3 "$SEL"
   [ "$status" -eq 0 ]
@@ -1008,9 +1027,15 @@ mk_cfg() {
 
 # ── sc-7czu T-CLASS ──────────────────────────────────────────────────────────
 # inventory: invariant=クラス判定 — skip_reason=token_expired と error_code=429 は eligible=1／
-#            skip_reason=no_token は eligible=0／healthy は復帰クラスの全部より上位
-#          | polarity=positive(revExp,rev429) + negative(dead)
-#          | mutant_fingerprint=`_REVIVAL_SKIP_REASONS` へ "no_token" を追加 → dead が eligible=1 になり RED
+#            skip_reason=no_token は eligible=0／healthy は復帰クラスの全部より上位／
+#            demoted マーカーの code は**由来ごとに異なる値**が載る（429 固定ではない）
+#          | polarity=positive(revExp,rev429,revCodeOnly,revSkipOnly) + negative(dead)
+#          | mutant_fingerprint=`_REVIVAL_SKIP_REASONS` へ "no_token" を追加 → dead が eligible=1 になり RED /
+#            `_revival_of` の OR を片半へ縮める（`if code in _REVIVAL_CODES:` だけ／`if skip in
+#            _REVIVAL_SKIP_REASONS:` だけ）→ revSkipOnly／revCodeOnly がそれぞれ RED /
+#            `tier, dcode = 1, (code or "?")` を `1, "429"` へ固定 → demoted の code assert が RED
+#            （★revExp は error_code と skip_reason を**両方**持つため、この行だけでは OR の片半を
+#              消す変異が全 tooth green で生存する＝実測。片方しか持たない 2 行が必須。sc-7czu WF 指摘）
 @test "sc-7czu T-CLASS: 復帰=token_expired/429 は eligible=1・死亡=no_token は 0・healthy が全部より上位" {
   run --separate-stderr env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$CLASSES")" python3 "$SEL"
   [ "$status" -eq 0 ]
@@ -1019,10 +1044,20 @@ mk_cfg() {
   [ "$(el revExp)" = "1" ]   # (i) 失効 token の pre-flight skip = CC 側 refresh で回復する生存クラス
   [ "$(el rev429)" = "1" ]   # (ii) 一過性 HTTP 429 = sc-j8zv incident の実体
   [ "$(el dead)" = "0" ]     # (iii) credential 不在 = 回復しない＝従来どおり除外
-  # (iv) 順位保証: healthy は score 1 と最下位なのに、score 99/98 の復帰クラスより上に来る（tier 化）。
+  # allowlist の 2 経路を**独立に** pin する（片方しか持たない行でないと OR の片半を消す変異が生存する）。
+  [ "$(el revCodeOnly)" = "1" ]   # error_code=expired だけ（skip_reason 無し）でも復帰
+  [ "$(el revSkipOnly)" = "1" ]   # skip_reason=token_expired だけ（error_code 無し）でも復帰
+  # (iv) 順位保証: healthy は score 1 と最下位なのに、score 99〜96 の復帰クラスより上に来る（tier 化）。
   #      ★「1 位でない」ではなく walk 順の**完全一致**で pin する（2 位を許すと lazy walk / 先頭 1 件
   #        採用で即採用され、保証にならない）。
-  [ "$(awk -F'\t' '$2=="1"{print $1}' <<<"$output" | paste -sd, -)" = "healthy,revExp,rev429" ]
+  [ "$(awk -F'\t' '$2=="1"{print $1}' <<<"$output" | paste -sd, -)" \
+    = "healthy,revExp,rev429,revCodeOnly,revSkipOnly" ]
+  # demoted マーカーの code は**由来ごとに違う値**が載る（監査面で後から層別するための情報）。
+  #   ここを 429 固定へ潰す退行は、429 行だけを見る assert では検知できない（sc-7czu WF 指摘・実測）。
+  local c10; c10() { awk -F'\t' -v l="$1" '$1==l{print $10}' <<<"$output"; }
+  [ "$(c10 rev429)" = "demoted:stale(429)" ]
+  [ "$(c10 revCodeOnly)" = "demoted:stale(expired)" ]
+  [ "$(c10 revSkipOnly)" = "demoted:stale(token_expired)" ]   # code 欠落時は skip_reason が由来として載る
 }
 
 # ── sc-7czu T-TIER ───────────────────────────────────────────────────────────
@@ -1058,10 +1093,14 @@ mk_cfg() {
   [ "$(el s401)" = "0" ]
   [ "$(el s403)" = "0" ]
   [ "$(el s404)" = "0" ]     # 401/403 以外の非 5xx も復帰しない＝allowlist は「429/5xx のみ」で閉じる
+  [ "$(el s600)" = "0" ]     # 上限側も閉じる（5xx は 599 まで。`500 <= st` へ緩める変異の否定対照）
   [ "$(el sUnk)" = "0" ]     # 未知語彙は fail-closed（「知らないコード＝たぶん生きてる」に倒さない）
+  # demoted の code は由来ごとに異なる値（429 固定への潰しを 5xx 側からも検知する）。
+  [ "$(awk -F'\t' '$1=="s503"{print $10}' <<<"$output")" = "demoted:stale(503)" ]
   # 除外理由は由来が分かる形（dead: / unknown:）で、shape ドリフト警報の予約語彙 malformed: を使わない。
   [[ "$(awk -F'\t' '$1=="s401"{print $10}' <<<"$output")" == dead:401* ]]
   [[ "$(awk -F'\t' '$1=="s404"{print $10}' <<<"$output")" == dead:404* ]]
+  [[ "$(awk -F'\t' '$1=="s600"{print $10}' <<<"$output")" == dead:600* ]]
   [[ "$(awk -F'\t' '$1=="sUnk"{print $10}' <<<"$output")" == unknown:zzz* ]]
   [ "$(grep -c 'malformed:' <<<"$output" || true)" -eq 0 ]
 }
