@@ -759,7 +759,7 @@ mk_cfg() {
 
 # ★sc-7czu で title も改訂: 本 tooth の body は「black3=復帰クラスで col2=1」「除外側の pin は phito」へ
 #   動いており、旧 title の「除外black3」は逆の不変条件を述べていた（bats の失敗レポートは title で読まれる）。
-@test "sc-1rq spawn: 正常採用時 監査 note — 接頭辞 + chosen=black4 + 候補全員(default/black3=復帰クラス)・除外 phito snapshot" {
+@test "sc-1rq spawn: 正常採用時 監査 note — 接頭辞 + chosen + 候補全員(healthy/復帰クラス)・除外行 snapshot" {
   : > "$NOTE_LOG"
   mk_cfg "$ABASE/black4"; mk_cfg "$ABASE/black2"
   run env SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$GOLDEN")" SCRIBE_ACCOUNTS_BASE="$ABASE" \
