@@ -381,13 +381,27 @@ plant_driver_mutant() {
   finalize="$(grep -Fn 'const capFinal = capFinalize(' "$WF" | cut -d: -f1)"
   [ -n "$promote" ] && [ -n "$finalize" ]
   [ "$promote" -lt "$finalize" ]
+  # 昇格は loop モード分岐（canAutoFix ∧ !LIGHT_TYPES）の **内側**に閉じている。ブロック外化は single / light の
+  # 終端結果を変えないため behavioral には捕えられない（L-B6 の inventory 参照）＝ここで静的に pin するしかない。
+  local loopOpen loopElse
+  loopOpen="$(grep -Fn 'if (canAutoFix && !LIGHT_TYPES.has(taskType)) {' "$WF" | cut -d: -f1)"
+  loopElse="$(awk -v s="$loopOpen" 'NR>s && /^} else {$/ {print NR; exit}' "$WF")"
+  [ -n "$loopOpen" ] && [ -n "$loopElse" ]
+  [ "$promote" -gt "$loopOpen" ]
+  [ "$promote" -lt "$loopElse" ]
 }
 
 # ── L-B6 ─────────────────────────────────────────────────────────────────────
-# inventory: invariant=single / light 経路は系統A で 1 mm も変わらない（昇格は loop モードの分岐内に閉じる）
+# inventory: invariant=single / light 経路の**終端結果**は系統A で 1 mm も変わらない
 #          | polarity=negative
-#          | mutant_fingerprint=昇格の if を `if (canAutoFix && !LIGHT_TYPES.has(taskType)) {` ブロックの外へ
-#            出す → single モードの blocking 有り run が converged=true になり RED
+#          | mutant_fingerprint=**無し（本 tooth は結果の不変を pin する）**。宣言していた「昇格の if を
+#            `if (canAutoFix && !LIGHT_TYPES.has(taskType)) {` ブロックの外へ出す」変異は **behavioral に等価**で
+#            あり本 tooth では捕えられない（実測: 同条件の昇格 if を終端直前 `const lastH = ...` の直後へ複製した
+#            変異木で、single blocking 有り run = converged=false / OPEN / rounds=1、light monitoring clean run =
+#            converged=true / CONVERGED / rounds=1 と、いずれも HEAD と同一）。理由は構造的で、single は blocking
+#            検出時に round1 で break するため `round >= effectiveCap` を満たさず zeroStreak も 0、light は
+#            effectiveCap=1 で昇格結果が既存 single 終端の結論と一致するため。**未検証 claim を指紋として置かない**
+#            （本 file 冒頭の規律）。昇格 if の**位置**（loop モード分岐の内側）は L-B5 が静的に pin する。
 @test "sc-pyab L-B6: single / light モードの終端は系統A の影響を受けない" {
   # single モード（autoFix なし・静的 diff 供給）で blocking あり → 従来どおり OPEN。
   run env CQ_ARGS='{"taskTitle":"c","worktree":"/tmp/wt","diff":"diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n","taskType":"testable"}' \
@@ -483,12 +497,18 @@ plant_driver_mutant() {
 
 # ── L-C1（既定不変の behavioral pin・cap.bats base 対照を守る核）──────────────
 # inventory: invariant=round 別 knob 未設定時、driver の出力（K 行 + RESULT）が knob 導入前の driver と
-#            **byte 単位で同一**（cap.bats の base 木対照 3 本は HEAD driver を base 木へ cp する現物対現物
-#            比較ゆえ、既定挙動が 1 mm でも変わると base 対照が false RED になる）
+#            **byte 単位で同一**
 #          | polarity=positive
 #          | mutant_fingerprint=`byRound(REVIEW_FINDINGS_BY_ROUND, label, REVIEW_FINDINGS)`
 #            → `byRound(REVIEW_FINDINGS_BY_ROUND, label, [])`（knob 未設定時の既定を変える）→ 対照 driver と
-#            出力が食い違い RED（**実走で確認する**＝この変異こそ cap.bats base 対照 3 本を false RED にする形）
+#            出力が食い違い RED（**実走で確認する**）
+#
+# 【何が壊れるかの正確な機序】cap.bats の base 木対照（materialize_base_tree）は **HEAD の driver を base 木へ
+# cp する**ため、driver 既定の変更は base 側と HEAD 側へ等しく効き、callSeq / agentCallTotal の現物対現物比較は
+# 既定変更に **不感**である（＝「既定を変えると base 対照が false RED になる」という因果は成立しない・実測）。
+# 実際に割れるのは (a) literal 期待値を持つ tooth（cell-quality-cap.bats の `verifyCallCount -eq 8/12` /
+# `agentCallTotal -eq 8` 等）と、(b) **knob 導入前の driver** を対照に取る本 tooth。既定を動かさない結論は
+# 変わらないが、根拠はこの 2 点に置く（誤った因果を根拠に将来判断すると誤る）。
 @test "sc-pyab L-C1: round 別 knob 未設定時の driver 出力は導入前と byte 一致（cap.bats base 対照を割らない）" {
   local prev="$BATS_TEST_TMPDIR/prevdrv"
   mkdir -p "$prev/tests" "$prev/workflows"
@@ -523,8 +543,7 @@ plant_driver_mutant() {
   done
 
   # 変異（driver knob 既定変更）: 未設定時の既定を [] へ変えると、対照 driver との byte 一致が崩れる。
-  # ＝本 tooth が「既定不変」を実際に守っている証拠であり、同時に cap.bats の base 木対照 3 本
-  # （HEAD driver を base 木へ cp する現物対現物比較）が false RED になる形そのもの。
+  # ＝本 tooth が「既定不変」を実際に守っている証拠（cap.bats 側で割れるのは上記 (a) の literal 期待値 tooth）。
   local mut="$BATS_TEST_TMPDIR/mu-c1"
   plant_driver_mutant "$mut" 'byRound(REVIEW_FINDINGS_BY_ROUND, label, REVIEW_FINDINGS)' \
       'byRound(REVIEW_FINDINGS_BY_ROUND, label, [])'

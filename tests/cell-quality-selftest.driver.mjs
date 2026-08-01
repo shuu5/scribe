@@ -164,9 +164,12 @@ async function runWorkflow() {
   //   CQ_REVIEW_FINDINGS_BY_ROUND='{"1":[...],"3":[]}'  … round→findings(未指定 round は CQ_REVIEW_FINDINGS)
   //   CQ_VERIFY_REFUTED_BY_ROUND='{"3":true}'            … round→refuted (未指定 round は CQ_VERIFY_REFUTED)
   // 【既定不変が load-bearing】未設定(null)なら参照すらせず既存値へ倒すので挙動は byte 単位で従来と同一。
-  // cell-quality-cap.bats の base 木対照 3 本は **HEAD の driver を base 木へ cp して現物対現物**で比較する
-  // ため、既定挙動を 1 mm でも変えると base 対照が false RED になる(= この既定不変自体を loop.bats の
-  // 「driver knob 既定不変」tooth が pin する)。
+  // 壊れる先を正確に言うと: cap.bats の base 木対照(materialize_base_tree)は **HEAD の driver を base 木へ
+  // cp する**ので、driver 既定の変更は base 側と HEAD 側へ **等しく** 効き、callSeq / agentCallTotal の
+  // 現物対現物比較は既定変更に **不感**である(= 「既定を変えると base 対照が false RED になる」という因果は
+  // 成立しない・実測)。実際に割れるのは (a) literal 期待値を持つ tooth(cell-quality-cap.bats の
+  // `verifyCallCount -eq 8/12` `agentCallTotal -eq 8` 等)と、(b) **knob 導入前の driver** を対照に取る
+  // loop.bats の「driver knob 既定不変」tooth(L-C1)。既定を動かさない結論は変わらないが、根拠をこの 2 点に置く。
   //   CQ_THROW_AT_ROUND='3'                              … CQ_THROW_AT_LABEL の注入を **その round に限定**
   //     (未設定 = 全 round= 従来どおり)。verify 段が **特定 round だけ**落ちた run(= verdict:null → unverified
   //     行きで confirmed が 0 になる run)を駆動する唯一の経路。label 前方一致だけでは round を切れない
