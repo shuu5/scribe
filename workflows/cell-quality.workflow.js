@@ -1118,6 +1118,17 @@ const SELFTEST_RUN_SCHEMA = {
 }
 
 // ── prompt builders(固有物を文脈として注入) ─────────────────────────────────
+// (sc-pyab 項目1) goal-anchored severity の rubric。review / verify の **双方へ同一 literal** を焼く。
+// 収束ループの終了条件の固定点は「acceptance / fence を脅かす重大欠陥ゼロ」であって「レビュアーが何も
+// 言わなくなること」ではない。severity が好み・一般論で付くと (a) 受入に無関係な指摘が blocking として
+// ループを駆動し churn を生む / (b) 受入を脅かす欠陥が minor に埋もれて silent ship する、の両方向に外れる。
+// ゆえに severity の基準を「受入(acceptance / fence)を脅かすか」1 本へ固定し、prompt に literal で焼く。
+// literal 到達は tests/cell-quality-loop.bats の CQ_PROMPT_GREP 軸 tooth が pin する(消えたら RED)。
+const SEVERITY_RUBRIC = `【severity rubric(goal-anchored)】severity は acceptance / fence を脅かすかを唯一の基準に付与する。
+- critical/major = acceptance 未達・fence 違反・回帰・fail-open・破壊性・boot path 等、受入を脅かすもの(収束ループを駆動する)。
+- minor/nit = 受入を脅かさない指摘(記録のみ・ループさせない)。過剰提案・好みの指摘は出さない。
+- args の acceptance が定型文の場合は contextFile を優先する(定型文を根拠に severity を上下させない)。`
+
 function ctxBlock() {
   return [
     `# セル: ${taskTitle}`,
@@ -1130,6 +1141,18 @@ function ctxBlock() {
       ? `context file: ${contextFile}\n(まずこのファイルを Read し、全文を本セルの文脈として扱うこと。Workflow args は全体約 4KB で切り詰められるため、大きな文脈はこのファイルで供給されている)`
       : '',
   ]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+// (sc-pyab 項目1) verifyPrompt 用の goal-anchor。ctxBlock の **goal / acceptance だけ**を切り出す。
+// 独立反証者へ context / contextFile 全文までは渡さない: sc-mbcm [2](tests/cell-quality-contextfile.bats)
+// が「verify prompt へ contextFile を注入しない = 独立反証者は finding + diff を見る」を landed tooth として
+// 固定しており、その独立性設計を壊さないため。一方で severity を「受入を脅かすか」で判定させるには goal と
+// acceptance が要る(それが無い verify は「一般論として妥当か」を裁くしかなく rubric が空文になる)ので、
+// 判定に必要な最小の 2 つだけを渡す。
+function goalAnchorBlock() {
+  return [`# セル: ${taskTitle}`, goal ? `goal:\n${goal}` : '', refinedAcceptance ? `acceptance(受入基準):\n${refinedAcceptance}` : '']
     .filter(Boolean)
     .join('\n\n')
 }
@@ -1210,15 +1233,18 @@ ${roundDiff || '(diff 未供給。worktree の現状を read-only で確認し�
 </diff>
 
 観点「${d.key}」に該当する問題のみを挙げよ。各 finding に severity(critical/major/minor/nit)を厳密に付与すること。
-- critical/major = 収束ループを駆動する(受入未達・回帰・fail-open・破壊性・boot path 等)。
-- minor/nit = 記録のみ(ループさせない)。過剰提案・好みの指摘は出さない。
+${SEVERITY_RUBRIC}
 JSON で {findings:[{title,severity,location,rationale,suggestedFix?}]} を返せ。問題が無ければ findings:[]。`
 }
 
 function verifyPrompt(f, dimKey, roundDiff) {
-  return `あなたは独立した検証者(read-only)。下記 finding を **反証(refute)** せよ。
+  return `${goalAnchorBlock()}
+
+あなたは独立した検証者(read-only)。下記 finding を **反証(refute)** せよ。
 立証責任は finding 側にある: diff/ソースに照らして具体的・実害ありと確証できる場合のみ refuted=false。
 少しでも不確か・再現不能・過剰提案・スコープ外なら refuted=true にせよ(デフォルトは refuted=true 寄り)。
+上の goal / acceptance が「受入」の定義である。refuted の判定と severity の妥当性はこの受入に照らして行う。
+${SEVERITY_RUBRIC}
 
 観点: ${dimKey}
 finding:
@@ -1738,6 +1764,41 @@ while (round < effectiveCap) {
 // ── 収束/escalate 判定の確定 ──────────────────────────────────────────────────
 const lastH = history[history.length - 1] || {}
 if (canAutoFix && !LIGHT_TYPES.has(taskType)) {
+  // ── (sc-pyab 系統A) hard cap 到達は「未収束」の同義ではない ──────────────────────
+  // 旧実装は「zeroStreak >= 2 に至らないまま cap へ到達」を一律 escalate にしていた。しかし最終 round が
+  // **真にクリーン**(blocking 0 かつ machinery 健全)だった run は、単に「2 度目のゼロを確認する round が
+  // 残っていなかった」だけであり、cap があと 1 round 多ければ converged していた。この構造欠陥で「直す対象が
+  // 無いのに ESCALATE」が量産されていた(本 anchor 実測 3 例: sc-4qzp / sc-k33c 本体 / sc-k33c ERRATA 前。
+  // 正本 scm-qrqg・folio-coas でも独立観測)。
+  // 昇格は次の連言でのみ立てる(literal な `lastH.confirmedBlocking === 0` の単独条件で立ててはならない
+  // = machinery 失敗 round の 0 blocking を「クリーン」と誤読して silent ship する):
+  //   (i)  hard cap へ **自然到達**した最終 round であること(round >= effectiveCap かつ cap 由来の早期打切り
+  //        でない)。cap 早期打切り run・snapshot EMPTY_DIFF break の run は「最終 round」ではない。
+  //   (ii) その round の blocking が 0 / (iii) その round の machinery が健全(reviewFailed=0 かつ snapshotFailed=false)。
+  // (ii)(iii) は zeroStreak が既に含意する: zeroStreak は `blocking.length === 0 && !machineryFailed` の
+  // round でのみ ++ され、それ以外の全経路で 0 へ戻る ⇒ 「zeroStreak >= 1」= 直近 round は真にクリーンだった。
+  // ゆえに最小差分は「hard cap 到達時は zeroStreak >= 1 を converged とみなす」形にする(数値既定 maxRounds=3 /
+  // zeroStreak >= 2 は不変・構造のみ変更)。
+  // 挿入位置は **capFinalize 呼出より前**(後置すると capExceeded → converged=false の強制を上書きし fence 違反。
+  // 前置なら「最終 round は clean だが capExceeded」の run は capFinalize が converged を落とす=fail-closed 維持)。
+  // ── 昇格を **狭める** 2 つの連言(新規の閾値・回数定数は導入しない=数値決め打ち禁止を守る) ──
+  // (A) `!capExceeded`: capFinalize は capExceeded の run で converged を false へ戻すが、escalate は
+  //     droppedBlocking>0 のときしか立てない。ゆえに昇格が converged=true を立てると **直下の escalate 網
+  //     (zeroStreak < 2)が丸ごと skip され**、capFinalize で converged だけが剥がれて converged=false ∧
+  //     escalate=false = gatePrefix OPEN(sc-k33c errata が封鎖した loop-mode fail-open)へ落ちる。
+  //     実測(cap 引数なしの既定路・verify 1 観点に quota 例外・最終 round clean): base=ESCALATE / 昇格のみ=OPEN。
+  //     cap 発火 run は「幅を落として走った」= 真にクリーンだと主張できないので昇格の対象外にする。
+  // (B) `!(lastH.unverified > 0)`: zeroStreak が含意する machineryFailed は reviewFailed / snapshotFailed だけで
+  //     **verify 段の失敗を含まない**。verify agent が非 cap 例外で全滅した round は verdict:null → unverified 行き
+  //     ゆえ confirmed=0 になり、blocking 0 ∧ machineryFailed false で「真にクリーン」と誤読される。
+  //     unverified が残る round は「反証機構が動いた結果の 0」ではないので昇格しない(fail-closed)。
+  if (!converged && !escalate && !capExceeded && round >= effectiveCap && !capTerminatedEarly(round, effectiveCap) && zeroStreak >= 1 && !(lastH.unverified > 0)) {
+    converged = true
+    log(
+      `収束(系統A): hard cap ${effectiveCap} 到達だが最終 round は真にクリーン(zeroStreak=${zeroStreak}・blocking=0・machinery 健全)` +
+        `= 「2 度目のゼロを確認する round が残っていなかった」だけであり未収束ではない。`
+    )
+  }
   // loop モード: zeroStreak>=2 で converged 済み。未達 & cap 到達なら escalate(silent ship 禁止)。
   // F3/F4: machinery 失敗で真にクリーンな round を確保できなかった場合も同じく escalate へ倒す。
   // (sc-k33c errata) `round >= effectiveCap` だけだと **cap 由来の早期打切り**(round gate / review 前

@@ -158,6 +158,34 @@ async function runWorkflow() {
   const THROW_KIND = envStr('CQ_THROW_KIND', 'quota') // 'quota' | 'error' | 'plain'(=cap 指紋なし=fail-closed 駆動)
   const REVIEW_ORDER = envStr('CQ_REVIEW_ORDER', '') // 'reverse' = review の解決順を反転(K1c 決定論の駆動)
   let reviewSeq = 0
+  // (sc-pyab 項目4) round 別 stub knob。round ごとに review findings / verify verdict を差し替える。
+  // 既存 knob(CQ_REVIEW_FINDINGS / CQ_VERIFY_REFUTED)は「全 round 同一」しか表現できず、round 3 で初めて
+  // クリーンになる run(= 系統A の正方向 tooth)も、round 間で主張集合が変わる run も駆動できなかった。
+  //   CQ_REVIEW_FINDINGS_BY_ROUND='{"1":[...],"3":[]}'  … round→findings(未指定 round は CQ_REVIEW_FINDINGS)
+  //   CQ_VERIFY_REFUTED_BY_ROUND='{"3":true}'            … round→refuted (未指定 round は CQ_VERIFY_REFUTED)
+  // 【既定不変が load-bearing】未設定(null)なら参照すらせず既存値へ倒すので挙動は byte 単位で従来と同一。
+  // 壊れる先を正確に言うと: cap.bats の base 木対照(materialize_base_tree)は **HEAD の driver を base 木へ
+  // cp する**ので、driver 既定の変更は base 側と HEAD 側へ **等しく** 効き、callSeq / agentCallTotal の
+  // 現物対現物比較は既定変更に **不感**である(= 「既定を変えると base 対照が false RED になる」という因果は
+  // 成立しない・実測)。実際に割れるのは (a) literal 期待値を持つ tooth(cell-quality-cap.bats の
+  // `verifyCallCount -eq 8/12` `agentCallTotal -eq 8` 等)と、(b) **knob 導入前の driver** を対照に取る
+  // loop.bats の「driver knob 既定不変」tooth(L-C1)。既定を動かさない結論は変わらないが、根拠をこの 2 点に置く。
+  //   CQ_THROW_AT_ROUND='3'                              … CQ_THROW_AT_LABEL の注入を **その round に限定**
+  //     (未設定 = 全 round= 従来どおり)。verify 段が **特定 round だけ**落ちた run(= verdict:null → unverified
+  //     行きで confirmed が 0 になる run)を駆動する唯一の経路。label 前方一致だけでは round を切れない
+  //     (WF が焼く round 番号は label の **末尾**にある)。
+  const REVIEW_FINDINGS_BY_ROUND = JSON.parse(process.env.CQ_REVIEW_FINDINGS_BY_ROUND || 'null')
+  const VERIFY_REFUTED_BY_ROUND = JSON.parse(process.env.CQ_VERIFY_REFUTED_BY_ROUND || 'null')
+  const THROW_AT_ROUND = envStr('CQ_THROW_AT_ROUND', '')
+  // label 末尾の ' r<N>'(WF が焼く round 番号)から round を読む。読めなければ '' = 既定へ倒す(fail-safe)。
+  const roundOf = (label) => {
+    const m = /\br(\d+)$/.exec(String(label || ''))
+    return m ? m[1] : ''
+  }
+  const byRound = (map, label, dflt) => {
+    const r = roundOf(label)
+    return map && r && Object.prototype.hasOwnProperty.call(map, r) ? map[r] : dflt
+  }
 
   const agentStub = (prompt, opts) => {
     const label = (opts && opts.label) || ''
@@ -174,7 +202,9 @@ async function runWorkflow() {
     // 呼出元が設定しないと発火しないため=K9 の「層3 は stub 検証のみ」)。
     // CQ_THROW_AT_LABEL: label prefix 指定で cap 例外を投げる(呼出し番号を数えずに 6 call site を個別に狙える
     // = 変異注入 tooth が call 順の変化に脆くならない)。kind は CQ_THROW_KIND('quota'|'error')。
-    if (THROW_AT_LABEL && label.startsWith(THROW_AT_LABEL)) return Promise.reject(makeCapError(THROW_KIND))
+    // (sc-pyab) CQ_THROW_AT_ROUND 未設定なら短絡して従来と同一(既定不変)。設定時のみ round を突き合わせる。
+    if (THROW_AT_LABEL && label.startsWith(THROW_AT_LABEL) && (!THROW_AT_ROUND || roundOf(label) === THROW_AT_ROUND))
+      return Promise.reject(makeCapError(THROW_KIND))
     if (BUDGET_THROW_AT > 0 && calls.length === BUDGET_THROW_AT) return Promise.reject(makeCapError('quota'))
     if (AGENT_CAP_AT > 0 && calls.length === AGENT_CAP_AT) return Promise.reject(makeCapError('error'))
     if (THROW_AT_STAGE === 'element-budget' && label.startsWith('verify:')) return Promise.reject(makeCapError('quota'))
@@ -201,7 +231,7 @@ async function runWorkflow() {
     if (label.startsWith('implement')) return Promise.resolve('stub implement done')
     if (label.startsWith('snapshot')) return Promise.resolve(SNAPSHOT)
     if (label.startsWith('review:')) {
-      const res = { findings: REVIEW_FINDINGS }
+      const res = { findings: byRound(REVIEW_FINDINGS_BY_ROUND, label, REVIEW_FINDINGS) }
       // (sc-k33c K1c) stage1(review)の解決順を反転させる knob。pipeline は barrier 無しゆえ観点は到着順に
       // stage2 へ流れる = 共有カウンタ先着順 admission だと admit 集合が解決順で変わる(非決定)。観点別固定枠
       // なら反転しても admit 集合は同一 — その決定論を behavioral に駆動するための人工遅延。
@@ -211,7 +241,7 @@ async function runWorkflow() {
       }
       return Promise.resolve(res)
     }
-    if (label.startsWith('verify:')) return Promise.resolve({ refuted: VERIFY_REFUTED, confidence: 'high', reasoning: 'stub' })
+    if (label.startsWith('verify:')) return Promise.resolve({ refuted: !!byRound(VERIFY_REFUTED_BY_ROUND, label, VERIFY_REFUTED), confidence: 'high', reasoning: 'stub' })
     if (label.startsWith('autofix')) {
       return Promise.resolve({ applied: ['stub fix'], selfTestRan: true, selfTestPassed: FIX_SELFTEST_PASSED, amended: FIX_SELFTEST_PASSED, summary: FIX_SUMMARY, newDiff: SNAPSHOT })
     }
