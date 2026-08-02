@@ -150,6 +150,25 @@ STUBEOF
     chmod +x "$1"
 }
 
+# 全行が優先クラス（[滞留]）の過負荷 stub（T3 phase2 用）。実 producer の regime（配送観測の便 record は
+# 全行が [滞留]）を模す＝優先行は N 枠を消費しないので trim では 1 行も減らず、終端 hard-cap だけが効く。
+make_allprio_stub() {  # $1=path $2=tag $3=mode(無視)
+    cat > "$1" <<'STUBEOF'
+#!/usr/bin/env bash
+tag="__TAG__"
+pad='仕掛かり記録の詳細説明テキストであり表示予算を消費するための埋草である。'
+i=1
+while [ $i -le 200 ]; do
+    printf '  便 %sREC%03d [滞留] %s%s\n' "$tag" "$i" "$pad" "$pad"
+    i=$((i + 1))
+done
+printf '      🔔 呼び鈴打ちますか？（提案のみ・push は人間 go）｜根拠: %s-BELL\n' "$tag"
+printf '  ── 集計: undelivered(滞留)=200 呼び鈴提案=1（%s）\n' "$tag"
+STUBEOF
+    sed -i "s/__TAG__/$2/" "$1"
+    chmod +x "$1"
+}
+
 # 少行 stub（T2 用・trim が誤発火しないことを見る）。
 make_small_stub() {  # $1=path $2=tag
     cat > "$1" <<'STUBEOF'
@@ -438,6 +457,26 @@ run_hook_consult() {  # $1=cwd $2=window-name
     # 対で見る: 非優先 record 行は畳まれている（「trim が効いていない」ことを優先行の生存と取り違えない）
     [[ "$after" == *"行を省略・全件: "* ]]
     [ "$(u16_of "$after")" -le 9800 ]
+
+    # phase2（優先行が予算を食い潰す最悪ケース・実 producer の regime）: 全 6 block が全行 [滞留]（＝優先行で
+    # N 枠を消費しない）＋末尾に 🔔 / 集計:。trim では 1 行も減らず終端 hard-cap だけが効く経路を e2e で踏む。
+    local ap
+    make_all_stubs make_allprio_stub
+    ap="$(hook_stdout)"
+    # 節生存: hard-cap が発火しても全節見出しは 1 つも落ちない（末尾一律切りだと (2)-(5) が全滅する形）
+    [[ "$ap" == *"(1) gate-pending"* ]]
+    [[ "$ap" == *"(2) degraded-watch"* ]]
+    [[ "$ap" == *"(3) needs-orch handoff"* ]]
+    [[ "$ap" == *"(4) 配送観測"* ]]
+    [[ "$ap" == *"(5) re-ratify sweep"* ]]
+    # 予算警告は body より前（stdout 先頭 1 行目）
+    [[ "$(head -n 1 <<<"$ap")" == *"⚠ 警告: 表示予算"* ]]
+    [[ "$ap" == *"予算到達により以降 "* ]]
+    # rank-A（🔔 / 集計:）は block 末尾に置いても全 6 block ぶん残る
+    [ "$(grep -c '🔔' <<<"$ap")" -eq 6 ]
+    [ "$(grep -c '── 集計:' <<<"$ap")" -eq 6 ]
+    # 予算保証は **警告行を含む stdout 総量**で見る（body だけ見ると警告行ぶん超過して land する）
+    [ "$(u16_of "$ap")" -le 8000 ]
 }
 
 @test "(T4) mutation: trim 除去 / 省略行 emit 除去 で T1 の assert が RED 化する（teeth の非vacuity）" {

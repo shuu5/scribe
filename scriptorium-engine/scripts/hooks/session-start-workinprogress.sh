@@ -143,6 +143,13 @@ sys.stdout.write(str(len(_d.encode("utf-16-le")) // 2))' 2>/dev/null)"
     printf '%s' "$_n"
 }
 
+# 予算警告行（body より **前**＝stdout 先頭に出るので stdout 総量に乗る）。emit 側と hard-cap 側の原価計算で
+# 同一 SSOT を使うための 1 行生成関数（literal を二重持ちすると cap 予約が字面 drift で狂う）。
+_wip_warn_line() {  # $1=切り詰め行数 → 警告行 1 行を stdout
+    printf '  ⚠ 警告: 表示予算 %s u16 到達により末尾 %s 行を切り詰めた（全件: bash %s --full）' \
+        "$WIP_HARDCAP_U16" "$1" "$_WIP_SELF"
+}
+
 _wip_count_lines() {  # $1=text → 行数を stdout
     local _c=0 _l
     while IFS= read -r _l; do _c=$((_c + 1)); done <<<"$1"
@@ -388,10 +395,14 @@ _wip_hc_build() {  # $1=avail $2=行数 $3=節数
 #   では先頭 block が予算を食い切り、後続の **節見出しごと**落ちる＝本 hook が直そうとした元症状（末尾の節が
 #   丸ごと消える）が閾値だけ前倒しで再現する。よって節構造を保つ配分型にする（_wip_hc_build）。
 _wip_hardcap() {  # $1=body
-    local _body="$1" _line _i _s=0 _n _nsec _fixed=0 _avail _measured _attempt=0 _own _cursec
+    local _body="$1" _line _i _s=0 _n _nsec _fixed=0 _avail _measured _attempt=0 _own _cursec _capeff
     _WIP_OUT="$_body"; _WIP_CAPPED=0
     _measured="$(_wip_u16len "$_body")"
     [ "$_measured" -lt "$WIP_HARDCAP_U16" ] && return 0
+    # 発火時は警告行が body の前に出る＝**stdout 総量**が cap を超えないよう、その原価を先に引く
+    # （未発火なら警告行は出ないので上の初期判定は素の cap のままでよい）。行数は最大幅で見積る。
+    _capeff=$(( WIP_HARDCAP_U16 - $(_wip_u16len "$(_wip_warn_line 9999999)") - 1 ))
+    [ "$_capeff" -lt 1 ] && _capeff=1
 
     _WIP_LINE=()
     while IFS= read -r _line; do _WIP_LINE+=("$_line"); done <<<"${_body%$'\n'}"
@@ -423,17 +434,18 @@ _wip_hardcap() {  # $1=body
         _WIP_OWN[_i]=$_own
     done
     # 予約: 節ごとに新規省略行 1 本（pointer 込みで ~160 u16）+ 末尾の予算到達行。
-    _avail=$(( WIP_HARDCAP_U16 - _fixed - _nsec * 160 - 240 ))
+    _avail=$(( _capeff - _fixed - _nsec * 160 - 240 ))
     [ "$_avail" -lt 0 ] && _avail=0
 
     # 実測収束ループ（按分推定の代わり）: 組んだ結果を実測し、超過していれば予算を実測比で縮めて組み直す。
     # 行別 u16 が実測できていれば 1 回で収まる。degrade 経路（python3 不在）でも数回で cap 以下へ落ちる。
+    # 目標は _capeff（= cap - 警告行）＝**警告行を含む stdout 総量**が WIP_HARDCAP_U16 以下になる。
     while :; do
         _wip_hc_build "$_avail" "$_n" "$_nsec"
         _measured="$(_wip_u16len "$_WIP_OUT")"
-        [ "$_measured" -le "$WIP_HARDCAP_U16" ] && break
+        [ "$_measured" -le "$_capeff" ] && break
         _attempt=$(( _attempt + 1 )); [ "$_attempt" -ge 6 ] && break
-        _avail=$(( _avail * WIP_HARDCAP_U16 / (_measured > 0 ? _measured : 1) - 200 ))
+        _avail=$(( _avail * _capeff / (_measured > 0 ? _measured : 1) - 200 ))
         [ "$_avail" -lt 0 ] && _avail=0
     done
 }
@@ -491,7 +503,7 @@ _emit_workinprogress() {
     _WIP_OUT="$_WIP_BODY"
     [ "$WIP_TRIM" -eq 1 ] && _wip_hardcap "$_WIP_BODY"
     # 予算警告は body より前（stdout 先頭）に出す（本文を読む前に「切られている」と分かるように）。
-    [ "$_WIP_CAPPED" -gt 0 ] && printf '%s\n' "  ⚠ 警告: 表示予算 $WIP_HARDCAP_U16 u16 到達により末尾 $_WIP_CAPPED 行を切り詰めた（全件: bash $_WIP_SELF --full）"
+    [ "$_WIP_CAPPED" -gt 0 ] && printf '%s\n' "$(_wip_warn_line "$_WIP_CAPPED")"
     printf '%s' "$_WIP_OUT"
 }
 
@@ -638,7 +650,7 @@ TMUXEOF
     }
     # ★走査対象は本 script が定義する **全 top-level 関数**（sc-v0ao: 新設関数の編入漏れを塞ぐ）。_LK_FNS が
     #   明示列挙で、直下の coverage assert が「列挙 == 実定義集合」を機械照合する（列挙漏れ＝FAIL）。
-    _LK_FNS="_emit_workinprogress _wip_count_lines _wip_emit_block _wip_hardcap _wip_hc_build _wip_is_priority _wip_is_rank_a _wip_is_section_head _wip_line_costs _wip_plan_n _wip_trim_block _wip_u16len"
+    _LK_FNS="_emit_workinprogress _wip_count_lines _wip_emit_block _wip_hardcap _wip_hc_build _wip_is_priority _wip_is_rank_a _wip_is_section_head _wip_line_costs _wip_plan_n _wip_trim_block _wip_u16len _wip_warn_line"
     _lk_sample=""
     for _lk_f in $_LK_FNS; do _lk_sample="$_lk_sample$(declare -f "$_lk_f")"$'\n'; done
     # 編入漏れ検知（新設関数を _LK_FNS へ足し忘れると RED）: 実定義集合 = 本 script の行頭 `name() {` 定義。
@@ -890,7 +902,9 @@ WIREEOF
     # command substitution = subshell ゆえ _emit_workinprogress の cd / global 汚染を親へ持ち込まない。
     _wire_out="$(_emit_workinprogress "$st_tmp/anchor")"
     _wire_head="$(head -n 1 <<<"$_wire_out")"
-    _wire_u16="$(_wip_u16len "$(tail -n +2 <<<"$_wire_out")")"   # 警告行を除いた body が cap 以下
+    # ★警告行は body より前に出る＝**stdout 総量**に乗るので、body だけでなく警告行込みの全量で cap を見る
+    #   （body のみで見ると警告行ぶん cap を超えて land する・sc-v0ao worker 実測 8,037 u16 > 8,000）。
+    _wire_u16="$(_wip_u16len "$_wire_out")"
     # ★rank-A 生存も **実 emit 経路**で見る（review major-1/2）: stub は 6 本とも block 末尾に 🔔 2 行 + 集計 1 行を
     #   置くので、健全形では 🔔 12 件・集計 6 件が丸ごと残る（落ちるのは rank-B の [滞留] record 行だけ）。
     _wire_bell="$(grep -c '🔔' <<<"$_wire_out")"; _wire_sum="$(grep -c '── 集計:' <<<"$_wire_out")"
@@ -898,9 +912,9 @@ WIREEOF
         && [[ "$_wire_head" == *"⚠ 警告: 表示予算"*"到達により末尾"*"行を切り詰めた"* ]] \
         && grep -q '予算到達により以降 [0-9][0-9]* 行省略（全件: ' <<<"$_wire_out" \
         && [ "$_wire_bell" -eq 12 ] && [ "$_wire_sum" -eq 6 ]; then
-        echo "ok: 配線: 優先行主体 stub 6 本を実 emit 経路へ通し hard-cap が発火（stdout 先頭に警告行・body=$_wire_u16 u16・末尾 rank-A は 🔔 12/集計 6 を全保持）"
+        echo "ok: 配線: 優先行主体 stub 6 本を実 emit 経路へ通し hard-cap が発火（stdout 先頭に警告行込み stdout 総量=$_wire_u16 u16・末尾 rank-A は 🔔 12/集計 6 を全保持）"
     else
-        echo "FAIL: 配線: _emit_workinprogress の hard-cap 経路が不正（body=$_wire_u16 u16・🔔=$_wire_bell（期待 12）集計=$_wire_sum（期待 6）・head=[$_wire_head]）" >&2; st_fail=1
+        echo "FAIL: 配線: _emit_workinprogress の hard-cap 経路が不正（stdout 総量=$_wire_u16 u16・🔔=$_wire_bell（期待 12）集計=$_wire_sum（期待 6）・head=[$_wire_head]）" >&2; st_fail=1
     fi
     # 配線 teeth（source 照合）: emit 本体の定義に _wip_hardcap 呼出しが字面で実在する（unwire を RED 化）。
     if declare -f _emit_workinprogress | grep -q '_wip_hardcap'; then
