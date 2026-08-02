@@ -4,7 +4,7 @@
 # 動機（bd sc-o2nm・mandate-verify fence ■11）: docs を pin する assert は本 teeth 導入前は
 # tests 配下に 1 本も存在せず、canonical block を入れ忘れても旧規約が残っても既存 bats は
 # 全 green になった（＝docs 改訂に歯が無い）。本 teeth は固定文字列の完全一致で次を pin する:
-#   (1) canonical 3-クラス block が protocol.md §5.4 に verbatim（sha256 完全一致）で実在
+#   (1) canonical 3-クラス block **v2** が protocol.md §5.4 に verbatim（18 行 / 1359 字 / sha256 完全一致）で実在
 #   (2) 誤読防止句 3 行の実在 / (3) 旧トリガー固有 literal の不在（negative）
 #   (4) 本裁定で緩めない fence literal の残存 / (5) 構造 teeth（worker 注入の過剰注入・打切り検知）
 #   (6) html の構造不変（要素総数・タグ balance・旧カテゴリ文字列 0・強調記号増 0）
@@ -44,18 +44,76 @@ setup() {
     DESIGN="$REPO/docs/scribe-design.md"
     GUIDE="$REPO/docs/dynamic-workflow-guide.html"
     INJECT="$REPO/scripts/hooks/session-start-role-inject.sh"
+    VERDICT="$REPO/tests/cell-quality-verdict.bats"
 
-    # canonical block の verbatim 基準（bd sc-o2nm description の実測値）
-    CANON_SHA256="e92aa851963606510422b6d5e81693f8c05cc3679f529fb68631415da74d960d"
-    CANON_LINES=23
+    # canonical block **v2** の verbatim 基準（一次 SSOT = scriptorium orch-vhiu notes・
+    # in-repo carrier = skills/setup/PRIME.template.md の canonical-3class-block-v2 sentinel 区間）。
+    # 期待値は literal で焼く（自ファイル・被検査ファイルから再計算した値を期待値にする自己参照 pin は
+    # 不可＝reflow 済みや typo 混入の「自称 v2」でも green になるため）。
+    CANON_SHA256="9f21616439b00259d99cdac1103b6b83fc1923672ad7752753bbf2f914e21c7d"
+    CANON_LINES=18
+    CANON_CHARS=1359
+    # 埋込 carrier の形（§5 step4 の 3 スペース継続インデント + text フェンス）。
+    EMBED_PREFIX="   "
+    FENCE_BEGIN='   ```text'
+    FENCE_END='   ```'
+    # canonical block の見出し行（occurrence 一意性 pin の錨）。
+    CANON_HEAD='【人間確認が要るのは「取り消せない」3 クラスのみ】'
+    # 正本 (b) / (c) 行の逐語。負論理 pin が「許す唯一の出現」を完全一致で狭めるために使う。
+    CANON_B_LINE='(b) 出す — public 化・外部公開・外部サービスへの送信（scriptorium 核② private 保証はこの型）。判定単位は repo でなく「情報」＝public 面の情報集合を増やすかで判定する。private 配備層から public engine への同期のような境界事案は機械 2 条件〔① 配備層 file を touch しない ② private 実名 DATA literal が 0 hit〕が両方 green なら非該当（AI 判断で merge）・どちらかが赤 or 機械照合できないなら (b) として人間確認へ倒す fail-safe。「既に public な repo だから非該当」という repo 単位の断定は禁止（public repo の中に private 由来の同期先が在りうる＝実例 scribe 内 scriptorium-engine）。〔裁定 R-A・2026-07-26〕'
+    CANON_C_LINE='(c) 使う — 追加課金が発生する操作（従量課金 API 呼出 / 有料サービスの新規契約 / クラウド資源の課金発生）。定額プラン内は対象外＝token 消費それ自体は非該当（Workflow を何 M token 回しても (c) に当たらない）。旧文言「大きな金銭コスト（承認でなく予算上限で制御）」は観測できず死文化するため廃止した。〔裁定 R-B・2026-07-26〕'
     # html のベースライン（本 codify 時点の実測・意図的変更時のみ更新する）
     GUIDE_ELEMENTS=706
 }
 
-# §5.4 に埋め込んだ canonical block（3 スペース継続インデント + text フェンス）を
-# de-indent して取り出す。verbatim 判定は「行頭空白を除いた行内容・行順・行数」で行う。
-extract_canonical() {
-    awk '/^   ```text$/ { f=1; next } f && /^   ```$/ { f=0; next } f { sub(/^   /, ""); print }' "$PROTOCOL"
+# §5 step4 に埋め込んだ canonical block を sentinel 区間（text フェンス）で抽出し、3 スペースの
+# 埋込接頭辞を厳密に剥がして stdout へ出す（tests/cell-quality-verdict.bats:58-79 の移植）。
+#   $1=file / $2=begin sentinel（固定文字列）/ $3=end sentinel（固定文字列）/ $4=埋込接頭辞
+# markdown フェンス内の空行は trailing space を作らない形で書くため、空行は長さ 0 で受ける。
+# 接頭辞に一致しない非空行・sentinel 欠落は stderr へ吐いて rc=9（silent な部分抽出で pin を空虚化させない）。
+# 旧実装（`sub(/^   /,"")` の素通し）は接頭辞 drift を無言で吸収したため、fail-loud 形へ置き換えた。
+extract_canonical_block() {
+    awk -v b="$2" -v e="$3" -v p="$4" '
+      !s && index($0, b) { s = 1; next }
+      s && index($0, e)  { found = 1; exit }
+      s {
+        pl = length(p)
+        if (substr($0, 1, pl) == p) { print substr($0, pl + 1) }
+        else if ($0 == "")          { print "" }
+        else { printf("PREFIX-MISMATCH: %s\n", $0) > "/dev/stderr"; bad = 1; exit }
+      }
+      END {
+        if (bad)    exit 9
+        if (!s)     { print "BEGIN-SENTINEL-NOT-FOUND" > "/dev/stderr"; exit 9 }
+        if (!found) { print "END-SENTINEL-NOT-FOUND"   > "/dev/stderr"; exit 9 }
+      }
+    ' "$1"
+}
+
+# 被検査ファイル（protocol.md 本体 / $BATS_TEST_TMPDIR 上の mutant コピー）に対する薄い wrapper。
+extract_canonical() { extract_canonical_block "$1" "$FENCE_BEGIN" "$FENCE_END" "$EMBED_PREFIX"; }
+
+# 抽出結果の sha256 / 文字数（正本は末尾改行を含まない 18 行ゆえ最終 1 byte を落として測る）。
+canon_sha256() { extract_canonical "$1" | head -c -1 | sha256sum | cut -d' ' -f1; }
+canon_chars() {
+    extract_canonical "$1" | head -c -1 \
+        | python3 -c 'import sys; print(len(sys.stdin.buffer.read().decode("utf-8")))'
+}
+
+# 指定 literal を含む行のうち「許された正本行（埋込接頭辞込みの完全一致）」以外だけを stdout へ出す
+# （tests/cell-quality-verdict.bats:84-90 と同型）。$1=literal / $2=file / $3.. =許す行（完全一致）。
+# 行単位の `grep -v <語>` 除外は fail-open（v1 復活行が同一行に 1 語添えるだけで素通りする）ゆえ、
+# 除外は正本行との完全一致だけに狭める。
+leftover_lines() {
+    local literal="$1" f="$2"; shift 2
+    local line allowed ok
+    while IFS= read -r line; do
+        ok=0
+        for allowed in "$@"; do
+            [ "$line" = "$allowed" ] && { ok=1; break; }
+        done
+        [ "$ok" -eq 1 ] || printf '%s\n' "$line"
+    done < <(grep -F -- "$literal" "$f" || true)
 }
 
 @test "docs が全て実在する（teeth の前提）" {
@@ -72,13 +130,29 @@ extract_canonical() {
     [ "$output" = "1" ]
 }
 
-@test "canonical block が 23 行・sha256 完全一致で verbatim 埋込されている" {
-    local body n sum
-    body="$(extract_canonical)"
-    n="$(printf '%s\n' "$body" | wc -l)"
+@test "canonical block v2 が 18 行 / 1359 字 / sha256 完全一致で verbatim 埋込されている（版 pin）" {
+    local n
+    # 抽出そのものが成功する（sentinel 欠落・埋込接頭辞 drift は rc=9 で fail-loud）。
+    run extract_canonical "$PROTOCOL"
+    [ "$status" -eq 0 ]
+    # 行数 drift（折り返し・行結合・欠落）を byte pin から独立に捕える。
+    n="$(extract_canonical "$PROTOCOL" | wc -l)"
     [ "$n" -eq "$CANON_LINES" ]
-    sum="$(printf '%s' "$body" | sha256sum | cut -d' ' -f1)"
-    [ "$sum" = "$CANON_SHA256" ]
+    [ "$(canon_chars "$PROTOCOL")" -eq "$CANON_CHARS" ]
+    # byte 同一性の本体。
+    [ "$(canon_sha256 "$PROTOCOL")" = "$CANON_SHA256" ]
+    # occurrence 一意性: 規範を反転させた第 2 block が同居すると抽出器（最初の区間で exit）を
+    # 素通りするため、見出し行が 1 個であることを版 pin の一部として要求する。
+    [ "$(grep -Fc -- "$CANON_HEAD" "$PROTOCOL")" -eq 1 ]
+}
+
+@test "版 pin: CANON_SHA256 が tests/cell-quality-verdict.bats の同定数と一致する（片側 drift を RED 化）" {
+    # 同一の正本を docs 側と runtime carrier 側で別々に pin しているため、片側だけ版が上がると
+    # 「両方 green なのに実体が食い違う」状態を作れてしまう。定数の同値性そのものを歯にする。
+    local other
+    other="$(sed -n "s/^  CANON_SHA256='\([0-9a-f]\{64\}\)'\$/\1/p" "$VERDICT")"
+    [ -n "$other" ]
+    [ "$other" = "$CANON_SHA256" ]
 }
 
 @test "canonical block の 4 見出しが protocol.md に実在する" {
@@ -88,10 +162,49 @@ extract_canonical() {
     grep -qF -- '【本裁定で緩めないもの（fence）】' "$PROTOCOL"
 }
 
-@test "3 クラス（消す / 出す / 使う）の行が実在する" {
+@test "3 クラス（消す / 出す / 使う）の行が v2 の逐語で実在する" {
+    # sha256 版 pin と重複するが、RED になったとき「どの行が落ちたか」を人間が読める形にする補助 pin。
+    # (b)(c) は v2 で全面改訂された行ゆえ、先頭の一致ではなく行全体の逐語で焼く。
     grep -qF -- '(a) 消す — データ / repo / 履歴 / live 成果物の破壊（第一防衛線は機械 guard 層）' "$PROTOCOL"
-    grep -qF -- '(b) 出す — public 化・外部公開・外部サービスへの送信' "$PROTOCOL"
-    grep -qF -- '(c) 使う — 大きな金銭コスト（承認でなく予算上限で制御）' "$PROTOCOL"
+    grep -qF -- "$CANON_B_LINE" "$PROTOCOL"
+    grep -qF -- "$CANON_C_LINE" "$PROTOCOL"
+}
+
+@test "v2 の必須語（追加課金 / 機械 2 条件 / 判定単位は repo でなく「情報」/ 裁定 R-A・R-B）が実在する" {
+    for tok in \
+        '(c) 使う — 追加課金が発生する操作' \
+        '定額プラン内は対象外＝token 消費それ自体は非該当' \
+        '判定単位は repo でなく「情報」' \
+        '機械 2 条件〔① 配備層 file を touch しない ② private 実名 DATA literal が 0 hit〕' \
+        '〔裁定 R-A・2026-07-26〕' \
+        '〔裁定 R-B・2026-07-26〕'; do
+        grep -qF -- "$tok" "$PROTOCOL"
+    done
+    # v2 で新設された語が実在する（現行 protocol.md では 0 hit だったため非自明な pin）。
+    grep -qF -- '追加課金' "$PROTOCOL"
+}
+
+# v1 の廃止済み文言は「v2 の (c) 行が旧語を引用して廃止を宣言する」構造ゆえ literal 0 hit を要求できない。
+# ただし除外を「同一行に『廃止した』を含む」に置くと、v1 を復活させる行が 1 語添えるだけで素通りする
+# （負論理 pin の fail-open）。ゆえに許すのは**正本 (c) 行との完全一致 1 行だけ**に狭める。
+@test "negative(版 pin): v1 の廃止文言が正本 (c) 行以外の形で protocol.md に残っていない" {
+    [ -z "$(leftover_lines '大きな金銭コスト' "$PROTOCOL" "${EMBED_PREFIX}${CANON_C_LINE}")" ]
+    [ -z "$(leftover_lines '予算上限で制御'   "$PROTOCOL" "${EMBED_PREFIX}${CANON_C_LINE}")" ]
+}
+
+# クラス (b) の repo 単位断定（v1 系の緩い判定）は v2 で明示的に禁止された。禁止文それ自体は
+# 正本 (b) 行に**正当に**含まれるため、素の literal 0 hit は false-RED になる（除外が要る）。
+@test "negative(版 pin): repo 単位断定の反転形が正本 (b) 行以外に無く、旧 carve-out が撤去されている" {
+    [ -z "$(leftover_lines '既に public な repo だから非該当' "$PROTOCOL" "${EMBED_PREFIX}${CANON_B_LINE}")" ]
+    # 旧・行為ベースの一括免除（repo 単位の断定）は撤去済み＝再流入を negative で塞ぐ。
+    assert_absent '本リポは既に public な GitHub repo であり' "$PROTOCOL"
+    assert_absent '**public な doc への追記は 3 クラスの「出す」（＝新規の公開面拡大: private→public 化・新規 repo 公開・未公開データの外部送信）に該当しない**' "$PROTOCOL"
+    # 旧免除の**射程限定句**（行為ベース: 編集する行為そのものは非該当 / 内容の公開性では判定しない）も
+    # 断片単位で塞ぐ。full 文の pin だけでは、この 2 句だけを書き戻す断片経路が開いたままになる
+    # （R-A は行為ベースの一括免除そのものを撤回し、判定を機械 2 条件へ置き換えた）。
+    # literal は素の語形（強調記号なし）で焼く＝bold の有無に依らず捕捉する上位互換。
+    assert_absent '既に public な doc を編集する行為そのもの' "$PROTOCOL"
+    assert_absent '載せる内容の公開性ではない' "$PROTOCOL"
 }
 
 @test "canonical block が §5 step4（§5.4）の内側にある（別節へ移設したら RED）" {
@@ -107,9 +220,12 @@ extract_canonical() {
 # ---------- (2) 誤読防止句 3 行 ----------
 
 @test "誤読防止句 3 行が実在する" {
-    grep -qF -- '1. 人間承認を外しても **gate は外さない**（gate が実効安全弁になったので強化側）。' "$PROTOCOL"
+    # v2 では誤読防止句の ** 強調が正本本文から外れている（v1 の埋込側で付いていた記号は正本に無い）。
+    # 記号の付加は v2 の搬送規律が禁じ sha256 も外れるため、pin 側から記号を外して retarget する
+    # （block へ記号を足して green にするのは搬送規律違反。同型の解決先例 = cell-quality-verdict.bats:156-172）。
+    grep -qF -- '1. 人間承認を外しても gate は外さない（gate が実効安全弁になったので強化側）。' "$PROTOCOL"
     grep -qF -- '2. 「worker が自己 merge してよい」ではない（gate 分離＝独立レビューは不変）。' "$PROTOCOL"
-    grep -qF -- '3. front-load / バナーは **廃止でなく scope 縮小**（user 裁定 2026-07-17 の可視性要件を壊さない）。' "$PROTOCOL"
+    grep -qF -- '3. front-load / バナーは廃止でなく scope 縮小（user 裁定 2026-07-17 の可視性要件を壊さない）。' "$PROTOCOL"
 }
 
 # ---------- (3) 旧トリガー固有 literal の不在（negative） ----------
@@ -171,24 +287,136 @@ extract_canonical() {
     assert_absent 'グレー（設計判断の許容幅）は確認せず通す' "$PROTOCOL"
 }
 
-# ---------- 埋込注記の carve-out / carve-back を「対で」pin（クラス (b) の唯一の安全弁） ----------
+# ---------- 埋込注記の機械 2 条件を「対で」pin（クラス (b) の唯一の安全弁） ----------
 #
-# §5.4 の埋込注記は「public な doc への追記は『出す』に該当しない」という permissive な
-# carve-out を admin 判定で新設し、その fail-open を「ただし当該追記が未公開データ…を新たに
-# 公開面へ載せる場合は『出す』に該当し人間確認を取る」という carve-back **だけ**で塞いでいる
-# （doc 自身が「内容ベースの本例外を欠くと permissive 側へ倒れる＝クラス (b) の fail-open」と
-# 明言する）。実測: carve-back の 1 文だけを削除しても他の全 assert は green だった。
-# ＝ scribe が独自に narrowing した唯一のクラスの安全弁が無防備だったため、**対で** pin して
+# 旧・埋込注記は「public な doc への追記は『出す』に該当しない」という repo 単位の permissive な
+# carve-out を持ち、その fail-open を carve-back **1 文だけ**で塞いでいた（実測: carve-back を
+# 削っても他の全 assert が green）。v2（裁定 R-A）はこれを **機械 2 条件**へ置き換え、carve-back の
+# 趣旨を条件②へ吸収した。①（配備層 touch）だけが残り②③が欠ける改訂は fail-open ゆえ、
+# 「非該当側（両方 green）」と「該当側（どちらかが赤 → 人間確認へ倒す）」を **対で** pin して
 # 片方だけが残る編集を RED にする。
-@test "埋込注記の carve-out（public doc 編集は「出す」非該当）が実在する" {
-    grep -qF -- '**public な doc への追記は 3 クラスの「出す」（＝新規の公開面拡大: private→public 化・新規 repo 公開・未公開データの外部送信）に該当しない**' "$PROTOCOL"
+#
+# ★pin literal は **note 固有形**（強調記号・括弧付き）で焼く: 素の語（`① 配備層 file を touch しない`
+# 等）は canonical block の (b) 行にも同じ字面で現れる（実測 2 hit）ため、note からその句を削っても
+# block 側の 1 hit で grep が充足され pin が空虚になる（実測: ① を削って全 suite green）。
+# 下記 4 literal はいずれも protocol.md 内 1 hit で、block 非該当（＝note だけが充足源）。
+# 非空虚性は推論でなく mutation probe（:「note の ① 句だけを削ると RED」）で実測して示す。
+@test "埋込注記の非該当条件（機械 2 条件が両方 green）が実在する" {
+    grep -qF -- '**判定単位は repo でなく情報**' "$PROTOCOL"
+    grep -qF -- '**① 配備層 file を touch しない**（`scriptorium-engine/` 配下）' "$PROTOCOL"
+    grep -qF -- '**② private 実名 DATA literal が 0 hit**（user 発言の生引用' "$PROTOCOL"
+    grep -qF -- '**両方 green なら非該当**（AI 判断で merge）' "$PROTOCOL"
 }
 
-@test "埋込注記の carve-back（未公開データを公開面へ載せるなら「出す」）が実在する" {
-    grep -qF -- '**ただし当該追記が未公開データ〔user 発言の生引用・private / foreign 台帳の内容・ホスト名 / メール / 資格情報・未公開の内部情報〕を新たに公開面へ載せる場合は「出す」に該当し人間確認を取る**' "$PROTOCOL"
-    # carve-out の射程限定（行為ベースであって内容ベースではない）も対で保持する
-    grep -qF -- '**既に public な doc を編集する行為そのもの**' "$PROTOCOL"
-    grep -qF -- '**載せる内容の公開性ではない**' "$PROTOCOL"
+@test "埋込注記の該当条件（赤 or 機械照合不能なら (b) へ倒す）と carve-back の趣旨が実在する" {
+    # block 側 (b) 行にも同字面で現れる句ゆえ、note 固有形（強調記号 +（fail-safe））で焼く。
+    grep -qF -- '**どちらかが赤 or 機械照合できないなら (b) として人間確認へ倒す**（fail-safe）' "$PROTOCOL"
+    # carve-back の趣旨（未公開データ・foreign 台帳の内容を新たに公開面へ載せるなら「出す」）は
+    # 条件②へ吸収した形で必ず維持する（①だけを残す改訂は fail-open）。
+    grep -qF -- '**未公開データや foreign 台帳の内容を新たに公開面へ載せる場合は「出す」に該当し人間確認を取る**' "$PROTOCOL"
+    # ② が指す private 実名 DATA の外延（列挙）も対で保持する。
+    grep -qF -- 'user 発言の生引用・private / foreign 台帳の内容・ホスト名 / メール / 資格情報・未公開の内部情報' "$PROTOCOL"
+    # 行為ベースの一括免除へ戻さない旨（v1 への巻き戻し禁止）が明文で残る。
+    grep -qF -- '行為ベースの一括免除' "$PROTOCOL"
+}
+
+# ---------- mutation probe: 版 pin / 負論理 pin が非空虚であること ----------
+#
+# 「RED になるはず」という推論では teeth の非空虚性を示せない（実際に v1 を lock していた前歴がある）。
+# 変異は $BATS_TEST_TMPDIR 上の mutant コピーに対して行い、protocol.md 本体と git 履歴を汚さない。
+# 各 probe はまず「変異が実際に入った（no-op でない）」ことを 2 経路で確認してから RED を読む。
+
+@test "mutation: block 内の 1 語（追加課金）を書き換えると sha256 版 pin が RED へ flip する" {
+    local mut n
+    mut="$BATS_TEST_TMPDIR/word-protocol.md"
+    cp "$PROTOCOL" "$mut"
+    sed -i 's|追加課金が発生する操作|多額の課金が発生する操作|' "$mut"
+
+    run cmp -s "$PROTOCOL" "$mut"
+    [ "$status" -ne 0 ]
+    grep -qF -- '多額の課金が発生する操作' "$mut"
+
+    # 行数は 18 のまま＝行数 pin では捕まらず、byte pin だけが捕える。
+    n="$(extract_canonical "$mut" | wc -l)"
+    [ "$n" -eq "$CANON_LINES" ]
+    [ "$(canon_sha256 "$mut")" != "$CANON_SHA256" ]
+}
+
+@test "mutation: block 内の 2 行を結合（reflow 再現）すると行数 pin と sha256 版 pin が RED へ flip する" {
+    local mut n
+    mut="$BATS_TEST_TMPDIR/reflow-protocol.md"
+    python3 - "$PROTOCOL" "$mut" <<'PY'
+import sys
+src = open(sys.argv[1], encoding="utf-8").read().split("\n")
+i = next(k for k, l in enumerate(src) if l.startswith("   【聞かないこと】"))
+src[i:i + 2] = [src[i] + src[i + 1].lstrip()]
+open(sys.argv[2], "w", encoding="utf-8").write("\n".join(src))
+PY
+    run cmp -s "$PROTOCOL" "$mut"
+    [ "$status" -ne 0 ]
+
+    # 語の grep は全て素通りする（結合後も部分文字列としてヒットする）＝reflow は byte/行数 pin でしか捕まらない。
+    grep -qF -- '【聞かないこと】' "$mut"
+    grep -qF -- '【上げること】' "$mut"
+
+    n="$(extract_canonical "$mut" | wc -l)"
+    [ "$n" -ne "$CANON_LINES" ]
+    [ "$(canon_sha256 "$mut")" != "$CANON_SHA256" ]
+}
+
+@test "mutation: block 外へ v1 語 / repo 単位断定を 1 行復活させると負論理 pin が RED へ flip する" {
+    local mut
+    mut="$BATS_TEST_TMPDIR/v1-protocol.md"
+    cp "$PROTOCOL" "$mut"
+    # 「同一行に『廃止した』を添えれば素通り」型の fail-open も同時に排除できていることを示す。
+    printf '%s\n' '- (c) 使う — 大きな金銭コスト（承認でなく予算上限で制御）。旧規定は廃止した。' >> "$mut"
+    printf '%s\n' '- 「既に public な repo だから非該当」と判定してよい。' >> "$mut"
+
+    run cmp -s "$PROTOCOL" "$mut"
+    [ "$status" -ne 0 ]
+
+    # 負論理 pin: clean 側は空 / 変異側は非空（＝pin は非空虚）。
+    [ -z "$(leftover_lines '大きな金銭コスト' "$PROTOCOL" "${EMBED_PREFIX}${CANON_C_LINE}")" ]
+    [ -n "$(leftover_lines '大きな金銭コスト' "$mut" "${EMBED_PREFIX}${CANON_C_LINE}")" ]
+    [ -z "$(leftover_lines '既に public な repo だから非該当' "$PROTOCOL" "${EMBED_PREFIX}${CANON_B_LINE}")" ]
+    [ -n "$(leftover_lines '既に public な repo だから非該当' "$mut" "${EMBED_PREFIX}${CANON_B_LINE}")" ]
+
+    # sha256 版 pin は block 内しか見ない＝block 外の領域を守るのは負論理 pin だけであることを示す。
+    [ "$(canon_sha256 "$mut")" = "$CANON_SHA256" ]
+}
+
+@test "mutation: 埋込注記の ① 句だけを削ると note 固有 pin が RED へ flip する（素の語 pin は空虚）" {
+    local mut
+    mut="$BATS_TEST_TMPDIR/note-cond1-protocol.md"
+    # note の「機械 2 条件〔① … / ② …〕」から ① 句だけを外し「機械条件〔② …〕」へ退化させる
+    # （＝配備層 touch 条件＝`scriptorium-engine/` を守る側だけが落ちる fail-open 型の改訂）。
+    python3 - "$PROTOCOL" "$mut" <<'PY'
+import sys
+src = open(sys.argv[1], encoding="utf-8").read()
+old = "**機械 2 条件**〔**① 配備層 file を touch しない**（`scriptorium-engine/` 配下）/ **② private 実名 DATA literal が 0 hit**"
+new = "**機械条件**〔**② private 実名 DATA literal が 0 hit**"
+if src.count(old) != 1:
+    sys.exit("MUT-ANCHOR-NOT-UNIQUE: %d" % src.count(old))
+open(sys.argv[2], "w", encoding="utf-8").write(src.replace(old, new))
+PY
+
+    # 変異が実際に入った（no-op でない）ことを 2 経路で確認してから RED を読む。
+    run cmp -s "$PROTOCOL" "$mut"
+    [ "$status" -ne 0 ]
+    grep -qF -- '**機械条件**〔**② private 実名 DATA literal が 0 hit**' "$mut"
+
+    # 素の語（block の (b) 行と同字面）は block 側 1 hit で充足され素通りする＝旧 pin が空虚だった実測。
+    [ "$(grep -Fc -- '① 配備層 file を touch しない' "$PROTOCOL")" -eq 2 ]
+    [ "$(grep -Fc -- '① 配備層 file を touch しない' "$mut")" -eq 1 ]
+    grep -qF -- '① 配備層 file を touch しない' "$mut"
+
+    # note 固有 pin は clean 側 green / 変異側 RED（＝pin は非空虚）。
+    grep -qF -- '**① 配備層 file を touch しない**（`scriptorium-engine/` 配下）' "$PROTOCOL"
+    run grep -qF -- '**① 配備層 file を touch しない**（`scriptorium-engine/` 配下）' "$mut"
+    [ "$status" -ne 0 ]
+
+    # sha256 版 pin は block 内しか見ない＝note を守るのは本 pin だけであることを示す。
+    [ "$(canon_sha256 "$mut")" = "$CANON_SHA256" ]
 }
 
 # ---------- (4) fence（本裁定で緩めないもの）の保持 ----------
