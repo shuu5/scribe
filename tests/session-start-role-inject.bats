@@ -20,6 +20,21 @@ setup() {
     REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
     SCRIPT="$REPO/scripts/hooks/session-start-role-inject.sh"
     HOOKS_JSON="$REPO/hooks/hooks.json"
+    PROTOCOL="$REPO/docs/protocol.md"
+
+    # --- boot core（progressive disclosure・sc-x93w / orch-db47 leg(1)）の pin 材料 ---------------
+    # 注入は protocol.md 全文 cat / §2-4 awk 抽出から **doc 側 sentinel 区間の boot core** へ変わった。
+    # ★再武装の設計（■10-3）: pin は必ず **core 固有 literal**（script の header / intro が供給しない語）
+    #   から採る。header・intro だけで green になる pin は、core 区間を空にしても緑のままで空虚になる
+    #   （反 false-green 確認 = 下の "反 false-green" test が実際に flip を測る）。
+    CORE_ADMIN_SENTINEL="scribe-core-admin"
+    CORE_WORKER_SENTINEL="scribe-core-worker"
+    CORE_ADMIN_TRIGGER='**trigger 表（admin・'
+    CORE_ADMIN_INVARIANT='**完了 truth = bd**'
+    CORE_ADMIN_APPROVAL='**承認は 3 クラス + snapshot-mismatch だけ**'
+    CORE_WORKER_TRIGGER='**trigger 表（worker・'
+    CORE_WORKER_DONE2='**順序を逆にしない**'
+    CORE_WORKER_AUTONOMY='**停止してよいのは 2 例外だけ**'
 
     # --- .beads opt-in guard(bd un-7hx)を通すため、実在する cwd を temp に用意する ---
     # 既定 cwd(anchor 相当・.beads あり・非 worktree)と worker cwd(.worktrees/ 配下・.beads
@@ -171,6 +186,10 @@ inject_tmux() {
     [[ "$output" != *"ultracode を保持"* ]]
     [[ "$output" == *"role=admin"* ]]
     [[ "$output" == *"あなたは scribe admin"* ]]
+    # ★再武装（sc-x93w ■10-3）: 上 3 本は header/intro だけで green になり「本文注入は不変」を測れない
+    #   （core 区間を空にしても緑）。core 固有 literal を足して suppress が本文を巻き添えにしないことを pin。
+    [[ "$output" == *"$CORE_ADMIN_TRIGGER"* ]]
+    [[ "$output" == *"$CORE_ADMIN_INVARIANT"* ]]
 }
 
 @test "ultracode source 分岐: resume → 打鍵案内を出す(新規 process=喪失濃厚側の fail-safe)" {
@@ -243,11 +262,15 @@ inject_tmux() {
     [[ "$output" == *"role=consult"* ]]
 }
 
-@test "guard(.beads 有・CC-native worktree): worker は従来どおり注入する(§2/§3/§4) (sc-vwm)" {
+@test "guard(.beads 有・CC-native worktree): worker は従来どおり注入する(boot core) (sc-vwm)" {
+    # sc-x93w retarget: 旧 pin は `## 2. worker prompt 規約`（§2-4 全文注入時代の見出し）だったが、
+    # 注入は doc 側 sentinel 区間の boot core へ変わった。core 固有 literal（header/intro が供給しない）
+    # へ移し、注入が実際に届いていることの検知力を等価以上に保つ。
     run --separate-stderr inject - "$REPO" "$CC_WT_JSON"
     [ "$status" -eq 0 ]
     [[ "$output" == *"role=worker"* ]]
-    [[ "$output" == *"## 2. worker prompt 規約"* ]]
+    [[ "$output" == *"$CORE_WORKER_TRIGGER"* ]]
+    [[ "$output" == *"$CORE_WORKER_DONE2"* ]]
 }
 
 @test "degrade: 未知の SCRIBE_ROLE は無視され cwd 判定へ(worktree→worker)・stderr 警告" {
@@ -367,12 +390,18 @@ inject_tmux() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"role=admin"* ]]
     [[ "$output" == *"gate funnel"* ]]
+    # ★再武装（sc-x93w ■10-3）: `gate funnel` は intro が供給するため core が空でも green だった。
+    [[ "$output" == *"$CORE_ADMIN_TRIGGER"* ]]
+    [[ "$output" == *"$CORE_ADMIN_APPROVAL"* ]]
 }
 
 @test "guard(.beads 有・worktree): worker は従来どおり注入する" {
     run --separate-stderr inject - "$REPO" "$WT_JSON"
     [ "$status" -eq 0 ]
     [[ "$output" == *"role=worker"* ]]
+    # ★再武装（sc-x93w ■10-3）: role 行は header が供給するため本文ゼロでも green だった。
+    [[ "$output" == *"$CORE_WORKER_TRIGGER"* ]]
+    [[ "$output" == *"$CORE_WORKER_AUTONOMY"* ]]
 }
 
 @test "guard(.beads 有): consult は従来どおり注入する" {
@@ -455,49 +484,57 @@ inject_tmux() {
     [[ "$output" == *"cwd .worktrees/"* ]]
 }
 
-# ---- 本文抽出器(awk)不在: worker/consult は明示 warning で degrade・admin は無傷 ----
-# awk を PATH から外し本文抽出(_scribe_emit_*)を不能にする。worker/consult が「header のみの
-# サイレント部分注入」に陥らず、exit 0 を維持しつつ stderr へ明示 warning を出して degrade する
-# ことを assert(規約本文の silent drop 防止・errata wf_f51949b7)。
+# ---- 本文抽出器の依存を awk から sed へ移した（sc-x93w・■6）: awk 不在でも 3 role とも本文が届く ----
+# 旧実装は worker/consult の本文抽出が awk 単一依存で、awk 不在ホストでは「明示 warning を出して
+# 何も注入しない」degrade に落ちていた（admin だけが cat 経路で無傷）。sc-x93w で抽出を **sed のみ**へ
+# 移したため degrade 自体が不要になり、この 2 本は **強化側の RED** になった（■6-2）。assert を削除せず
+# 「awk 不在でも 3 role とも規約本文が届く」へ retarget する（degrade 検知 → 無 degrade 検知の等価以上）。
+# admin を awk 非依存に保つ要件（■6-3）は 3 本目がそのまま担い続ける。
+# restricted PATH が張るのは bash env dirname cat sed head jq のみ＝python3 も timeout も無い環境で、
+# emit-budget lib は fail-open（計測を諦め本文だけ出す）に落ちる。本文が出続けることが本 test の核。
 _link_bin_without_awk() {
     local bindir="$1" b
     mkdir -p "$bindir"
     for b in bash env dirname cat sed head jq; do
         ln -sf "$(command -v "$b")" "$bindir/$b"
     done
-    # awk は意図的にリンクしない → command -v awk が失敗
+    # awk は意図的にリンクしない → 抽出経路が awk を要求するなら本文がゼロになる
 }
 
-@test "awk 不在(restricted PATH): worker は exit 0 維持で degrade・stderr に明示 warning" {
+@test "awk 不在(restricted PATH): worker へ規約本文(boot core)が届く(sed 抽出＝awk 非依存)" {
     local bindir="$BATS_TEST_TMPDIR/noawk-worker"
     _link_bin_without_awk "$bindir"
     run --separate-stderr env -i PATH="$bindir" SCRIBE_ROLE= CLAUDE_PLUGIN_ROOT="$REPO" \
         bash -c "printf '%s' '$WT_JSON' | '$SCRIPT'"
     [ "$status" -eq 0 ]
-    [ -z "$output" ]
-    [[ "$stderr" == *"awk not found"* ]]
-    [[ "$stderr" == *"worker"* ]]
+    [[ "$output" == *"role=worker"* ]]
+    [[ "$output" == *"$CORE_WORKER_TRIGGER"* ]]
+    [[ "$output" == *"$CORE_WORKER_DONE2"* ]]
+    [[ "$stderr" != *"awk not found"* ]]        # awk 依存の degrade 経路は消滅している
 }
 
-@test "awk 不在(restricted PATH): consult は exit 0 維持で degrade・stderr に明示 warning" {
+@test "awk 不在(restricted PATH): consult へ規約本文(§2.3)が届く(sed 抽出＝awk 非依存)" {
     local bindir="$BATS_TEST_TMPDIR/noawk-consult"
     _link_bin_without_awk "$bindir"
     run --separate-stderr env -i PATH="$bindir" SCRIBE_ROLE=consult CLAUDE_PLUGIN_ROOT="$REPO" \
         bash -c "printf '%s' '$ANCHOR_JSON' | '$SCRIPT'"
     [ "$status" -eq 0 ]
-    [ -z "$output" ]
-    [[ "$stderr" == *"awk not found"* ]]
-    [[ "$stderr" == *"consult"* ]]
+    [[ "$output" == *"role=consult"* ]]
+    [[ "$output" == *"### 2.3 consult"* ]]
+    [[ "$output" == *"サマリ保存"* ]]
+    [[ "$stderr" != *"awk not found"* ]]
 }
 
-@test "awk 不在(restricted PATH): admin は cat 経路で無傷(本文を注入する)" {
+@test "awk 不在(restricted PATH): admin へ規約本文(boot core)が届く(■6-3・admin を awk 依存にしない)" {
     local bindir="$BATS_TEST_TMPDIR/noawk-admin"
     _link_bin_without_awk "$bindir"
     run --separate-stderr env -i PATH="$bindir" SCRIBE_ROLE=admin CLAUDE_PLUGIN_ROOT="$REPO" \
         bash -c "printf '%s' '$ANCHOR_JSON' | '$SCRIPT'"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"gate funnel"* ]]
-    [[ "$output" == *"dolt push 同期点"* ]]
+    [[ "$output" == *"gate funnel"* ]]                 # intro 由来（従来 pin を維持）
+    [[ "$output" == *"dolt push 同期点"* ]]            # intro 由来（従来 pin を維持）
+    [[ "$output" == *"$CORE_ADMIN_TRIGGER"* ]]         # ★再武装: core 固有 literal（■10-3）
+    [[ "$output" == *"$CORE_ADMIN_APPROVAL"* ]]
 }
 
 # ---- role 別注入内容の必須キーワード(spec §2.1-2.3) ----
@@ -519,15 +556,23 @@ _link_bin_without_awk() {
     [[ "$output" == *"notes で提案"* ]]
 }
 
-@test "注入(worker): protocol.md の §2/§3/§4 のみ(§1/§5/§6 は出さない)" {
+@test "注入(worker): boot core 区間のみ(§1/§5/§6 の本文は出さない・admin core も混入しない)" {
+    # sc-x93w retarget: positive 3 本（§2/§3/§4 の見出し literal）は core 化で構造的に出なくなったため、
+    # **同じ 3 節をカバーする core 固有 literal**（§3=禁止 / §4=完了 2 段 / §2=自律規律）へ置換する。
+    # negative 3 本（§1/§5/§6 の非注入）は**そのまま維持**し、さらに admin core の非混入を追加して
+    # 「区間を跨いだ過剰注入」まで pin する（検知力は等価以上・assert 削除 0）。
     run --separate-stderr inject worker "$REPO" "$WT_JSON"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"## 2. worker prompt 規約"* ]]
-    [[ "$output" == *"## 3. B/hybrid 役割境界"* ]]
-    [[ "$output" == *"## 4. gate-pending → gate → close → errata 規約"* ]]
+    [[ "$output" == *"$CORE_WORKER_TRIGGER"* ]]
+    [[ "$output" == *"**follow-up は自分で起票しない**"* ]]      # §3 相当（旧 `## 3.` pin の代替）
+    [[ "$output" == *"$CORE_WORKER_DONE2"* ]]                     # §4 相当（旧 `## 4.` pin の代替）
+    [[ "$output" == *"$CORE_WORKER_AUTONOMY"* ]]                  # §2 相当（旧 `## 2.` pin の代替）
     [[ "$output" != *"## 1. spawn 規約"* ]]
     [[ "$output" != *"## 5. gate funnel 手順"* ]]
     [[ "$output" != *"## 6. 監視"* ]]
+    # 区間跨ぎの過剰注入（admin core が worker へ漏れる）を塞ぐ
+    [[ "$output" != *"$CORE_ADMIN_TRIGGER"* ]]
+    [[ "$output" != *"$CORE_ADMIN_APPROVAL"* ]]
 }
 
 @test "注入(consult): read-only / 記憶系のみ / サマリ保存義務 / 暫定運用 を含む" {
@@ -648,6 +693,10 @@ _link_bin_without_awk() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"role=admin"* ]]
     [[ "$output" == *"gate funnel"* ]]
+    # ★再武装（sc-x93w ■10-3）: wire 経由でも **doc 側 core 本文**まで届くことを end-to-end で pin する
+    #   （`gate funnel` は intro 由来ゆえ core 空でも green だった）。
+    [[ "$output" == *"$CORE_ADMIN_TRIGGER"* ]]
+    [[ "$output" == *"$CORE_ADMIN_INVARIANT"* ]]
 }
 
 # ---- 機械防御 carrier self-check（split-brain 検出・sc-99c） ----
@@ -667,9 +716,10 @@ _link_bin_without_awk() {
     [[ "$output" == *"このセッションは scribe-spawn 経由ではありません"* ]]
     [[ "$output" == *"edit-write-guard.py"* ]]
     [[ "$output" == *"起動し直す"* ]]
-    # §2-4 本文は従来どおり注入される（warning は追加であって置換ではない）
-    [[ "$output" == *"## 2. worker prompt 規約"* ]]
-    # §2-4-only 不変条件を warning が壊さない（禁止見出しを混ぜない）
+    # boot core 本文は従来どおり注入される（warning は追加であって置換ではない・sc-x93w retarget）
+    [[ "$output" == *"$CORE_WORKER_TRIGGER"* ]]
+    [[ "$output" == *"$CORE_WORKER_AUTONOMY"* ]]
+    # core-only 不変条件を warning が壊さない（禁止見出しを混ぜない）
     [[ "$output" != *"## 1. spawn 規約"* ]]
     [[ "$output" != *"## 5. gate funnel 手順"* ]]
     [[ "$output" != *"## 6. 監視"* ]]
@@ -685,8 +735,9 @@ _link_bin_without_awk() {
     # carrier モデル散文（「機械防御が無効」の語を含む）は出るため、warning ブロック固有の signature で判定。
     [[ "$output" != *"このセッションは scribe-spawn 経由ではありません"* ]]
     [[ "$output" != *"境界を確立できません"* ]]
-    # 従来どおり §2 本文は注入される
-    [[ "$output" == *"## 2. worker prompt 規約"* ]]
+    # 従来どおり boot core 本文は注入される（sc-x93w retarget: `## 2.` 見出し → core 固有 literal）
+    [[ "$output" == *"$CORE_WORKER_TRIGGER"* ]]
+    [[ "$output" == *"$CORE_WORKER_DONE2"* ]]
 }
 
 @test "機械防御(sc-99c): SCRIBE_WORKER=1 だが SCRIBE_WORKTREE 不正 → 境界確立不能 warning を注入" {
@@ -696,8 +747,9 @@ _link_bin_without_awk() {
     # SCRIBE_WORKTREE 不在 = edit-write-guard は fail-closed（全 Edit block）ゆえ別文言で警告する
     [[ "$output" == *"境界を確立できません"* ]]
     [[ "$output" == *"edit-write-guard.py"* ]]
-    # §2 本文は従来どおり注入される
-    [[ "$output" == *"## 2. worker prompt 規約"* ]]
+    # boot core 本文は従来どおり注入される（sc-x93w retarget: `## 2.` 見出し → core 固有 literal）
+    [[ "$output" == *"$CORE_WORKER_TRIGGER"* ]]
+    [[ "$output" == *"$CORE_WORKER_DONE2"* ]]
 }
 
 # ---- docs SSOT pin（carrier モデルが protocol.md §2 に成文化されている・sc-99c drift 停止） ----
@@ -709,4 +761,367 @@ _link_bin_without_awk() {
     grep -q 'SCRIBE_WORKTREE' "$proto"
     # role-inject の warning 本文 SSOT がここである旨（両 carrier がこれを引く＝drift 停止）
     grep -q 'session-start-role-inject.sh' "$proto"
+}
+
+# ---- boot core sentinel（progressive disclosure・sc-x93w / orch-db47 leg(1)）の新設 teeth ----
+#
+# 設計の核（■5-4 / ■10-6）: 抽出器は begin/end が **各ちょうど 1 個で begin が先** を検査し、満たさない
+# ときは「空でない部分抽出」を黙って返さず **rc 非 0（fail-loud）** にする。hook 本体は fail-open を保ち
+# （stderr へ warn・exit 0・無出力）セッションを壊さない。sentinel 区間を**空にすると**上流の core 固有
+# pin が RED へ flip する——これが「pin が非空虚である」ことの実測（推論でなく mutation で示す）。
+#
+# 変異は $BATS_TEST_TMPDIR 上の mutant plugin root（docs だけ差し替えたコピー）に対して行い、
+# 本物の docs/protocol.md と git 履歴を汚さない。
+
+# _mutant_root <dst> — $REPO の docs/ と scripts/ を symlink ではなく実体コピーで持つ最小 plugin root
+_mutant_root() {
+    local dst="$1"
+    mkdir -p "$dst/docs" "$dst/scripts/hooks/lib"
+    cp "$REPO/docs/protocol.md" "$dst/docs/protocol.md"
+    cp "$REPO/docs/role-context-spec.md" "$dst/docs/role-context-spec.md"
+    cp "$REPO/scripts/hooks/session-start-role-inject.sh" "$dst/scripts/hooks/"
+    cp "$REPO/scripts/hooks/lib/emit_budget.sh" "$dst/scripts/hooks/lib/"
+}
+
+@test "sentinel: protocol.md に boot core 区間が admin/worker とも begin/end 各 1 個で実在する" {
+    local n
+    for name in "$CORE_ADMIN_SENTINEL" "$CORE_WORKER_SENTINEL"; do
+        n="$(grep -cF -- "<!-- ${name}:begin -->" "$PROTOCOL")"
+        [ "$n" -eq 1 ]
+        n="$(grep -cF -- "<!-- ${name}:end -->" "$PROTOCOL")"
+        [ "$n" -eq 1 ]
+    done
+    # sentinel 名は canonical-3class-block-v2 と別名（■5-3・同名は将来 carrier 追加時に occurrence pin を崩す）
+    [ "$CORE_ADMIN_SENTINEL" != "canonical-3class-block-v2" ]
+    [ "$CORE_WORKER_SENTINEL" != "canonical-3class-block-v2" ]
+}
+
+@test "sentinel: 区間が空でも end sentinel 行を本文として吐かない（範囲アドレス縮退の封鎖）" {
+    # sed の `addr1,addr2` は addr2 < addr1 のとき **addr1 の 1 行だけ**を出す。抽出器がこれを
+    # 数値で先に弾かないと、空区間で end sentinel の HTML コメントを規約本文として注入してしまう。
+    local root="$BATS_TEST_TMPDIR/mut-empty"
+    _mutant_root "$root"
+    python3 - "$root/docs/protocol.md" "$CORE_WORKER_SENTINEL" <<'PY'
+import re, sys
+p, name = sys.argv[1], sys.argv[2]
+s = open(p, encoding="utf-8").read()
+b, e = f"<!-- {name}:begin -->", f"<!-- {name}:end -->"
+i, j = s.index(b), s.index(e)
+open(p, "w", encoding="utf-8").write(s[:i] + b + "\n" + s[j:])
+PY
+    run --separate-stderr inject worker "$root" "$WT_JSON"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"<!--"* ]]                       # sentinel 行そのものを本文として出さない
+    [[ "$output" != *"$CORE_WORKER_TRIGGER"* ]]       # 区間が空なので core は 1 行も出ない
+}
+
+@test "反 false-green(■10-6): worker core 区間を空にすると core 固有 pin が RED へ flip する" {
+    local root="$BATS_TEST_TMPDIR/mut-hollow-worker"
+    _mutant_root "$root"
+    python3 - "$root/docs/protocol.md" "$CORE_WORKER_SENTINEL" <<'PY'
+import sys
+p, name = sys.argv[1], sys.argv[2]
+s = open(p, encoding="utf-8").read()
+b, e = f"<!-- {name}:begin -->", f"<!-- {name}:end -->"
+i, j = s.index(b), s.index(e)
+open(p, "w", encoding="utf-8").write(s[:i] + b + "\n" + s[j:])
+PY
+    # clean 側は green（pin が実際に本文を掴んでいる）
+    run --separate-stderr inject worker "$REPO" "$WT_JSON"
+    [[ "$output" == *"$CORE_WORKER_TRIGGER"* ]]
+    [[ "$output" == *"$CORE_WORKER_DONE2"* ]]
+    [[ "$output" == *"$CORE_WORKER_AUTONOMY"* ]]
+    [[ "$output" == *"bdw"* ]]
+    # 変異側は同じ pin がすべて落ちる＝pin は非空虚（header/intro だけでは充足されない）
+    run --separate-stderr inject worker "$root" "$WT_JSON"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=worker"* ]]                # header/intro は出続ける（＝pin の充足源ではない）
+    [[ "$output" != *"$CORE_WORKER_TRIGGER"* ]]
+    [[ "$output" != *"$CORE_WORKER_DONE2"* ]]
+    [[ "$output" != *"$CORE_WORKER_AUTONOMY"* ]]
+    [[ "$output" != *"bdw"* ]]
+    # ★実測メモ（■10-4 の「落ちるか実行して確かめる」）: `bd create` / `bd dep` / `bd dolt push` /
+    #   `notes で提案` は **worker intro が同じ字面を供給する**ため core を空にしても green のままになる
+    #   ＝出力 grep だけでは ■9-4 の 6 要素保持を測れない。だから下の doc-level teeth で core 区間自体を pin する。
+    [[ "$output" == *"bd create"* ]]
+    [[ "$output" == *"notes で提案"* ]]
+}
+
+@test "core 内容(■9-4): worker core 区間が 6 要素（bd create/dep/dolt push・bdw・notes で提案・自 worktree 境界）を保持する" {
+    # 出力 grep は intro が同じ字面を供給するため空虚になりうる（上の実測メモ）。ゆえに **doc 側 core 区間を
+    # 直接抽出**して 6 要素を pin する＝trim で core から要素が落ちた瞬間に RED になる。
+    local core
+    core="$(sed -n "/<!-- ${CORE_WORKER_SENTINEL}:begin -->/,/<!-- ${CORE_WORKER_SENTINEL}:end -->/p" "$PROTOCOL")"
+    [ -n "$core" ]
+    [[ "$core" == *'`bd create`'* ]]
+    [[ "$core" == *'`bd dep`'* ]]
+    [[ "$core" == *'`bd dolt push`'* ]]
+    [[ "$core" == *'`bdw`'* ]]
+    [[ "$core" == *"notes で提案"* ]]
+    [[ "$core" == *"自 worktree の中だけ"* ]]
+    # 自己 close / 自己 merge 禁止（■2 の §4 分割）も core に残る
+    [[ "$core" == *'`bd close`'* ]]
+    [[ "$core" == *"自己 merge しない"* ]]
+}
+
+@test "core 内容(■9-2/■9-5): admin core が禁止・境界・承認・trigger 表 3 行以上を保持する" {
+    local core n
+    core="$(sed -n "/<!-- ${CORE_ADMIN_SENTINEL}:begin -->/,/<!-- ${CORE_ADMIN_SENTINEL}:end -->/p" "$PROTOCOL")"
+    [ -n "$core" ]
+    # trigger 表は 3 行以上（spawn 前→§1 / gate 前→§5 / 承認迷い→§5.4）
+    # count は herestring で取る（pipefail 下の `producer | grep -c` は SIGPIPE 偽 RED の原因・protocol §2）
+    n="$(grep -c '^- \*\*.*→ §' <<< "$core" || true)"
+    [ "$n" -ge 3 ]
+    # ★1 行 1 assert（`[[ A ]] && [[ B ]]` と書かない）: AND-OR リストの非最終要素は bash の
+    #   errexit 免除規則で失敗しても落ちない＝前 2 本が vacuous になる（tests/scribe-account-select.bats
+    #   :835 で明文化済みの既知 footgun・本 leg の cell-quality gate が実測で再確認）。
+    [[ "$core" == *"§1"* ]]
+    [[ "$core" == *"§5"* ]]
+    [[ "$core" == *"§5.4"* ]]
+    # 禁止・不可逆・fail-closed・境界（■9-2 で落としてはならない側）
+    [[ "$core" == *"fail-closed"* ]]
+    [[ "$core" == *"read に留め write しない"* ]]      # 台帳 write 境界
+    [[ "$core" == *"消す / 出す / 使う"* ]]            # 承認 3 クラス
+    [[ "$core" == *"自己 close も自己 merge もしない"* ]]  # gate 分離
+    [[ "$core" == *"完了 truth = bd"* ]]
+    # transport の**禁止**側（no-push）は ■2 の「core に 2 行」＝構造封鎖だけでは半分。co-submit は事後検知が
+    # 原理的に不可能（§6）で、§6 全文は boot で届かない＝この 1 行を落とすと boot 時点でどこからも届かない。
+    [[ "$core" == *"no-push"* ]]
+    [[ "$core" == *"INJECT_DEFERRED"* ]]
+    [[ "$core" == *"握りつぶして再送しない"* ]]
+    # ■4-5: core 本文へ既存の negative / occurrence pin に当たる literal を書かない
+    [[ "$core" != *"## 1. spawn 規約"* ]]
+    [[ "$core" != *"## 5. gate funnel 手順"* ]]
+    [[ "$core" != *"## 6. 監視"* ]]
+    [[ "$core" != *"## 8. cross-ledger 境界"* ]]
+    [[ "$core" != *"【人間確認が要るのは"* ]]
+    [[ "$core" != *"① 配備層 file を touch しない"* ]]
+}
+
+@test "反 false-green(■10-6): admin core 区間を空にすると core 固有 pin が RED へ flip する" {
+    local root="$BATS_TEST_TMPDIR/mut-hollow-admin"
+    _mutant_root "$root"
+    python3 - "$root/docs/protocol.md" "$CORE_ADMIN_SENTINEL" <<'PY'
+import sys
+p, name = sys.argv[1], sys.argv[2]
+s = open(p, encoding="utf-8").read()
+b, e = f"<!-- {name}:begin -->", f"<!-- {name}:end -->"
+i, j = s.index(b), s.index(e)
+open(p, "w", encoding="utf-8").write(s[:i] + b + "\n" + s[j:])
+PY
+    run --separate-stderr inject admin "$REPO" "$ANCHOR_JSON"
+    [[ "$output" == *"$CORE_ADMIN_TRIGGER"* ]]
+    [[ "$output" == *"$CORE_ADMIN_INVARIANT"* ]]
+    [[ "$output" == *"errata"* ]]
+    run --separate-stderr inject admin "$root" "$ANCHOR_JSON"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=admin"* ]]
+    [[ "$output" == *"gate funnel"* ]]                # intro は生きている＝旧 pin が空虚だった証拠
+    [[ "$output" != *"$CORE_ADMIN_TRIGGER"* ]]
+    [[ "$output" != *"$CORE_ADMIN_INVARIANT"* ]]
+    [[ "$output" != *"errata"* ]]
+}
+
+@test "fail-loud(■5-4): begin sentinel を削ると抽出器は空を返さず degrade（無注入・exit 0・stderr warn）" {
+    local root="$BATS_TEST_TMPDIR/mut-nobegin"
+    _mutant_root "$root"
+    python3 - "$root/docs/protocol.md" "$CORE_WORKER_SENTINEL" <<'PY'
+import sys
+p, name = sys.argv[1], sys.argv[2]
+s = open(p, encoding="utf-8").read()
+open(p, "w", encoding="utf-8").write(s.replace(f"<!-- {name}:begin -->\n", "", 1))
+PY
+    run --separate-stderr inject worker "$root" "$WT_JSON"
+    [ "$status" -eq 0 ]                                # hook 本体は fail-open（session を壊さない）
+    [ -z "$output" ]                                   # 部分注入を黙って出さない（fail-loud の効果）
+    [[ "$stderr" == *"boot core 区間"* ]]
+    [[ "$stderr" == *"$CORE_WORKER_SENTINEL"* ]]
+}
+
+@test "fail-loud(■5-4): begin sentinel が 2 個あると degrade（無注入・exit 0・stderr warn）" {
+    local root="$BATS_TEST_TMPDIR/mut-dupbegin"
+    _mutant_root "$root"
+    python3 - "$root/docs/protocol.md" "$CORE_ADMIN_SENTINEL" <<'PY'
+import sys
+p, name = sys.argv[1], sys.argv[2]
+s = open(p, encoding="utf-8").read()
+b = f"<!-- {name}:begin -->"
+open(p, "w", encoding="utf-8").write(s.replace(b, b + "\n" + b, 1))
+PY
+    run --separate-stderr inject admin "$root" "$ANCHOR_JSON"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [[ "$stderr" == *"boot core 区間"* ]]
+}
+
+@test "fail-loud(■5-4): begin/end が逆順でも degrade（範囲が EOF まで暴走しない）" {
+    local root="$BATS_TEST_TMPDIR/mut-swapped"
+    _mutant_root "$root"
+    python3 - "$root/docs/protocol.md" "$CORE_WORKER_SENTINEL" <<'PY'
+import sys
+p, name = sys.argv[1], sys.argv[2]
+s = open(p, encoding="utf-8").read()
+b, e = f"<!-- {name}:begin -->", f"<!-- {name}:end -->"
+i, j = s.index(b), s.index(e)
+# begin と end を入れ替える（end が先・begin が後）
+s = s[:i] + e + s[i + len(b):j] + b + s[j + len(e):]
+open(p, "w", encoding="utf-8").write(s)
+PY
+    run --separate-stderr inject worker "$root" "$WT_JSON"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [[ "$stderr" == *"boot core 区間"* ]]
+}
+
+# _head_contract <role> <plugin_root>  — stdin = 注入出力。先頭 1,000 u16 が acceptance(1) の 4 要素
+#   (i) 「これは要約」自衛文 (ii) 自 role の規約 SSOT doc の**絶対** path (iii) Read 指示 (iv) trigger 表
+#   を満たすかを検査し、**assert でなく rc** を返す（rc=0 合格 / 非 0 不合格）。rc 形にするのが load-bearing:
+#   clean で green・mutant で RED を**同じ判定器**で両側 pin でき、反 false-green を実測できる。
+# ★pin の採り方（gate finding 由来の retarget）: 旧実装は `"Read"` / `".md" and "/"` / `"trigger"` の 3 本で、
+#   いずれも **script の intro 行が単独で供給する**ため core を空にしても green だった（＝4 要素中 3 要素が
+#   実質未検証）。ゆえに (i) は自衛文の逐語 literal、(ii) は「行から path を切り出して先頭が `/`」+ 実行時
+#   展開値との一致、(iv) は **doc 側 core の表行**（intro 散文の "trigger" では代替できない語）で測る。
+_head_contract() {
+    local role="$1" root="$2" guard doc coreline
+    case "$role" in
+        admin)   guard='以下は規約の要約';   doc="$root/docs/protocol.md";          coreline="$CORE_ADMIN_TRIGGER" ;;
+        worker)  guard='以下は規約の要約';   doc="$root/docs/protocol.md";          coreline="$CORE_WORKER_TRIGGER" ;;
+        consult) guard='規約の全体ではない'; doc="$root/docs/role-context-spec.md"; coreline='### 2.3 consult' ;;
+        *)       echo "unknown role: $role" >&2; return 2 ;;
+    esac
+    python3 -c '
+import re, sys
+guard, doc, coreline = sys.argv[1], sys.argv[2], sys.argv[3]
+h = sys.stdin.buffer.read().decode("utf-8", "replace").strip().encode("utf-16-le")[:2000].decode("utf-16-le", "ignore")
+bad = []
+if guard not in h:
+    bad.append("(i) 自衛文が先頭 1,000 u16 に無い: " + guard)
+if "Read" not in h:
+    bad.append("(iii) Read 指示が先頭 1,000 u16 に無い")
+m = re.search(r"規約 SSOT[^`]*`([^`]+)`", h)
+if m is None:
+    bad.append("(ii) 規約 SSOT 行から doc path を切り出せない")
+else:
+    p = m.group(1)
+    if not p.startswith("/"):
+        bad.append("(ii) SSOT doc の path が絶対でない: " + p)
+    elif p != doc:
+        bad.append("(ii) SSOT doc の path が実行時展開値と一致しない: " + p + " != " + doc)
+if coreline not in h:
+    bad.append("(iv) doc 側 core の trigger 行が先頭 1,000 u16 に無い: " + coreline)
+if bad:
+    sys.stderr.write("head contract 違反:\n  " + "\n  ".join(bad) + "\n")
+    sys.exit(1)
+' "$guard" "$doc" "$coreline"
+}
+
+@test "予算(■8): 3 role とも 1,000 <= u16 <= 9,800（land 目標 8,000 以下）で先頭が acceptance(1) の 4 要素を満たす" {
+    # 非 vacuity floor 1,000（0 u16 は合格でなく計測不能＝未達）と失格線 9,800 の AND 条件。
+    # worker は条件 A（split-brain warning 込みの最悪ケース）で測る＝env -u で spawn signal を落とす。
+    local r out u
+    for r in admin worker consult; do
+        out="$(printf '%s' "$ANCHOR_JSON" | env -u SCRIBE_WORKER -u SCRIBE_WORKTREE -u TMUX -u TMUX_PANE \
+            -u SCRIBE_TMUX SCRIBE_ROLE="$r" CLAUDE_PLUGIN_ROOT="$REPO" "$SCRIPT" 2>/dev/null)"
+        [ -n "$out" ]
+        u="$(printf '%s' "$out" | python3 -c 'import sys;d=sys.stdin.buffer.read().decode("utf-8","replace").strip();print(len(d.encode("utf-16-le"))//2)')"
+        [ "$u" -ge 1000 ]
+        [ "$u" -le 8000 ]
+        # 先頭 1,000 u16 に「これは要約」自衛文 + 自 role の SSOT doc **絶対** path + Read 指示 + trigger 表
+        printf '%s' "$out" | _head_contract "$r" "$REPO"
+    done
+}
+
+@test "反 false-green(acceptance(1)): head 契約は 自衛文削除 / 相対 path 化 / hollow core のいずれでも RED へ flip する" {
+    # 旧 head-check は script の intro だけで 3 要素とも green になり、hollow core でも通っていた
+    # （gate finding）。retarget 後の判定器が **実際に落ちる**ことを 3 変異で実測する（推論でなく mutation）。
+    local out root
+
+    # --- clean: 3 role とも green（判定器が本文を掴んでいる） ---
+    for r in admin worker consult; do
+        out="$(printf '%s' "$ANCHOR_JSON" | env -u SCRIBE_WORKER -u SCRIBE_WORKTREE -u TMUX -u TMUX_PANE \
+            -u SCRIBE_TMUX SCRIBE_ROLE="$r" CLAUDE_PLUGIN_ROOT="$REPO" "$SCRIPT" 2>/dev/null)"
+        run _head_contract "$r" "$REPO" <<< "$out"
+        [ "$status" -eq 0 ]
+    done
+
+    # --- (i) 自衛文を script の intro から削る → RED（旧 check には assert が無く green のままだった） ---
+    root="$BATS_TEST_TMPDIR/mut-head-noguard"
+    _mutant_root "$root"
+    python3 - "$root/scripts/hooks/session-start-role-inject.sh" <<'PY'
+import sys
+p = sys.argv[1]
+lines = open(p, encoding="utf-8").read().split("\n")
+keep = [L for L in lines if "以下は規約の要約(boot core)" not in L]
+assert len(keep) < len(lines), "自衛文行が見つからない（変異が空振り）"
+open(p, "w", encoding="utf-8").write("\n".join(keep))
+PY
+    out="$(printf '%s' "$ANCHOR_JSON" | env -u SCRIBE_WORKER -u SCRIBE_WORKTREE -u TMUX -u TMUX_PANE \
+        -u SCRIBE_TMUX SCRIBE_ROLE=admin CLAUDE_PLUGIN_ROOT="$root" "$root/scripts/hooks/session-start-role-inject.sh" 2>/dev/null)"
+    [ -n "$out" ]                                      # 出力自体は出る＝落ちるのは head 契約だけ
+    run _head_contract admin "$root" <<< "$out"
+    [ "$status" -ne 0 ]
+
+    # --- (ii) intro の path を相対にする → RED（旧 `.md` and `/` 判定は相対でも green だった） ---
+    root="$BATS_TEST_TMPDIR/mut-head-relpath"
+    _mutant_root "$root"
+    python3 - "$root/scripts/hooks/session-start-role-inject.sh" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+lines = s.split("\n")
+n = 0
+for i, L in enumerate(lines):
+    if "規約 SSOT の全文" in L and "$PROTOCOL_DOC" in L:
+        lines[i] = L.replace("$PROTOCOL_DOC", "docs/protocol.md")
+        n += 1
+assert n > 0, "intro の path 展開が見つからない（変異が空振り）"
+open(p, "w", encoding="utf-8").write("\n".join(lines))
+PY
+    out="$(printf '%s' "$ANCHOR_JSON" | env -u SCRIBE_WORKER -u SCRIBE_WORKTREE -u TMUX -u TMUX_PANE \
+        -u SCRIBE_TMUX SCRIBE_ROLE=admin CLAUDE_PLUGIN_ROOT="$root" "$root/scripts/hooks/session-start-role-inject.sh" 2>/dev/null)"
+    [ -n "$out" ]
+    [[ "$out" == *"docs/protocol.md"* ]]               # 変異は効いている（相対 path が出ている）
+    run _head_contract admin "$root" <<< "$out"
+    [ "$status" -ne 0 ]
+
+    # --- (iv) doc 側 core を空にする → RED（旧 `"trigger"` は intro 散文が供給し green だった） ---
+    root="$BATS_TEST_TMPDIR/mut-head-hollow"
+    _mutant_root "$root"
+    python3 - "$root/docs/protocol.md" "$CORE_ADMIN_SENTINEL" <<'PY'
+import sys
+p, name = sys.argv[1], sys.argv[2]
+s = open(p, encoding="utf-8").read()
+b, e = f"<!-- {name}:begin -->", f"<!-- {name}:end -->"
+i, j = s.index(b), s.index(e)
+open(p, "w", encoding="utf-8").write(s[:i] + b + "\n" + s[j:])
+PY
+    out="$(printf '%s' "$ANCHOR_JSON" | env -u SCRIBE_WORKER -u SCRIBE_WORKTREE -u TMUX -u TMUX_PANE \
+        -u SCRIBE_TMUX SCRIBE_ROLE=admin CLAUDE_PLUGIN_ROOT="$root" "$root/scripts/hooks/session-start-role-inject.sh" 2>/dev/null)"
+    [ -n "$out" ]
+    run _head_contract admin "$root" <<< "$out"
+    [ "$status" -ne 0 ]
+}
+
+@test "予算(■13-1): consult は §2.1/§2.2 の混入なく inline 回帰も無い（script に規約本文を書かない）" {
+    run --separate-stderr inject consult "$REPO" "$ANCHOR_JSON"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"### 2.3 consult"* ]]
+    [[ "$output" != *"### 2.1 admin"* ]]
+    [[ "$output" != *"### 2.2 worker"* ]]
+    # inline 回帰の機械定義: script 側に §2.3 本文（doc 固有の長句）をベタ書きしていない
+    run grep -cF -- 'サマリ保存義務' "$SCRIPT"
+    [ "$output" -le 1 ]                                # intro の 1 語まで（本文の転記は 0）
+}
+
+@test "script: 規約本文の抽出経路が awk / grep / python3 に依存しない（■6-1・sed と cat のみ）" {
+    # 抽出器 2 本（_scribe_emit_sentinel_section / _scribe_emit_consult_section）の本体に
+    # awk / grep / python3 / wc が現れないことを構造で pin する（restricted PATH 耐性の回帰ネット）。
+    local fn
+    fn="$(sed -n '/^_scribe_emit_sentinel_section()/,/^}/p;/^_scribe_emit_consult_section()/,/^}/p' "$SCRIPT")"
+    [ -n "$fn" ]
+    [[ "$fn" != *"awk "* ]]
+    [[ "$fn" != *"grep "* ]]
+    [[ "$fn" != *"python3"* ]]
+    [[ "$fn" != *"wc "* ]]
+    [[ "$fn" == *"sed -n"* ]]
 }
