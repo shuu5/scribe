@@ -111,6 +111,95 @@ run_hook() {  # $1=cwd
     run env -u TMUX -u TMUX_PANE bash "$SCRIPT" < "$TEST_TMPDIR/payload.json"
 }
 
+# ── 表示層 trim（bd sc-v0ao）用ヘルパ ──────────────────────────────────────────────────────────
+# stdout **のみ** を返す（`run` は stderr を混ぜるため u16 計測には使わない・計測規律: stderr 混入禁止）。
+hook_stdout_of() {  # $1=script $2..=args → stdout を echo
+    local _s="$1"; shift
+    printf '{"cwd":"%s"}' "$ANCHOR" > "$TEST_TMPDIR/payload.json"
+    env -u TMUX -u TMUX_PANE CLAUDE_PLUGIN_ROOT="$PLUGIN" bash "$_s" "$@" < "$TEST_TMPDIR/payload.json" 2>/dev/null
+}
+hook_stdout() { hook_stdout_of "$SCRIPT" "$@"; }
+
+# u16（UTF-16 code unit）計測: utf-8 decode → strip → utf-16-le byte 長 // 2（wc -c / wc -m は代用にしない）。
+u16_of() {  # $1=text → u16 数
+    printf '%s' "$1" | python3 -c 'import sys
+_d = sys.stdin.buffer.read().decode("utf-8", "replace").strip()
+sys.stdout.write(str(len(_d.encode("utf-16-le")) // 2))'
+}
+
+# 過負荷 stub: 1 節あたり 200 行・各行 ~120 文字（日本語混在）を吐く。$3=prio なら **末尾付近**に
+# 滞留行 / 呼び鈴行（優先クラス）を足す（T3 用）。record 行には優先クラス語を一切含めない。
+make_overload_stub() {  # $1=path $2=tag $3=mode(plain|prio)
+    cat > "$1" <<'STUBEOF'
+#!/usr/bin/env bash
+tag="__TAG__"
+pad='仕掛かり記録の詳細説明テキストであり表示予算を消費するための埋草である。'
+i=1
+while [ $i -le 200 ]; do
+    printf '  %sREC%03d %s%s%s\n' "$tag" "$i" "$pad" "$pad" "$pad"
+    i=$((i + 1))
+done
+STUBEOF
+    sed -i "s/__TAG__/$2/" "$1"
+    if [ "${3:-plain}" = "prio" ]; then
+        cat >> "$1" <<'STUBEOF'
+printf '  [滞留] %sSTUCK 便が滞留している宛先がある\n' "$tag"
+printf '  🔔 呼び鈴: %sBELL needs-user 併存の提案（proposal-only）\n' "$tag"
+STUBEOF
+    fi
+    chmod +x "$1"
+}
+
+# 全行が優先クラス（[滞留]）の過負荷 stub（T3 phase2 用）。実 producer の regime（配送観測の便 record は
+# 全行が [滞留]）を模す＝優先行は N 枠を消費しないので trim では 1 行も減らず、終端 hard-cap だけが効く。
+make_allprio_stub() {  # $1=path $2=tag $3=mode(無視)
+    cat > "$1" <<'STUBEOF'
+#!/usr/bin/env bash
+tag="__TAG__"
+pad='仕掛かり記録の詳細説明テキストであり表示予算を消費するための埋草である。'
+i=1
+while [ $i -le 200 ]; do
+    printf '  便 %sREC%03d [滞留] %s%s\n' "$tag" "$i" "$pad" "$pad"
+    i=$((i + 1))
+done
+printf '      🔔 呼び鈴打ちますか？（提案のみ・push は人間 go）｜根拠: %s-BELL\n' "$tag"
+printf '  ── 集計: undelivered(滞留)=200 呼び鈴提案=1（%s）\n' "$tag"
+STUBEOF
+    sed -i "s/__TAG__/$2/" "$1"
+    chmod +x "$1"
+}
+
+# 少行 stub（T2 用・trim が誤発火しないことを見る）。
+make_small_stub() {  # $1=path $2=tag
+    cat > "$1" <<'STUBEOF'
+#!/usr/bin/env bash
+tag="__TAG__"
+for i in 1 2 3; do printf '  %sREC%03d 少量の記録行\n' "$tag" "$i"; done
+STUBEOF
+    sed -i "s/__TAG__/$2/" "$1"
+    chmod +x "$1"
+}
+
+# 6 block 全部（第1-4節 + 第5節の re-ratify / slate）を差し替える。tag は block 識別子。
+make_all_stubs() {  # $1=maker(make_overload_stub|make_small_stub) $2=mode
+    "$1" "$PLUGIN/scripts/orch-dispatch.sh"         S1 "${2:-plain}"
+    "$1" "$PLUGIN/scripts/orch-degraded-watch.sh"   S2 "${2:-plain}"
+    "$1" "$PLUGIN/scripts/orch-handoff-scan.sh"     S3 "${2:-plain}"
+    "$1" "$PLUGIN/scripts/orch-delivery-observe.sh" S4 "${2:-plain}"
+    "$1" "$PLUGIN/scripts/orch-stale-scan.sh"       S5 "${2:-plain}"
+    "$1" "$PLUGIN/scripts/lib/orch_slate.sh"        S6 "${2:-plain}"
+}
+
+# mutant を作る（sed 式で本体を書き換えた copy）。lib も同梱して source を解決させる（_SCRIPT_DIR 相対）。
+make_mutant() {  # $1=sed 式 → mutant script path を echo
+    local _d="$TEST_TMPDIR/mut-$2"
+    mkdir -p "$_d/lib"
+    sed "$1" "$SCRIPT" > "$_d/session-start-workinprogress.sh"
+    cp "$REPO/scripts/hooks/lib/orch_session.sh" "$_d/lib/orch_session.sh"
+    chmod +x "$_d/session-start-workinprogress.sh"
+    printf '%s' "$_d/session-start-workinprogress.sh"
+}
+
 # consult 経路（fence7 b）: TMUX + stub tmux 付きで起動（$2=窓名・空→tmux 取得失敗を模す）。
 run_hook_consult() {  # $1=cwd $2=window-name
     printf '{"cwd":"%s"}' "$1" > "$TEST_TMPDIR/payload.json"
@@ -301,6 +390,111 @@ run_hook_consult() {  # $1=cwd $2=window-name
     [[ "$output" == *"orch_slate.sh 不在"* ]]               # slate surface skip note（fail-open）
     [[ "$output" == *"GATE-PENDING-SENTINEL"* ]]           # 第1-4節は温存 → 継続発火（部分縮退しない）
     [[ "$output" == *"DELIVERY-OBSERVE-SENTINEL"* ]]
+}
+
+# ══ 表示層 trim（bd sc-v0ao・inline 復帰「上位 N 行 + 全件 pointer」）の teeth: T1-T4 ══════════════
+# ★既存 20 test は 1 行 stub ゆえ trim 経路を一切踏まない（20/20 green は新機能の証拠にならない）。
+#   よって過負荷 stub（1 節 200 行 × ~120 字）で **同一 run の before(--full) / after** を対で測り、
+#   「0 u16 / 縮退 / vacuous な小出力」を合格根拠にできないようにする。
+
+@test "(T1) 過負荷 stub: before(--full)>=12000 u16 かつ after<=9800 u16・全節見出し実在・fail-open 0 hit・省略件数が実省略行数と一致" {
+    make_all_stubs make_overload_stub plain
+    local before after b a
+    before="$(hook_stdout --full)"     # 同一 run の before（trim を外した全件経路）
+    after="$(hook_stdout)"             # after（表示層 trim 後）
+    b="$(u16_of "$before")"; a="$(u16_of "$after")"
+    # (c) before が 12,000 u16 以上 = 計測が非vacuous（stub が実際に cliff 超えの負荷を出している）
+    [ "$b" -ge 12000 ]
+    # (d) after が 9,800 u16 以下（目標 8,000）
+    [ "$a" -le 9800 ]
+    # (a) 全節見出しが在る（trim で節が消えていない）
+    [[ "$after" == *"(1) gate-pending"* ]]
+    [[ "$after" == *"(2) degraded-watch"* ]]
+    [[ "$after" == *"(3) needs-orch handoff"* ]]
+    [[ "$after" == *"(4) 配送観測"* ]]
+    [[ "$after" == *"(5) re-ratify sweep"* ]]
+    # (b) 出力中の fail-open が 0 hit（縮退した小出力を合格根拠にしない）
+    [[ "$after" != *"fail-open"* ]]
+    # 各 block: 表示 record 行数が N 上限内 + 「省略行の <数> == 実省略行数」（= 200 - 表示行数）
+    local tags=(S1 S2 S3 S4 S5 S6)
+    local scripts=(orch-dispatch.sh orch-degraded-watch.sh orch-handoff-scan.sh orch-delivery-observe.sh orch-stale-scan.sh orch_slate.sh)
+    local k shown line omit
+    for k in 0 1 2 3 4 5; do
+        shown="$(grep -c "${tags[$k]}REC" <<<"$after" || true)"
+        line="$(grep -F '行を省略・全件: ' <<<"$after" | grep -F "${scripts[$k]}" || true)"
+        omit="$(sed -n 's/.*残り \([0-9][0-9]*\) 行を省略.*/\1/p' <<<"$line")"
+        [ -n "$omit" ]                       # 省略が起きた block には必ず省略行が出る
+        [ "$shown" -ge 5 ]                   # floor: 5 行未満へは落ちない
+        [ "$shown" -le 20 ]                  # 予算駆動 N の上限内（200 行中のごく一部）
+        [ "$((shown + omit))" -eq 200 ]      # 省略件数が実省略行数と一致
+    done
+}
+
+@test "(T2) 少行 stub(3 行) → 省略行 0 hit・全 record 行が残る（trim が誤発火しない）" {
+    make_all_stubs make_small_stub
+    local after n
+    after="$(hook_stdout)"
+    [[ "$after" != *"行を省略"* ]]                    # 省略 0 の block では省略行を出さない
+    n="$(grep -c 'REC' <<<"$after" || true)"
+    [ "$n" -eq 18 ]                                   # 3 行 × 6 block が全部残る
+}
+
+@test "(T3) 過負荷 stub の末尾付近に置いた滞留行 / 呼び鈴行が trim 後も全 block で残存（優先行は N 枠外）" {
+    make_all_stubs make_overload_stub prio
+    local after t
+    after="$(hook_stdout)"
+    for t in S1 S2 S3 S4 S5 S6; do
+        [[ "$after" == *"${t}STUCK"* ]]               # [滞留] 行（末尾付近）が残る
+        [[ "$after" == *"${t}BELL"* ]]                # 🔔 呼び鈴行（末尾付近）が残る
+    done
+    # 節生存（acceptance 3）: 優先行が混ざっても節見出しは 1 つも消えない（優先行の生存だけを見て
+    # 「後半の節が見出しごと落ちた」を見逃さないための対の assert）。
+    [[ "$after" == *"(1) gate-pending"* ]]
+    [[ "$after" == *"(2) degraded-watch"* ]]
+    [[ "$after" == *"(3) needs-orch handoff"* ]]
+    [[ "$after" == *"(4) 配送観測"* ]]
+    [[ "$after" == *"(5) re-ratify sweep"* ]]
+    # 対で見る: 非優先 record 行は畳まれている（「trim が効いていない」ことを優先行の生存と取り違えない）
+    [[ "$after" == *"行を省略・全件: "* ]]
+    [ "$(u16_of "$after")" -le 9800 ]
+
+    # phase2（優先行が予算を食い潰す最悪ケース・実 producer の regime）: 全 6 block が全行 [滞留]（＝優先行で
+    # N 枠を消費しない）＋末尾に 🔔 / 集計:。trim では 1 行も減らず終端 hard-cap だけが効く経路を e2e で踏む。
+    local ap
+    make_all_stubs make_allprio_stub
+    ap="$(hook_stdout)"
+    # 節生存: hard-cap が発火しても全節見出しは 1 つも落ちない（末尾一律切りだと (2)-(5) が全滅する形）
+    [[ "$ap" == *"(1) gate-pending"* ]]
+    [[ "$ap" == *"(2) degraded-watch"* ]]
+    [[ "$ap" == *"(3) needs-orch handoff"* ]]
+    [[ "$ap" == *"(4) 配送観測"* ]]
+    [[ "$ap" == *"(5) re-ratify sweep"* ]]
+    # 予算警告は body より前（stdout 先頭 1 行目）
+    [[ "$(head -n 1 <<<"$ap")" == *"⚠ 警告: 表示予算"* ]]
+    [[ "$ap" == *"予算到達により以降 "* ]]
+    # rank-A（🔔 / 集計:）は block 末尾に置いても全 6 block ぶん残る
+    [ "$(grep -c '🔔' <<<"$ap")" -eq 6 ]
+    [ "$(grep -c '── 集計:' <<<"$ap")" -eq 6 ]
+    # 予算保証は **警告行を含む stdout 総量**で見る（body だけ見ると警告行ぶん超過して land する）
+    [ "$(u16_of "$ap")" -le 8000 ]
+}
+
+@test "(T4) mutation: trim 除去 / 省略行 emit 除去 で T1 の assert が RED 化する（teeth の非vacuity）" {
+    make_all_stubs make_overload_stub plain
+    local after mut out
+    # 健全形は green（対照）
+    after="$(hook_stdout)"
+    [ "$(u16_of "$after")" -le 9800 ]
+    [[ "$after" == *"行を省略・全件: "* ]]
+    # mutation A: 表示層 trim を外す（WIP_TRIM=1 → 0）→ after が 9,800 u16 を超える（T1 の (d) が RED 化）
+    mut="$(make_mutant 's/^WIP_TRIM=1/WIP_TRIM=0/' A)"
+    out="$(hook_stdout_of "$mut")"
+    [ "$(u16_of "$out")" -gt 9800 ]
+    # mutation B: 省略行 emit を止める（条件を到達不能化・構文は保つ）→ 省略行が 0 hit（T1 の件数一致が RED 化）
+    mut="$(make_mutant 's/_omit" -gt 0 \]/_omit" -gt 999999 ]/' B)"
+    out="$(hook_stdout_of "$mut")"
+    [ -n "$out" ]                                     # mutant が死んでいない（構文破壊で空になる偽 RED を排除）
+    [[ "$out" != *"行を省略・全件: "* ]]
 }
 
 @test "(wire) hooks.json が workinprogress を spec-inject/guard-health と同形 fail-safe で SessionStart へ wire" {
