@@ -986,7 +986,17 @@ _head_contract() {
     case "$role" in
         admin)   guard='以下は規約の要約';   doc="$root/docs/protocol.md";          coreline="$CORE_ADMIN_TRIGGER" ;;
         worker)  guard='以下は規約の要約';   doc="$root/docs/protocol.md";          coreline="$CORE_WORKER_TRIGGER" ;;
-        consult) guard='規約の全体ではない'; doc="$root/docs/role-context-spec.md"; coreline='### 2.3 consult' ;;
+        # consult の coreline は **script intro の trigger 逐語**を採る（ERRATA-01・admin gate 2026-08-02）。
+        # 旧 pin `### 2.3 consult` は §2.3 本文の到達を測るだけで trigger 表を測っておらず、intro の
+        # trigger 括弧書きを削った mutant でも green のままだった（実測 4 象限: 旧 clean=GREEN /
+        # 旧 mutant=GREEN＝空虚 ／ 新 clean=GREEN / 新 mutant=RED "(iv) trigger"）。
+        # admin/worker は doc 側 core の表**行数 >=3 + §1/§5/§5.4** を「core 内容(■9-2/■9-5)」teeth が
+        # 別途 pin するため head 側は prefix で足りるが、consult には doc 側 trigger 表が存在せず
+        # （carrier は intro のみ）head の pin だけが唯一の歯になる。ゆえに prefix でなく**句全体**を
+        # 焼き、行の一部が欠けても RED にする＝admin/worker と同強度に揃える。
+        # なお §2.3 本文の到達は別 test 2 本（「予算(■13-1)」の `### 2.3 consult` と approval-codify の
+        # consult 抽出 teeth）が引き続き pin するため、この差し替えで失う検知力は無い。
+        consult) guard='規約の全体ではない'; doc="$root/docs/role-context-spec.md"; coreline='trigger: 役割境界→§2.3 / grill 手順→protocol.md §7 / 承認の 3 クラス→protocol.md §5.4' ;;
         *)       echo "unknown role: $role" >&2; return 2 ;;
     esac
     python3 -c '
