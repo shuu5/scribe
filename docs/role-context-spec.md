@@ -29,7 +29,7 @@
 - **git toplevel フォールバックの理由**: cwd が repo のサブディレクトリ（例 `anchor/docs/`）のとき `.beads/` は直下に無いが toplevel にはある。これを拾うため `git rev-parse --show-toplevel` で補う（git 不在・非 repo では無害に失敗し「`.beads` 無し」へ倒れる＝fail-safe）。
 - **ガード不成立時の挙動**: role 判定すら行わず、**stdout/stderr とも無出力で `exit 0`**（現行 fail-safe を維持し、無関係セッションを一切汚さない）。
 - **適用順**: このガードは `SCRIBE_ROLE` env 明示より**外側**（最優先）。明示 role があっても `.beads/` が無ければ注入しない（scribe 管轄外で role を騙る誤注入を防ぐ。正規の consult/admin は `.beads` を持つ anchor で動くため実害なし）。
-- **本ガードと scribe 自身（自己管理）**: scribe repo は現在**自身の `.beads/`（prefix `sc-`）を持ち scribe 自身で自己管理する**（CLAUDE.md 冒頭が SSOT）。ゆえに本ガードを通過し、**素の scribe checkout を直接開いた anchor セッションは admin 注入が発火する**（`.beads` あり = scribe 管轄・anchor 無印 = admin）。`.worktrees/` 配下の scribe-code worker セッションは worker 判定となり、その役割文脈は `scribe-spawn.sh` 生成の spawn prompt が主担体（注入は protocol §2/§3/§4 のみ）。注入を残したい satellite repo があれば、その repo に `.beads/`（redirect でも可）を置けば opt-in できる。（歴史的経緯: 旧くは scribe を ubuntu-note-system 側の beads で管理し `.beads/` を持たなかったため、本ガード後に注入ゼロ＝自己抑制となっていた。scribe 自身を `.beads/` で自己管理する構成に移行して解消した。）
+- **本ガードと scribe 自身（自己管理）**: scribe repo は現在**自身の `.beads/`（prefix `sc-`）を持ち scribe 自身で自己管理する**（CLAUDE.md 冒頭が SSOT）。ゆえに本ガードを通過し、**素の scribe checkout を直接開いた anchor セッションは admin 注入が発火する**（`.beads` あり = scribe 管轄・anchor 無印 = admin）。`.worktrees/` 配下の scribe-code worker セッションは worker 判定となり、その役割文脈は `scribe-spawn.sh` 生成の spawn prompt が主担体（SessionStart 注入は protocol.md §0 内の worker boot core 区間 `scribe-core-worker` のみ＝§2/§3/§4 の全文ではない・bd `sc-x93w`）。注入を残したい satellite repo があれば、その repo に `.beads/`（redirect でも可）を置けば opt-in できる。（歴史的経緯: 旧くは scribe を ubuntu-note-system 側の beads で管理し `.beads/` を持たなかったため、本ガード後に注入ゼロ＝自己抑制となっていた。scribe 自身を `.beads/` で自己管理する構成に移行して解消した。）
 
 > 一次出典: bd un-7hx（grill 確定: doobidoo `2ad028a2` + 2026-06-11 設計議論。背景＝ガード無しで全ホストへ admin 注入が漏れる）。実装は `scripts/hooks/session-start-role-inject.sh` の `_scribe_has_beads()`。
 
@@ -55,7 +55,11 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 
 ### 2.1 admin（anchor）
 
-**伝える**: プロトコル全文（`docs/protocol.md` 全節）。admin は graph の所有者であり funnel の実行者なので、全手順を持つ。
+**伝える**: `docs/protocol.md` の **admin boot core**（sentinel 区間 `scribe-core-admin`）+ **on-demand 全文への到達路**の 2 段（progressive disclosure・bd `sc-x93w` / orch-db47 leg(1)）。admin は graph の所有者であり funnel の実行者なので**全手順を持つ必要がある**が、SessionStart 注入は UTF-16 code unit 10,000 で truncate されるため**全文を注入すると実配達は 1.79%**（実測 121,513 u16）＝「全部渡した」つもりで大半が届かない。ゆえに:
+
+- **注入する（boot）**: 不変条件の 1 行版（所有 / 完了 truth=bd / gate の ground-truth 義務 / errata / 承認 3 クラス / 台帳境界 / transport / 監視 / 命名 / 寿命）+ **trigger 表**（いつどの節を Read するか）+ **自 role の規約 SSOT doc の絶対 path**（実行時展開）。
+- **注入しない（on-demand）**: 各節の手順本文。admin は trigger 表に従って `docs/protocol.md` の該当節を **Read して取りに行く**（全文はいつでも読める＝到達性は失われない）。
+- 予算は **3 role とも 8,000 u16 以下**を land 目標とし、超過は `scripts/hooks/lib/emit_budget.sh` が stdout 先頭で loud に warn する（truncate はしない＝fail-open）。
 
 - graph 所有: `bd create` / `bd dep`（依存 wire）/ assignment / 最終判断（§3 admin の所有）。
 - cross-ledger 境界（複数台帳併存・federated）: **write は自 `sc-` 台帳のみ**・他 project 台帳（`un-`/`cc-`）は read+provenance 保持・機密本文は durable copy 禁止・doobidoo を SPOF にしない・**scriptorium への cross-repo 作業依頼 intake は §8 の `needs-orch` 規約**（SSOT = `docs/protocol.md` §8。admin 専用ゆえ worker/consult 注入には含めない）。
@@ -112,7 +116,10 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 > **状態（sc-gub）**: 本節は元は C2 への future handoff だった。C2 は実装完了済み（`scripts/hooks/session-start-role-inject.sh`・executable・25+ 回帰テスト）。以下は実装の **decision record** として残す（未着手 TODO ではない）。
 
 - 実装先: `scripts/hooks/session-start-role-inject.sh`（`hooks/hooks.json` の SessionStart wire が `[ -x ]` ガードで参照済み）。
-- §1 の判定で role を解決し、§2 の role 別内容を `docs/protocol.md` から引いて SessionStart 出力（additionalContext）として注入する。**規約本文は protocol.md を SSOT とし、注入 script は「どの節を出すか」だけを持つ**（本文を script に二重化しない）。
+- §1 の判定で role を解決し、§2 の role 別内容を `docs/protocol.md` から引いて SessionStart 出力（additionalContext）として注入する。**規約本文は protocol.md を SSOT とし、注入 script は「どの sentinel 区間を出すか」だけを持つ**（本文を script に二重化しない・`sc-x93w` で「どの節を出すか」から改訂）。
+  - **carrier = HTML コメントの sentinel 区間**: admin=`scribe-core-admin` / worker=`scribe-core-worker`（いずれも `docs/protocol.md` §0 の内側）。consult だけは従来どおり本書 §2.3 の範囲抽出。
+  - **抽出は sed のみ**（`awk` / `grep` / `python3` を規約本文の carrier 経路の必須依存にしない＝restricted PATH でも 3 role とも本文が届く）。
+  - **抽出器は fail-loud**（begin/end が各ちょうど 1 個で begin が先、を満たさなければ空でない部分抽出を返さず rc 非 0）／**hook 本体は fail-open**（stderr へ warn・exit 0・無出力＝session を壊さない）。silent な部分抽出で teeth を空虚化させないための非対称。
 - PRIME 重複の解消（案 A 責務分割・PRIME を bd 基礎へ縮小）は実施済＝本リポの `bd prime` は role 中立（経緯 = 別 cell C4 / bd un-0c6）。縮小前の移行期は注入順序で worker の create 禁止が後勝ちになるよう配置していた。
 - v0 は堀 OFF。PostToolUse diagnostics hook（scribe-design.md §11）は配線しない（v1+）。
 - **C2 着手時の selftest 強化（C1 gate からの引き継ぎ）**: C1 の `selftest-<id>.local.sh` は hooks.json の安全性を「ガード idiom（`[ -x`/`test -x`）の存在」の部分一致で検査する。これは見せかけガード + 末尾無条件実行（`[ -x "$S" ] && "$S"; evil.sh` 等）を false-PASS しうる脆い判定（C1 gate finding・出荷物 hooks.json 自体は真に no-op で安全のため C1 では minor 据置）。C2 は `session-start-role-inject.sh` を実装し wire を編集する際、selftest の hook 検査を「各 command を `;`/`&&`/`||` で分割し、`${CLAUDE_PLUGIN_ROOT}` script 参照を含む実行 token が必ず直前ガードに支配される」or「`CLAUDE_PLUGIN_ROOT` を未存在パスにして実行し副作用ゼロ・exit 0 をドライラン観測」する dynamic assertion へ**強化した（実施済・`session-start-role-inject.bats` の「安全形 dynamic」テスト）**。

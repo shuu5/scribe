@@ -307,13 +307,16 @@ WARN_MARK='⚠️ [scribe/emit-budget]'
 }
 
 # ---- ■7: role-inject の 5 段順序（機械防御 warn が本文の後ろへ移った） ----
-@test "order(■7): worker の機械防御 split-brain warning は本文（§2-4）の**後ろ**に出る" {
+# sc-x93w retarget: 本文の pin を `## 2. worker prompt 規約`（§2-4 全文注入時代の見出し）から
+# **boot core 区間の先頭行**へ移す。順序（本文 → warning）を測る意図は不変で、pin だけを
+# 現行 carrier（doc 側 sentinel 区間）へ合わせた（assert 削除 0）。
+@test "order(■7): worker の機械防御 split-brain warning は本文（boot core）の**後ろ**に出る" {
     run --separate-stderr bash -c "printf '%s' '$WT_JSON' | env -u SCRIBE_ROLE -u SCRIBE_WORKER -u SCRIBE_WORKTREE \
         -u TMUX -u TMUX_PANE -u SCRIBE_TMUX CLAUDE_PLUGIN_ROOT='$REPO' '$ROLE_HOOK'"
     [ "$status" -eq 0 ]
-    # 本文（§2 見出し）と warning ブロック固有 signature の**行番号**を取り、順序を assert する
+    # 本文（core 区間の先頭行）と warning ブロック固有 signature の**行番号**を取り、順序を assert する
     local body_ln warn_ln
-    body_ln="$(printf '%s\n' "$output" | grep -n -F '## 2. worker prompt 規約' | head -n1 | cut -d: -f1)"
+    body_ln="$(printf '%s\n' "$output" | grep -n -F '**trigger 表（worker・' | head -n1 | cut -d: -f1)"
     warn_ln="$(printf '%s\n' "$output" | grep -n -F 'このセッションは scribe-spawn 経由ではありません' | head -n1 | cut -d: -f1)"
     [ -n "$body_ln" ]
     [ -n "$warn_ln" ]
@@ -325,8 +328,9 @@ WARN_MARK='⚠️ [scribe/emit-budget]'
 }
 
 @test "order(■7): warn 無し時は header が 1 行目 — header → 自衛文 intro → 本文 の順（warn は超過時のみ前置）" {
-    # 実 worker 注入は現状 8,000 u16 を超える（core trim は分割 A の領分）ため、既定閾値のままだと
-    # 1 行目が warn になる。ここは「warn が出ないときの 5 段順序」を見るので warn=0（opt-out）で無効化する。
+    # sc-x93w（分割 A）の core 化で実 worker 注入は 8,000 u16 を下回ったため、既定閾値でも warn は出ない。
+    # ただし本 test は「warn が出ないときの 5 段順序」だけを見る意図ゆえ、閾値に依存しないよう
+    # warn=0（opt-out）で明示的に無効化したまま据え置く（将来 core が太っても本 test は順序だけを測る）。
     run --separate-stderr bash -c "printf '%s' '$WT_JSON' | env -u SCRIBE_ROLE -u SCRIBE_WORKER -u SCRIBE_WORKTREE \
         -u TMUX -u TMUX_PANE -u SCRIBE_TMUX SCRIBE_EMIT_BUDGET_WARN_U16=0 CLAUDE_PLUGIN_ROOT='$REPO' '$ROLE_HOOK'"
     [ "$status" -eq 0 ]
