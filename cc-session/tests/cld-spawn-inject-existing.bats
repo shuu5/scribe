@@ -26,7 +26,13 @@ setup() {
 case "${1:-}" in
     list-windows) printf '%s\n' ${EXISTING_WINDOWS:-target-win} ;;
     new-window)   echo "NEW_WINDOW_CALLED $*" >> "$NEWWIN_LOG" ;;
-    display-message) echo "main" ;;
+    display-message)
+        # sc-9nc7: -t <pane> 指定時のみ pane_id を第 1 フィールドへエコーする（実 tmux の
+        # '#{pane_id} #{session_name}' format 再現）。-t 無しの bare 解決は実装が廃したので何も返さない。
+        _tgt=""; _prev=""
+        for _a in "$@"; do [[ "$_prev" == "-t" ]] && _tgt="$_a"; _prev="$_a"; done
+        [[ -n "$_tgt" ]] && echo "${PANE_ECHO_STUB-$_tgt} ${CURRENT_SESSION_STUB:-main}"
+        ;;
 esac
 exit 0
 TMUX_STUB
@@ -55,6 +61,9 @@ COMM_STUB
     export HOME="$SANDBOX/home"
     mkdir -p "$HOME/.local/state/claude-session"
     export TMUX="fake-tmux-socket,12345,0"
+    # sc-9nc7: 実 pane の中で走っている現実を再現する（cld-spawn は session 解決を pane_id の
+    # エコー一致でのみ行う）。tmux stub の display-message 分岐がこの値をエコーバックする。
+    export TMUX_PANE="%42"
     export PATH="$FAKE_BIN:$PATH"
 }
 

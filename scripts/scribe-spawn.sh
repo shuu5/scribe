@@ -1697,15 +1697,20 @@ spawn_confirm_orphan_guidance() {
 spawn_confirm() {
   local _wid="${1:-}"
 
-  # (0) 検証が **構造的に不能** なときだけ loud skip する: seam 未設定 **かつ** WID 空（＝tmux 不在 / window 未解決で
-  #     capture の宛先そのものが無い。WID 空で既定 capture を叩くと tmux が `-t ''` を現在 pane と解釈し admin 自身の
-  #     pane を誤 capture しうるため、叩かずに skip する）。
+  # (0) 検証が **構造的に不能** なときだけ loud skip する: **WID 空**（＝tmux 不在 / window 未解決 / session を
+  #     積極証拠で確定できず scribe_window_id が空を返した）。WID 空では capture-pane も send-keys も **1 回も
+  #     発行しない**（sc-9nc7）: tmux は `-t ''` を「現在 pane」と解釈するため、空 WID のまま叩くと **他 session の
+  #     live admin pane** を誤 capture し、そこへ Enter を撃つ（実測 scriptorium:orchestrator.%35 / scm:admin.%9）。
+  #     旧条件は「WID 空 **かつ** capture seam 未設定」の論理積で、seam 設定時は空 WID のまま send-keys 経路へ
+  #     進めた（seam は capture だけを差し替え、送信側 `$SPAWN_TMUX send-keys -t "$_wid"` は素通しのため）。
+  #     ゆえに条件を **WID 単独**へ変える。ただし **loud warn + return 0**（非 0 化しない）という現行契約は維持する:
+  #     非 0 へ反転させると tmux 不在 host の spawn が全滅する（「構造的不在なら loud skip」の契約自体が壊れる）。
   #     **capture の一時失敗 / 空出力それ自体では skip しない**（review finding#2）: OK の唯一 oracle は bd notes 由来の
   #     SPAWNED marker であって pane capture に依存しない。capture が 1 度失敗しただけで検証層を丸ごと放棄すると、
   #     WID は解決済み（window は在る）なのに silent unsubmitted worker がそのまま「spawned:」で通過する＝本 issue が
   #     塞ごうとした gap が残る。ゆえに capture 失敗はループ内で INCONCLUSIVE 相当（Enter を撃たない・DJ-b 維持）として
   #     扱い、marker polling を budget まで継続する。
-  if [[ -z "$_wid" ]] && [[ -z "${SCRIBE_SPAWN_CAPTURE:-}" ]]; then
+  if [[ -z "$_wid" ]]; then
     echo "scribe: ⚠ post-spawn submit 検証を実行できません（capture 対象が構造的に不在: window=$WINDOW window_id=未解決・tmux 不在 or window 未解決）→ この worker の prompt が実際に **submit されたか（turn が始まったか）は未検証**です（cld-spawn の 'prompt injected' は pane への到着の証拠であって submit の証拠ではない・sc-8g5）。admin は 'tmux capture-pane -p -t $WINDOW' と 'cd $ANCHOR && bd show $ID'（[SPAWNED--$ID] marker）で一次確認してください。" >&2
     return 0
   fi

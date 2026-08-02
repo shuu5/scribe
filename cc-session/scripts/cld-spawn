@@ -143,6 +143,66 @@ _win_exists() {
     tmux list-windows -a -F '#{window_name}' 2>/dev/null | grep -qFx "$_w"
 }
 
+# _tmux_server_alive
+#   tmux server が生きている（＝この socket 越しに tmux コマンドが通る）かを probe する。
+#   旧 guard（`[[ -z "${TMUX:-}" ]]` ＝「$TMUX が非空か」）の置き換え。$TMUX 非空は
+#   「今この pane が tmux 内にある」ことの証拠にも「server が生きている」ことの証拠にも
+#   ならない（双方向に誤る）:
+#     - 偽陰性: 端末エミュレータ側の世代交代等で TMUX が unset のまま渡ると、server は
+#       生きているのに spawn を全滅させる。
+#     - 偽陽性: stale だが非空の TMUX（消えた世代の値）はそのまま guard を通過する。
+#   probe に list-windows を選んだ理由（tmux(1) の一次根拠・実測 tmux 3.6b）:
+#     (1) `list-windows [-a]` は「-a を与えると server 上の全 window を列挙する」read-only
+#         コマンドで、副作用を持たない。
+#     (2) tmux が server を起動しにいくのは session を作る系（new-session / attach-session
+#         〔man: "If no server is started, attach-session will attempt to start it"〕/
+#         start-server）だけで、list-windows は **probe 対象を生成しない**。start-server や
+#         new-session を probe に使うと「probe が server を作ってしまう」構造的 fail-open
+#         になるが、list-windows にはそれが無い。
+#     (3) server は既定（exit-empty on）で「active session が無くなった時点で自ら exit」する
+#         ＝「session が 1 つ以上ある」と「server が生きている」は同値であり、`list-windows -a`
+#         の rc がそのまま liveness になる。
+#     (4) 実測（本 cell・tmux 3.6b）: 到達不能 socket に対する
+#         `tmux -S <dead> list-windows -a -F '#{window_id}'` は rc=1 で、socket も server も
+#         作られない。生きた server では rc=0。
+#   （has-session は「そんな session があるか」であって server liveness ではなく、
+#     display-message は下記 _resolve_current_session が捨てる非決定な解決を含むため採らない。）
+_tmux_server_alive() {
+    tmux list-windows -a -F '#{window_id}' >/dev/null 2>&1
+}
+
+# _resolve_current_session
+#   「今この cld-spawn が走っている pane が属する session」を **積極証拠つき**で解決する。
+#   stdout に session 名（解決できたときのみ）／解決不能なら非 0。
+#
+#   bare な display-message（-t 無しで session 名だけを取る形）は使わない: client 指定が無いと tmux は
+#   「直近 activity のある適当な client/session」を選ぶため、**rc=0 のまま現在窓と無関係な
+#   session を返す**（実測 4 回で un / sc / un / scriptorium と毎回別 session＝非決定）。
+#   これは「TMUX が非空なら現在 session が取れる」という前提が壊れていたということで、
+#   orca タブのような stale だが非空の TMUX 環境では今日すでに無関係 session へ窓を作りうる。
+#
+#   代わりに TMUX_PANE を -t に与え、返ってきた第 1 フィールド（pane_id）が $TMUX_PANE と
+#   一致したときだけ第 2 フィールド（session_name）を採用する（＝ pane_id のエコー一致）。
+#   rc や出力の非空では判定できない（実測: 不在 pane への display-message は rc=0 + 空、
+#   複数フィールド format なら rc=0 + 区切りのみの非空を返す）。
+#
+#   【残余ハザード（既知・意図的に残す）】エコー一致が保証するのは「その pane が実在する」
+#   ことだけであって「その pane が自プロセスの pane である」ことではない。TMUX_PANE が
+#   stale だが生存中の別 pane を指す場合、エコーは一致し誤 session が積極証拠つきで採用
+#   される。pane id は同一 server 内では単調増加で再利用されないため、この型は server の
+#   世代交代を跨いだ時にのみ成立する。ここで消えるのは「bare display-message 由来の非決定」
+#   であって「誤配全般」ではない。
+_resolve_current_session() {
+    local _out _pid _sess
+    [[ -n "${TMUX_PANE:-}" ]] || return 1
+    _out="$(tmux display-message -p -t "$TMUX_PANE" '#{pane_id} #{session_name}' 2>/dev/null)" || return 1
+    _pid="${_out%% *}"
+    _sess="${_out#* }"
+    [[ "$_pid" == "${TMUX_PANE}" ]] || return 1        # pane_id エコー一致＝pane 実在の積極証拠
+    [[ -n "$_sess" && "$_sess" != "$_pid" ]] || return 1   # 区切りだけ / 空フィールドを弾く
+    printf '%s' "$_sess"
+}
+
 CWD="$(pwd)"
 CD_SPECIFIED=false
 ENV_FILE=""
@@ -255,9 +315,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# tmux check（--help / 未知オプション判定の後＝help は tmux 外でも機能する）
-if [[ -z "${TMUX:-}" ]]; then
-    echo "Error: tmux内で実行してください" >&2
+# tmux server 生存 probe（--help / 未知オプション判定の後＝help は tmux 外でも機能する。
+# ここより前に置くと scribe-spawn.sh が毎 spawn で叩く `cld-spawn --help` の feature-detect
+# （--effort 透過の検出）まで巻き込んで silent 降格させる）。
+# 判定を「$TMUX が非空か」から「server が生きているか」へ移す理由は _tmux_server_alive を参照。
+if ! _tmux_server_alive; then
+    echo "Error: tmux server に接続できません（server 不在／socket 不達／tmux コマンド不在）。tmux server が生きている環境で実行してください。" >&2
     exit 1
 fi
 
@@ -338,12 +401,18 @@ fi
 # 存在検証・manifest 記録・プロンプト送達はすべてこの TARGET_SESSION スコープで行う
 # （session-scope 化・ccs-y9h。現状の「current session に生成するのに再利用は全 session 横断」
 # という非対称が、別プロジェクト session の同名 window を掴む topology drift の一因だった）。
+#
+# 現在 session の解決は **積極証拠（pane_id エコー一致）** のみを採る（_resolve_current_session）。
+# 確定できなければ黙って「適当な session」へ縮退せず --session 必須で fail-loud する。
+# --session の必須化は **この場合だけ**（無条件必須化ではない）: 既存呼出は --session を 1 つも
+# 渡しておらず、また --session は --inject-existing と併用禁止のため、無条件必須化や本判定の
+# 前方移動は既存経路を復旧手段ごと全滅させる。判定はこの TARGET_SESSION 決定ブロックの内側に閉じる。
 if [[ -n "$TARGET_SESSION_OPT" ]]; then
     TARGET_SESSION="$TARGET_SESSION_OPT"
 else
-    TARGET_SESSION="$(tmux display-message -p '#{session_name}')"
-    if [[ -z "$TARGET_SESSION" ]]; then
-        echo "Error: 現在の tmux session 名を解決できませんでした" >&2
+    if ! TARGET_SESSION="$(_resolve_current_session)"; then
+        echo "Error: 現在の tmux session を積極証拠で解決できませんでした（TMUX_PANE=${TMUX_PANE:-<unset>} が実在 pane としてエコー一致しない）。" >&2
+        echo "       spawn 先を取り違えないため、--session <name> で spawn 先 session を明示してください。" >&2
         exit 1
     fi
 fi

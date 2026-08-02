@@ -39,7 +39,11 @@ case "${1:-}" in
         echo "${WINDOW_NAME_STUB:-cld-spawn-test}"
         ;;
     display-message)
-        echo "main"
+        # sc-9nc7: -t <pane> 指定時のみ pane_id を第 1 フィールドへエコーする（実 tmux の
+        # '#{pane_id} #{session_name}' format 再現）。-t 無しの bare 解決は実装が廃したので何も返さない。
+        _tgt=""; _prev=""
+        for _a in "$@"; do [[ "$_prev" == "-t" ]] && _tgt="$_a"; _prev="$_a"; done
+        [[ -n "$_tgt" ]] && echo "${PANE_ECHO_STUB-$_tgt} ${CURRENT_SESSION_STUB:-main}"
         ;;
 esac
 exit 0
@@ -107,6 +111,9 @@ CLD_STUB
 
     # TMUX 環境変数: cld-spawn の tmux チェックをパスさせる
     export TMUX="fake-tmux-socket,12345,0"
+    # sc-9nc7: 実 pane の中で走っている現実を再現する（cld-spawn は session 解決を pane_id の
+    # エコー一致でのみ行う）。tmux stub の display-message 分岐がこの値をエコーバックする。
+    export TMUX_PANE="%42"
 
     export PATH="$FAKE_BIN:$PATH"
 }

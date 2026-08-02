@@ -92,6 +92,19 @@ case "$sub" in
       echo "ENTER $*" >> "$S/calls.log"
       n="$(cat "$S/enters")"; echo $((n + 1)) > "$S/enters"
     fi ;;
+  list-windows)
+    # sc-9nc7: scribe_window_id は session-scope（list-windows -t "=<session>"）で window_id を引く。
+    # SCRIBE_WINDOWS_STUB（"@N <window-name>" 行）が非空のときだけ返す。既定は空＝WID 未解決
+    # （＝tmux 不在 / window 未解決）の再現で、これが「構造的に不能」テストの前提を保つ。
+    echo "TMUX $sub $*" >> "$S/calls.log"
+    [[ -n "${SCRIBE_WINDOWS_STUB:-}" ]] && printf '%s\n' "$SCRIBE_WINDOWS_STUB" ;;
+  display-message)
+    # sc-9nc7: -t <pane> 指定時のみ pane_id を第 1 フィールドへエコーする（実 tmux の
+    # '#{pane_id} #{session_name}' format 再現）。PANE_ECHO_STUB でエコー不一致を作れる。
+    echo "TMUX $sub $*" >> "$S/calls.log"
+    _tgt=""; _prev=""
+    for _a in "$@"; do [[ "$_prev" == "-t" ]] && _tgt="$_a"; _prev="$_a"; done
+    [[ -n "$_tgt" ]] && echo "${PANE_ECHO_STUB-$_tgt} ${SCRIBE_SESSION_STUB-sess-stub}" ;;
   *) echo "TMUX $sub $*" >> "$S/calls.log" ;;
 esac
 exit 0
@@ -164,9 +177,15 @@ teardown() {
 }
 
 # 実 spawn（tmux 経路・cld-spawn は noop stub）を走らせる共通ドライバ。
+#   sc-9nc7: spawn_confirm の loud-skip 条件が「WID 空 かつ capture seam 未設定」の論理積から
+#   **WID 単独**へ変わった（空 WID のまま send-keys すると tmux が -t '' を現在 pane と解釈し、
+#   他 session の live admin pane へ Enter を撃つため）。ゆえに検証層を発火させるドライバは
+#   **WID が解決する現実**を stub で作る必要がある: 自 pane（TMUX_PANE）が実在して session が
+#   確定し、その session 内に対象 window がある、という状態。
 _spawn() {
   run env PATH="$SHIM_PATH" BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_CLD_SPAWN="$NOOP_CLD" \
       SCRIBE_SPAWN_CAPTURE="$CAPTURE_STUB" SCRIBE_TMUX="$TMUX_STUB" \
+      TMUX_PANE="%42" SCRIBE_WINDOWS_STUB="@9 wt-un-4nm" \
       "$SPAWN" --repo "$REPO" --anchor "$REPO" un-4nm
 }
 
@@ -347,6 +366,67 @@ _set_prompt_marker() {
   [[ "$output" == *"post-spawn 検証 OK"* ]]
   [[ "$output" == *"spawned: issue=un-4nm"* ]]
   [ "$(_enters)" -ge 1 ]
+}
+
+# ---------- sc-9nc7: WID 非空 assert（空 WID で 1 キーも送らない・誤配防止）----------
+# tmux は `-t ''` を「現在 pane」と解釈するため、空 WID のまま capture-pane / send-keys を叩くと
+# **他 session の live admin pane** を掴み、そこへ Enter を撃つ（実測 scriptorium:orchestrator.%35 /
+# scm:admin.%9）。旧 skip 条件は「WID 空 **かつ** capture seam 未設定」の論理積で、seam を設定した
+# 呼出では空 WID のまま送信側（$SPAWN_TMUX send-keys -t "$_wid"）へ進めた（seam は capture だけを
+# 差し替え、send-keys は素通しのため）。条件を WID 単独へ変えたことを、この 3 本が非空虚に pin する。
+
+@test "spawn(sc-9nc7): WID 空なら capture seam が設定されていても capture も send-keys も 1 回も発行しない" {
+  # SCRIBE_WINDOWS_STUB を渡さない＝window が引けず WID 空。旧論理積の実装はここで capture 経路へ
+  # 進み（seam があるため）、空 WID の send-keys まで到達する。
+  echo residual > "$S/mode"; echo after-enter > "$S/bdmode"
+  run env PATH="$SHIM_PATH" BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_CLD_SPAWN="$NOOP_CLD" \
+      SCRIBE_SPAWN_CAPTURE="$CAPTURE_STUB" SCRIBE_TMUX="$TMUX_STUB" TMUX_PANE="%42" \
+      "$SPAWN" --repo "$REPO" --anchor "$REPO" un-4nm
+  [ "$status" -eq 0 ]                                   # loud warn + return 0（非 0 化しない現行契約を維持）
+  [[ "$output" == *"post-spawn submit 検証を実行できません"* ]]
+  [[ "$output" == *"未検証"* ]]
+  [[ "$output" == *"spawned: issue=un-4nm"* ]]
+  ! grep -q '^CAPTURE' "$S/calls.log"                   # capture-pane を 1 回も発行しない
+  ! grep -q '^ENTER' "$S/calls.log"                     # send-keys Enter を 1 キーも送らない
+  [ "$(_enters)" -eq 0 ]
+}
+
+@test "spawn(sc-9nc7): session を積極証拠で確定できない（pane エコー不一致）なら WID を解決せず loud skip" {
+  # window は在る（SCRIBE_WINDOWS_STUB 非空）が、TMUX_PANE のエコーが一致しない＝自 pane の
+  # session を確定できない。scribe_window_id は -a による全 session 横断へ fallback せず空を返す。
+  echo residual > "$S/mode"; echo after-enter > "$S/bdmode"
+  run env PATH="$SHIM_PATH" BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_CLD_SPAWN="$NOOP_CLD" \
+      SCRIBE_SPAWN_CAPTURE="$CAPTURE_STUB" SCRIBE_TMUX="$TMUX_STUB" TMUX_PANE="%42" \
+      PANE_ECHO_STUB="%99" SCRIBE_WINDOWS_STUB="@9 wt-un-4nm" \
+      "$SPAWN" --repo "$REPO" --anchor "$REPO" un-4nm
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"post-spawn submit 検証を実行できません"* ]]
+  ! grep -q '^CAPTURE' "$S/calls.log"
+  ! grep -q '^ENTER' "$S/calls.log"
+}
+
+@test "spawn(sc-9nc7): WID が解決できれば検証層は従来どおり発火する（上 2 本が空虚でないことの対照）" {
+  # 上の 2 本が「常に skip する実装」でも緑になるのを防ぐ positive control。
+  echo residual > "$S/mode"; echo after-enter > "$S/bdmode"
+  _set_prompt_marker
+  _spawn
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"post-spawn submit 検証を実行できません"* ]]
+  [[ "$output" == *"post-spawn 検証 OK"* ]]
+  grep -q '^CAPTURE @9' "$S/calls.log"                  # 解決済み WID(@N) を宛先に capture している
+  grep -q '^ENTER .*-t @9' "$S/calls.log"               # send-keys も @N 宛（名前でも空でもない）
+  [ "$(_enters)" -ge 1 ]
+}
+
+@test "spawn(sc-9nc7): cld-spawn 起動 2 系統（consult / worker）に --session を足していない（無条件必須化の封鎖）" {
+  # cld-spawn 側の「積極証拠で解決できないときだけ --session 必須」を **無条件必須**へ広げると、
+  # 呼び手側に --session の供給が要るようになる。それは本 leg の scope 外であり、かつ --session は
+  # --inject-existing と併用禁止ゆえ inject 経路を巻き添えにする。呼び手が引数変更なしのままである
+  # ことを機械照合で pin する（scribe repo 内の 2 系統に限定＝scriptorium-engine 側は対象外）。
+  run grep -n '"\$CLD_SPAWN" --cd' "$SPAWN"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '"\$CLD_SPAWN" --cd')" -eq 2 ]   # consult / worker の 2 系統
+  ! printf '%s\n' "$output" | grep -q -- '--session'
 }
 
 @test "spawn(sc-8g5): 検証層 env のタイポは **launch 前** に fail-loud（worker を孤児化しない・finding#1）" {
