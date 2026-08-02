@@ -529,7 +529,12 @@ PY
 #   (2) `SCRIBE_ROLE=none`（scriptorium anchor の実配線・sc-cji）や `SCRIBE_ROLE=admin` で false-RED、
 # のいずれにも倒れる。全 invocation で env を明示隔離し、被検査ツリー（$REPO）を焼き込むこと。
 
-@test "worker 注入抽出が §2 末尾行と §4 末尾行を含む（打切り検知）" {
+# sc-x93w 等価移設: 旧 pin は「§2-4 全文抽出の**先頭側と末尾側**が両方届く＝途中で打ち切られていない」を
+# 節末の一次出典行で測っていた。注入が doc 側 sentinel 区間の boot core へ変わったため、同じ意図
+# （区間の先頭と末尾が両方届く＝打切りが無い）を **core 区間の begin 直後行と end 直前行の逐語 pin** へ
+# 移す（■10-1 の「打切り検知の意図を core 区間の begin 行と end 行の逐語 pin へ移して等価維持」）。
+# 期待値は doc から**計算せず** literal で焼く（被検査ファイルから再計算する自己参照 pin は空虚・header :49 と同じ理由）。
+@test "worker 注入抽出が core 区間の先頭行と末尾行を両方含む（打切り検知・sc-x93w 移設）" {
     local wt out
     wt="$BATS_TEST_TMPDIR/proj/.worktrees/spawn/x-1"
     mkdir -p "$wt/.beads"
@@ -538,12 +543,16 @@ PY
         | env -u SCRIBE_ROLE -u TMUX -u TMUX_PANE -u SCRIBE_TMUX -u SCRIBE_WORKER -u SCRIBE_WORKTREE \
               CLAUDE_PLUGIN_ROOT="$REPO" bash "$INJECT" > "$out" 2>/dev/null || true
     [ -s "$out" ]
-    # §2 の末尾行（一次出典）
-    grep -qF -- 'scriptorium orch-3bop（un-xnks 中継・本 bullet 成文化 leg = bd sc-c1ur）。' "$out"
-    # §4 の末尾行（一次出典）
-    grep -qF -- '見直しトリガー medium 5 本。基準本文 SSOT = `docs/methodology.md` §1.1）**。' "$out"
-    # §3 の本文（中間節が落ちていない）
-    grep -qF -- '## 3. B/hybrid 役割境界（worker↔beads）' "$out"
+    # core 区間の**先頭行**（begin sentinel の直後）
+    grep -qF -- '**trigger 表（worker・「いつどの節を Read するか」の索引。全文は本 file を上記の絶対 path で Read する）**' "$out"
+    # core 区間の**末尾行**（end sentinel の直前・空行を除く最後の実体行）
+    grep -qF -- '**機械防御の carrier は scribe-spawn**（`SCRIBE_WORKER` / `SCRIBE_WORKTREE` env signal + spawn prompt）' "$out"
+    # 中間（§3 相当 / §4 相当）が落ちていない
+    grep -qF -- '**follow-up は自分で起票しない**' "$out"
+    grep -qF -- '**順序を逆にしない**' "$out"
+    # sentinel 行そのものは本文として出さない（HTML コメントの漏出禁止）
+    assert_absent 'scribe-core-worker:begin' "$out"
+    assert_absent 'scribe-core-worker:end' "$out"
 }
 
 @test "worker 注入抽出に §5 本文と canonical block が混入しない（過剰注入検知・§9 到達範囲の閉包）" {

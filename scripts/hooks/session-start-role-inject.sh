@@ -24,18 +24,27 @@
 #     別レイヤ(自前 .beads の orchestrator 等)が scribe role 注入を受けないための明示シグナル（spec §1.1）
 #   ※ window 名は判定に使わない（表示規約のみ・spec §1）
 #
-# 注入内容の SSOT（本文を script に二重化しない・spec §3。script は「どの file/節を
-#                  出すか」だけを持ち、本文は doc から cat する）:
-#   admin   = docs/protocol.md 全文（graph 所有・gate funnel・errata 規約・dolt push 同期点）
-#   worker  = docs/protocol.md §2(worker prompt 規約)+§3(B/hybrid 役割境界)+§4(close→gate→errata)
+# 注入内容の SSOT（本文を script に二重化しない・spec §3。script は「どの file/どの sentinel 区間を
+#                  出すか」だけを持ち、本文は doc から抽出する）:
+#   admin   = docs/protocol.md の boot core 区間 `scribe-core-admin`（progressive disclosure・sc-x93w）
+#   worker  = docs/protocol.md の boot core 区間 `scribe-core-worker`（同上）
 #   consult = docs/role-context-spec.md §2.3（read-only・記憶系のみ write・サマリ保存義務・暫定運用）
 #             ※ consult の規約 SSOT は protocol.md ではなく role-context-spec.md §2.3 にインライン
 #               移設済み（un-tao テンプレ移設版）。
 #
-# fail-safe: 判定不能・doc 不在・本文抽出器(awk)不在でもセッションを壊さない。set -e は使わず
+# ★progressive disclosure（sc-x93w / orch-db47 leg(1)）: SessionStart 注入は UTF-16 code unit 10,000 で
+#   truncate される（実測）。旧実装は admin へ protocol.md 全文（121,513 u16）を cat しており実配達は
+#   1.79%＝worker の §3/§4 配達率は 0% だった。ゆえに **doc 側に置いた boot core（不変条件の 1 行版）
+#   だけを注入し、on-demand 全文へは「絶対 path + trigger 表」で到達させる** 2 段構えへ変えた。
+#   本文は doc が SSOT のままで（script はヒアドキュメントへ規約本文を書かない）、script が持つのは
+#   「どの sentinel 区間を出すか」だけ、という spec §3 の規律は不変。
+#
+# fail-safe: 判定不能・doc 不在・sentinel 区間の欠落でもセッションを壊さない。set -e は使わず
 #            常に exit 0(degrade)、警告は stderr。これは「全セッション破壊の防止」の核心。
-#            awk 不在時(worker/consult)は header のみのサイレント部分注入を避け、明示 warning を
-#            出して何も注入しない(admin は cat 経路で awk 非依存=無傷)。
+#            抽出器は begin/end が各ちょうど 1 個であることを検査し、欠落・重複・逆順では
+#            **空を返さず非 0**（fail-loud）＝header だけのサイレント部分注入で pin を空虚化させない。
+#            本文抽出は sed のみに依存する（awk / grep / python3 を規約本文の carrier 経路の必須依存に
+#            しない＝restricted PATH でも 3 role とも規約本文が届く）。
 
 # --- plugin root / doc パス解決（CLAUDE_PLUGIN_ROOT 優先・無ければ script 位置から導出） ---
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
@@ -99,28 +108,49 @@ _scribe_extract_json_string() {
     return 0
 }
 
-# --- protocol.md の top-level セクション(## N.)を抽出（want = 空白区切りの番号列・portable awk） ---
-_scribe_emit_protocol_sections() {
-    local file="$1" want="$2"
-    awk -v want="$want" '
-        BEGIN { k=split(want, a, " "); for (i=1;i<=k;i++) wanted[a[i]]=1; inseg=0 }
-        /^## / {
-            inseg=0
-            hdr=$0; sub(/^## /,"",hdr); num=hdr; sub(/[^0-9].*/,"",num)
-            if (num != "" && (num in wanted)) inseg=1
-        }
-        inseg { print }
-    ' "$file"
+# --- boot core の sentinel 区間を抽出（sed のみ・fail-loud・sc-x93w / ■5-4 / ■6-1） ---
+# $1=file / $2=sentinel 名（例 `scribe-core-admin`）。区間は HTML コメント
+#   `<!-- <名>:begin -->` … `<!-- <名>:end -->`（各ちょうど 1 個・begin が end より前）で挟む。
+# ★fail-loud（rc=9）にするのが load-bearing: 欠落・重複・逆順で「空でない部分抽出」を黙って返すと、
+#   core 固有 literal を pin している teeth が header/intro だけで green になり pin が空虚化する。
+#   呼び手（hook 本体）は rc!=0 を受けたら **何も注入せず** stderr へ warn して exit 0（fail-open）。
+# ★sed 以外に依存しない: 出現行番号を `sed -n '/pat/='` で取り、件数・順序の判定と行範囲の切り出しは
+#   bash 内で完結させる（grep / awk / wc を規約本文の carrier 経路へ持ち込まない＝restricted PATH 耐性）。
+#   sentinel 名には正規表現メタ文字（`.` `*` `[` `\` `/`）を使わない（sed の BRE へそのまま埋めるため）。
+_scribe_emit_sentinel_section() {
+    local file="$1" name="$2"
+    local b="<!-- ${name}:begin -->" e="<!-- ${name}:end -->"
+    local blines elines bline eline
+
+    blines="$(sed -n "/$b/=" "$file" 2>/dev/null)"
+    elines="$(sed -n "/$e/=" "$file" 2>/dev/null)"
+
+    # 単語分割で件数と先頭要素を得る（空文字列なら $# = 0）
+    set -- $blines
+    [ "$#" -eq 1 ] || return 9
+    bline="$1"
+    set -- $elines
+    [ "$#" -eq 1 ] || return 9
+    eline="$1"
+
+    [ "$bline" -lt "$eline" ] || return 9
+
+    # 区間が空（begin の直後が end）なら何も出さずに正常終了する。
+    # ※ここを sed の範囲アドレスへ丸投げすると addr2 < addr1 で「addr1 の 1 行だけ」を出す挙動に
+    #   落ち、end sentinel 行そのものを本文として吐く（区間を空にする反 false-green 検証が偽 green
+    #   になる）。数値で先に弾く。
+    [ "$((bline + 1))" -le "$((eline - 1))" ] || return 0
+
+    sed -n "$((bline + 1)),$((eline - 1))p" "$file"
 }
 
-# --- role-context-spec.md の §2.3 サブセクションを抽出（### 2.3 〜 次の --- 直前） ---
+# --- role-context-spec.md の §2.3 サブセクションを抽出（### 2.3 〜 次の --- 直前・sed のみ） ---
+# 旧実装は awk（`inseg` フラグ）だったが、規約本文の carrier 経路から awk 依存を外すため sed 化した
+# （■6-1）。範囲アドレスで `### 2.3` 〜 直後の水平線までを取り、終端の `---` 行だけを落とす＝旧 awk と
+# 同一の出力（`### 2.3` 行を含み `---` 行を含まない）になる。
 _scribe_emit_consult_section() {
     local file="$1"
-    awk '
-        /^### 2\.3/ { inseg=1 }
-        inseg && /^---[[:space:]]*$/ { inseg=0 }
-        inseg { print }
-    ' "$file"
+    sed -n '/^### 2\.3/,/^---[[:space:]]*$/{ /^---[[:space:]]*$/d; p; }' "$file"
 }
 
 # --- .beads opt-in マーカー検出（cwd 直下 → git toplevel フォールバック・bd un-7hx） ---
@@ -234,7 +264,8 @@ _scribe_header() {
 # worker が黙って踏まないよう、SCRIBE_WORKER/SCRIBE_WORKTREE 不在を検査し loud warning を stdout
 # （＝context 注入）へ出す。carrier モデルの本文 SSOT は docs/protocol.md §2（本注入と spawn prompt の
 # 両 carrier がここを引く＝drift 停止）。※注入内容に protocol.md の top-level 見出し（`## N.`）文字列を
-# 混ぜない——worker 注入は §2-4 のみという既存不変条件（テスト pin）を壊さないため。
+# 混ぜない——worker 注入は boot core 区間だけという既存不変条件（`## 1.` / `## 5.` / `## 6.` の非注入を
+# 測るテスト pin）を壊さないため（sc-x93w 以降は「§2-4 のみ」ではなく「core 区間のみ」）。
 _scribe_worker_defense_warn() {
     local wt="${SCRIBE_WORKTREE:-}"
     if [ "${SCRIBE_WORKER:-}" != "1" ]; then
@@ -268,6 +299,11 @@ DEFWARN2
 # 本文は必ず変数へ全量受けてから 1 回で出す——`cat` の直流しや逐次 echo では (1) の「先頭 warn」が
 # 構造的に成立しない（本文を出し始めた後では前置できない）。degrade / opt-out 経路は body を作らず
 # その場で exit 0 する（無出力＝warn も出さない・■7）。
+#
+# ★(3) 自衛文枠は「これは要約である旨 + 自 role の規約 SSOT doc の**絶対 path**（実行時展開）+ Read 指示」
+#   を先頭 1,000 u16 以内に置く（■7(3) / acceptance(2)）。path は必ず $PROTOCOL_DOC / $SPEC_DOC から
+#   展開する——tracked file へホーム配下の絶対 path を literal で焼くと、ephemeral な worktree path が
+#   公開 repo に残るため（■13-3）。trigger 表は doc 側の core 冒頭が持つ（script は規約本文を持たない・■4-6）。
 body=""
 case "$role" in
     admin)
@@ -275,9 +311,14 @@ case "$role" in
             echo "[scribe/SessionStart] warning: protocol.md 不在($PROTOCOL_DOC)・admin 文脈注入を skip(degrade)" >&2
             exit 0
         fi
+        core="$(_scribe_emit_sentinel_section "$PROTOCOL_DOC" scribe-core-admin)" || {
+            echo "[scribe/SessionStart] warning: boot core 区間(scribe-core-admin)を $PROTOCOL_DOC から抽出できません(begin/end が各 1 個で begin が先、を満たさない)・admin 文脈注入を skip(degrade)" >&2
+            exit 0
+        }
         body="$(
         _scribe_header
-        echo "あなたは scribe admin(anchor)です。graph の所有者・gate funnel の実行者・唯一の bd dolt push 同期点です。以下のプロトコル全文が役割規約の SSOT です。"
+        echo "あなたは scribe admin(anchor)です。graph の所有者・gate funnel の実行者・唯一の bd dolt push 同期点です。"
+        echo "⚠️ **以下は規約の要約(boot core)であって全文ではありません**。規約 SSOT の全文 = \`$PROTOCOL_DOC\` ——判断が要約の外へ出たら、下の trigger 表で節を選んで**この絶対 path を Read** すること(全文注入は cap で truncate されるため注入しない)。"
         echo ""
         # ultracode 打鍵リマインダ(sc-icb・source 分岐=sc-o7fz/orch-cn7s): ultracode は CC 仕様上
         # session-only(settings/env/flag で永続化不可・公式 docs verified=sc-ex2 裁定)で hook からも
@@ -304,7 +345,7 @@ case "$role" in
                 echo ""
                 ;;
         esac
-        cat "$PROTOCOL_DOC"
+        printf '%s\n' "$core"
         )"
         ;;
     worker)
@@ -312,25 +353,26 @@ case "$role" in
             echo "[scribe/SessionStart] warning: protocol.md 不在($PROTOCOL_DOC)・worker 文脈注入を skip(degrade)" >&2
             exit 0
         fi
-        # 本文抽出は awk 単一依存(フォールバック非実装はスコープ判断)。awk 不在ホストでは
-        # 「header のみ・規約本文ゼロ」のサイレント部分注入を避け、明示 warning を出して degrade する。
-        if ! command -v awk >/dev/null 2>&1; then
-            echo "[scribe/SessionStart] warning: awk not found — worker 規約本文(protocol.md §2-4)を注入できません。SSOT: docs/protocol.md §2-4 を手動参照" >&2
+        core="$(_scribe_emit_sentinel_section "$PROTOCOL_DOC" scribe-core-worker)" || {
+            echo "[scribe/SessionStart] warning: boot core 区間(scribe-core-worker)を $PROTOCOL_DOC から抽出できません(begin/end が各 1 個で begin が先、を満たさない)・worker 文脈注入を skip(degrade)" >&2
             exit 0
-        fi
+        }
         body="$(
         _scribe_header
-        echo "あなたは scribe worker(worktree セッション)です。自 issue の write だけを行い graph は触りません(B/hybrid)。bd create / bd dep / bd dolt push は禁止、follow-up は notes で提案します。以下は protocol.md の worker 関連節(§2 prompt 規約 / §3 役割境界 / §4 close→gate→errata)です。"
+        echo "あなたは scribe worker(worktree セッション)です。自 issue の write だけを行い graph は触りません(B/hybrid)。bd create / bd dep / bd dolt push は禁止、follow-up は notes で提案します。"
+        echo "⚠️ **以下は規約の要約(boot core)であって全文ではありません**。規約 SSOT の全文 = \`$PROTOCOL_DOC\` ——要約の外の判断が要るときは、下の trigger 表で節を選んで**この絶対 path を Read** すること。operative な手順は spawn prompt が運ぶ。"
         echo ""
-        _scribe_emit_protocol_sections "$PROTOCOL_DOC" "2 3 4"
+        printf '%s\n' "$core"
         # 機械防御 carrier self-check（split-brain 検出・sc-99c）: scribe-spawn を経ない worker
         # （env signal 不在）には「機械防御が無効」の loud warning を注入する。SSOT=protocol.md §2。
         # ■7 (5): 本文の**後ろ**へ置く（本文は 1 byte も削らない。warning 本文自体も無改変で位置だけを
-        # 移す）。区切り改行を足さないのが load-bearing——§2-4 抽出は必ず空行で終わる（§5 見出し直前）ため
-        # 分離は既に取れており、余分に足すと注入量が 1 u16 増えて「本文不変（条件A−条件B=873 u16）」の
-        # 実測不変条件が崩れる。出力の有無は変数で判定する（空なら 1 行も出さない）。
+        # 移す）。**区切りの空行 1 行は warning を出すときだけ前置する**のが load-bearing——旧 §2-4 抽出は
+        # 節末の空行を本文の一部として持っていたが、sentinel 区間は `$( )` が末尾改行を落とすため区切りが
+        # 消える（core 末尾行に warning が直結し、実測不変条件「条件A−条件B=873 u16」も 872 へずれる）。
+        # 逆に無条件に足すと、warning を出さない spawn worker 側でも body 末尾が動きうるため条件付きにする
+        # （出力の有無は変数で判定＝空なら 1 行も出さない）。
         _defwarn="$(_scribe_worker_defense_warn)"
-        if [ -n "$_defwarn" ]; then printf '%s\n' "$_defwarn"; fi
+        if [ -n "$_defwarn" ]; then printf '\n%s\n' "$_defwarn"; fi
         )"
         ;;
     consult)
@@ -338,14 +380,10 @@ case "$role" in
             echo "[scribe/SessionStart] warning: role-context-spec.md 不在($SPEC_DOC)・consult 文脈注入を skip(degrade)" >&2
             exit 0
         fi
-        # 本文抽出は awk 単一依存。awk 不在ホストではサイレント部分注入を避け明示 warning で degrade。
-        if ! command -v awk >/dev/null 2>&1; then
-            echo "[scribe/SessionStart] warning: awk not found — consult 規約本文(role-context-spec.md §2.3)を注入できません。SSOT: docs/role-context-spec.md §2.3 を手動参照" >&2
-            exit 0
-        fi
         body="$(
         _scribe_header
         echo "あなたは scribe consult(設計議論・grill 専用の read-only セッション)です。オーケストレーション・gate 代行・実装はしません。write してよいのは記憶系(doobidoo / auto-memory)のみで、終了前のサマリ保存が義務です。以下が役割規約(role-context-spec.md §2.3)です。"
+        echo "⚠️ 以下は §2.3 の全文だが規約の全体ではない。規約 SSOT = \`$SPEC_DOC\` を Read（trigger: 役割境界→§2.3 / grill 手順→protocol.md §7 / 承認の 3 クラス→protocol.md §5.4）。"
         echo ""
         _scribe_emit_consult_section "$SPEC_DOC"
         )"
