@@ -226,33 +226,30 @@ orch 側 `orch-dispatch` 入口 gate が焼く acceptance snapshot と、その�
 3. **findings 直読（refuted も鵜呑みにしない）**: WF の返り値 findings を admin が直読検証する。WF 内の adversarial verify が `refuted` と判定した finding も鵜呑みにせず、admin が一次監査する（gate は薄い一次監査・WF 返り値の机上承認ではない）。スコープ外（他リポ・他 cell の領分）を求める finding は却下し、却下理由を記録する。
 4. **merge gate（3 クラス判定・merge 自体は非トリガー）**（orchestrator grill orch-8is・2026-06-26 ユーザー ratify → orch-vhiu 2026-07-25 で 3 クラスへ改訂）: **merge という行為そのものは人間確認の必須トリガーから外す**。ユーザーは自分でコードを読まないため「全 merge を最後に確認する」のは情報量ゼロで意味がなく、実質の安全弁は下記の **AI gate（findings 直読＝step3）と 3 クラスの機械判定**に置く。確認を取るのは **下記 canonical block の 3 クラスに該当する変更**と **snapshot-mismatch トリガ**（orch-tdj で scribe 側に追加した独立 fail-closed トリガ・orch ①-④ 番号を持たない）**だけ**で、それ以外は admin が確認なしで auto-merge する（step6）。**旧②③（規約ファイル / 全ホスト配布物）の human ratify は廃止**し、**同時にそれらの変更は AI 敵対 gate（step2 の cell-quality review + step3 の findings 直読）を必ず通す gate 必須化へ置き換える**（人間承認を外しても gate は外さない＝この 2 つは対で成立する）:
 
+   canonical block の一次 SSOT = scriptorium bd `orch-vhiu` notes（改訂は SSOT 側で行い、本節へは **verbatim 搬送のみ**。搬送版 = **v2**〔2026-07-26 の追加裁定 R-A / R-B 込み〕）。
+
    ```text
    【人間確認が要るのは「取り消せない」3 クラスのみ】
    (a) 消す — データ / repo / 履歴 / live 成果物の破壊（第一防衛線は機械 guard 層）
-   (b) 出す — public 化・外部公開・外部サービスへの送信（scriptorium 核② private 保証はこの型）
-   (c) 使う — 大きな金銭コスト（承認でなく予算上限で制御）
+   (b) 出す — public 化・外部公開・外部サービスへの送信（scriptorium 核② private 保証はこの型）。判定単位は repo でなく「情報」＝public 面の情報集合を増やすかで判定する。private 配備層から public engine への同期のような境界事案は機械 2 条件〔① 配備層 file を touch しない ② private 実名 DATA literal が 0 hit〕が両方 green なら非該当（AI 判断で merge）・どちらかが赤 or 機械照合できないなら (b) として人間確認へ倒す fail-safe。「既に public な repo だから非該当」という repo 単位の断定は禁止（public repo の中に private 由来の同期先が在りうる＝実例 scribe 内 scriptorium-engine）。〔裁定 R-A・2026-07-26〕
+   (c) 使う — 追加課金が発生する操作（従量課金 API 呼出 / 有料サービスの新規契約 / クラウド資源の課金発生）。定額プラン内は対象外＝token 消費それ自体は非該当（Workflow を何 M token 回しても (c) に当たらない）。旧文言「大きな金銭コスト（承認でなく予算上限で制御）」は観測できず死文化するため廃止した。〔裁定 R-B・2026-07-26〕
 
-   それ以外（規約ファイル・全ホスト配布物・事前合意逸脱を含む）は
-   AI 敵対 gate 通過をもって AI 判断で merge する。
+   それ以外（規約ファイル・全ホスト配布物・事前合意逸脱を含む）は AI 敵対 gate 通過をもって AI 判断で merge する。
 
    【聞かないこと】順序・選択肢の是認だけを求める問いは出さない（AI が推奨を出し、決めて進む）。
-   【上げること】複数の妥当な設計が併存し、選択が人間の目的・価値観に依存するとき
-   ＝承認要求ではなく grill 提案として上げる。事実で決まるなら止めない。
+   【上げること】複数の妥当な設計が併存し、選択が人間の目的・価値観に依存するとき＝承認要求ではなく grill 提案として上げる。事実で決まるなら止めない。
 
    【本裁定で緩めないもの（fence）】
-   AI 敵対 gate / write-isolation（foreign 台帳 write 禁止）/ 完了 truth=bd（終端宣言）/
-   破壊操作の機械 guard / 核② private 保証（orch-ufz・orch-xkec boundary）/
-   gate 分離（worker は自己 merge しない・gate-pending funnel）/
-   承認要求の可視性様式（🔴 バナー・AskUserQuestion 最優先・安売り禁止）
+   AI 敵対 gate / write-isolation（foreign 台帳 write 禁止）/ 完了 truth=bd（終端宣言）/ 破壊操作の機械 guard / 核② private 保証（orch-ufz・orch-xkec boundary）/ gate 分離（worker は自己 merge しない・gate-pending funnel）/ 承認要求の可視性様式（🔴 バナー・AskUserQuestion 最優先・安売り禁止）
    ※様式は存続。変わるのは発火条件（④ 該当 → 3 クラス該当）だけ。
 
    【必ず添える 3 つの誤読防止句】
-   1. 人間承認を外しても **gate は外さない**（gate が実効安全弁になったので強化側）。
+   1. 人間承認を外しても gate は外さない（gate が実効安全弁になったので強化側）。
    2. 「worker が自己 merge してよい」ではない（gate 分離＝独立レビューは不変）。
-   3. front-load / バナーは **廃止でなく scope 縮小**（user 裁定 2026-07-17 の可視性要件を壊さない）。
+   3. front-load / バナーは廃止でなく scope 縮小（user 裁定 2026-07-17 の可視性要件を壊さない）。
    ```
 
-   - **埋込注記（block の外・block 内文言は 1 byte も変えない）**: 上記は user 裁定（2026-07-25・一次 SSOT = scriptorium orch-vhiu）の文面の **verbatim** 複製で、各層で言い換えない。本リポは既に public な GitHub repo であり、**public な doc への追記は 3 クラスの「出す」（＝新規の公開面拡大: private→public 化・新規 repo 公開・未公開データの外部送信）に該当しない**（該当させると public repo の全 doc 編集が人間確認化し本裁定の目的を自壊させる・admin 判定 2026-07-26）。**ただし当該追記が未公開データ〔user 発言の生引用・private / foreign 台帳の内容・ホスト名 / メール / 資格情報・未公開の内部情報〕を新たに公開面へ載せる場合は「出す」に該当し人間確認を取る**——非該当なのは「**既に public な doc を編集する行為そのもの**」であって、**載せる内容の公開性ではない**（前段の定義自身が「未公開データの外部送信」を「出す」に含む以上、内容ベースの本例外を欠くと同一文が許可と禁止を同時に含み permissive 側へ倒れる＝クラス (b) の fail-open。本例外の一次出典は admin 判定 2026-07-26 で、**根拠の詳細は当該 cell の bd notes に留め、公開 doc へ露出の手口・経路を敷衍しない**）。
+   - **埋込注記（block の外・block 内文言は 1 byte も変えない）**: 上記は user 裁定（一次 SSOT = scriptorium `orch-vhiu` notes・2026-07-25 裁定 + 2026-07-26 の追加裁定 R-A / R-B）の文面の **verbatim** 複製で、各層で言い換えない。クラス (b) の適用は block 本文どおり **判定単位は repo でなく情報**（public 面の情報集合を増やすかで判定する）であり、「public な repo だから」を理由に非該当と決める **repo 単位の断定は禁止**（public repo の中に private 由来の同期先が在りうる）。本リポの doc 編集のような境界事案は **機械 2 条件**〔**① 配備層 file を touch しない**（`scriptorium-engine/` 配下）/ **② private 実名 DATA literal が 0 hit**（user 発言の生引用・private / foreign 台帳の内容・ホスト名 / メール / 資格情報・未公開の内部情報）〕で判定し、**両方 green なら非該当**（AI 判断で merge）・**どちらかが赤 or 機械照合できないなら (b) として人間確認へ倒す**（fail-safe）。すなわち②が赤のとき——**未公開データや foreign 台帳の内容を新たに公開面へ載せる場合は「出す」に該当し人間確認を取る**（旧 carve-back はこの②へ吸収した。機械照合できる 2 条件へ落としたのが R-A の要点で、行為ベースの一括免除〔「public doc の編集そのものは非該当」〕には戻さない＝クラス (b) の fail-open を再び開くため。**根拠の詳細は当該 cell の bd notes に留め、公開 doc へ露出の手口・経路を敷衍しない**）。
    - **本 §5.4 が merge-gate 分類の規約正本（canonical SSOT）**（`orch-an2` で本節へ改訂・`orch-d6b` G6 で byte 整合・`orch-vhiu` 2026-07-25 で 3 クラスへ改訂）: orchestrator 面の top-spec §1.1 と orchestrator `CLAUDE.md` は本節を指す（top-spec 末尾「規約正本は scribe `protocol.md` §5.4」）。両所の番号（①-④）と本節の**移行表**（履歴として残すが、**判定に使うのは 3 クラスのみ**）— orchestrator **①（事前合意からの逸脱）→ 廃止**（人間確認トリガーから外れ、AI 敵対 gate の強化側と【上げること】の grill 提案へ移行）/ **②（規約ファイル）→ 廃止**（gate 必須化と対で置換）/ **③（全ホスト配布物）→ 廃止**（同上）/ **④（新規 outward）→ 3 クラスの「出す」へ移行**（存続）。**①-④ を defer 参照する foreign 側の doc・機械 gate すべて**（top-spec §1.1 / orchestrator `CLAUDE.md` / orch-dispatch 入口 gate ほか ①-④ を参照する箇所）は本改訂への追随が要る（foreign doc / foreign 台帳への write は本 leg の scope 外＝orchestrator 側 leg 所管。scribe 側は本行の宣言に留める）。
    - **3 クラス該当（消す / 出す / 使う）= ユーザー確認**: diff・操作が canonical block の 3 クラスに該当したら、**AI の主観的判断に関係なく必ずユーザー確認を取る**（グレーでも止める＝fail-closed）。第一防衛線は**機械 guard 層**（破壊操作の guard・step7 cleanup の確認プロンプトと force 系不使用）で、本 gate はその上の判断層。
    - **3 クラス非該当 = AI 敵対 gate 通過をもって AI 判断で merge（旧②③廃止と対の gate 必須化）**: 規約ファイル（`CLAUDE.md` / 本書 / `docs/role-context-spec.md` / `.beads/PRIME.md` 等）・全ホスト配布物（`hooks/` / グローバル設定〔`~/.claude/` 配下〕/ plugin 出荷物〔`scripts/`・`workflows/`・`skills/`〕）・事前合意からの逸脱を含め、**人間 ratify は求めない**。その代わりに **AI 敵対 gate（step2 の cell-quality review + step3 の findings 直読）を必ず通す**——**人間承認を外しても gate は外さない**（gate が実効安全弁になったので強化側）。gate が逸脱・欠陥を検出したら merge せず errata（§4）で潰す。**「worker が自己 merge してよい」ではない**（gate 分離＝独立レビューは不変・§4 / gate-pending funnel）。
