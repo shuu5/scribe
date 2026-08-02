@@ -45,7 +45,11 @@ case "\${1:-}" in
         cat "${TMUX_LOG}.winname" 2>/dev/null || echo "fallback"
         ;;
     display-message)
-        echo "main"
+        # sc-9nc7: -t <pane> 指定時のみ pane_id を第 1 フィールドへエコーする（実 tmux の
+        # '#{pane_id} #{session_name}' format 再現）。-t 無しの bare 解決は実装が廃したので何も返さない。
+        _tgt=""; _prev=""
+        for _a in "\$@"; do [[ "\$_prev" == "-t" ]] && _tgt="\$_a"; _prev="\$_a"; done
+        [[ -n "\$_tgt" ]] && echo "\${PANE_ECHO_STUB-\$_tgt} \${CURRENT_SESSION_STUB:-main}"
         ;;
 esac
 exit 0
@@ -58,6 +62,11 @@ TMUX_STUB
 if [[ "\$*" == *"cld-spawn-XXXXXX.sh"* ]]; then
     touch "${LAUNCHER_PATH}"
     echo "${LAUNCHER_PATH}"
+elif [[ "\$*" == *"cld-spawn-prompt-XXXXXX.txt"* ]]; then
+    # sc-9nc7: worker cell の sandbox では /tmp が read-only で、deliver_prompt の /tmp 絶対
+    # テンプレが mktemp 失敗 → PROMPT 未着（構造的 RED）になる。書き先だけ SANDBOX へ移す
+    # （挙動は同一・/tmp 書込可能な host でも同じ経路を通る）。
+    /usr/bin/mktemp "${SANDBOX}/cld-spawn-prompt-XXXXXX.txt"
 else
     /usr/bin/mktemp "\$@"
 fi
@@ -106,6 +115,9 @@ INJECT_STUB
     export HOME="$SANDBOX/home"
     mkdir -p "$HOME/.local/state/claude-session"
     export TMUX="fake-tmux-socket,12345,0"
+    # sc-9nc7: 実 pane の中で走っている現実を再現する（cld-spawn は session 解決を pane_id の
+    # エコー一致でのみ行う）。tmux stub の display-message 分岐がこの値をエコーバックする。
+    export TMUX_PANE="%42"
     export PATH="$FAKE_BIN:$PATH"
 }
 

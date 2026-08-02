@@ -181,9 +181,56 @@ scribe_write_exclude() {
 #     CC のリスト churn に脆いため B 案（scribe-add）へ切替えた（sc-yqa grill）。本関数は settings.local.json のみ扱う。
 scribe_sandbox_write_exclude() { scribe_write_exclude "${1:?worktree required}" '**/.claude/settings.local.json'; }
 
-# scribe_window_id <window-name> → tmux window 名から window_id(@N) を解決（無ければ空。dotted bd id の
+# scribe_current_session → 自 pane が属する tmux session 名を **積極証拠**で解決（stdout・不能なら空 + 非 0）。
+#   bare な display-message（-t 無しで session 名だけを取る形）は使わない: client 指定が無いと tmux は直近
+#   activity のある session を選び、**rc=0 のまま現在窓と無関係な session を返す**（実測 4 回で毎回別 session）。
+#   代わりに TMUX_PANE を -t に与え、返った第 1 フィールド（pane_id）が $TMUX_PANE とエコー一致したときだけ
+#   第 2 フィールド（session_name）を採る。rc / 出力の非空では判定できない（不在 pane への display-message は
+#   rc=0 + 空、複数フィールド format なら rc=0 + 区切りのみを返す・実測）。
+#   残余ハザード: エコー一致が保証するのは「その pane が実在する」ことだけで「自プロセスの pane である」ことでは
+#   ない（stale だが生存中の pane を指す型は残る＝pane id 再利用が起きない同一 server 内では server 世代交代を
+#   跨いだ時にのみ成立）。cc-session/scripts/cld-spawn の _resolve_current_session と同判定（配布物が別ゆえ同型実装）。
+scribe_current_session() {
+  local _out _pid _sess
+  [[ -n "${TMUX_PANE:-}" ]] || return 1
+  _out="$("${SCRIBE_TMUX:-tmux}" display-message -p -t "$TMUX_PANE" '#{pane_id} #{session_name}' 2>/dev/null)" || return 1
+  _pid="${_out%% *}"; _sess="${_out#* }"
+  [[ "$_pid" == "${TMUX_PANE}" ]] || return 1
+  [[ -n "$_sess" && "$_sess" != "$_pid" ]] || return 1
+  printf '%s' "$_sess"
+}
+
+# scribe_window_id <window-name> [session] → tmux window 名から window_id(@N) を解決（無ければ空。dotted bd id の
 # `-t` 区切り衝突を避けるため以後の tmux -t は @N で行う・protocol.md §1。sc-e1w で spawn/cleanup から集約）。
-scribe_window_id() { tmux list-windows -F '#{window_id} #{window_name}' 2>/dev/null | awk -v n="$1" '$2==n{print $1; exit}' || true; }
+#   【session-scope 限定（sc-9nc7）】探索は **単一 session の中**に閉じる（`list-windows -t "=<session>"` ＝
+#   '=' 前置の exact match）。旧実装は `list-windows`（-t 無し）で、tmux は「現在 session」を暗黙 target に
+#   するが、その「現在」は client 依存＝bare display-message と同じ非決定を持ち込む。かといって -a（全 session
+#   横断）へ広げるのは**拡大**であり誤りの向きが悪い: 呼び手は scribe-spawn.sh の `send-keys -t "$WID" Enter` と
+#   scribe-cleanup.sh の `kill-window -t "$WID"` で、-a は「他 session の同名 wt- 窓へ Enter を撃つ / 他 session の
+#   窓を kill する」新規の誤配経路を作る。よって session を積極証拠で確定できないときは **空を返す**
+#   （-a による横断解決へ fallback しない）。空 WID は呼び手側で loud skip / checklist 降格になる＝fail-safe。
+#   同一 session 内で同名 window が複数一致した場合も silent 先頭採用はせず stderr 1 行 + 空を返す。
+scribe_window_id() {
+  local _name="${1:-}" _sess="${2:-}" _line _ids=()
+  [[ -n "$_name" ]] || return 0
+  [[ -n "$_sess" ]] || _sess="$(scribe_current_session)" || _sess=""
+  [[ -n "$_sess" ]] || return 0
+  # 空行を弾く条件は if 形にする（`[[ … ]] && …` を loop body の最終文にすると、条件偽で body が
+  # 非 0 を返し、呼び出し元が set -e のとき errexit を踏む）。
+  while IFS= read -r _line; do
+    if [[ -n "$_line" ]]; then _ids+=("$_line"); fi
+  done < <("${SCRIBE_TMUX:-tmux}" list-windows -t "=$_sess" -F '#{window_id} #{window_name}' 2>/dev/null \
+             | awk -v n="$_name" '$2==n{print $1}')
+  if (( ${#_ids[@]} == 0 )); then
+    return 0
+  fi
+  if (( ${#_ids[@]} > 1 )); then
+    printf 'scribe: warn: window 名 %s が session %s 内で %d 件一致しました（誤配防止のため window_id を解決しません）\n' \
+      "$_name" "$_sess" "${#_ids[@]}" >&2
+    return 0
+  fi
+  printf '%s' "${_ids[0]}"
+}
 
 # scribe_branch_name <id> [hhmmss] → spawn/<id>-HHMMSS（protocol.md §1）。
 #   並列 spawn 衝突回避の -HHMMSS サフィックスは規約として維持する。
