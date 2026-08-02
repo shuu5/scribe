@@ -47,6 +47,32 @@ fi
 PROTOCOL_DOC="$PLUGIN_ROOT/docs/protocol.md"
 SPEC_DOC="$PLUGIN_ROOT/docs/role-context-spec.md"
 
+# --- emit-budget 共有 lib（measure-then-emit の単一入口・sc-mzhi / orch-db47 leg(4) ■11）---
+# 本 script の stdout は SessionStart で context へ注入される＝予算（既定 warn 8,000 u16）を持つ。
+# lib が本文を u16 で実測し、超過時のみ警告を **stdout 先頭** へ前置する（truncate はしない）。
+# fail-open: lib 不在・壊れでも本文注入を止めない——source 失敗時は「本文をそのまま出すだけ」の
+# no-op fallback を同じ API 形で定義し、以降の呼び出し側を分岐させない。
+# ★fallback の発火条件は「source の rc」ではなく **API の存在**（sc-mzhi self-review major）:
+#   構文的には valid だが scribe_emit_with_budget を含まない lib（部分書込・rsync/cp 中断・plugin 版
+#   ズレ・将来の関数リネーム）を掴むと `.` は rc=0 を返し、fallback が定義されないまま呼出が
+#   `command not found`（stderr のみ）となり、stdout 0 byte / exit 0 の **silent total loss** になる。
+#   `command -v` は shell 関数も解決する（verified）ので、これで唯一の単一障害点を塞ぐ。
+# shellcheck source=lib/emit_budget.sh
+if ! . "$_SCRIPT_DIR/lib/emit_budget.sh" 2>/dev/null \
+   || ! command -v scribe_emit_with_budget >/dev/null 2>&1; then
+    scribe_emit_with_budget() { [ -n "${1:-}" ] || return 0; printf '%s\n' "$1"; return 0; }
+fi
+# 計測 bound は **lib 既定（1s）のまま上書きしない**（wire 予算は hooks/hooks.json で 10,000ms）。
+# 事実: 本 hook は emit の前に **timeout で包まれていない待ちを 2 つ**持つ——
+#   (1) `_scribe_has_beads` の `git rev-parse --show-toplevel`（cwd 直下に .beads が無い経路＝repo の
+#       サブディレクトリから起動したセッションでは必ず発火する）
+#   (2) `_scribe_is_consult_window` の `tmux display-message`
+# どちらも所要時間の上限を持たないため、「計測 bound + 既知 bound の和 < wire 予算」という形の算術は
+# そもそも立たない。よって計測側は最小へ倒す（lib 既定 1s）。実 admin body の u16 計測は実測 0.017s
+# ゆえ bound を伸ばして買えるものは無く、伸ばした分だけ上記 (1)(2) が遅い環境で wire kill の窓が開く
+# （kill されると stdout は 1 byte も出ず、wire の `|| true` ゆえ silent に規約注入が全損する）。
+# lib が置いた非対称性の原則どおり: 計測を諦めて失うのは warn だけで、本文は fail-open で必ず出る。
+
 # --- stdin の hook JSON から cwd / source を抽出（jq → sed フォールバック）。tty なら読まない(block 回避) ---
 # 全 hook の stdin JSON 共通フィールドに cwd が含まれ（session_id/transcript_path/cwd/...）、
 # SessionStart は加えて source（startup|resume|clear|compact）を持つ（公式 hooks 仕様）。
@@ -231,12 +257,25 @@ DEFWARN2
     fi
 }
 
+# === 注入本文の組み立て（measure-then-emit・■7 の 5 段順序）===
+# stdout の順序を次に固定する:
+#   (1) emit-budget warn（u16 が warn 閾値を超えたときだけ・lib が前置する）
+#   (2) role header 1 行
+#   (3) 自衛文枠 = role 別 intro（+ admin のみ ultracode リマインダ）
+#   (4) core 本体（doc からの供給）
+#   (5) 機械防御 split-brain warning（sc-99c）は **本文の後ろ**（本文は 1 byte も削らない。loud 性は
+#       「出ること」で担保され、先頭の希少枠を占有する必要はない）
+# 本文は必ず変数へ全量受けてから 1 回で出す——`cat` の直流しや逐次 echo では (1) の「先頭 warn」が
+# 構造的に成立しない（本文を出し始めた後では前置できない）。degrade / opt-out 経路は body を作らず
+# その場で exit 0 する（無出力＝warn も出さない・■7）。
+body=""
 case "$role" in
     admin)
         if [ ! -r "$PROTOCOL_DOC" ]; then
             echo "[scribe/SessionStart] warning: protocol.md 不在($PROTOCOL_DOC)・admin 文脈注入を skip(degrade)" >&2
             exit 0
         fi
+        body="$(
         _scribe_header
         echo "あなたは scribe admin(anchor)です。graph の所有者・gate funnel の実行者・唯一の bd dolt push 同期点です。以下のプロトコル全文が役割規約の SSOT です。"
         echo ""
@@ -266,6 +305,7 @@ case "$role" in
                 ;;
         esac
         cat "$PROTOCOL_DOC"
+        )"
         ;;
     worker)
         if [ ! -r "$PROTOCOL_DOC" ]; then
@@ -278,13 +318,20 @@ case "$role" in
             echo "[scribe/SessionStart] warning: awk not found — worker 規約本文(protocol.md §2-4)を注入できません。SSOT: docs/protocol.md §2-4 を手動参照" >&2
             exit 0
         fi
+        body="$(
         _scribe_header
         echo "あなたは scribe worker(worktree セッション)です。自 issue の write だけを行い graph は触りません(B/hybrid)。bd create / bd dep / bd dolt push は禁止、follow-up は notes で提案します。以下は protocol.md の worker 関連節(§2 prompt 規約 / §3 役割境界 / §4 close→gate→errata)です。"
         echo ""
+        _scribe_emit_protocol_sections "$PROTOCOL_DOC" "2 3 4"
         # 機械防御 carrier self-check（split-brain 検出・sc-99c）: scribe-spawn を経ない worker
         # （env signal 不在）には「機械防御が無効」の loud warning を注入する。SSOT=protocol.md §2。
-        _scribe_worker_defense_warn
-        _scribe_emit_protocol_sections "$PROTOCOL_DOC" "2 3 4"
+        # ■7 (5): 本文の**後ろ**へ置く（本文は 1 byte も削らない。warning 本文自体も無改変で位置だけを
+        # 移す）。区切り改行を足さないのが load-bearing——§2-4 抽出は必ず空行で終わる（§5 見出し直前）ため
+        # 分離は既に取れており、余分に足すと注入量が 1 u16 増えて「本文不変（条件A−条件B=873 u16）」の
+        # 実測不変条件が崩れる。出力の有無は変数で判定する（空なら 1 行も出さない）。
+        _defwarn="$(_scribe_worker_defense_warn)"
+        if [ -n "$_defwarn" ]; then printf '%s\n' "$_defwarn"; fi
+        )"
         ;;
     consult)
         if [ ! -r "$SPEC_DOC" ]; then
@@ -296,10 +343,12 @@ case "$role" in
             echo "[scribe/SessionStart] warning: awk not found — consult 規約本文(role-context-spec.md §2.3)を注入できません。SSOT: docs/role-context-spec.md §2.3 を手動参照" >&2
             exit 0
         fi
+        body="$(
         _scribe_header
         echo "あなたは scribe consult(設計議論・grill 専用の read-only セッション)です。オーケストレーション・gate 代行・実装はしません。write してよいのは記憶系(doobidoo / auto-memory)のみで、終了前のサマリ保存が義務です。以下が役割規約(role-context-spec.md §2.3)です。"
         echo ""
         _scribe_emit_consult_section "$SPEC_DOC"
+        )"
         ;;
     *)
         # 到達不能（role は必ず上で確定する）。万一の保険として degrade。
@@ -307,5 +356,9 @@ case "$role" in
         exit 0
         ;;
 esac
+
+# === emit（measure-then-emit の単一出口）===
+# body が空（本文抽出が空を返した等）なら無出力＝warn も出さない（■7・既存の「出力ゼロ」assert 群を守る）。
+scribe_emit_with_budget "$body" "SessionStart role=$role"
 
 exit 0

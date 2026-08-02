@@ -48,6 +48,29 @@ _MBX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 # shellcheck source=lib/mailbox-common.sh
 . "$_MBX_DIR/lib/mailbox-common.sh" 2>/dev/null || exit 0
 
+# --- emit-budget 共有 lib（measure-then-emit の単一入口・sc-mzhi / orch-db47 leg(4) ■11-1）---
+# 本 hook の stdout は毎 turn の context へ注入される＝予算を共有する。lib 不在でも surface を止めない
+# （fail-open）ため、source 失敗時は「本文をそのまま出すだけ」の no-op fallback を定義する。
+# UserPromptSubmit の非 0 は user prompt 自体を block するため、ここも決して die しない。
+# ★fallback の発火条件は「source の rc」ではなく **API の存在**（sc-mzhi self-review major）:
+#   API を欠いた valid な lib（部分書込・版ズレ等）では `.` が rc=0 を返し fallback が定義されず、
+#   呼出が `command not found`（stderr のみ）となって stdout 0 byte / exit 0 の silent total loss
+#   になる。`command -v` は shell 関数も解決する（verified）。
+# shellcheck source=lib/emit_budget.sh
+if ! . "$_MBX_DIR/lib/emit_budget.sh" 2>/dev/null \
+   || ! command -v scribe_emit_with_budget >/dev/null 2>&1; then
+    scribe_emit_with_budget() { [ -n "${1:-}" ] || return 0; printf '%s\n' "$1"; return 0; }
+fi
+# 計測 bound の合成（wire 予算 10,000ms・sc-mzhi self-review 2 巡目 major）: 本 hook は emit の **前** に
+# mbx_direct_read の 5s bound を払う（毎 prompt 経路ゆえ短め）。和が wire を超えると hook が kill され
+# 新着中継が丸ごと消える。算術: 5s + 1s = 6s < 10s。lib 既定（1s）を明示 pin する。
+# ★第 3 項（既知限界・本 leg の allowlist 外）: 上の算術は jq が在る前提でしか閉じない。`mbx_emit` は
+#   jq → python3 の順で整形するため、**jq 不在ホストでは lib/mailbox-common.sh 側の python3 fallback**
+#   （timeout で包まれていない＝unbounded）に先に当たり、その所要時間は上の和に入らない。この
+#   fallback の bound 化は lib/mailbox-common.sh の変更を要し本 leg の変更可 file 外ゆえ、ここでは
+#   限界として明記するに留める。
+SCRIBE_EMIT_BUDGET_MEASURE_TIMEOUT_SEC="${SCRIBE_EMIT_BUDGET_MEASURE_TIMEOUT_SEC:-1}"
+
 # ============================ main ============================
 
 mbx_read_stdin
@@ -97,6 +120,11 @@ lines="$(printf '%s' "$raw" | mbx_emit)" || exit 0
 new="$(printf '%s\n' "$lines" | mbx_filter_unseen "${prefix}.seen")" || exit 0
 [ -n "$new" ] || exit 0
 
+# --- emit（measure-then-emit の単一出口・sc-mzhi ■7/■11-3）---
+# 新着本文を変数へ全量受けてから 1 回で出す（逐次 echo では warn を先頭へ前置できない）。
+# ここへ来るのは「新着が在る」経路だけ＝TTL 内 / role 不一致 / 新着ゼロ / degrade は上で exit 0 済み
+# （無出力＝warn も出さない・■7）。
+_emit_body="$(
 echo "=== [scribe/UserPromptSubmit] 📬 下り mailbox 新着（scriptorium → ${self_db}・direct read / hydrate せず） ==="
 echo ""
 echo "\`${label}\` の open bead のうち、**本セッションで未報告のもの**です（既報は再通知しません・中間配送点 sc-b6w）。"
@@ -104,5 +132,7 @@ echo ""
 echo "$new"
 echo ""
 echo "（詳細は \`bd -C \"${ORCH_ANCHOR}\" show <id> --readonly\`。**park-by-default**＝即実行せず自台帳 bead へ外部化し、現 atomic step 完了後に triage してください＝protocol §8 受信優先順位。hydrate 禁止＝\`bd repo sync\`/\`repo add\` を呼ばないこと・orch-ufz。）"
+)"
+scribe_emit_with_budget "$_emit_body" "UserPromptSubmit mailbox"
 
 exit 0
