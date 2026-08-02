@@ -59,6 +59,31 @@ _MBX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 # shellcheck source=lib/mailbox-common.sh
 . "$_MBX_DIR/lib/mailbox-common.sh" 2>/dev/null || exit 0
 
+# --- emit-budget 共有 lib（measure-then-emit の単一入口・sc-mzhi / orch-db47 leg(4) ■11-1）---
+# 本 hook の stdout も SessionStart で context へ注入される＝予算を共有する。lib 不在でも surface を
+# 止めない（fail-open）ため、source 失敗時は「本文をそのまま出すだけ」の no-op fallback を定義する。
+# ★fallback の発火条件は「source の rc」ではなく **API の存在**（sc-mzhi self-review major）:
+#   API を欠いた valid な lib（部分書込・版ズレ等）では `.` が rc=0 を返し fallback が定義されず、
+#   stdout 0 byte / exit 0 の silent total loss になる。本 hook は emit の **前に** dedupe seed
+#   （mbx_seed_seen）を焼き終えているため、無出力終了は「seen 済みだが一度も surface されない」
+#   配送保証の恒久破壊になる（UserPromptSubmit 中継も unseen フィルタで抑止される）。
+# shellcheck source=lib/emit_budget.sh
+if ! . "$_MBX_DIR/lib/emit_budget.sh" 2>/dev/null \
+   || ! command -v scribe_emit_with_budget >/dev/null 2>&1; then
+    scribe_emit_with_budget() { [ -n "${1:-}" ] || return 0; printf '%s\n' "$1"; return 0; }
+fi
+# 計測 bound の合成（wire 予算 10,000ms・sc-mzhi self-review 2 巡目 major）: 本 hook は emit の **前** に
+# mbx_direct_read の 8s bound を払う（下記 `mbx_direct_read "$ORCH_ANCHOR" "$label" 8`）。和が wire を
+# 超えると hook が kill され stdout 0 byte——しかも dedupe seed は emit の **前** に焼き終えているため
+# 「seen 済みなのに一度も surface されない」配送保証の恒久破壊になる（実測: 8s bd + 無応答 python3 で
+# 10.06s＝wire 超過）。算術: 8s + 1s = 9s < 10s。lib 既定（1s）を明示 pin して将来の既定 bump から守る。
+# ★第 3 項（既知限界・本 leg の allowlist 外）: 上の算術は jq が在る前提でしか閉じない。`mbx_emit` は
+#   jq → python3 の順で整形するため、**jq 不在ホストでは lib/mailbox-common.sh 側の python3 fallback**
+#   （timeout で包まれていない＝unbounded）に先に当たり、その所要時間は上の和に入らない。実測でも
+#   jq 不在 + 遅い python3 + 遅い bd の組合せで wire 超過に達する。この fallback の bound 化は
+#   lib/mailbox-common.sh の変更を要し本 leg の変更可 file 外ゆえ、ここでは限界として明記するに留める。
+SCRIBE_EMIT_BUDGET_MEASURE_TIMEOUT_SEC="${SCRIBE_EMIT_BUDGET_MEASURE_TIMEOUT_SEC:-1}"
+
 # ============================ main ============================
 
 # self-scope: SCRIBE_ROLE=none（既知 opt-out）は無出力 exit 0（role-inject と同型）
@@ -108,6 +133,10 @@ body="$(printf '%s' "$raw" | mbx_emit)" || exit 0
 # dedupe seed（surface した id を既報として記録＝中間配送点が再通知しない・best-effort）
 [ -n "$prefix" ] && printf '%s\n' "$body" | mbx_ids_from_lines | mbx_seed_seen "${prefix}.seen"
 
+# --- emit（measure-then-emit の単一出口・sc-mzhi ■7/■11-3）---
+# surface 本文を変数へ全量受けてから 1 回で出す（逐次 echo では warn を先頭へ前置できない）。
+# ここへ来るのは「surface すべき本文が在る」経路だけ＝degrade / 新着ゼロは上で exit 0 済み（無出力＝warn も無し）。
+_emit_body="$(
 echo "=== [scribe/SessionStart] 📬 下り mailbox（scriptorium → ${self_db}・direct read / hydrate せず） ==="
 echo ""
 echo "scriptorium orchestrator が \`${label}\` で宛先付けした open な coord/knowledge bead です（pull 型・top-spec §5.3）。"
@@ -116,5 +145,7 @@ echo ""
 echo "$body"
 echo ""
 echo "（詳細は \`bd -C \"${ORCH_ANCHOR}\" show <id> --readonly\` で読めます。orch 台帳は恒久 private ゆえ \`bd repo sync\`/\`repo add\` で hydrate しないこと＝git 経由の漏洩防止・orch-ufz。）"
+)"
+scribe_emit_with_budget "$_emit_body" "SessionStart mailbox"
 
 exit 0
