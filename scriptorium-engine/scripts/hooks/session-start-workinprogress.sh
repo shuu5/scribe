@@ -223,21 +223,24 @@ _wip_plan_n() {  # $1=block の u16 $2=block の行数 → N を stdout
 }
 
 # 1 block の trim。優先行は素通し、非優先行は先頭 N 行だけ残し、省略が出たら末尾に隣接して省略行を 1 行足す。
+# ★行の蓄積は文字列 += でなく配列へ push する（`_out="$_out$_line"` は 1 行ごとに全文をコピーし直すため
+#   優先行が多い block で O(n^2) になる。実測: 全行が優先クラスの 6,006 行入力で hook 全体 13.5s → 配列化で
+#   大幅短縮。SessionStart hook は session 起動を直列に待たせるので superlinear を残さない）。
 _wip_trim_block() {  # $1=body $2=N $3=全件 pointer → trim 済み body を stdout
-    local _body="$1" _n="$2" _ptr="$3" _line _out="" _kept=0 _omit=0
+    local _body="$1" _n="$2" _ptr="$3" _line _kept=0 _omit=0
+    local -a _acc=()
     while IFS= read -r _line; do
         if _wip_is_priority "$_line"; then
-            _out="$_out$_line"$'\n'
+            _acc+=("$_line")
         elif [ "$_kept" -lt "$_n" ]; then
-            _out="$_out$_line"$'\n'; _kept=$((_kept + 1))
+            _acc+=("$_line"); _kept=$((_kept + 1))
         else
             _omit=$((_omit + 1))
         fi
     done <<<"$_body"
-    if [ "$_omit" -gt 0 ]; then
-        _out="$_out$(printf '  … 残り %d 行を省略・全件: %s' "$_omit" "$_ptr")"$'\n'
-    fi
-    printf '%s' "$_out"
+    [ "$_omit" -gt 0 ] && _acc+=("$(printf '  … 残り %d 行を省略・全件: %s' "$_omit" "$_ptr")")
+    [ "${#_acc[@]}" -gt 0 ] && printf '%s\n' "${_acc[@]}"
+    return 0
 }
 
 # 1 block を実行 → 全量変数受け → trim → _WIP_BODY へ append（予算の残りと残 block 数を更新）。
@@ -368,6 +371,7 @@ _wip_hc_build() {  # $1=avail $2=行数 $3=節数
     # 「省略件数 == 実省略行数」の機械照合が壊れる＝review major-1/3）。所有者を持たない drop がある節にだけ
     # 新規 1 行を節末尾へ挿入する（既存省略行と併存してよい＝件数が互いに素なので総和は実省略行数と一致する）。
     _ptr="bash $_WIP_SELF --full"
+    local -a _acc=()   # 文字列 += は O(n^2)（1 行ごとに全文コピー）ゆえ配列 push で組む
     for (( _i = 0; _i < _n; _i++ )); do
         _sec=${_WIP_SEC[_i]}
         if [ "${_WIP_PROT[_i]}" -eq 1 ] || [ "${_keep[_i]}" -eq 1 ]; then
@@ -378,14 +382,16 @@ _wip_hc_build() {  # $1=avail $2=行数 $3=節数
                 case "$_num" in ''|*[!0-9]*) _num=0 ;; esac
                 _line="${_pre}残り $(( _num + ${_blkdrop[_i]} )) 行を省略${_post}"
             fi
-            _out="$_out$_line"$'\n'
+            _acc+=("$_line")
         fi
         if [ "${_secdrop[_sec]}" -gt 0 ] && [ "${_WIP_INS[_sec]:--1}" -eq "$_i" ]; then
-            _out="$_out$(printf '  … 残り %d 行を省略・全件: %s' "${_secdrop[_sec]}" "$_ptr")"$'\n'
+            _acc+=("$(printf '  … 残り %d 行を省略・全件: %s' "${_secdrop[_sec]}" "$_ptr")")
         fi
     done
+    _acc+=("$(printf '  … 予算到達により以降 %d 行省略（全件: %s）' "$_drop" "$_ptr")")
     _WIP_CAPPED=$_drop
-    _WIP_OUT="$_out$(printf '  … 予算到達により以降 %d 行省略（全件: %s）' "$_drop" "$_ptr")"$'\n'
+    _out="$(printf '%s\n' "${_acc[@]}")"
+    _WIP_OUT="$_out"$'\n'
 }
 
 # 終端 hard-cap（予算保証の本体）: 優先行の全保持は上界を持たないため、最終段で u16 を実測して切る。
