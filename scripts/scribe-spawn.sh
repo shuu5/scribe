@@ -1688,7 +1688,7 @@ spawn_confirm_orphan_guidance() {
   echo "scribe: 健全だが遅い worker を誤検知した可能性もあります（loud-fail は安全側＝silent に「起動済み」と誤宣言しない）。まず一次観測してください:"
   echo "         tmux capture-pane -p -t \"${_wid:-$WINDOW}\" | tail -n 20"
   echo "         cd \"$ANCHOR\" && bd show $ID   # [SPAWNED--$ID] が出ていれば worker は起動済み（継続してよい）"
-  echo "scribe: 掃除するには（force 系を使わない確認プロンプト付き cleanup）:"
+  echo "scribe: 上記確認で worker 不在が確定した場合のみ、掃除するには（force 系を使わない確認プロンプト付き cleanup）:"
   echo "         $SCRIPT_DIR/scribe-cleanup.sh --repo \"$REPO\" --worktree \"$WORKTREE\" --branch \"$BRANCH\" --window \"$WINDOW\" $ID"
 }
 

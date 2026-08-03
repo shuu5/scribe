@@ -721,3 +721,28 @@ _spawn_bg_fail() {   # $1 = claude --bg の exit code / $2 = --bg の stdout（�
   [ "$(cat "$S/bdcalls")" -eq 0 ]
   [ ! -s "$S/calls.log" ]
 }
+
+# ---------- sc-zvom（rider）: spawn_confirm_orphan_guidance の cleanup 見出しを条件文言へ従属化 ----------
+# 何を守るか: 本関数は既に一次観測（pane capture / bd の SPAWNED marker）を cleanup **より先に** 印字する
+#   理想形だが、見出しが「掃除するには（…）:」という **無条件の勧め** のままだった。sc-r43f が両 launch 経路へ
+#   land させた同一語彙「上記確認で worker 不在が確定した場合のみ、…」へ揃え、cleanup を条件へ従属させる。
+#   oracle は file の grep ではなく **実行出力の内容と行番号比較**（file grep 型 teeth は不可・sc-zvom(3)）。
+
+@test "rbff2-zvom: exit 7 経路の cleanup 見出しが条件文言へ従属し、一次観測 2 行が cleanup より前に出る" {
+  local z_ln p_ln t_ln cl_ln
+  echo delivered > "$S/mode"; echo never > "$S/bdmode"   # SPAWNED 不着 → spawn_confirm が loud-fail（exit 7）
+  _spawn
+  [ "$status" -eq 7 ]                                    # spawn_confirm_orphan_guidance を通る経路であることの前提
+  [[ "$output" == *"post-spawn submit 検証に失敗"* ]]
+  [[ "$output" == *"不在が確定した場合のみ"* ]]           # (a) 条件文言が出る
+  [[ "$output" == *"上記確認で worker 不在が確定した場合のみ、掃除するには（force 系を使わない確認プロンプト付き cleanup）:"* ]]
+  z_ln="$(grep -n -m1 -F '不在が確定した場合のみ' <<< "$output" | cut -d: -f1)"
+  p_ln="$(grep -n -m1 -F 'SPAWNED--un-4nm' <<< "$output" | cut -d: -f1)"
+  t_ln="$(grep -n -m1 -F 'tmux capture-pane' <<< "$output" | cut -d: -f1)"
+  cl_ln="$(grep -n -m1 -F 'scribe-cleanup.sh --repo' <<< "$output" | cut -d: -f1)"
+  [ -n "$z_ln" ] && [ -n "$p_ln" ] && [ -n "$t_ln" ] && [ -n "$cl_ln" ]
+  [ "$z_ln" -lt "$cl_ln" ]                               # (b) 条件文言は cleanup コマンド行より前
+  [ "$p_ln" -lt "$cl_ln" ]                               # (c) 一次観測（bd の SPAWNED marker）も cleanup より前
+  [ "$t_ln" -lt "$cl_ln" ]                               # (c) 一次観測（tmux capture-pane）も cleanup より前
+  [ -d "$WT" ]                                           # orphan は残す（自動削除しない＝既存契約）
+}
