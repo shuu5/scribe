@@ -142,6 +142,11 @@ consumed があれば前サイクルの「命令・制約」節が**機械的に
 emit_working_memory "$(date -u +%Y-%m-%dT%H:%M:%SZ)" manual "$WORKING_MEMORY_CONSUMED_FILE" > "$WORKING_MEMORY_FILE"
 ```
 
+> **供給源の規律（bd sc-209c）**: 第 3 引数は **consumed の実 path を明示**する（既定任せ禁止——`/clear`・respawn で
+> sid が変わる経路では名義がずれ、carry-forward が無言で 0 項目化した実例がある）。実行後に stderr の
+> `carry-forward 供給 0 項目` warn が出たら**停止して供給源を確認**する（0 項目のまま次サイクルへ進めない）。
+> ただし effort の初回サイクル（consumed が未生成）・命令が元から空のときは正常＝**前サイクルの退避物が在るはずなのに 0 項目**のときだけ停止する。
+
 **3b. LLM マージ（更新）**: 生成された `$WORKING_MEMORY_FILE` を Edit して仕上げる:
 - 「## 計画弧・次のステップ」に現在地と次の行動を記入（ephemeral、毎回上書き。**3-pre の突合済み内容のみ**）。
   **bd 導入リポでは各 durable 項目に bd issue ID の参照を必須とする**（ID が無い durable 項目は

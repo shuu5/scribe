@@ -65,10 +65,22 @@ extract_effort_directives() {
 #   consumed_file が与えられ、その「命令・制約」節に項目があれば、それを
 #   「命令・制約」節へ機械的に carry-forward する（決定論的に絶対落とさない）。
 #   trigger: manual | auto_precompact
+#
+#   fail-silent 解消（bd sc-209c）: consumed_file を **渡したのに** carry 結果が 0 項目
+#   （file 不在を含む）のときは stderr へ loud warn を出す。sid が変わる経路（/clear・respawn）で
+#   供給源 path を取り違えると、命令・制約が無言で全喪失したまま生成が成功してしまうため
+#   （実例: 供給源の名義ずれで carry-forward が 0 項目化。行数を数えて初めて気づいた）。
+#   stdout の生成物は従来と byte 等価＝挙動変更は stderr のみ。引数なし（新規 session）は無警告。
 emit_working_memory() {
     local ts="$1" trigger="$2" consumed="${3:-}"
     local carried=""
     [ -n "$consumed" ] && carried="$(extract_effort_directives "$consumed")"
+    if [ -n "$consumed" ] && [ -z "$carried" ]; then
+        local _exists=no
+        [ -f "$consumed" ] && _exists=yes
+        printf 'working-memory: WARN: carry-forward 供給 0 項目 — source=%s exists=%s\n' "$consumed" "$_exists" >&2
+        printf 'working-memory: WARN: 前サイクルの「命令・制約」が引き継がれません。供給源 path を確認してください（bd sc-209c）\n' >&2
+    fi
 
     echo "---"
     echo "externalized_at: \"$ts\""
