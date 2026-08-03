@@ -212,6 +212,13 @@ mv "<CONSUME-TARGET の左辺>" "<右辺（.consumed.md）>"
     自 session の直前作業と整合する（＝§2-b で読んで採用し brief に反映し終えた、自分の respawn / `/clear` 前の退避物）／
     または current-sid の WM そのもの（`[CONSUME-TARGET]`）。この 2 つは **reversible な mv**（消えても次サイクルの
     `/session:ready-compaction` が consumed から carry-forward で拾う）ゆえ routine な確認往復を省く。
+  - **採用候補（sid≠current）の consume 先は current-sid 名義**（設計裁定 A・2026-08-03・bd sc-209c）:
+    mv 先を `working-memory.<current-sid>.consumed.md` とし、**直後に frontmatter へ `consumed-from: <元 sid>` を
+    1 行追記**する（provenance を落とさない）。次サイクルの `/session:ready-compaction` は **current-sid の
+    consumed** を carry-forward の供給源に取るため、元 sid 名義のまま置くと上の「reversible」が成立せず
+    命令・制約が無言で 0 項目化する。**裁定理由**: 供給側を mtime 降順で fallback 探索する案は、並走 session の
+    consumed を掴む cross-contamination があるため劣後（退避側でなく consume 側の名義を正すのが本筋）。
+    `[CONSUME-TARGET]`（current-sid の WM そのもの）経路と、下記 orphan の非自動 consume の安全弁は**不変**。
   - **正規外（＝surface して人間へ確認・ask 維持）**: 候補内容が直前作業と**不一致** / 曖昧な候補が**複数** /
     所有 session **不明** / 別 session の orphan が**混在** / `[DIFF-UNKNOWN]` のまま**未突合**。この時は consume せず
     brief に loud surface し、人間へ mv 先を提示して指示を仰ぐ。
