@@ -1688,7 +1688,7 @@ spawn_confirm_orphan_guidance() {
   echo "scribe: 健全だが遅い worker を誤検知した可能性もあります（loud-fail は安全側＝silent に「起動済み」と誤宣言しない）。まず一次観測してください:"
   echo "         tmux capture-pane -p -t \"${_wid:-$WINDOW}\" | tail -n 20"
   echo "         cd \"$ANCHOR\" && bd show $ID   # [SPAWNED--$ID] が出ていれば worker は起動済み（継続してよい）"
-  echo "scribe: 掃除するには（force 系を使わない確認プロンプト付き cleanup）:"
+  echo "scribe: 上記確認で worker 不在が確定した場合のみ、掃除するには（force 系を使わない確認プロンプト付き cleanup）:"
   echo "         $SCRIPT_DIR/scribe-cleanup.sh --repo \"$REPO\" --worktree \"$WORKTREE\" --branch \"$BRANCH\" --window \"$WINDOW\" $ID"
 }
 
@@ -1819,6 +1819,13 @@ if [[ "$EFFECTIVE_TRANSPORT" == "bg" ]]; then
   # --disallowed-tools は 1 argv verbatim（tmux 経路と同契約）。CLAUDE_CONFIG_DIR が unset（WCFG_DIR 空）のときは
   # 明示 export しない（env-file の `unset` を尊重＝空 export で ~/.claude 意味論を壊さない）。
   _bg_rc=0
+  _bg_positive=0
+  # sc-gvvr ①: bg 経路には tmux 経路（下の spawn_confirm_baseline 呼出）に相当する launch 前 baseline が無い。
+  # rc≠0 を **marker 増分** で裏取りするには baseline が必須ゆえ、launch の **直前**（transport 分岐の内側）で
+  # 自前取得する。分岐の内側に置くのは dry-run 規律のため（dry-run は emit_plan で既に exit 済み＝bd --json を
+  # 1 回も叩かない）。取得不能なら SPAWN_CONFIRM_BASELINE が空になり spawn_confirm_spawned_new は常に偽＝
+  # fail-closed（再 spawn の stale marker を新規出現と誤読する fail-open を封鎖する）。
+  spawn_confirm_baseline
   # --model は claude --help feature-detect 済（BG_MODEL_ARG・空なら付けない・worker=opus 不変条件を bg へ運ぶ・
   # finding#1）＝tmux 経路が cld-spawn へ --model "$MODEL" を必ず渡すのと parity。effort と同じ位置で argv 展開する。
   if [[ -n "$WCFG_DIR" ]]; then
@@ -1829,10 +1836,16 @@ if [[ "$EFFECTIVE_TRANSPORT" == "bg" ]]; then
       && "$CLAUDE_BIN" --bg "$PROMPT_TEXT" --plugin-dir "$SCRIBE_PLUGIN_DIR" --dangerously-skip-permissions "${BG_MODEL_ARG[@]}" "${BG_EFFORT_ARG[@]}" --disallowed-tools "$WORKER_DISALLOWED_TOOLS" )" || _bg_rc=$?
   fi
   if [[ "$_bg_rc" -ne 0 ]]; then
-    # 「preflight 通過 ≠ launch 成功」（AC3）。auto は tmux へ post-launch fallback、bg 明示は loud fail。
+    # 「preflight 通過 ≠ launch 成功」（AC3）。auto は tmux へ post-launch fallback（■F6: 本 leg で挙動不変）、
+    # bg 明示は marker 増分で裏取りし、陽性なら成功扱い・陰性 / 判定不能なら従来どおり loud fail（rc 素通し）。
     if [[ "$TRANSPORT" == "auto" ]]; then
       echo "scribe: ⚠ bg launch が失敗しました（exit=$_bg_rc・preflight 通過≠launch 成功）→ tmux 経路へ post-launch fallback します（同一 worktree を再利用・二重起動しない）。注: bg 用に生成済みの settings.local.json env block は tmux 経路では無害な冗長〔env-file が同 signal を届ける〕として残ります。" >&2
       EFFECTIVE_TRANSPORT="tmux"
+    elif spawn_confirm_spawned_new; then
+      # sc-gvvr ①: rc≠0 でも worker が既に turn を始めていることがある（read-back の失敗＝launch の失敗ではない）。
+      # 倒す根拠は **rc の意味論ではなく marker 増分のみ**（baseline 比の新規出現・single-shot＝独自 poll を持たない）。
+      # baseline 不明 / 生 marker 件数 > 0 では倒さない（spawn_confirm_spawned_new が fail-closed でそれを保証する）。
+      _bg_positive=1
     else
       {
         echo "scribe: error: bg launch（claude --bg）が失敗しました（exit=$_bg_rc）。送達確認が取れませんでした（worker が起動しているかは未確定）。"
@@ -1847,11 +1860,23 @@ if [[ "$EFFECTIVE_TRANSPORT" == "bg" ]]; then
       } >&2
       exit "$_bg_rc"
     fi
-  else
-    # launch 成功。short-id を trim（最終行を採用）。捕捉不能（空）は loud に worktree 参照へ degrade（AC6）。
+  fi
+  if [[ "$_bg_rc" -eq 0 || "$_bg_positive" -eq 1 ]]; then
+    # launch 成功、**または** rc≠0 を marker 増分の積極証拠で成功扱いへ倒した場合。short-id を trim（最終行を採用）。
+    # 捕捉不能（空）は loud に worktree 参照へ degrade（AC6）。sc-gvvr ■F8: 成功扱い経路も **同一の** trim と空時
+    # degrade を必ず通す（未 trim の生 stdout を spawned(bg): / monitor_cmd_for_bg へ流さない）。
     BG_LAUNCHED_ID="$(printf '%s\n' "$BG_LAUNCHED_ID" | tail -n1 | tr -d '[:space:]')"
     if [[ -z "$BG_LAUNCHED_ID" ]]; then
-      echo "scribe: ⚠ bg launch は成功しましたが short-id を返却値から捕捉できませんでした → monitor は worktree 参照（commit sentinel 主網・id 非依存）へ degrade します（native state / logs は手動で id を補完してください・AC6/DJ4）。" >&2
+      echo "scribe: ⚠ bg launch の short-id を返却値から捕捉できませんでした → monitor は worktree 参照（commit sentinel 主網・id 非依存）へ degrade します（native state / logs は手動で id を補完してください・AC6/DJ4）。" >&2
+    fi
+    if [[ "$_bg_positive" -eq 1 ]]; then
+      # 成功扱いの loud warn（stdout は spawned(bg): / monitor: のみ＝この警告は必ず stderr へ・■F7）。
+      {
+        echo "scribe: ⚠ bg launch（claude --bg）は exit=$_bg_rc を返しましたが、[SPAWNED--$ID] marker が baseline 比で新規出現しています＝積極証拠で起動を確認しました（成功扱いで続行します）。"
+        echo "scribe: 注: 送達確認（read-back）そのものは取れていません。rc=$_bg_rc が意味するのは read-back の失敗までで、worker の turn 開始は marker 増分だけが根拠です。"
+        echo "scribe: 注: launch の retry により worker prompt が重複注入された可能性があります（worker session の冒頭を一読してください）。"
+        echo "scribe: 注: 同一 id の二重 worker が居ないか一次観測してください: tmux list-windows -a | grep wt-$ID"
+      } >&2
     fi
   fi
 fi
@@ -1874,7 +1899,22 @@ if [[ "$EFFECTIVE_TRANSPORT" == "tmux" ]]; then
   # 直前でこれを消費する（cld-spawn は --disallowed-tools を claude の末尾可変長 <tools...> として自身の起動行
   # 末尾へ再配置するため、scribe 側の引数順は PROMPT 前であれば可）。
   "$CLD_SPAWN" --cd "$WORKTREE" --bd-id "$ID" --model "$MODEL" "${CLD_EFFORT_ARG[@]}" --disallowed-tools "$WORKER_DISALLOWED_TOOLS" --env-file "$WORKER_ENV_FILE" "$PROMPT_TEXT" || _cld_rc=$?
-  if [[ "$_cld_rc" -ne 0 ]]; then
+  _cld_positive=0
+  # sc-gvvr ①: rc≠0 でも worker が既に turn を始めていることがある（read-back の失敗＝launch の失敗ではない・実測 3 例）。
+  # 倒す根拠は **rc の意味論ではなく marker 増分のみ**（上の spawn_confirm_baseline 比の新規出現・single-shot＝独自の
+  # poll / sleep / budget を新設しない）。baseline 不明 / 生 marker 件数 > 0 では倒さない（spawn_confirm_spawned_new が
+  # fail-closed でそれを保証する＝再 spawn の stale marker で fail-open しない）。
+  if [[ "$_cld_rc" -ne 0 ]] && spawn_confirm_spawned_new; then
+    _cld_positive=1
+    # 成功扱いの loud warn（stdout は spawned: / monitor: のみ＝この警告は必ず stderr へ・■F7）。
+    {
+      echo "scribe: ⚠ cld-spawn は exit=$_cld_rc を返しましたが、[SPAWNED--$ID] marker が baseline 比で新規出現しています＝積極証拠で起動を確認しました（成功扱いで続行します）。"
+      echo "scribe: 注: 送達確認（read-back）そのものは取れていません。rc=$_cld_rc が意味するのは read-back の失敗までで、worker の turn 開始は marker 増分だけが根拠です。"
+      echo "scribe: 注: cld-spawn の retry により worker prompt が重複注入された可能性があります（worker session の冒頭を一読してください）。"
+      echo "scribe: 注: 同一 id の二重 worker が居ないか一次観測してください: tmux list-windows -a | grep wt-$ID"
+    } >&2
+  fi
+  if [[ "$_cld_rc" -ne 0 && "$_cld_positive" -eq 0 ]]; then
     {
       echo "scribe: error: cld-spawn が失敗しました（exit=$_cld_rc）。送達確認が取れませんでした（worker が起動しているかは未確定）。"
       echo "scribe: worktree が orphan として残っています（自動削除はしません＝force 禁止・確認必須ポリシー）: $WORKTREE"
@@ -1893,9 +1933,15 @@ if [[ "$EFFECTIVE_TRANSPORT" == "tmux" ]]; then
   # cld-spawn の success は「prompt が pane に **到着** した」ことしか意味しない（sentinel-presence 短絡・上記根因）。
   # ここで turn 開始の積極証拠（[SPAWNED--$ID] の新規出現）を待ち、未 submit（RESIDUAL）なら Enter 冪等再送で回復する。
   # 失敗は loud-fail（非 0 exit・自動 teardown なし）＝silent に「起動済み」と宣言しない。
-  _confirm_rc=0
-  spawn_confirm "$(scribe_window_id "$WINDOW")" || _confirm_rc=$?
-  [[ "$_confirm_rc" -eq 0 ]] || exit "$_confirm_rc"
+  # sc-gvvr ■F5: 成功扱いへ倒した場合は本層を **skip** して monitor 案内へ合流する（guard は call site に置き
+  # spawn_confirm 本体は 1 行も編集しない）。marker 陽性は turn 開始の確定であり RESIDUAL の Enter 再送は定義上
+  # 不要で、fall-through させると marker 導出失敗経路 / budget 経路が spawn_confirm_orphan_guidance を呼び、
+  # 「掃除提示なし」（acceptance(1)）が確率的に破れる。
+  if [[ "$_cld_positive" -eq 0 ]]; then
+    _confirm_rc=0
+    spawn_confirm "$(scribe_window_id "$WINDOW")" || _confirm_rc=$?
+    [[ "$_confirm_rc" -eq 0 ]] || exit "$_confirm_rc"
+  fi
 fi
 
 # ===== monitor 案内（EFFECTIVE_TRANSPORT 別・AC8・DJ4 hybrid 温存）=====
