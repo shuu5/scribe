@@ -63,14 +63,44 @@ setup() {
     # hook は tmux を "${SCRIBE_TMUX:-tmux}" 経由で呼ぶ(gate の command -v も同 seam)。
     # 実 tmux server に依存せず window 名を注入できるよう偽 tmux を用意する。
     # 挙動は env で制御: STUB_TMUX_WINDOW=返す #W / STUB_TMUX_FAIL=1 で display-message が非0 exit。
+    #
+    # ★format-aware 化(sc-0dx9 / ■S12(i)): hook は `#{pane_id} #W` を 1 回で取り、pane 実在を
+    #   pane_id の**エコー一致**で判定する。format を無視して固定 2 フィールドを返す stub は
+    #   「実装ゼロでも teeth が緑」になる false-green ゆえ不可——format 文字列を実際に読んで
+    #   #{pane_id} / #W / #{window_name} を実値へ置換する。pane_id は既定で -t の target を
+    #   エコー back し(=実在 pane)、PANE_ECHO で不一致・空(不在 pane)を opt-in する
+    #   (leg(a) tests/scribe-window-id.bats の "${PANE_ECHO-$_tgt} …" 方式を踏襲)。
+    #   不在 pane は実測事実(4)どおり **rc=0 のまま両フィールド空**で模す(rc や出力の非空で
+    #   実在判定しない)。STUB_TMUX_FAIL=1 の非 0 exit は不変(別経路の pin)。
     STUB_TMUX="$BATS_TEST_TMPDIR/fake-tmux"
     cat > "$STUB_TMUX" <<'STUB'
 #!/usr/bin/env bash
+# 呼出ログ(■S12(iii)): SCRIBE_TMUX_CALLS が非空のときだけ全呼出を 1 行ずつ追記する
+# (tmux 呼出回数=1 の acceptance(3) を機械照合する唯一の手段。command -v は exec しないので数えない)。
+[ -n "${SCRIBE_TMUX_CALLS:-}" ] && printf '%s %s\n' "$1" "$*" >> "$SCRIBE_TMUX_CALLS"
 [ "$1" = "display-message" ] || exit 0
 [ "${STUB_TMUX_FAIL:-0}" = "1" ] && exit 1
-printf '%s\n' "${STUB_TMUX_WINDOW:-}"
+_tgt=""; _prev=""
+for _a in "$@"; do
+  [ "$_prev" = "-t" ] && _tgt="$_a"
+  _prev="$_a"
+done
+_fmt="$_prev"
+_pid="${PANE_ECHO-$_tgt}"
+_win="${STUB_TMUX_WINDOW:-}"
+_out="$_fmt"
+_out="${_out//'#{pane_id}'/$_pid}"
+_out="${_out//'#{window_name}'/$_win}"
+_out="${_out//'#W'/$_win}"
+printf '%s\n' "$_out"
 STUB
     chmod +x "$STUB_TMUX"
+
+    # --- orca タブ由来 stale pane skip(sc-0dx9 / ot 依頼 leg(b)) ---
+    # skip 時 stderr の**逐語 literal**。script 側(_scribe_is_consult_window)と 1 byte 一致させる
+    # ＝新コードだけが出す文字列ゆえ null-diff 耐性の主軸(■S8(A))。末尾に TMUX_PANE=… が続くので
+    # 部分一致(grep -qF)で照合する。
+    ORCA_SKIP_STDERR='[scribe/SessionStart] warning: ORCA_TERMINAL_HANDLE あり + pane_id エコー不一致 → orca タブ由来の stale TMUX_PANE とみなし consult 窓判定を skip(非 consult・sc-0dx9)'
 }
 
 # inject <role|-> <plugin_root> <stdin_json>
@@ -80,10 +110,12 @@ inject() {
     # tmux 系 env(TMUX/TMUX_PANE/SCRIBE_TMUX)を明示 unset して hermetic 化(sc-cji): これらを stub しない
     # テストは consult 窓判定の gate が必ず偽になり fail-safe(既存 opt-out/判定)経路を取る。tmux セッション内で
     # bats を走らせても none 枝が実 tmux を叩かない(継承 TMUX による非決定を排除)。consult 窓検出は inject_tmux で試す。
+    # ORCA_TERMINAL_HANDLE も同じ hermetic 原則で unset する(sc-0dx9 / ■S12(ii)): orca タブ由来の host で
+    # gate を走らせると継承 handle が skip 条件の片翼を満たし、既存 consult テストが false-RED になりうる。
     if [ "$r" = "-" ]; then
-        printf '%s' "$json" | env -u SCRIBE_ROLE -u TMUX -u TMUX_PANE -u SCRIBE_TMUX CLAUDE_PLUGIN_ROOT="$root" "$SCRIPT"
+        printf '%s' "$json" | env -u SCRIBE_ROLE -u TMUX -u TMUX_PANE -u SCRIBE_TMUX -u ORCA_TERMINAL_HANDLE CLAUDE_PLUGIN_ROOT="$root" "$SCRIPT"
     else
-        printf '%s' "$json" | env -u TMUX -u TMUX_PANE -u SCRIBE_TMUX SCRIBE_ROLE="$r" CLAUDE_PLUGIN_ROOT="$root" "$SCRIPT"
+        printf '%s' "$json" | env -u TMUX -u TMUX_PANE -u SCRIBE_TMUX -u ORCA_TERMINAL_HANDLE SCRIBE_ROLE="$r" CLAUDE_PLUGIN_ROOT="$root" "$SCRIPT"
     fi
 }
 
@@ -95,10 +127,35 @@ inject_tmux() {
     local base=(CLAUDE_PLUGIN_ROOT="$root" SCRIBE_TMUX="$STUB_TMUX" TMUX="fake-tmux" TMUX_PANE="%0"
                 STUB_TMUX_WINDOW="$win" STUB_TMUX_FAIL="$fail")
     if [ "$r" = "-" ]; then
-        printf '%s' "$json" | env -u SCRIBE_ROLE "${base[@]}" "$SCRIPT"
+        printf '%s' "$json" | env -u SCRIBE_ROLE -u ORCA_TERMINAL_HANDLE -u PANE_ECHO "${base[@]}" "$SCRIPT"
     else
-        printf '%s' "$json" | env SCRIBE_ROLE="$r" "${base[@]}" "$SCRIPT"
+        printf '%s' "$json" | env -u ORCA_TERMINAL_HANDLE -u PANE_ECHO SCRIBE_ROLE="$r" "${base[@]}" "$SCRIPT"
     fi
+}
+
+# inject_orca <role|-> <json> <window> <pane_echo> <handle|-> [root] [script]
+#   orca タブ由来 stale pane skip(sc-0dx9)の hermetic ドライバ。inject_tmux との差分は
+#   PANE_ECHO(stub が返す pane_id フィールド)と ORCA_TERMINAL_HANDLE を明示制御できること。
+#   pane_echo="%0"  → TMUX_PANE と一致(=pane 実在の積極証拠あり)
+#   pane_echo="%99" → エコー不一致(=不在 pane / 別 pane)
+#   pane_echo=""    → 不在 pane の実測形(両フィールド空・rc=0)
+#   handle="-"      → ORCA_TERMINAL_HANDLE を unset / それ以外は値を焼く(""=空 set も表現できる)
+#   呼出ログが要るテストは ORCA_CALLS にファイル path を、display-message の非 0 exit が要るテストは
+#   ORCA_FAIL=1 を、それぞれ呼出前に設定する。
+inject_orca() {
+    local r="$1" json="$2" win="$3" pecho="$4" handle="$5"
+    local root="${6:-$REPO}" scr="${7:-$SCRIPT}"
+    local -a post=(CLAUDE_PLUGIN_ROOT="$root" SCRIBE_TMUX="$STUB_TMUX" TMUX="fake-tmux"
+                   TMUX_PANE="%0" STUB_TMUX_WINDOW="$win" STUB_TMUX_FAIL="${ORCA_FAIL:-0}"
+                   PANE_ECHO="$pecho" SCRIBE_TMUX_CALLS="${ORCA_CALLS:-}")
+    if [ "$r" != "-" ]; then post+=(SCRIBE_ROLE="$r"); fi
+    if [ "$handle" != "-" ]; then post+=(ORCA_TERMINAL_HANDLE="$handle"); fi
+    printf '%s' "$json" | env -u SCRIBE_ROLE -u ORCA_TERMINAL_HANDLE "${post[@]}" "$scr"
+}
+
+# _stderr_lines — $stderr の非空行数（空文字列でも 0 を返す形。改行のみの stderr を 1 行と数えない）
+_stderr_lines() {
+    printf '%s' "$1" | grep -c . || true
 }
 
 # ---- 構文 ----
@@ -357,6 +414,224 @@ inject_tmux() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"role=admin"* ]]                          # window 判定は none 枝だけ・global override ではない
     [[ "$output" == *"env SCRIBE_ROLE"* ]]
+}
+
+# ---- orca タブ由来 stale pane の skip(sc-0dx9 / ot 依頼 leg(b)) ----------------------------------
+# 何を守るか: orca タブから起動したセッションは TMUX / TMUX_PANE を**非空のまま**継承するが、その
+# TMUX_PANE が指す pane は消滅していることがある(実測: server pid は生存・pane %88 だけ消滅)。不在 pane への
+# display-message は rc=0 + 空を返すため rc でも出力の非空でも実在判定できない ⇒ pane_id の**エコー一致**
+# (積極証拠)で判定する。skip は **論理積**(ORCA_TERMINAL_HANDLE 非空 ∧ エコー不一致)に限る——handle 単独
+# 条件は、tmux server が orca 起点で再起動され全 pane が handle を継承した場合に sc-cji の consult 復帰を
+# silent 全滅させる。fail-safe の向き(判定不能→非 consult)・常時 exit 0・none opt-out の stdout 0 byte は不変で、
+# 本 leg が足す観測可能 delta は「skip 経路だけ stderr 1 行」だけ。
+@test "orca-skip: handle 非空 × エコー不一致 → skip(注入ゼロ)・stderr は逐語 literal ちょうど 1 行" {
+    run --separate-stderr inject_orca none "$ANCHOR_JSON" "consult-sc-xyz" "%99" "term_"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]                                            # consult へ復帰しない(stdout 0 byte)
+    [[ "$output" != *"role="* ]]
+    grep -qF -- "$ORCA_SKIP_STDERR" <<< "$stderr"               # 新コードだけが出す逐語 literal(■S8(A))
+    [ "$(_stderr_lines "$stderr")" -eq 1 ]                      # fail-loud は stderr 1 行のみ
+}
+
+@test "orca-skip: handle unset × エコー不一致 → skip しない(論理積の negative)・stderr 0 byte" {
+    # handle 単独条件にしていたら「不一致だから skip」で consult が silent 全滅する。論理積ゆえ
+    # handle 不所持では従来判定(取得した窓名の consult- prefix)をそのまま続行する。
+    run --separate-stderr inject_orca none "$ANCHOR_JSON" "consult-sc-xyz" "%99" "-"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=consult"* ]]                         # skip しない＝sc-cji の復帰が生きている
+    [ -z "$stderr" ]                                            # stderr 1 行 ⇔ skip 経路のみ(不変量)
+}
+
+@test "orca-skip: handle 非空 × エコー一致 → 従来判定(consult- prefix)を続行・stderr 0 byte" {
+    run --separate-stderr inject_orca none "$ANCHOR_JSON" "consult-sc-xyz" "%0" "term_"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=consult"* ]]                         # pane 実在の積極証拠あり → skip しない
+    [[ "$output" == *"env SCRIBE_ROLE=none override"* ]]
+    [ -z "$stderr" ]
+}
+
+@test "orca-skip: 不在 pane(両フィールド空・rc=0) × handle 非空 → skip・stderr 1 行(rc/非空では判定しない)" {
+    # 実測事実(4): 不在 pane への display-message は rc=0 + 空(複数 field format なら区切りだけの非空)。
+    # ゆえに rc でも出力の非空でも実在判定できず、エコー一致だけが積極証拠になる。
+    run --separate-stderr inject_orca none "$ANCHOR_JSON" "" "" "term_"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    grep -qF -- "$ORCA_SKIP_STDERR" <<< "$stderr"
+    [ "$(_stderr_lines "$stderr")" -eq 1 ]
+}
+
+@test "orca-skip: ORCA_TERMINAL_HANDLE=\"\"(空 set) × エコー不一致 → skip しない・stderr なし(■S15)" {
+    # 空 set を skip 側に数えると skip が広がり「正当な consult を殺す」向きへ倒れる。[ -n ] 固定。
+    run --separate-stderr inject_orca none "$ANCHOR_JSON" "consult-sc-xyz" "%99" ""
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=consult"* ]]
+    [ -z "$stderr" ]
+}
+
+@test "orca-skip: 区切り無し出力(1 field)は判定不能 → 非 consult へ倒す退化ガード(handle 無しでも)" {
+    # format を無視して 1 field しか返さない tmux(将来の版差・truncate)でも consult を誤検出しない。
+    # 退化ガードが無いと _w に pane_id 相当の全文が入り、窓名として prefix 判定されうる。
+    local one="$BATS_TEST_TMPDIR/fake-tmux-onefield"
+    cat > "$one" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = "display-message" ] || exit 0
+printf '%s\n' "consult-sc-xyz"
+STUB
+    chmod +x "$one"
+    run --separate-stderr bash -c '
+        printf "%s" "$1" | env -u ORCA_TERMINAL_HANDLE SCRIBE_ROLE=none CLAUDE_PLUGIN_ROOT="$2" \
+            SCRIBE_TMUX="$3" TMUX="fake-tmux" TMUX_PANE="%0" "$4"
+    ' _ "$ANCHOR_JSON" "$REPO" "$one" "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]                                            # 判定不能 → 非 consult(fail-safe の向き不変)
+    [ -z "$stderr" ]                                            # skip 経路ではないので stderr も出さない
+}
+
+@test "orca-skip: 窓名に空白が入っても非貪欲 parse で窓名を復元できる(consult 継続)" {
+    run --separate-stderr inject_orca none "$ANCHOR_JSON" "consult-sc a b" "%0" "term_"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=consult"* ]]
+    [ -z "$stderr" ]
+}
+
+@test "orca-skip: tmux 呼出は consult 復帰経路 / skip 経路とも display-message ちょうど 1 回(acceptance(3))" {
+    ORCA_CALLS="$BATS_TEST_TMPDIR/calls-ok.log"; : > "$ORCA_CALLS"
+    run --separate-stderr inject_orca none "$ANCHOR_JSON" "consult-sc-xyz" "%0" "term_"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=consult"* ]]
+    [ "$(grep -c '^display-message' "$ORCA_CALLS")" -eq 1 ]
+    ORCA_CALLS="$BATS_TEST_TMPDIR/calls-skip.log"; : > "$ORCA_CALLS"
+    run --separate-stderr inject_orca none "$ANCHOR_JSON" "consult-sc-xyz" "%99" "term_"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "$(grep -c '^display-message' "$ORCA_CALLS")" -eq 1 ]
+}
+
+@test "orca-skip: 正当 opt-out 3 経路(TMUX unset / wt-* でエコー一致 / display-message 非 0)は stderr 0 byte" {
+    # 本 hook は 8 本の symlink 経由で全セッションへ live 配布される。handle 非所持での毎回 warning は
+    # fleet 全体のノイズになるため、stderr 1 行 ⇔ skip 経路のみ、を三方向から pin する(■S11)。
+    run --separate-stderr inject none "$REPO" "$ANCHOR_JSON"        # TMUX unset(gate で早期 return)
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ -z "$stderr" ]
+    run --separate-stderr inject_orca none "$ANCHOR_JSON" "wt-sc-abc" "%0" "term_"   # 窓名が非 consult
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ -z "$stderr" ]
+    ORCA_FAIL=1
+    run --separate-stderr inject_orca none "$ANCHOR_JSON" "consult-sc-xyz" "%99" "term_"  # 取得失敗
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ -z "$stderr" ]                                            # 非 0 exit は skip 経路より前に return する
+}
+
+@test "orca-skip: behavioral closure — 全 role で handle set × エコー不一致 の stdout/stderr が baseline と完全一致(■S13)" {
+    # 変更が SCRIBE_ROLE=none 枝の内側に閉じていることを、git diff ではなく**挙動**で測る
+    # (commit-stable な閉包検証)。未知値の既存 warning 1 行も不変であること。
+    local r base_out base_err
+    for r in admin worker consult - bogus; do
+        run --separate-stderr inject_orca "$r" "$ANCHOR_JSON" "consult-sc-xyz" "%99" "-"
+        [ "$status" -eq 0 ]
+        base_out="$output"; base_err="$stderr"
+        run --separate-stderr inject_orca "$r" "$ANCHOR_JSON" "consult-sc-xyz" "%99" "term_"
+        [ "$status" -eq 0 ]
+        [ "$output" = "$base_out" ]                             # role 行を含む stdout 全体が一致
+        [ "$stderr" = "$base_err" ]
+    done
+    [[ "$base_err" == *"未知の SCRIBE_ROLE"* ]]                 # 最終ループ(bogus)の warning は不変
+}
+
+@test "orca-skip: 将来反転コメントの逐語 token が _scribe_is_consult_window 側に実在する(■S14)" {
+    grep -qF 'orca タブ化' "$SCRIPT"
+    grep -qF '本 skip が正当な consult を殺す向きに反転' "$SCRIPT"
+    grep -qF 'ot-ody 論点3' "$SCRIPT"
+    grep -qF 'orca-migration-recon Q5 案 B' "$SCRIPT"
+    # role 判定 case より**上**(=関数側)にあること。role 判定 case は 1 byte も触らない契約。
+    local ln_comment ln_case
+    ln_comment="$(grep -n 'orca タブ化' "$SCRIPT" | head -n1 | cut -d: -f1)"
+    ln_case="$(grep -n '^case "\${SCRIBE_ROLE:-}" in' "$SCRIPT" | head -n1 | cut -d: -f1)"
+    [ -n "$ln_comment" ]
+    [ -n "$ln_case" ]
+    [ "$ln_comment" -lt "$ln_case" ]
+}
+
+@test "orca-skip: 反 false-green(■S8(C)) — 論理積の handle 条件を除去した変異体では handle 無しでも skip する" {
+    # clean 側は「handle unset × 不一致 → consult 継続・stderr 0 byte」。handle 条件を落とした変異体は
+    # 同じ入力で skip し逐語 literal を出す ⇒ 論理積の assert が非空虚(mutation を実際に殺す)であることの実測。
+    local root="$BATS_TEST_TMPDIR/mut-orca-and"
+    _mutant_root "$root"
+    local mscript="$root/scripts/hooks/session-start-role-inject.sh"
+    python3 - "$mscript" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+old = '        if [ -n "${ORCA_TERMINAL_HANDLE:-}" ]; then\n'
+assert s.count(old) == 1, s.count(old)
+open(p, "w", encoding="utf-8").write(s.replace(old, '        if true; then\n'))
+PY
+    chmod +x "$mscript"
+    # clean: handle 無し → skip しない・stderr なし
+    run --separate-stderr inject_orca none "$ANCHOR_JSON" "consult-sc-xyz" "%99" "-"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=consult"* ]]
+    [ -z "$stderr" ]
+    # 変異体: 同じ入力で skip し literal が出る＝assert は変異を殺す
+    run --separate-stderr inject_orca none "$ANCHOR_JSON" "consult-sc-xyz" "%99" "-" "$root" "$mscript"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    grep -qF -- "$ORCA_SKIP_STDERR" <<< "$stderr"
+    [ "$(_stderr_lines "$stderr")" -eq 1 ]
+}
+
+@test "orca-skip: 旧実装との flip(■S8(D)) — 変更前 commit の script は同一入力で role=consult を出す" {
+    # 「戻り値が変わらないから no-op で可」の反証。ただし**何を塞いだか**は限定して書く(■S19):
+    #   旧実装は pane_id を一切見ないため、**不明 target が active pane へ縮退して live な consult 窓名を
+    #   返す**形(実測事実(5) の一般形)で false-consult を成立させる。一方 **不在 pane そのもの**(#W が空)は
+    #   旧実装でも空 #W → prefix 不一致 → 非 consult に落ちる(実測事実(4) / ■S8 本文・独立実走で再確認)。
+    #   ゆえに本 flip が示すのは ■S11 delta(ii)＝判定根拠を「出力が空でない」から pane_id エコー一致という
+    #   **積極証拠**へ置換したこと であり、「不在 pane の false-consult を塞いだ」ではない。
+    # git stash は使わず変更前 commit から取り出した実体を走らせて実出力で示す。
+    local root="$BATS_TEST_TMPDIR/old-9345edb"
+    _mutant_root "$root"
+    local oldscript="$root/scripts/hooks/session-start-role-inject.sh"
+    # 対照 ref の解決(sc-0dx9 self-review 修正): 直近の**変更前 commit** 9345edb は anchor ローカルの
+    # 取込 merge commit で origin/main の ancestor では**ない**(実測 `git merge-base --is-ancestor` = NO。
+    # 本リポは squash merge 運用ゆえ land 後も origin から到達しない)。これを直書きすると fresh clone /
+    # 他ホスト / shallow clone / branch 削除+gc 後の環境で `git show` が fatal になり、本 tooth が恒常 RED
+    # になる(hook の唯一の gate が当該環境で赤くなる)。ゆえに 9345edb は**到達可能なときだけ**使い、
+    # そうでなければ**公開済み祖先** ef037b49(= origin/main の ancestor / PR #163 の squash commit)へ落とす。
+    # 当該 script の blob は両 ref で byte 一致を実測済み(sha256 2dc62c45…)ゆえ対照の意味は不変。
+    # SC_0DX9_OLD_REF を置けば任意の変更前 commit へ差し替えられる(override が最優先)。
+    # 先行慣行: tests/cell-quality-loop.bats(公開済み不変 SHA へ pin) / cell-quality-cap.bats(env override +
+    # cat-file preflight + loud FATAL)。到達不能は skip でなく loud fail = 対照消失の silent 空虚化を防ぐ。
+    local oldref="${SC_0DX9_OLD_REF:-}"
+    if [ -z "$oldref" ] && git -C "$REPO" cat-file -e '9345edb:scripts/hooks/session-start-role-inject.sh' 2>/dev/null; then
+        git -C "$REPO" show 9345edb:scripts/hooks/session-start-role-inject.sh > "$oldscript"
+    else
+        : "${oldref:=ef037b49f3669a3abb82ceeca97444b476e0d912}"
+        if ! git -C "$REPO" cat-file -e "${oldref}:scripts/hooks/session-start-role-inject.sh" 2>/dev/null; then
+            echo "# FATAL: 対照 ref '${oldref}' から scripts/hooks/session-start-role-inject.sh を読めない" >&2
+            echo "#        (shallow clone / gc / 別リポ)。SC_0DX9_OLD_REF で変更前 commit を指定せよ。" >&2
+            return 1
+        fi
+        git -C "$REPO" show "${oldref}:scripts/hooks/session-start-role-inject.sh" > "$oldscript"
+    fi
+    chmod +x "$oldscript"
+    [ -s "$oldscript" ]                                         # 空取り出しで対照を空虚化させない
+    grep -qF 'display-message' "$oldscript"                     # 取り違え防止(対照が同じ hook 実体であること)
+    grep -qF 'ORCA_TERMINAL_HANDLE' "$SCRIPT"                   # 新実装には条件がある
+    run grep -qF 'ORCA_TERMINAL_HANDLE' "$oldscript"            # 旧実装には無い(取り違え防止)
+    [ "$status" -ne 0 ]
+    # 旧実装: handle 非空 × エコー不一致でも consult へ復帰してしまう
+    run --separate-stderr inject_orca none "$ANCHOR_JSON" "consult-sc-xyz" "%99" "term_" "$root" "$oldscript"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"role=consult"* ]]
+    [ -z "$stderr" ]
+    # 新実装: 同一入力で skip(注入ゼロ) + 逐語 literal
+    run --separate-stderr inject_orca none "$ANCHOR_JSON" "consult-sc-xyz" "%99" "term_"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    grep -qF -- "$ORCA_SKIP_STDERR" <<< "$stderr"
 }
 
 # ---- .beads opt-in guard(bd un-7hx): .beads 有/無 × role ----
