@@ -562,3 +562,187 @@ _set_prompt_marker() {
   [[ "$output" != *"scribe-cleanup.sh"* ]]
   [[ "$output" != *"SPAWNED--un-4nm"* ]]
 }
+
+# ---------- sc-gvvr ①: launch rc≠0 を marker 増分の積極証拠で成功扱いへ倒す（両経路・orch-2z5r ①）----------
+# 何を守るか: cld-spawn / bg launch の rc≠0 は **read-back（送達確認）の失敗**しか意味せず、worker は既に turn を
+#   始めていることがある（実測 3 例）。②（sc-r43f）は文言と提示構造だけを直したので、rc≠0 は依然として非 0 exit で
+#   終わり monitor 案内まで飛ぶ（2 次被害＝admin が monitor を手で立て直す）。ここでは
+#   (1) 倒す唯一の oracle を spawn_confirm_spawned_new（[SPAWNED--<id>] の **baseline 比 新規出現**）に固定し
+#       （rc の意味論では倒さない・生の marker 件数 > 0 でも倒さない＝stale marker の fail-open 封鎖）、
+#   (2) 陽性なら exit 0・掃除提示ゼロ・spawned:/monitor: を emit し（成功扱い）、
+#   (3) 陰性 / 判定不能では rc を **素通し**して ② の文言・印字順序を退行させないこと、
+#   (4) cld の成功扱いでは post-spawn 検証層を skip する（capture / send-keys を 1 回も発行しない）こと
+#   を、file の grep ではなく **実行の exit code と stdout/stderr** で pin する（vacuous 封鎖）。
+
+# cld-spawn を任意 rc で失敗させる driver（bdmode は呼び手が事前に設定する）。
+_spawn_cld_fail() {   # $1 = cld-spawn の exit code
+  local f="$BATS_TEST_TMPDIR/rbff2-cld-$1"
+  printf '#!/usr/bin/env bash\nexit %s\n' "$1" > "$f"; chmod +x "$f"
+  run --separate-stderr env PATH="$SHIM_PATH" BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_CLD_SPAWN="$f" \
+      SCRIBE_SPAWN_CAPTURE="$CAPTURE_STUB" SCRIBE_TMUX="$TMUX_STUB" \
+      TMUX_PANE="%42" SCRIBE_WINDOWS_STUB="@9 wt-un-4nm" \
+      "$SPAWN" --repo "$REPO" --anchor "$REPO" un-4nm
+}
+
+# bg launch を任意 rc で失敗させる driver（--transport bg 明示＝auto の post-launch fallback を避ける。jq は
+# rbff:（bg）と同じく必須前提で skip しない＝rbff2 群を非空虚に保つ）。--bg の stdout は file 経由で与えるので
+# 未 trim（前後空白・改行）の生返却値もそのまま再現できる。
+_spawn_bg_fail() {   # $1 = claude --bg の exit code / $2 = --bg の stdout（既定 bgagent-abcd1234）
+  local rc="$1" avail claude outf
+  outf="$BATS_TEST_TMPDIR/rbff2-bgout"; printf '%s' "${2-bgagent-abcd1234}" > "$outf"
+  avail="$BATS_TEST_TMPDIR/rbff2-bg-avail"; printf '#!/usr/bin/env bash\nexit 0\n' > "$avail"; chmod +x "$avail"
+  claude="$BATS_TEST_TMPDIR/rbff2-claude"
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'if [[ "$1" == "--help" ]]; then echo "usage: claude [--bg] [--model M] [--effort L] [--plugin-dir D] ..."; exit 0; fi'
+    echo "if [[ \"\$1\" == \"--bg\" ]]; then cat '$outf'; exit $rc; fi"
+    echo 'exit 0'
+  } > "$claude"; chmod +x "$claude"
+  run --separate-stderr env PATH="$SHIM_PATH" BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_BG_PREFLIGHT="$avail" \
+      SCRIBE_CLAUDE_BIN="$claude" SCRIBE_PLUGIN_DIR="$REPO_ROOT" \
+      SCRIBE_SPAWN_CAPTURE="$CAPTURE_STUB" SCRIBE_TMUX="$TMUX_STUB" \
+      "$SPAWN" --repo "$REPO" --anchor "$REPO" --transport bg un-4nm
+}
+
+@test "rbff2: cld rc≠0 + SPAWNED 新規出現 → exit 0 で成功扱い（loud warn・掃除提示ゼロ・spawned:/monitor: を emit）" {
+  echo delivered > "$S/mode"; echo immediate > "$S/bdmode"   # c=0 が baseline read → 以降 marker 出現＝増分あり
+  _spawn_cld_fail 42
+  [ "$status" -eq 0 ]                                                     # rc を 42 のまま落とさず成功扱いへ倒す
+  [[ "$output" == *"spawned: issue=un-4nm"* ]]                            # stdout に spawned:
+  [[ "$output" == *"monitor: "* ]]                                        # stdout に monitor:（2 次被害＝monitor skip の回復）
+  [[ "$stderr" == *"積極証拠で起動を確認しました（成功扱いで続行します）"* ]]   # canonical loud warn（逐語）
+  [[ "$stderr" == *"exit=42"* ]]                                          # 元の rc 値を surface（silent 昇格ゼロ）
+  [[ "$stderr" == *"重複注入された可能性"* ]]                              # retry による prompt 重複の注意
+  [[ "$stderr" == *"tmux list-windows"* ]]                                # 二重 worker の一次観測手順
+  [[ "$output$stderr" != *"scribe-cleanup.sh"* ]]                         # 出力全体に掃除コマンドを 1 文字も出さない
+  [[ "$output$stderr" != *"起動していません"* ]]
+  [[ "$output" != *"積極証拠で起動を確認しました"* ]]                       # 新 warn は stdout を汚さない（stderr のみ）
+  [ -d "$WT" ]
+}
+
+@test "rbff2: cld rc≠0 + SPAWNED 不着 → rc を素通し（exit 42）し ② の非断定文言と印字順序を退行させない" {
+  local p_ln t_ln c_ln cl_ln
+  echo delivered > "$S/mode"; echo never > "$S/bdmode"
+  _spawn_cld_fail 42
+  [ "$status" -eq 42 ]                                                    # 陰性は rc 素通し（7 等へ丸めない）
+  [[ "$stderr" == *"送達確認が取れませんでした（worker が起動しているかは未確定）"* ]]
+  [[ "$stderr" != *"起動していません"* ]]
+  [[ "$stderr" != *"積極証拠で起動を確認しました"* ]]                       # 陰性で成功扱い warn を出さない
+  [[ "$stderr" == *"不在が確定した場合のみ"* ]]
+  [[ "$output" != *"spawned: issue=un-4nm"* ]]
+  p_ln="$(grep -n -m1 -F 'SPAWNED--un-4nm' <<< "$stderr" | cut -d: -f1)"
+  t_ln="$(grep -n -m1 -F 'tmux capture-pane' <<< "$stderr" | cut -d: -f1)"
+  c_ln="$(grep -n -m1 -F '不在が確定した場合のみ' <<< "$stderr" | cut -d: -f1)"
+  cl_ln="$(grep -n -m1 -F 'scribe-cleanup.sh --repo' <<< "$stderr" | cut -d: -f1)"
+  [ -n "$p_ln" ] && [ -n "$t_ln" ] && [ -n "$c_ln" ] && [ -n "$cl_ln" ]
+  [ "$p_ln" -lt "$cl_ln" ]
+  [ "$t_ln" -lt "$cl_ln" ]
+  [ "$c_ln" -lt "$cl_ln" ]
+}
+
+@test "rbff2: cld rc≠0 + stale marker（baseline 時点で既在）→ 成功扱いへ倒さない（exit 42・fail-open 封鎖）" {
+  # 再 spawn の残骸 marker を「新規出現」と誤読すると、起動していない worker を成功扱いにしてしまう。
+  # 判定は **生の件数 > 0** ではなく baseline 差分でなければならない、の回帰 pin。
+  echo delivered > "$S/mode"; echo always > "$S/bdmode"
+  _spawn_cld_fail 42
+  [ "$status" -eq 42 ]
+  [[ "$stderr" != *"積極証拠で起動を確認しました"* ]]
+  [[ "$stderr" == *"送達確認が取れませんでした（worker が起動しているかは未確定）"* ]]
+  [[ "$output" != *"spawned: issue=un-4nm"* ]]
+}
+
+@test "rbff2: cld の成功扱いでは post-spawn 検証層を再実行しない（capture 0 件・send-keys 0 件）" {
+  # ■F5: 成功扱い後に検証層へ fall-through させると、marker 導出失敗経路 / budget 経路が
+  # spawn_confirm_orphan_guidance を呼び「掃除提示なし」が確率的に破れる。層ごと skip することを side-effect で pin。
+  echo residual > "$S/mode"; echo immediate > "$S/bdmode"   # capture すれば RESIDUAL→Enter を撃つ mode
+  _spawn_cld_fail 42
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"spawned: issue=un-4nm"* ]]
+  ! grep -q '^CAPTURE' "$S/calls.log"                       # capture-pane を 1 回も発行しない
+  ! grep -q '^ENTER' "$S/calls.log"                         # send-keys Enter を 1 キーも送らない
+  [ "$(_enters)" -eq 0 ]
+  [[ "$stderr" != *"post-spawn 検証 OK"* ]]                  # 検証層そのものを通っていない
+  [[ "$stderr" != *"post-spawn submit 検証に失敗"* ]]
+}
+
+@test "rbff2: bg rc≠0 + SPAWNED 新規出現 → exit 0 で成功扱い（spawned(bg): の agent_id は単一トークン・掃除提示ゼロ）" {
+  local aid
+  echo immediate > "$S/bdmode"                              # baseline（launch 直前の自前取得）→ 以降 marker 出現
+  _spawn_bg_fail 9 $'  bgagent-abcd1234  \n'                # 未 trim の生 stdout（空白・改行込み）
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"spawned(bg): issue=un-4nm"* ]]
+  [[ "$output" == *"monitor: "* ]]
+  [[ "$stderr" == *"積極証拠で起動を確認しました（成功扱いで続行します）"* ]]
+  [[ "$stderr" == *"exit=9"* ]]
+  [[ "$stderr" == *"重複注入された可能性"* ]]
+  [[ "$stderr" == *"tmux list-windows"* ]]
+  [[ "$output$stderr" != *"scribe-cleanup.sh"* ]]
+  [[ "$output$stderr" != *"起動していません"* ]]
+  # ■F8: short-id は成功枝と同一の trim を通る（未 trim の生 stdout を流さない＝空白を含まない単一トークン）。
+  aid="$(sed -n 's/.*spawned(bg): issue=un-4nm agent_id=\([^ ]*\) .*/\1/p' <<< "$output")"
+  [ "$aid" = "bgagent-abcd1234" ]
+}
+
+@test "rbff2: bg rc≠0 + SPAWNED 不着 → rc を素通し（exit 9）し ② の非断定文言と印字順序を退行させない" {
+  local p_ln c_ln cl_ln
+  echo never > "$S/bdmode"
+  _spawn_bg_fail 9
+  [ "$status" -eq 9 ]
+  [[ "$stderr" == *"送達確認が取れませんでした（worker が起動しているかは未確定）"* ]]
+  [[ "$stderr" != *"起動していません"* ]]
+  [[ "$stderr" != *"積極証拠で起動を確認しました"* ]]
+  [[ "$stderr" == *"不在が確定した場合のみ"* ]]
+  [[ "$output" != *"spawned(bg):"* ]]
+  p_ln="$(grep -n -m1 -F 'SPAWNED--un-4nm' <<< "$stderr" | cut -d: -f1)"
+  c_ln="$(grep -n -m1 -F '不在が確定した場合のみ' <<< "$stderr" | cut -d: -f1)"
+  cl_ln="$(grep -n -m1 -F 'scribe-cleanup.sh --repo' <<< "$stderr" | cut -d: -f1)"
+  [ -n "$p_ln" ] && [ -n "$c_ln" ] && [ -n "$cl_ln" ]
+  [ "$p_ln" -lt "$cl_ln" ]
+  [ "$c_ln" -lt "$cl_ln" ]
+}
+
+@test "rbff2: bg rc≠0 + stale marker（baseline 時点で既在）→ 成功扱いへ倒さない（exit 9・fail-open 封鎖）" {
+  echo always > "$S/bdmode"
+  _spawn_bg_fail 9
+  [ "$status" -eq 9 ]
+  [[ "$stderr" != *"積極証拠で起動を確認しました"* ]]
+  [[ "$stderr" == *"送達確認が取れませんでした（worker が起動しているかは未確定）"* ]]
+  [[ "$output" != *"spawned(bg):"* ]]
+}
+
+@test "rbff2: bg の baseline は transport 分岐の内側で取る（--dry-run は bd --json を 1 回も叩かない）" {
+  # ■F11/confirm.bats:470 と同じ side-effect 規律を bg baseline 追加後も保つ（dry-run で bd を叩き始めたら
+  # 「dry-run は side-effect ゼロ」契約が壊れる）。--transport bg 明示で dry-run しても bdcalls は 0。
+  run env BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_CLD_SPAWN=cld-spawn \
+      SCRIBE_BG_PREFLIGHT=/bin/true SCRIBE_CLAUDE_BIN=/bin/true SCRIBE_PLUGIN_DIR="$REPO_ROOT" \
+      SCRIBE_SPAWN_CAPTURE="$CAPTURE_STUB" SCRIBE_TMUX="$TMUX_STUB" \
+      "$SPAWN" --repo "$REPO" --anchor "$REPO" --transport bg --dry-run un-4nm
+  [ "$status" -eq 0 ]
+  [ "$(cat "$S/bdcalls")" -eq 0 ]
+  [ ! -s "$S/calls.log" ]
+}
+
+# ---------- sc-zvom（rider）: spawn_confirm_orphan_guidance の cleanup 見出しを条件文言へ従属化 ----------
+# 何を守るか: 本関数は既に一次観測（pane capture / bd の SPAWNED marker）を cleanup **より先に** 印字する
+#   理想形だが、見出しが「掃除するには（…）:」という **無条件の勧め** のままだった。sc-r43f が両 launch 経路へ
+#   land させた同一語彙「上記確認で worker 不在が確定した場合のみ、…」へ揃え、cleanup を条件へ従属させる。
+#   oracle は file の grep ではなく **実行出力の内容と行番号比較**（file grep 型 teeth は不可・sc-zvom(3)）。
+
+@test "rbff2-zvom: exit 7 経路の cleanup 見出しが条件文言へ従属し、一次観測 2 行が cleanup より前に出る" {
+  local z_ln p_ln t_ln cl_ln
+  echo delivered > "$S/mode"; echo never > "$S/bdmode"   # SPAWNED 不着 → spawn_confirm が loud-fail（exit 7）
+  _spawn
+  [ "$status" -eq 7 ]                                    # spawn_confirm_orphan_guidance を通る経路であることの前提
+  [[ "$output" == *"post-spawn submit 検証に失敗"* ]]
+  [[ "$output" == *"不在が確定した場合のみ"* ]]           # (a) 条件文言が出る
+  [[ "$output" == *"上記確認で worker 不在が確定した場合のみ、掃除するには（force 系を使わない確認プロンプト付き cleanup）:"* ]]
+  z_ln="$(grep -n -m1 -F '不在が確定した場合のみ' <<< "$output" | cut -d: -f1)"
+  p_ln="$(grep -n -m1 -F 'SPAWNED--un-4nm' <<< "$output" | cut -d: -f1)"
+  t_ln="$(grep -n -m1 -F 'tmux capture-pane' <<< "$output" | cut -d: -f1)"
+  cl_ln="$(grep -n -m1 -F 'scribe-cleanup.sh --repo' <<< "$output" | cut -d: -f1)"
+  [ -n "$z_ln" ] && [ -n "$p_ln" ] && [ -n "$t_ln" ] && [ -n "$cl_ln" ]
+  [ "$z_ln" -lt "$cl_ln" ]                               # (b) 条件文言は cleanup コマンド行より前
+  [ "$p_ln" -lt "$cl_ln" ]                               # (c) 一次観測（bd の SPAWNED marker）も cleanup より前
+  [ "$t_ln" -lt "$cl_ln" ]                               # (c) 一次観測（tmux capture-pane）も cleanup より前
+  [ -d "$WT" ]                                           # orphan は残す（自動削除しない＝既存契約）
+}
