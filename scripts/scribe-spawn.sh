@@ -1835,9 +1835,14 @@ if [[ "$EFFECTIVE_TRANSPORT" == "bg" ]]; then
       EFFECTIVE_TRANSPORT="tmux"
     else
       {
-        echo "scribe: error: bg launch（claude --bg）が失敗しました（exit=$_bg_rc）。worker は起動していません。"
+        echo "scribe: error: bg launch（claude --bg）が失敗しました（exit=$_bg_rc）。送達確認が取れませんでした（worker が起動しているかは未確定）。"
         echo "scribe: worktree が orphan として残っています（自動削除はしません＝force 禁止・確認必須ポリシー）: $WORKTREE"
-        echo "scribe: 掃除するには（force 系を使わない確認プロンプト付き cleanup）:"
+        # sc-r43f: この rc は read-back（送達確認）の失敗しか意味しない＝worker が既に起動していることがある。
+        # cleanup を無条件提示すると live worker を破壊し、断定文言は二重起動（再 spawn）を誘発する。ゆえに
+        # 積極証拠の確認手順を **cleanup より先に** 印字し、cleanup 行は不在確定を条件に従属させる。
+        echo "scribe: まず worker の生死を一次観測してください（積極証拠が出れば worker は起動済み＝掃除も再 spawn もしません）:"
+        echo "         cd \"$ANCHOR\" && bd show $ID   # 出力に [SPAWNED--$ID] があり status=in_progress なら worker は起動済み"
+        echo "scribe: 上記確認で worker 不在が確定した場合のみ、掃除するには（force 系を使わない確認プロンプト付き cleanup）:"
         echo "         $SCRIPT_DIR/scribe-cleanup.sh --repo \"$REPO\" --worktree \"$WORKTREE\" --branch \"$BRANCH\" --window \"$WINDOW\" $ID"
       } >&2
       exit "$_bg_rc"
@@ -1871,9 +1876,15 @@ if [[ "$EFFECTIVE_TRANSPORT" == "tmux" ]]; then
   "$CLD_SPAWN" --cd "$WORKTREE" --bd-id "$ID" --model "$MODEL" "${CLD_EFFORT_ARG[@]}" --disallowed-tools "$WORKER_DISALLOWED_TOOLS" --env-file "$WORKER_ENV_FILE" "$PROMPT_TEXT" || _cld_rc=$?
   if [[ "$_cld_rc" -ne 0 ]]; then
     {
-      echo "scribe: error: cld-spawn が失敗しました（exit=$_cld_rc）。worker は起動していません。"
+      echo "scribe: error: cld-spawn が失敗しました（exit=$_cld_rc）。送達確認が取れませんでした（worker が起動しているかは未確定）。"
       echo "scribe: worktree が orphan として残っています（自動削除はしません＝force 禁止・確認必須ポリシー）: $WORKTREE"
-      echo "scribe: 掃除するには（force 系を使わない確認プロンプト付き cleanup）:"
+      # sc-r43f: この rc は read-back（送達確認）の失敗しか意味しない＝cld-spawn が非 0 でも worker は
+      # 起動していることがある（実測 3 例）。cleanup を無条件提示すると live worker を破壊するため、
+      # 積極証拠の確認手順を **cleanup より先に** 印字し、cleanup 行は不在確定を条件に従属させる。
+      echo "scribe: まず worker の生死を一次観測してください（積極証拠が出れば worker は起動済み＝掃除も再 spawn もしません）:"
+      echo "         cd \"$ANCHOR\" && bd show $ID   # 出力に [SPAWNED--$ID] があり status=in_progress なら worker は起動済み"
+      echo "         tmux capture-pane -p -t \"$WINDOW\" | tail -n 20   # 同 session 内で実行（worker の turn が動いていれば起動済み）"
+      echo "scribe: 上記確認で worker 不在が確定した場合のみ、掃除するには（force 系を使わない確認プロンプト付き cleanup）:"
       echo "         $SCRIPT_DIR/scribe-cleanup.sh --repo \"$REPO\" --worktree \"$WORKTREE\" --branch \"$BRANCH\" --window \"$WINDOW\" $ID"
     } >&2
     exit "$_cld_rc"

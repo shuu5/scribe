@@ -469,3 +469,96 @@ _set_prompt_marker() {
   [ ! -s "$S/calls.log" ]
   [ "$(cat "$S/bdcalls")" -eq 0 ]
 }
+
+# ---------- sc-r43f: launch rc≠0 の断定撤去 + cleanup 提示の条件化（両経路・orch-2z5r ②）----------
+# 何を守るか: cld-spawn / bg launch の rc≠0 は **送達確認（read-back）の失敗**しか意味しないのに、旧文言は
+#   「worker は起動していません」と断定していた（→ admin が再 spawn して二重 worker）うえ、cleanup コマンドを
+#   **無条件**に提示していた（→ live worker の破壊＝「消す」クラス事故。scm-hpti が 3 例目で実行一歩手前）。
+#   ゆえに (1) error: 行を非断定文言へ是正し (2) 積極証拠の確認手順（bd show の SPAWNED marker + status /
+#   tmux 経路は capture-pane 併記）を **cleanup コマンドより先に** 印字して cleanup 行を「不在が確定した
+#   場合のみ」へ従属させる。oracle は file の grep ではなく **実行 stderr の内容と印字順序**（vacuous 封鎖）。
+#   exit code は不変（本 leg は文言と提示構造のみ・成功扱いへの反転や裏取り実装は sc-gvvr ①）。
+
+@test "rbff: cld-spawn rc≠0 は断定せず確認手順（bd marker + capture-pane）を cleanup より先に出す" {
+  local fail42 p_ln t_ln c_ln cl_ln
+  fail42="$BATS_TEST_TMPDIR/rbff-cld-42"; printf '#!/usr/bin/env bash\nexit 42\n' > "$fail42"; chmod +x "$fail42"
+  run env PATH="$SHIM_PATH" BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_CLD_SPAWN="$fail42" \
+      SCRIBE_SPAWN_CAPTURE="$CAPTURE_STUB" SCRIBE_TMUX="$TMUX_STUB" \
+      TMUX_PANE="%42" SCRIBE_WINDOWS_STUB="@9 wt-un-4nm" \
+      "$SPAWN" --repo "$REPO" --anchor "$REPO" un-4nm
+  [ "$status" -eq 42 ]                                     # exit code は素通し（不変・1/7 と弁別可能な値）
+  [[ "$output" != *"worker は起動していません"* ]]          # 旧断定文言の撤去
+  [[ "$output" != *"起動していません"* ]]                   # 言い換えによる復活も封鎖
+  [[ "$output" != *"起動失敗"* ]]
+  [[ "$output" == *"送達確認が取れませんでした（worker が起動しているかは未確定）"* ]]
+  [[ "$output" == *"[SPAWNED--un-4nm]"* ]]                 # 積極証拠の確認手順（bd show の marker）
+  [[ "$output" == *"in_progress"* ]]                       # status も併記（marker + status の AND）
+  [[ "$output" == *"tmux capture-pane"* ]]                 # tmux 経路は pane 一次観測も併記
+  [[ "$output" == *"不在が確定した場合のみ"* ]]             # cleanup は条件へ従属
+  [[ "$output" == *"scribe-cleanup.sh"* ]]                 # cleanup 行自体は残す（削除ではなく従属化）
+  # 印字順序（acceptance(2) の本体は literal ではなく順序）: 確認手順・条件文言が cleanup コマンドより前。
+  p_ln="$(grep -n -m1 -F 'SPAWNED--un-4nm' <<< "$output" | cut -d: -f1)"
+  t_ln="$(grep -n -m1 -F 'tmux capture-pane' <<< "$output" | cut -d: -f1)"
+  c_ln="$(grep -n -m1 -F '不在が確定した場合のみ' <<< "$output" | cut -d: -f1)"
+  cl_ln="$(grep -n -m1 -F 'scribe-cleanup.sh --repo' <<< "$output" | cut -d: -f1)"
+  [ -n "$p_ln" ] && [ -n "$t_ln" ] && [ -n "$c_ln" ] && [ -n "$cl_ln" ]
+  [ "$p_ln" -lt "$cl_ln" ]
+  [ "$t_ln" -lt "$cl_ln" ]
+  [ "$c_ln" -lt "$cl_ln" ]
+  [ -d "$WT" ]                                             # orphan は残す（自動削除しない＝既存契約）
+}
+
+@test "rbff: bg launch 失敗も断定せず確認手順（bd marker）を cleanup より先に出す" {
+  # --transport bg を **明示** する: auto は bg launch 失敗時に tmux へ post-launch fallback して当該 block へ
+  # 入らない（＝assert が vacuous になる）。jq は bg × SCRIBE_SANDBOX=0 の env carrier 合成に必須（skip しない）。
+  local avail claude p_ln c_ln cl_ln
+  avail="$BATS_TEST_TMPDIR/rbff-bg-avail"; printf '#!/usr/bin/env bash\nexit 0\n' > "$avail"; chmod +x "$avail"
+  claude="$BATS_TEST_TMPDIR/rbff-claude-9"
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'if [[ "$1" == "--help" ]]; then echo "usage: claude [--bg] [--model M] [--effort L] [--plugin-dir D] ..."; exit 0; fi'
+    echo 'if [[ "$1" == "--bg" ]]; then echo "bgagent-abcd1234"; exit 9; fi'
+    echo 'exit 0'
+  } > "$claude"; chmod +x "$claude"
+  run env PATH="$SHIM_PATH" BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_BG_PREFLIGHT="$avail" \
+      SCRIBE_CLAUDE_BIN="$claude" SCRIBE_PLUGIN_DIR="$REPO_ROOT" \
+      SCRIBE_SPAWN_CAPTURE="$CAPTURE_STUB" SCRIBE_TMUX="$TMUX_STUB" \
+      "$SPAWN" --repo "$REPO" --anchor "$REPO" --transport bg un-4nm
+  [ "$status" -eq 9 ]                                      # bg stub の exit code を素通し（不変）
+  [[ "$output" == *"bg launch（claude --bg）が失敗しました"* ]]   # 事実（launch コマンドの失敗）は残す
+  [[ "$output" != *"worker は起動していません"* ]]
+  [[ "$output" != *"起動していません"* ]]
+  [[ "$output" != *"起動失敗"* ]]
+  [[ "$output" == *"送達確認が取れませんでした（worker が起動しているかは未確定）"* ]]
+  [[ "$output" == *"[SPAWNED--un-4nm]"* ]]
+  [[ "$output" == *"in_progress"* ]]
+  [[ "$output" == *"不在が確定した場合のみ"* ]]
+  [[ "$output" == *"scribe-cleanup.sh"* ]]
+  [[ "$output" != *"capture-pane"* ]]                      # bg は tmux window が無い（pane 観測を誤案内しない）
+  p_ln="$(grep -n -m1 -F 'SPAWNED--un-4nm' <<< "$output" | cut -d: -f1)"
+  c_ln="$(grep -n -m1 -F '不在が確定した場合のみ' <<< "$output" | cut -d: -f1)"
+  cl_ln="$(grep -n -m1 -F 'scribe-cleanup.sh --repo' <<< "$output" | cut -d: -f1)"
+  [ -n "$p_ln" ] && [ -n "$c_ln" ] && [ -n "$cl_ln" ]
+  [ "$p_ln" -lt "$cl_ln" ]
+  [ "$c_ln" -lt "$cl_ln" ]
+  [ -d "$WT" ]
+}
+
+@test "rbff: 案内は stderr のみへ出る（stdout 純度＝group redirect 破壊の唯一の検出網）" {
+  # `{ … } >&2` を printf/heredoc へ書き換えたり group redirect を落とすと、案内が stdout へ漏れて
+  # 「spawned 行だけを読む」consumer を汚す。stdout/stderr を分離して両側から pin する。
+  local fail42
+  fail42="$BATS_TEST_TMPDIR/rbff-cld-42b"; printf '#!/usr/bin/env bash\nexit 42\n' > "$fail42"; chmod +x "$fail42"
+  run --separate-stderr env PATH="$SHIM_PATH" BEADS_BDW="$BDW_PRESENT_STUB" SCRIBE_CLD_SPAWN="$fail42" \
+      SCRIBE_SPAWN_CAPTURE="$CAPTURE_STUB" SCRIBE_TMUX="$TMUX_STUB" \
+      TMUX_PANE="%42" SCRIBE_WINDOWS_STUB="@9 wt-un-4nm" \
+      "$SPAWN" --repo "$REPO" --anchor "$REPO" un-4nm
+  [ "$status" -eq 42 ]
+  [[ "$stderr" == *"送達確認が取れませんでした（worker が起動しているかは未確定）"* ]]
+  [[ "$stderr" == *"[SPAWNED--un-4nm]"* ]]
+  [[ "$stderr" == *"不在が確定した場合のみ"* ]]
+  [[ "$stderr" == *"scribe-cleanup.sh"* ]]
+  [[ "$output" != *"送達確認が取れませんでした"* ]]          # stdout（$output）へは 1 文字も漏らさない
+  [[ "$output" != *"scribe-cleanup.sh"* ]]
+  [[ "$output" != *"SPAWNED--un-4nm"* ]]
+}
