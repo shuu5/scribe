@@ -61,6 +61,36 @@ teardown() {
     grep -q "ALPHA" "$CONSUMED"
 }
 
+@test "czero: emit_working_memory は consumed 不在で loud warn を出す（stdout は従来形のまま）" {
+    local missing="$WORKING_MEMORY_DIR/nope.consumed.md"
+    run bash -c "source '$SCRIPT_DIR/lib/working-memory.sh'; emit_working_memory 2026-01-01T00:00:00Z manual '$missing' 2>'$SANDBOX/err'"
+    [ "$status" -eq 0 ]
+    grep -qF 'carry-forward 供給 0 項目' "$SANDBOX/err"
+    grep -qF "$missing" "$SANDBOX/err"
+    grep -qF 'exists=no' "$SANDBOX/err"
+    # 挙動変更は stderr のみ＝stdout は「consumed 引数なし」と byte 等価
+    run bash -c "source '$SCRIPT_DIR/lib/working-memory.sh'; emit_working_memory 2026-01-01T00:00:00Z manual '$missing' 2>/dev/null"
+    local with_arg="$output"
+    run bash -c "source '$SCRIPT_DIR/lib/working-memory.sh'; emit_working_memory 2026-01-01T00:00:00Z manual 2>/dev/null"
+    [ "$with_arg" = "$output" ]
+}
+
+@test "czero: 命令・制約節が空の consumed も 0 項目として warn する（exists=yes）" {
+    printf '%s\n' "## 計画弧・次のステップ" "- s" "" "## この effort を貫く命令・制約" > "$CONSUMED"
+    run bash -c "source '$SCRIPT_DIR/lib/working-memory.sh'; emit_working_memory 2026-01-01T00:00:00Z manual '$CONSUMED' 2>'$SANDBOX/err'"
+    [ "$status" -eq 0 ]
+    grep -qF 'carry-forward 供給 0 項目' "$SANDBOX/err"
+    grep -qF 'exists=yes' "$SANDBOX/err"
+}
+
+@test "czero: 正常 carry（項目あり）では warn を出さない（negative）" {
+    printf '%s\n' "## 計画弧・次のステップ" "- s" "" "## この effort を貫く命令・制約" "- [auto] CZERO_KEEP" > "$CONSUMED"
+    run bash -c "source '$SCRIPT_DIR/lib/working-memory.sh'; emit_working_memory 2026-01-01T00:00:00Z manual '$CONSUMED' 2>'$SANDBOX/err'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CZERO_KEEP"* ]]
+    [ ! -s "$SANDBOX/err" ]
+}
+
 @test "integration: SessionStart が PostCompact より先に走っても誤誘導を出さない（順序逆転）" {
     # working のみ存在（PostCompact 未走 = consumed なし）
     printf '%s\n' "## この effort を貫く命令・制約" "- [auto] PENDING" > "$WM_FILE"
