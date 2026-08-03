@@ -40,6 +40,7 @@
 .beads-credential-key
 .beads/issues.jsonl
 .beads/interactions.jsonl
+.beads/events.jsonl
 embeddeddolt/
 
 # Python bytecode (scripts/hooks/*.py = git-destructive-guard 等)
