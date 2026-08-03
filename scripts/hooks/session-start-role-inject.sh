@@ -184,6 +184,23 @@ _scribe_has_beads() {
 # 契約は spawn prompt が担保）。取得は必ず `-t "$TMUX_PANE"` 明示（背景 spawn 中に human が別窓 focus
 # すると bare `display-message` は誤窓名を返す・verified hazard）。tmux 呼出は `"${SCRIBE_TMUX:-tmux}"`
 # 経由で bats から stub 可能にする（scribe-spawn.sh:718 と同一 seam 名）。
+# ★orca タブ由来 stale pane の skip（sc-0dx9 / ot 依頼 leg(b)）:
+#   orca（GUI ターミナル）タブから起動したセッションは TMUX / TMUX_PANE を**非空のまま**継承するが、
+#   その TMUX_PANE が指す pane は既に消滅していることがある（実測: TMUX=/tmp/tmux-1001/default,1601,16 /
+#   TMUX_PANE=%88 で **server 自体は生存**し pane %88 だけが消滅）。不在 pane への display-message は
+#   rc=0 + 空（複数フィールド format なら区切りだけの非空）を返すため、**rc でも出力の非空でも**実在を
+#   判定できない。ゆえに pane 実在は `#{pane_id}` の**エコー一致**（積極証拠）で判定する。
+#   ★skip は **論理積**（ORCA_TERMINAL_HANDLE が非空 ∧ エコー不一致）に限る——handle 単独条件にすると、
+#   tmux server が orca タブ起点で再起動されて server env に handle が入り全 pane がこれを継承した場合、
+#   sc-cji の consult 復帰が **silent に全滅**する。handle 不所持でのエコー不一致は従来どおり扱う
+#   （skip せず取得した窓名でそのまま prefix 判定＝空なら非 consult）。
+#   ★将来（要反転）: consult を **orca タブ化**（出典: ot-ody 論点3 / orca-migration-recon Q5 案 B）すると、
+#     **本 skip が正当な consult を殺す向きに反転**する。その時点で本条件を外すか反転させること。
+#   限定（過大主張しない）: pane 実在検証が塞ぐのは**不在 pane のみ**。stale だが生存中の pane を指す型は
+#   本 leg では塞がらない（pane id は同一 server 内で再利用されないため、その型は server 世代交代後にのみ成立）。
+#   照合は TMUX_PANE が `%N` 形であることを前提とする。`%N` 以外の target 形が入ると正当 pane でも不一致に
+#   なりうるが、帰結は既存 fail-safe と同じ非 consult であり新たな害は無い。
+#   fail-loud は stderr 1 行のみ（skip 経路だけ・silent 失効の可視化）。fail-safe の向き・exit 0 は不変。
 _scribe_is_consult_window() {
     command -v "${SCRIBE_TMUX:-tmux}" >/dev/null 2>&1 || return 1
     [ -n "${TMUX:-}" ] || return 1
@@ -191,8 +208,24 @@ _scribe_is_consult_window() {
     # active-pane 解決へ縮退し「取得は必ず -t 明示」の防護が黙って無効化される（tmux 3.4 実測=
     # -t "" は現在 focus 窓名を exit 0 で返す）。pane 識別子なし=防護が効かない→fail-safe(非 consult)。
     [ -n "${TMUX_PANE:-}" ] || return 1
-    local _w
-    _w="$("${SCRIBE_TMUX:-tmux}" display-message -p -t "${TMUX_PANE:-}" '#W' 2>/dev/null)" || return 1
+    local _out _pid _w
+    # tmux 呼出は **1 回のまま**（pane_id と #W を 1 回で同時取得する・この hook は timeout 非包の待ちを
+    # 2 つ持ち、呼出を増やすと wire 予算超過＝stdout 0 byte の silent 全損の窓が広がる）。
+    _out="$("${SCRIBE_TMUX:-tmux}" display-message -p -t "${TMUX_PANE:-}" '#{pane_id} #W' 2>/dev/null)" || return 1
+    # parse は空白 1 個区切り（非貪欲）: 窓名に空白が入っても窓名側を丸ごと復元できる。cut/awk/python3 に
+    # 依存しない（restricted PATH 耐性）。参照実装 scripts/lib/scribe-lib.sh の scribe_current_session と同型。
+    _pid="${_out%% *}"
+    _w="${_out#* }"
+    if [ "$_pid" != "${TMUX_PANE:-}" ]; then
+        # 論理積の handle 条件（空文字は set でないと扱う: 空 set を skip 側に数えると skip が広がり、
+        # 本 leg が最も恐れる「正当な consult を殺す」向きへ倒れる）。
+        if [ -n "${ORCA_TERMINAL_HANDLE:-}" ]; then
+            echo "[scribe/SessionStart] warning: ORCA_TERMINAL_HANDLE あり + pane_id エコー不一致 → orca タブ由来の stale TMUX_PANE とみなし consult 窓判定を skip(非 consult・sc-0dx9) TMUX_PANE=${TMUX_PANE:-}" >&2
+            return 1
+        fi
+    fi
+    # 退化ガード: 区切りが無い出力（1 フィールドのみ）は _w == _pid になる＝判定不能ゆえ非 consult へ倒す。
+    [ "$_w" != "$_pid" ] || return 1
     case "$_w" in
         consult-*) return 0 ;;
         *)         return 1 ;;
