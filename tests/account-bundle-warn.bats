@@ -449,8 +449,10 @@ _untracked_deliverables() {
   # 禁止 2 path の 0 touch だけでは「allowlist に無い第 3 の file を触った」を検出できないため、包含側も見る。
   # allowlist = F13 編集可リスト + tests/scribe-account-select.bats。後者は F13 の列挙には無いが ■F3 が
   # 「既存 bats の hermetic setup へ新 seam を必ず追加する」と明示的に義務づける面（追加しないと host の
-  # live session 数に依存して既存 suite が非決定化する）。**allowlist 例外として DONE note に申し送り、
-  # admin ratify に載せる**（追記のみ・assert の削除 / 緩和 / catch-all 化はゼロ）。
+  # live session 数に依存して既存 suite が非決定化する）。**この例外は admin ratify 済み**（bd sc-zwzs の
+  # salvage note＝より具体的な ■F3 が一般的な ■F13 に優先する lex specialis。契約側の列挙漏れであって
+  # 逸脱ではない）。ratify の条件は「追記のみ・削除 0 行・assert の削除 / 緩和 / catch-all 化はゼロ」ゆえ、
+  # 下でその条件のうち機械照合できる面（削除行 0）を assert する（条件を散文の申し送りに留めない）。
   local allow changed out
   allow='^(scripts/scribe-account-bundle-warn|scripts/scribe-spawn\.sh|scripts/README\.md'
   allow="$allow"'|tests/account-bundle-warn\.bats|tests/account-bundle-warn-mutants\.sh'
@@ -462,4 +464,13 @@ _untracked_deliverables() {
   [ -n "$changed" ]                                     # vacuity 防止（本 cell の変更集合は必ず非空）
   out="$(grep -vE "$allow" <<<"$changed" || true)"
   [ -z "$out" ]
+
+  # ratify 条件の機械照合: allowlist 例外（tests/scribe-account-select.bats）への変更は **追記のみ**
+  # ＝削除行 0 であること。numstat の第 2 列が削除行数で、base...HEAD と working tree の両方を見る。
+  # 空（= 当該 file に変更なし）は合格。数値として読めない値（binary の '-' 等）は fail-closed で RED。
+  local del
+  for del in "$(git -C "$REPO_ROOT" diff --numstat "$base"...HEAD -- tests/scribe-account-select.bats | awk '{print $2}')" \
+             "$(git -C "$REPO_ROOT" diff --numstat -- tests/scribe-account-select.bats | awk '{print $2}')"; do
+    [ -z "$del" ] || { [[ "$del" =~ ^[0-9]+$ ]] && [ "$del" -eq 0 ]; }
+  done
 }
