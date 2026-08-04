@@ -8,6 +8,10 @@
 #         machinery 健全）なら converged へ昇格する。過剰一般化（machineryFailed 連言外し / capFinalize の
 #         後置）は否定対照が捕える。
 #   [L-C] driver の round 別 stub knob（項目4）: 未設定時の挙動が **byte 単位で従来と同一**であること。
+#   [L-S] sc-vtf8（M0 受け sc-k33c carve-out）: snapshot 段の **3 値弁別**。生 diff / EMPTY_DIFF /
+#         inline 上限超過（DIFF_TOO_LARGE_FOR_INLINE_RETURN）を分離し、非 compliant 応答を EMPTY_DIFF 系の
+#         文言へ丸めない。実測根拠 = 非空 143KB diff（sc-u9tj）/ 112KB 超 diff（orch-4c0a）が EMPTY_DIFF と
+#         誤分類され review 前に中断した＝偽の「レビュー対象不在」。
 #
 # 【本 file が持たないもの = churn（旧契約 ■6・admin 裁定で Leg-2 へ移送済み）】
 #   churn（正味前進なし round の loud 打切り）は **本 leg の scope 外**。受入条件 v2（2026-08-01 の churn 移送
@@ -46,6 +50,13 @@ setup() {
   # 唯一の非 cap 経路（cap 指紋例外で駆動すると capExceeded が terminal を先に倒し、系統A の連言を観測できない）。
   FINDING_DEGENERATE='[{"title":"test","severity":"critical","location":"x","rationale":"todo"}]'
 
+  # ── (sc-vtf8) single モードの基底 args（autoFix off・静的 diff 未供給・taskType 指定＝classify を回さない）──
+  # snapshot だけがレビュー対象の供給源になる形＝3 値弁別が **終端（converged/escalate）まで効く**唯一の経路。
+  # loop モード（ARGS_BASE）は「新鮮 diff 依存で再試行に賭ける」ため短絡せず、kind 差は最終 round にしか現れない。
+  SINGLE_BASE='{"taskTitle":"snap-cell","worktree":"/tmp/wt","taskType":"testable"}'
+  # WF 内部規約の marker（harness literal ではない＝CC binary に同名 literal は 0 hit・実測）。
+  SNAP_MARKER='DIFF_TOO_LARGE_FOR_INLINE_RETURN'
+
   # ── driver 既定不変の対照 ref（不変 SHA へ pin・可動 ref を使わない） ──────────────
   # knob 導入前の driver を持つ **公開済み**の不変 SHA。cap.bats の CAP_BASE_REF と同じ思想:
   # 可動 ref（origin/main）にすると本 diff の land と同時に対照が HEAD 自身になり、driver 既定不変の比較が
@@ -67,6 +78,24 @@ kval() {
 # ARGS_BASE へ JSON 片をマージする（args を手組みせず 1 経路で作る）。
 lq_args() {
   node -e 'const a=JSON.parse(process.argv[1]);Object.assign(a,JSON.parse(process.argv[2]||"{}"));console.log(JSON.stringify(a))' "$ARGS_BASE" "$1"
+}
+
+# SINGLE_BASE へ JSON 片をマージする（sc-vtf8 の single モード args を手組みしない）。
+sq_args() {
+  node -e 'const a=JSON.parse(process.argv[1]);Object.assign(a,JSON.parse(process.argv[2]||"{}"));console.log(JSON.stringify(a))' "$SINGLE_BASE" "$1"
+}
+
+# RESULT JSON の history 末尾から <field> を取り出す（K 行に無い一次データ＝snapshotKind 等を読む）。
+last_hist() {
+  local out="$1" field="$2"
+  node -e 'const m=process.argv[1].match(/RESULT (.*)$/m);const h=JSON.parse(m[1]).history;const l=h[h.length-1]||{};console.log(String(l[process.argv[2]]))' "$out" "$field"
+}
+
+# RESULT JSON の **全 round** の <field> を "," 連結で取り出す。loop モードは snapshot 失敗で短絡せず
+# hard cap まで回るため、最終 round だけでなく全 round の kind を見ないと「途中だけ別 kind」を見逃す。
+hist_all() {
+  local out="$1" field="$2"
+  node -e 'const m=process.argv[1].match(/RESULT (.*)$/m);const h=JSON.parse(m[1]).history;console.log(h.map((x)=>String(x[process.argv[2]])).join(","))' "$out" "$field"
 }
 
 # 変異木を BATS_TEST_TMPDIR に作る: WF の literal を sed で置換し、driver は最終木のものを使う。
@@ -640,4 +669,243 @@ plant_driver_mutant() {
   [ "$status" -eq 0 ]
   per_round="$(node -e 'const m=process.argv[1].match(/RESULT (.*)$/m);console.log(JSON.parse(m[1]).history.map(h=>h.confirmedBlocking).join(","))' "$output")"
   [ "$per_round" != "0,4,4" ]
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [L-S] sc-vtf8: snapshot 段の 3 値弁別（EMPTY_DIFF / inline 上限超過 / 非 compliant）
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── L-S1（真の EMPTY_DIFF 経路の回帰ガード・**新設**）────────────────────────────
+# inventory: invariant=single モード（autoFix off・静的 diff 未供給）で snapshot が真に空（EMPTY_DIFF）なら、
+#            review/verify を 1 本も起動せず（callSeq='snapshot r1'）snapshotFailed=true・snapshotKind='true-empty'
+#            で escalate する。**この経路（un-2yy の false-CONVERGED 防止 guard）は本 tooth 追加まで teeth が
+#            1 本も無かった**（L-B9 は loop モードの終端判定であって短絡経路ではない）
+#          | polarity=positive（現 main で GREEN。guard の存在を pin する）
+#          | mutant_fingerprint=un-2yy の分岐条件を反転 `} else if (!staticDiffProvided) {`
+#            → `} else if (staticDiffProvided) {` → snapshotFailed が立たず roundDiff='' のまま review が走り
+#            findings:[] で CONVERGED（＝レビュー対象ゼロの run を「収束」と称して ship）→ RED（**実走で確認する**）
+@test "sc-vtf8 L-S1: 真の EMPTY_DIFF は review を起動せず true-empty として escalate（un-2yy guard の回帰ガード）" {
+  local a
+  a="$(sq_args '{}')"
+  run env CQ_ARGS="$a" CQ_SNAPSHOT='EMPTY_DIFF' node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  # review/verify を 1 本も起動していない（対象不在で 4 観点を回さない＝un-2yy 最小コスト）。
+  [ "$(kval "$output" callSeq)" = "snapshot r1" ]
+  [ "$(kval "$output" reviewVerifyCalls)" -eq 0 ]
+  [ "$(last_hist "$output" snapshotFailed)" = "true" ]
+  [ "$(last_hist "$output" snapshotKind)" = "true-empty" ]
+  [ "$(kval "$output" converged)" = "false" ]
+  [ "$(kval "$output" escalate)" = "true" ]
+  [ "$(kval "$output" gatePrefix)" = "ESCALATE" ]
+  # true-empty のときだけ「レビュー対象不在」を名乗ってよい（L-S2/L-S3 が対の否定側を張る）。
+  [[ "$output" == *'ESCALATE_REASON'*'レビュー対象不在'* ]]
+
+  # 変異: un-2yy の分岐条件を反転すると、対象不在の run が review を回して findings:[] で CONVERGED になる。
+  local mut="$BATS_TEST_TMPDIR/mu-s1"
+  plant_wf_mutant "$mut" 'else if (!staticDiffProvided) {' 'else if (staticDiffProvided) {'
+  run env CQ_ARGS="$a" CQ_SNAPSHOT='EMPTY_DIFF' node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" converged)" = "true" ]
+  [ "$(kval "$output" gatePrefix)" = "CONVERGED" ]
+  [ "$(kval "$output" reviewVerifyCalls)" -gt 0 ]
+}
+
+# ── L-S2（非 compliant 応答を EMPTY_DIFF 系へ丸めない）──────────────────────────
+# inventory: invariant=3 形（生 diff / EMPTY_DIFF / marker）のいずれにも一致しない応答は snapshotKind
+#            ='noncompliant' として **machinery 異常側**の文言で escalate し、「レビュー対象不在」「commit 済」を
+#            名乗らない（空だと断定できない応答を「対象なし」と一次診断すると sc-u9tj / orch-4c0a の誤診を再生産）
+#          | polarity=positive（RED→GREEN: 実装前は 'diff --git' 非包含を一律 EMPTY_DIFF 扱いし
+#            escalateReason に「レビュー対象不在」「commit 済の可能性」が焼かれていた）
+#          | mutant_fingerprint=分類器の既定を丸める `return 'noncompliant'` → `return 'true-empty'`
+#            → escalateReason に「レビュー対象不在」が復活して RED（**実走で確認する**）
+@test "sc-vtf8 L-S2: 非 compliant な snapshot 応答は EMPTY_DIFF 系文言へ丸めず machinery 異常として escalate" {
+  local a
+  a="$(sq_args '{}')"
+  # 'diff --git' も 'EMPTY_DIFF' も marker も含まない説明文だけの応答（LLM が最も出しやすい非 compliant 形）。
+  run env CQ_ARGS="$a" CQ_SNAPSHOT='Both (a) and (b) produced no output that I could capture.' node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(last_hist "$output" snapshotKind)" = "noncompliant" ]
+  # fail-closed は不変（分類が増えても「収束」へは倒れない）。
+  [ "$(last_hist "$output" snapshotFailed)" = "true" ]
+  [ "$(kval "$output" converged)" = "false" ]
+  [ "$(kval "$output" escalate)" = "true" ]
+  [ "$(kval "$output" gatePrefix)" = "ESCALATE" ]
+  local reason
+  reason="$(sed -n 's/^ESCALATE_REASON //p' <<< "$output")"
+  [ -n "$reason" ]
+  [[ "$reason" == *'machinery 異常'* ]]
+  [[ "$reason" == *'未確定'* ]]
+  [[ "$reason" != *'レビュー対象不在'* ]]
+  [[ "$reason" != *'commit 済'* ]]
+
+  # 変異: 分類器の既定を 'true-empty' へ丸めると、空だと断定できない応答が「レビュー対象不在」を名乗る。
+  local mut="$BATS_TEST_TMPDIR/mu-s2"
+  plant_wf_mutant "$mut" "return 'noncompliant'" "return 'true-empty'"
+  run env CQ_ARGS="$a" CQ_SNAPSHOT='Both (a) and (b) produced no output that I could capture.' node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  reason="$(sed -n 's/^ESCALATE_REASON //p' <<< "$output")"
+  [[ "$reason" == *'レビュー対象不在'* ]]
+}
+
+# ── L-S3（TOO_LARGE marker の専用 escalateReason + 閾値 args 化 + 未指定の完全後方互換）──
+# inventory: invariant=(a) 閾値 args（snapshotInlineLimitBytes）指定時のみ snapshotPrompt に上限節が焼かれる
+#            （未指定＝弁別を行わない完全後方互換）/ (b) marker 応答は snapshotKind='too-large' として
+#            「レビュー対象不在」「commit 済」を名乗らない専用の中立 escalateReason で fail-closed /
+#            (c) 不正な閾値は agent を 1 体も起動せず fail-fast（silent fail-open を作らない）
+#          | polarity=positive（RED→GREEN: 実装前は marker 応答も「EMPTY_DIFF=レビュー対象不在」と報告された）
+#          | mutant_fingerprint=marker 判定の無効化 `SNAP_TOO_LARGE_RE.test(s)) return 'too-large'`
+#            → `false) return 'too-large'` → kind が noncompliant へ落ち「inline 上限超過」文言が消えて RED
+#            （**実走で確認する**）
+@test "sc-vtf8 L-S3: inline 上限超過 marker は専用 escalateReason で分離され、閾値は args 化（未指定は後方互換）" {
+  local a_lim a_nolim
+  a_lim="$(sq_args '{"snapshotInlineLimitBytes":4096}')"
+  a_nolim="$(sq_args '{}')"
+
+  # (a) 閾値指定時のみ snapshotPrompt に上限節（marker literal）が焼かれる。
+  run env CQ_ARGS="$a_lim" CQ_SNAPSHOT='EMPTY_DIFF' CQ_PROMPT_GREP="$SNAP_MARKER" node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" promptGrepCount)" -eq 1 ]
+  [[ "$(kval "$output" promptGrepLabels)" == *'snapshot'* ]]
+  # 未指定なら prompt は従来の 2 値契約のまま（＝agent は marker を返しようがない＝弁別を行わない）。
+  run env CQ_ARGS="$a_nolim" CQ_SNAPSHOT='EMPTY_DIFF' CQ_PROMPT_GREP="$SNAP_MARKER" node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" promptGrepCount)" -eq 0 ]
+
+  # (b) marker 応答（契約どおり marker 行 + persistedOutputPath 行のみ・agent は file を作らない）。
+  run env CQ_ARGS="$a_lim" \
+      CQ_SNAPSHOT="$SNAP_MARKER bytes=146432
+/tmp/claude-persisted/snapshot-r1.txt" node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(last_hist "$output" snapshotKind)" = "too-large" ]
+  [ "$(last_hist "$output" snapshotFailed)" = "true" ]
+  [ "$(kval "$output" reviewVerifyCalls)" -eq 0 ]
+  [ "$(kval "$output" converged)" = "false" ]
+  [ "$(kval "$output" escalate)" = "true" ]
+  [ "$(kval "$output" gatePrefix)" = "ESCALATE" ]
+  local reason
+  reason="$(sed -n 's/^ESCALATE_REASON //p' <<< "$output")"
+  [[ "$reason" == *'inline 上限超過'* ]]
+  [[ "$reason" == *'limit=4096 bytes'* ]]
+  [[ "$reason" != *'レビュー対象不在'* ]]
+  [[ "$reason" != *'commit 済'* ]]
+
+  # (c) 不正な閾値は fail-fast（agent 0 本で run を殺す＝「弁別を頼んだのに無弁別で走る」を作らない）。
+  run env CQ_ARGS="$(sq_args '{"snapshotInlineLimitBytes":"4096"}')" CQ_SNAPSHOT='EMPTY_DIFF' node "$DRIVER" run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'snapshotInlineLimitBytes は正整数'* ]]
+  [[ "$output" == *'DRIVER_AGENT_CALLS 0'* ]]
+
+  # 変異: marker 判定を無効化すると too-large 分岐が消え、専用文言が出ない（noncompliant へ落ちる）。
+  local mut="$BATS_TEST_TMPDIR/mu-s3"
+  plant_wf_mutant "$mut" "SNAP_TOO_LARGE_RE.test(s)) return 'too-large'" "false) return 'too-large'"
+  run env CQ_ARGS="$a_lim" CQ_SNAPSHOT="$SNAP_MARKER bytes=146432" node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  reason="$(sed -n 's/^ESCALATE_REASON //p' <<< "$output")"
+  [[ "$reason" != *'inline 上限超過'* ]]
+  [ "$(last_hist "$output" snapshotKind)" = "noncompliant" ]
+}
+
+# ── L-S4（対照・orch-4c0a 検証条件）────────────────────────────────────────────
+# inventory: invariant='diff --git' を含む **112KB 超**の大応答は（閾値 args 指定下でも）ok として review 段へ
+#            流れる＝review が実際に起動する。判定順「'diff --git' 検出 → サイズ/marker 判定」が load-bearing
+#            （生 diff 本文は marker literal を含みうる＝本 leg 自身の diff がその実例）
+#          | polarity=positive（orch-4c0a / sc-u9tj の実測条件: 112KB・143KB の非空 diff で review 段 0 体だった）
+#          | mutant_fingerprint=サイズ判定を diff 検出より優先させる
+#            `s.includes('diff --git')) return 'ok'` → `s.includes('diff --git') && s.length < 1000) return 'ok'`
+#            → 大 diff が ok から外れ review 0 体で escalate → RED（**実走で確認する**）
+@test "sc-vtf8 L-S4: 112KB 超の生 diff 応答は ok として review 段が実際に起動する（orch-4c0a 検証条件）" {
+  local a big
+  a="$(sq_args '{"snapshotInlineLimitBytes":4096}')"
+  # 112KB 超（orch-4c0a の実測 ~112KB / sc-u9tj の 143KB と同オーダー）の生 diff テキスト。
+  big="diff --git a/big.txt b/big.txt
+$(head -c 115000 /dev/zero | tr '\0' 'x')"
+  # 非空虚性: 対照が実際に 112KB(114688B)超であること（小さい入力で green になっていない）。
+  [ "${#big}" -gt 114688 ]
+
+  run env CQ_ARGS="$a" CQ_SNAPSHOT="$big" node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(last_hist "$output" snapshotKind)" = "ok" ]
+  [ "$(last_hist "$output" snapshotFailed)" = "false" ]
+  [ "$(kval "$output" reviewCallCount)" -eq 4 ]
+  [ "$(kval "$output" gatePrefix)" = "CONVERGED" ]
+
+  # 変異: サイズ判定を diff 検出より優先すると、非空の大 diff が「レビュー対象なし」に化けて review 0 体になる
+  # （＝sc-u9tj / orch-4c0a で実際に起きた症状そのもの）。
+  local mut="$BATS_TEST_TMPDIR/mu-s4"
+  plant_wf_mutant "$mut" "s.includes('diff --git')) return 'ok'" "s.includes('diff --git') \&\& s.length < 1000) return 'ok'"
+  run env CQ_ARGS="$a" CQ_SNAPSHOT="$big" node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" reviewCallCount)" -eq 0 ]
+  [ "$(kval "$output" gatePrefix)" = "ESCALATE" ]
+}
+
+# ── L-S5（loop モード＝worker 自己点検の実運用形での kind 別 escalateReason）──────────
+# inventory: invariant=**canAutoFix=true（loop モード）** の終端 escalateReason も kind 別に分岐する:
+#            too-large は専用の中立文言（'inline 上限超過'）で、noncompliant は machinery 異常側で名乗り、
+#            どちらも 'レビュー対象不在' / 'commit 済' を名乗らない。true-empty のときだけ従来の
+#            「全 round で snapshot 空=commit 済の可能性」を名乗る（対照 (iii) が非空虚性を張る）
+#          | polarity=positive（L-S1..L-S4 は全て SINGLE_BASE=single モードで、canAutoFix 側の終端三項を
+#            1 本も踏まない。L-B9 は loop モードだが escalateReason 文字列を assert しない＝本 modality は
+#            無検証だった。worker 自己点検は scripts/scribe-selftest-args.sh が autoFix:true を焼く経路＝
+#            loop モードが実運用の主 modality）
+#          | mutant_fingerprint=終端三項の kind 判定を殺す
+#            `lastSnapKind === 'too-large' \|\| lastSnapKind === 'noncompliant'` → `false`
+#            → too-large run が「snapshot 空=commit 済 or レビュー対象不在の可能性」を名乗る旧・偽診断へ復帰
+#            （**実走で確認済み**: この変異は L-S1..L-S4 を含む既存 teeth を 1 本も落とさなかった）
+@test "sc-vtf8 L-S5: loop モード終端の escalateReason も kind 別に分岐する（too-large が「commit 済/レビュー対象不在」を名乗らない）" {
+  local a reason
+  a="$(lq_args '{"snapshotInlineLimitBytes":4096}')"
+
+  # (i) too-large: loop は短絡せず hard cap まで回る＝全 round で kind='too-large'（非空虚性: rounds=3 / cap 非発火）。
+  run env CQ_ARGS="$a" CQ_SNAPSHOT="$SNAP_MARKER bytes=146432" CQ_REVIEW_FINDINGS='[]' node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" rounds)" -eq 3 ]
+  [ "$(kval "$output" capExceeded)" = "false" ]
+  [ "$(hist_all "$output" snapshotKind)" = "too-large,too-large,too-large" ]
+  [ "$(hist_all "$output" snapshotFailed)" = "true,true,true" ]
+  [ "$(kval "$output" converged)" = "false" ]
+  [ "$(kval "$output" escalate)" = "true" ]
+  [ "$(kval "$output" gatePrefix)" = "ESCALATE" ]
+  reason="$(sed -n 's/^ESCALATE_REASON //p' <<< "$output")"
+  [ -n "$reason" ]
+  [[ "$reason" == *'snapshotKind=too-large'* ]]
+  [[ "$reason" == *'inline 上限超過'* ]]
+  [[ "$reason" != *'レビュー対象不在'* ]]
+  [[ "$reason" != *'commit 済'* ]]
+
+  # (ii) noncompliant（閾値 args 未指定＝分類が弁別 knob に依存しないことも同時に pin）。
+  run env CQ_ARGS="$(lq_args '{}')" CQ_SNAPSHOT='Both (a) and (b) produced no output that I could capture.' \
+      CQ_REVIEW_FINDINGS='[]' node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(hist_all "$output" snapshotKind)" = "noncompliant,noncompliant,noncompliant" ]
+  [ "$(kval "$output" converged)" = "false" ]
+  [ "$(kval "$output" gatePrefix)" = "ESCALATE" ]
+  reason="$(sed -n 's/^ESCALATE_REASON //p' <<< "$output")"
+  [ -n "$reason" ]
+  [[ "$reason" == *'snapshotKind=noncompliant'* ]]
+  [[ "$reason" == *'machinery 異常'* ]]
+  [[ "$reason" == *'未確定'* ]]
+  [[ "$reason" != *'レビュー対象不在'* ]]
+  [[ "$reason" != *'commit 済'* ]]
+
+  # (iii) 対照 true-empty: 従来文言（un-2f1 の「commit 済の可能性」ヒント）は **維持** される。
+  # ＝(i)(ii) の非包含 assert が「loop モードでは元々この語が出ない」という空虚 green でないことの証明。
+  run env CQ_ARGS="$(lq_args '{}')" CQ_SNAPSHOT='EMPTY_DIFF' CQ_REVIEW_FINDINGS='[]' node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(hist_all "$output" snapshotKind)" = "true-empty,true-empty,true-empty" ]
+  reason="$(sed -n 's/^ESCALATE_REASON //p' <<< "$output")"
+  [[ "$reason" == *'commit 済'* ]]
+  [[ "$reason" != *'inline 上限超過'* ]]
+
+  # 変異: 終端三項の kind 判定を殺すと、差分が **存在する** too-large run が旧・偽診断
+  # （「snapshot 空=commit 済 or レビュー対象不在の可能性」）を名乗って復活する。
+  # ※ sed の delimiter は `|` なのでパターン中の `||` は `\|\|` と書く。
+  local mut="$BATS_TEST_TMPDIR/mu-s5"
+  plant_wf_mutant "$mut" "lastSnapKind === 'too-large' \|\| lastSnapKind === 'noncompliant'" 'false'
+  run env CQ_ARGS="$a" CQ_SNAPSHOT="$SNAP_MARKER bytes=146432" CQ_REVIEW_FINDINGS='[]' node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  reason="$(sed -n 's/^ESCALATE_REASON //p' <<< "$output")"
+  [[ "$reason" == *'commit 済'* ]]
+  [[ "$reason" == *'レビュー対象不在'* ]]
+  [[ "$reason" != *'inline 上限超過'* ]]
 }

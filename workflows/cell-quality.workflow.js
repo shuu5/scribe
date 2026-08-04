@@ -3,7 +3,7 @@ export const meta = {
   description:
     '1 issue = 1 実装セルの品質WF: task-type routing → [Plan] → [Implement] → perspective-diverse な Opus review → 各 finding を独立 Opus が adversarial refute-verify → gated autoFix(confirmed のみ+self-test fail-closed+amend) → loop-until-dry 収束。返り値を呼出元(worker/admin)が一次監査する薄 gate 設計。固有物は args で差し込む(骨格は再利用)。',
   whenToUse:
-    'worker worktree で substantive な per-issue 実装の品質を担保したいとき。固有物(taskTitle/worktree/goal/acceptance/diff/baseRef/contextFile/selfTestCmd/dimensions/model/maxRounds/autoFix/doPlan/doImplement/taskType/target/context/probe/roAgentType)は args で渡す。★args は Workflow tool 経路で【全体約 4KB】に切り詰められる実測がある(un-cw0z)ため inline を小さく保つこと: 大きい diff は baseRef(commit 済差分を snapshot 合成が worktree で直接取得=インライン転記不要)、大きい文脈は contextFile(readable な path を渡し各段 agent が Read)で渡す。autoFix は既定 off(共有 fail-safe)、worker cell 文脈は autoFix:true を渡す。roAgentType は read-only 段の agentType 上書き escape hatch(既定 scribe:explore・"none" で agentType 無し強制)。★worktree は【必須】= 欠落/空/undefined/"[undefined]" は agent を 1 体も起動せず throw して run を殺す(sc-pfn4 の canonical args 契約。read-only の軽量用途=diff 供給 + doImplement/autoFix なし でも同じ=diff だけ渡す ad-hoc 直叩きは通らない)。sentinel "(current worktree)" も worker-cell 実行では別 prefix で throw する。',
+    'worker worktree で substantive な per-issue 実装の品質を担保したいとき。固有物(taskTitle/worktree/goal/acceptance/diff/baseRef/contextFile/selfTestCmd/dimensions/model/maxRounds/autoFix/doPlan/doImplement/taskType/target/context/probe/roAgentType/snapshotInlineLimitBytes)は args で渡す。★args は Workflow tool 経路で【全体約 4KB】に切り詰められる実測がある(un-cw0z)ため inline を小さく保つこと: 大きい diff は baseRef(commit 済差分を snapshot 合成が worktree で直接取得=インライン転記不要)、大きい文脈は contextFile(readable な path を渡し各段 agent が Read)で渡す。autoFix は既定 off(共有 fail-safe)、worker cell 文脈は autoFix:true を渡す。roAgentType は read-only 段の agentType 上書き escape hatch(既定 scribe:explore・"none" で agentType 無し強制)。★worktree は【必須】= 欠落/空/undefined/"[undefined]" は agent を 1 体も起動せず throw して run を殺す(sc-pfn4 の canonical args 契約。read-only の軽量用途=diff 供給 + doImplement/autoFix なし でも同じ=diff だけ渡す ad-hoc 直叩きは通らない)。sentinel "(current worktree)" も worker-cell 実行では別 prefix で throw する。',
   // (sc-pfn4) 必須 args の【静的】宣言。body の const REQUIRED_ARGS と同一集合であること(engine の二面宣言
   // 要求。片面/不一致は rc=2 DECL_MISMATCH)。集合は body 側の宣言コメントに理由を書く(ここは mirror)。
   requiredArgs: ['worktree'],
@@ -466,6 +466,24 @@ const effortSummary = {
   snapshot: SNAPSHOT_EFFORT, // medium 固定
 }
 const maxRounds = Number.isInteger(A.maxRounds) && A.maxRounds > 0 ? A.maxRounds : 3 // hard cap
+// ── (sc-vtf8) snapshot の inline 上限(bytes)。3 値契約の 3 つ目(DIFF_TOO_LARGE_FOR_INLINE_RETURN)の閾値。──
+// 【未指定(0)= 弁別を行わない完全後方互換】: 閾値が無ければ snapshotPrompt に上限節を **焼かない** =
+// agent は従来どおり 2 値(生 diff / EMPTY_DIFF)しか返さず、WF の判定も従来と同一の分岐しか踏まない。
+// 数値決め打ち禁止(bd sc-vtf8 (d))ゆえ既定値は持たせない = 呼出元が明示した run でだけ弁別が効く。
+// 不正値は **fail-fast**(cap args の __capIntArg と同じ posture): 「上限弁別を頼んだのに黙って無弁別で走る」
+// silent fail-open は、まさに本 leg が塞ぐ誤分類(非空 143KB diff を EMPTY_DIFF と呼ぶ)を再生産するため。
+// maxRounds/maxConcurrency の「不正値は既定へ黙って倒す」流儀を採らないのはこの非対称による(opt-in 弁別 knob)。
+const snapshotInlineLimitBytes = (() => {
+  const raw = A.snapshotInlineLimitBytes
+  if (raw === undefined || raw === null) return 0 // 未指定 = 弁別しない(現状維持)
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0) {
+    throw new Error(
+      `[cell-quality args fail-fast] snapshotInlineLimitBytes は正整数(単位=bytes)で渡すこと。received=${JSON.stringify(raw)}(type=${Array.isArray(raw) ? 'array' : typeof raw})。` +
+        ' 不正値を既定へ黙って倒すと「inline 上限の弁別を頼んだのに無弁別で走る」silent fail-open になるため fail-fast する(sc-vtf8)。'
+    )
+  }
+  return raw
+})()
 // ── (D2) opus 並列 cap(un-3yc): review fan-out / verify parallel(= opus 経路)の同時実行を args で絞る。
 // 未指定(0)=無 cap=従来どおり harness の min(16,cores-2)が実効上限(後方互換=安全既定。設計核(6)の「既定
 // 経路の並列度は不変」を破らない)。正整数指定時のみ opusLimiter を作り、runAgent 経由の opus agent を
@@ -1195,6 +1213,55 @@ ${refinedAcceptance ? `\n精緻化された受入基準:\n${refinedAcceptance}\n
 完了したら何を実装したか簡潔に返せ。`
 }
 
+// ── (sc-vtf8) snapshot 応答の 3 値契約とその分類器 ──────────────────────────────────
+// 【marker の位置づけ(必読)】'DIFF_TOO_LARGE_FOR_INLINE_RETURN' は **harness/CC の literal ではなく、本 leg
+// (bd sc-vtf8)が定義する WF 内部規約**である(CC binary に同名 literal は 0 hit=実測)。すなわち「harness が
+// 大出力時にこの語を返してくる」のではなく、**WF が snapshot agent に返させる合図**であり、意味は WF 側の
+// 本ファイルだけが決める。harness 由来と誤解して外部仕様を探しに行かないこと。
+// 【agent に file を書かせない】WF は fs を持たず(注入 global のみ)、snapshot 段の scribe:explore は Write を
+// 持たず、agents/ は fence 外。worktree へ diff dump を書かせると scribe-add / `git add -A` 経由で成果物へ
+// 混入し autoFix が commit してしまう(bd sc-vtf8 (b))。よって path を報告する場合も **Bash tool が自動 persist
+// した persistedOutputPath をそのまま報告するだけ**で、agent 自身は file を作らない。
+const SNAP_TOO_LARGE_MARKER = 'DIFF_TOO_LARGE_FOR_INLINE_RETURN'
+// 行頭 1 行の marker(先頭空白のみ許容・末尾に persistedOutputPath 行が続きうるので多行 anchor)。
+const SNAP_TOO_LARGE_RE = /^[ \t]*DIFF_TOO_LARGE_FOR_INLINE_RETURN\b/m
+// 分類は 4 値: 'ok'(生 diff) / 'too-large'(inline 上限超過) / 'true-empty'(EMPTY_DIFF) / 'noncompliant'。
+// 【判定順が load-bearing】
+//   ① 'diff --git' を含めば **無条件で ok**(最優先)。生 diff の本文は marker literal をそのまま含みうる
+//      (本 leg 自身の diff がまさに marker を含む=自己適用で too-large と誤分類する)。「サイズ判定を diff 検出
+//      より先に置く」実装は、非空の大 diff を「レビュー対象なし」に化けさせる本 bug と同型の退行になる。
+//   ② 行頭 marker → 'too-large'(差分は在るが inline 返却できなかった=未レビュー)。
+//   ③ 'EMPTY_DIFF' を含む → 'true-empty'(un-2f1: 説明文を前置されても取りこぼさない substring 判定)。
+//   ④ どれでもない(null / 空 / 説明文だけ) → 'noncompliant'。**'true-empty' へ丸めない**: 空だと断定できない
+//      応答を「レビュー対象不在」と名乗ると偽の一次診断(sc-u9tj / orch-4c0a の実害)を再生産する。
+// 分類自体は snapshotInlineLimitBytes の指定有無で切り替えない(未指定時は上限節を prompt へ焼かない=②は
+// 到達しないため後方互換は保たれる。逆に gate すると、marker を受け取っても「EMPTY_DIFF=対象不在」と
+// 名乗る誤診断が残ってしまう)。
+function classifySnapshot(snap) {
+  const s = typeof snap === 'string' ? snap : ''
+  if (s.includes('diff --git')) return 'ok'
+  if (SNAP_TOO_LARGE_RE.test(s)) return 'too-large'
+  if (s.includes('EMPTY_DIFF')) return 'true-empty'
+  return 'noncompliant'
+}
+// kind 別の escalateReason 断片。「レビュー対象不在」「commit 済の可能性」を名乗ってよいのは 'true-empty' だけ
+// (それ以外で名乗ると二次誤診の芽になる= bd sc-vtf8 notes (2))。
+function snapshotKindNote(kind, staticDiff) {
+  if (kind === 'too-large')
+    return (
+      `snapshot=inline 上限超過(${SNAP_TOO_LARGE_MARKER} / limit=${snapshotInlineLimitBytes} bytes)。` +
+      `差分は **存在する** が inline 返却できず未レビュー(空 diff とは別事象であり、EMPTY_DIFF 系の診断を当てはめてはならない)。` +
+      `target/baseRef で範囲を絞るか snapshotInlineLimitBytes を見直して再実行すること。`
+    )
+  if (kind === 'noncompliant')
+    return (
+      `snapshot 応答が 3 値契約(生 diff / EMPTY_DIFF / ${SNAP_TOO_LARGE_MARKER})のいずれにも一致せず(空 or 説明文のみ)= ` +
+      `snapshot machinery 異常。差分の有無は **未確定**(空だと断定できない)= 人手確認。`
+    )
+  // 'true-empty': 従来文言(un-2f1/un-2yy)を維持する。
+  return `snapshot=EMPTY_DIFF=レビュー対象不在(${staticDiff ? 'diff 供給済' : 'diff 未供給'})。空 diff は実装が既に commit 済の可能性(git diff HEAD が空)= un-2f1 参照。clean と区別し人手確認。`
+}
+
 function snapshotPrompt() {
   // un-2f1: セルの全差分 = 「base からの commit 済差分」+「未 commit 差分」の和。Implement/Fix が round 内で
   // commit すると `git diff HEAD` だけでは commit 済分が消え、snapshot が false EMPTY_DIFF になって fail-closed
@@ -1217,7 +1284,22 @@ git -C "${worktree}" diff HEAD
 ${target ? `特にスコープ対象「${target}」を含む ` : ''}上記 (a)+(b) を結合した **生 diff テキストのみ** を返せ
 (説明文・前置き・コードフェンス・要約を一切付けない。'diff --git ...' から始まる生の diff をそのまま出す)。
 両方とも空(=base からの commit も未 commit 変更も無い)のときだけ、他の語を一切付けず "EMPTY_DIFF" の一語だけを返せ。
-注意: 一方が空でも他方に差分があれば EMPTY_DIFF ではない(必ず両方を確認すること)。`
+注意: 一方が空でも他方に差分があれば EMPTY_DIFF ではない(必ず両方を確認すること)。${tooLargeClause(baseExpr)}`
+}
+
+// (sc-vtf8) 3 値契約の 3 つ目 = inline 上限超過節。**閾値未指定(0)では空文字**を返す = prompt は従来の 2 値
+// 契約のまま(完全後方互換・弁別を行わない)。marker の位置づけ(harness literal ではなく WF 内部規約)と
+// 「agent に file を作らせない」理由は classifySnapshot 直上のブロックコメントを参照。
+function tooLargeClause(baseExpr) {
+  if (!(snapshotInlineLimitBytes > 0)) return ''
+  return `
+ただし合成 diff が **${snapshotInlineLimitBytes} bytes を超える**ときは、diff 本文を一切返さず、他の語を一切付けずに
+次の 1 行だけを **行頭から** 返せ(EMPTY_DIFF とは別物であり、絶対に混同するな):
+${SNAP_TOO_LARGE_MARKER} bytes=<実測バイト数>
+実測バイト数は次で測れ: \`{ ${baseExpr}; git -C "${worktree}" diff "$BASE"...HEAD; git -C "${worktree}" diff HEAD; } | wc -c\`
+(この marker は harness の literal ではなく本ワークフローの内部規約である。**file を新規作成するな**——diff を
+worktree へ dump すると成果物へ混入する。Bash tool が出力を自動 persist した場合に限り、その persistedOutputPath
+を marker 行の次行にそのまま 1 行書いてよい(自分で file を作らず、報告するだけ)。)`
 }
 
 function reviewPrompt(d, round, roundDiff) {
@@ -1504,6 +1586,10 @@ while (round < effectiveCap) {
   // + git diff HEAD(未 commit)の合成へ移行し、commit したかに依らず差分を捕捉する。それでもなお空(=base 推定
   // ミス/真の空)なら snapshot 失敗としてマークし、後段の収束判定で clean 扱いから除外する(silent ship 防止)。
   let snapshotFailed = false
+  // (sc-vtf8) この round の snapshot 応答の分類('ok'/'too-large'/'true-empty'/'noncompliant'/''=未実行)。
+  // history と escalateReason へ伝播させ、「snapshot が失敗した」だけでなく **どう失敗したか** を呼出元/gate が
+  // 直読できるようにする(EMPTY_DIFF と inline 上限超過を同じ文言で報告しないための一次データ)。
+  let snapshotKind = ''
   if (!roundDiff || canAutoFix) {
     capAccount(1, 'snapshot') // (sc-k33c 層2) snapshot は admission 免除(監査面)。計上のみ。
     const snap = await roAgent(snapshotPrompt(), {
@@ -1519,7 +1605,11 @@ while (round < effectiveCap) {
     // 塞ぐ当の false-CONVERGED。検証 wf_2cd7cd9d-c45 で実証=説明文付き EMPTY が converged 扱いされた)。よって
     // 「実際の diff 内容を含むか」= 'diff --git' マーカーの有無で頑健に判定する(git diff の非空出力は必ず
     // 'diff --git' を含み、説明文や EMPTY_DIFF 応答には現れない=説明文を前置されても誤判定しない・fail-closed)。
-    const snapOk = !!(snap && snap.includes('diff --git'))
+    // (sc-vtf8) 単一値判定(snap.includes('diff --git'))を 3 値契約の分類へ置換する。ok の定義は **不変**
+    // ('diff --git' を含むか)ゆえ既存経路の挙動は変わらず、失敗側だけが too-large / true-empty / noncompliant
+    // へ弁別される(下の snapshotFailed 網の分岐条件も不変=どの失敗 kind でも fail-closed のまま)。
+    snapshotKind = classifySnapshot(snap)
+    const snapOk = snapshotKind === 'ok'
     if (snapOk) {
       roundDiff = snap
     } else if (canAutoFix) {
@@ -1542,6 +1632,8 @@ while (round < effectiveCap) {
   // findings を生む(設計核(2)の scope 固定=anchor ドリフト防止に反する)。machinery 失敗の history を 1 件残して
   // loop を抜け、後段の single 収束判定が converged を否定し escalate を立てる。loop モード(canAutoFix)は
   // 新鮮 diff 依存で再試行に賭けるため短絡しない(従来通り次ラウンドへ)。
+  // (sc-vtf8) 短絡自体は 3 kind 共通(対象が inline で得られない以上、roundDiff='' で reviewer を彷徨わせない)。
+  // 変えるのは **log の名乗り** だけ: 「レビュー対象不在」を名乗ってよいのは true-empty のみ。
   if (snapshotFailed && !canAutoFix && !staticDiffProvided) {
     history.push({
       round,
@@ -1552,8 +1644,13 @@ while (round < effectiveCap) {
       unverified: 0,
       reviewFailed: 0,
       snapshotFailed: true,
+      snapshotKind,
     })
-    log(`round ${round}: snapshot=EMPTY_DIFF(レビュー対象不在) → review を起動せず escalate(un-2yy 最小コスト)`)
+    log(
+      snapshotKind === 'true-empty'
+        ? `round ${round}: snapshot=EMPTY_DIFF(レビュー対象不在) → review を起動せず escalate(un-2yy 最小コスト)`
+        : `round ${round}: snapshot=${snapshotKind}(レビュー対象不在ではない) → review を起動せず escalate。${snapshotKindNote(snapshotKind, staticDiffProvided)}`
+    )
     break
   }
 
@@ -1676,9 +1773,10 @@ while (round < effectiveCap) {
     unverified: unverified.length,
     reviewFailed: reviewFailedCount, // 実行できなかった観点数(0=健全)
     snapshotFailed, // loop mode で diff 取得不能だったか
+    snapshotKind, // (sc-vtf8) どう失敗したか('ok'/'too-large'/'true-empty'/'noncompliant'/''=snapshot 未実行)
   })
   log(
-    `round ${round}: blocking=${blocking.length} minor=${minor.length} refuted=${refuted.length} unverified=${unverified.length} reviewFailed=${reviewFailedCount} snapshotFailed=${snapshotFailed}`
+    `round ${round}: blocking=${blocking.length} minor=${minor.length} refuted=${refuted.length} unverified=${unverified.length} reviewFailed=${reviewFailedCount} snapshotFailed=${snapshotFailed}${snapshotKind ? ` snapshotKind=${snapshotKind}` : ''}`
   )
 
   if (blocking.length === 0 && !machineryFailed) {
@@ -1812,14 +1910,20 @@ if (canAutoFix && !LIGHT_TYPES.has(taskType)) {
     // なお空になりうる)。escalateReason に「snapshot 空=commit 済の可能性」ヒントを含め、既知 artifact かどうかを
     // 呼出元が見分けられるようにする(un-x3o/un-iur の false-escalate の見分け)。
     const allSnapFailed = history.length > 0 && history.every((h) => h.snapshotFailed)
+    // (sc-vtf8) 「snapshot 空=commit 済の可能性」ヒントを名乗ってよいのは **true-empty のみ**。inline 上限超過
+    // (差分は在る)や非 compliant 応答(有無が未確定)でこれを名乗ると偽の一次診断になる(bd sc-vtf8 notes (2))。
+    const lastSnapKind = lastH.snapshotKind || ''
+    const allSnapTrueEmpty = allSnapFailed && history.every((h) => h.snapshotKind === 'true-empty')
     const why =
       lastH.reviewFailed || lastH.snapshotFailed
-        ? `review/snapshot machinery 失敗(reviewFailed=${lastH.reviewFailed || 0}, snapshotFailed=${!!lastH.snapshotFailed})で真にクリーンな round を確保できず` +
-          (allSnapFailed
-            ? `。全 round で snapshot 空=実装/修正が既に commit 済の可能性が高い(base...HEAD 合成でも空=base 推定要確認・既知 artifact かを findings 直読で判断)`
-            : !!lastH.snapshotFailed
-              ? `。snapshot 空=commit 済 or レビュー対象不在の可能性`
-              : '')
+        ? `review/snapshot machinery 失敗(reviewFailed=${lastH.reviewFailed || 0}, snapshotFailed=${!!lastH.snapshotFailed}${lastSnapKind ? `, snapshotKind=${lastSnapKind}` : ''})で真にクリーンな round を確保できず` +
+          (!lastH.snapshotFailed
+            ? ''
+            : lastSnapKind === 'too-large' || lastSnapKind === 'noncompliant'
+              ? `。${snapshotKindNote(lastSnapKind, staticDiffProvided)}`
+              : allSnapTrueEmpty
+                ? `。全 round で snapshot 空=実装/修正が既に commit 済の可能性が高い(base...HEAD 合成でも空=base 推定要確認・既知 artifact かを findings 直読で判断)`
+                : `。snapshot 空=commit 済 or レビュー対象不在の可能性`)
         : `critical/major が 2 連続ゼロに至らず`
     // (sc-k33c ERRATA-01 B5) 文言生成は SCCAP ブロック内の capLoopEscalate が持つ(cap 由来の早期打切りと
     // hard cap 到達の弁別もそこ)。ここは結果を使うだけ = cap の判定コードがブロック外へ散らない(K8)。
@@ -1835,11 +1939,14 @@ if (canAutoFix && !LIGHT_TYPES.has(taskType)) {
   // あって fix-and-retry では解けない。clean と区別して人手判断へ送る(レビュー対象不在 ≠ clean)。
   if (!converged && !escalate && lastH.confirmedBlocking === 0 && (lastH.reviewFailed || lastH.snapshotFailed)) {
     escalate = true
+    // (sc-vtf8) single モードも同じ規律: 「EMPTY_DIFF=レビュー対象不在」を名乗るのは true-empty のときだけ。
+    // too-large(差分は在るが inline 返却不能)/ noncompliant(有無が未確定)は専用の中立文言へ分岐する。
+    const lastSnapKind = lastH.snapshotKind || ''
     escalateReason =
       escalateReason ||
-      `single モード: blocking=0 だが machinery 失敗(reviewFailed=${lastH.reviewFailed || 0}, snapshotFailed=${!!lastH.snapshotFailed})。` +
+      `single モード: blocking=0 だが machinery 失敗(reviewFailed=${lastH.reviewFailed || 0}, snapshotFailed=${!!lastH.snapshotFailed}${lastSnapKind ? `, snapshotKind=${lastSnapKind}` : ''})。` +
         (lastH.snapshotFailed
-          ? `snapshot=EMPTY_DIFF=レビュー対象不在(${staticDiffProvided ? 'diff 供給済' : 'diff 未供給'})。空 diff は実装が既に commit 済の可能性(git diff HEAD が空)= un-2f1 参照。clean と区別し人手確認。`
+          ? snapshotKindNote(lastSnapKind, staticDiffProvided)
           : 'review が実行できず真にクリーンな round を確保できず。')
   }
 }
@@ -1875,6 +1982,9 @@ const result = {
   escalateReason,
   rounds: round,
   maxRounds: effectiveCap,
+  // (sc-vtf8) snapshot inline 上限(0=未指定=弁別なし)。escalateReason の too-large 分岐が「何 bytes を超えたと
+  // 主張しているのか」を呼出元/gate が args を再構成せずに直読できるようにする(監査面)。
+  snapshotInlineLimitBytes,
   autoFix: canAutoFix,
   reviewModel, // per-stage model(既定=MODEL)。監査用に明示
   verifyModel,
