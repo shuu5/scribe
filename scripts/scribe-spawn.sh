@@ -474,6 +474,30 @@ preflight_config_dir() {
   _r="$(probe_config_dir "$WCFG_DIR" "$WCFG_SOURCE")" || scribe_die "$_r"
 }
 
+# sc-zwzs（orch-c1df leg3）: --account auto の **採用確定点**から「同一 account への多重束ね」を loud warn する
+# 単一呼出点。判定本体（母集団・帰属・3 値の極性・kill-switch・上限時間）は scripts/scribe-account-bundle-warn
+# が単一 SSOT で持ち、ここは採用結果を渡して stderr へ回すだけ（本 file に判定ロジックを二重実装しない）。
+#   $1 = 採用 label（空可＝helper が採用 dir から逆写像する。API 故障 mirror 枝は label を持たない）
+#   $2 = 採用 config dir（空 = unset 意味論 = ~/.claude）
+# Phase1 = warn-only の不変条件: exit code / 採用 label / 注入 config dir / account-select: snapshot を 1 byte も
+# 変えない。ゆえに (a) helper は常に exit 0 だが更に `|| true` で二重に封じ、(b) 出力は stderr のみへ回す。
+# 呼ばない条件は 2 つ:
+#   ・dry-run（DRY_RUN=1）… dry-run は preflight walk を行わず実起動と採用 label が食い違う（既存 teeth
+#     「lazy walk」が非一致を pin 済み）ため、候補を「束ね」と名指すと偽の名指しになる。可視化は plan 行が担う。
+#   ・採用が確定していない（label も dir も空）… dry-run × 適格 0 件枝は AUTO_CHOSEN が空のまま return する（null 安全）。
+# resets5 は account-select: snapshot を stdin で渡し helper が **列名で**引く（列位置を hardcode しない＝
+# sc-8zuu が予約している TSV の additive 拡張で静かに壊れないため）。
+warn_account_bundle() {
+  local _lab="${1:-}" _dir="${2:-}"
+  [[ "${DRY_RUN:-0}" -eq 0 ]] || return 0
+  [[ -n "$_lab" || -n "$_dir" ]] || return 0
+  format_account_select_snapshot 2>/dev/null \
+    | "$SCRIPT_DIR/scribe-account-bundle-warn" \
+        --chosen-label "$_lab" --chosen-dir "$_dir" \
+        --accounts-base "$ACCOUNTS_BASE" --snapshot - >&2 || true
+  return 0
+}
+
 # ===========================================================================
 # --account auto の実解決（sc-1rq・facet①〜⑥⑧ の統合点）。IMPLEMENTATION CONTRACT 2026-07-08 準拠。
 # ===========================================================================
@@ -506,9 +530,14 @@ resolve_account_auto() {
     if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
       WCFG_DIR="$CLAUDE_CONFIG_DIR"; WCFG_SOURCE="auto-fallback-mirror"
       echo "scribe: ⚠ --account auto: claude-usage が読めません（API 故障）→ 主アカウント（admin 稼働 config dir を mirror=$WCFG_DIR）へ fallback します（この spawn は成立・採用 dir を preflight で一様検査・facet⑤①・sc-1rq）。" >&2
+      # sc-zwzs: fallback も **採用確定**（mirror 先で実起動する）ゆえ多重束ね判定に掛ける。label は持たないので
+      # 採用 dir を渡し helper 側で逆写像させる（写像外 dir なら helper が UNKNOWN を loud に 1 行出す）。
+      warn_account_bundle "" "$WCFG_DIR"
     else
       WCFG_DIR=""; WCFG_SOURCE="auto-fallback"
       echo "scribe: ⚠ --account auto: claude-usage が読めません（API 故障）→ 主アカウント（~/.claude・unset 経路）へ fallback します（この spawn は成立・facet⑤①・sc-1rq）。" >&2
+      # sc-zwzs: unset 経路の採用先は ~/.claude ＝ label 'default'（auto 枝と同一規約の写像）。
+      warn_account_bundle "default" ""
     fi
     return 0
   fi
@@ -539,6 +568,8 @@ resolve_account_auto() {
     if _reason="$(probe_config_dir "$_probe_dir" "auto:$_label")"; then
       WCFG_DIR="$_inject_dir"; WCFG_SOURCE="auto:$_label"; AUTO_CHOSEN="$_label"
       echo "scribe: --account auto: '$_label' を採用（残量 maximin 上位で preflight 通過・源=$WCFG_SOURCE・sc-1rq）" >&2
+      # sc-zwzs: 採用が確定した label に対してのみ多重束ねを判定する（候補の名指しにしない）。
+      warn_account_bundle "$_label" "$_inject_dir"
       return 0
     fi
     echo "scribe: --account auto: 候補 '$_label'（残量上位）は preflight 不通過で skip: ${_reason%%$'\n'*}" >&2
@@ -640,6 +671,9 @@ account_select_plan() {
   else
     echo "[plan]   selector=適格0件 → 実起動時に fail-loud（facet⑤②）"
   fi
+  # sc-zwzs: 多重束ね判定は **実起動時の採用確定点**でだけ行う（dry-run は preflight walk を行わず実起動と
+  # 採用 label が食い違うため、候補を「束ね」と名指すと偽の名指しになる）。dry-run はこの 1 行に留める。
+  echo "[plan]   多重束ね判定（sc-zwzs・warn-only）: 実起動時に採用が確定した account の live 本数を数え、1 本以上なら stderr へ 1 行 warn（exit code / 採用 label / 注入 dir は不変・SCRIBE_ACCOUNT_BUNDLE_DISABLE=1 で no-op）"
 }
 
 # --account auto の解決を関数定義後・分岐前に実行する（worker/consult 両経路が resolved WCFG を共有）。
