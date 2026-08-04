@@ -20,9 +20,22 @@
 #   WARN    … 同一 account に live >= 1     → 行頭 `account-bundle: ` を 1 物理行（stdout）。
 #   SILENT  … live 0                        → 出力なし。
 #   UNKNOWN … 判定不能                      → 行頭 `account-bundle-unknown: ` を 1 物理行（silent に畳まない）。
-#             不能の 4 事由: pgrep 不在 / /proc 読取不能（= probe が非 0 終了）/ seam 出力 parse 不能 /
-#             採用 account が確定できない（採用 dir が label へ写像できない・採用が空）。
+#             不能の 5 事由: pgrep 不在 / /proc 読取不能（= probe が非 0 終了）/ seam 出力 parse 不能 /
+#             採用 account が確定できない（採用 dir が label へ写像できない・採用が空）/
+#             **probe が構造的に盲目**（reason=probe-blind。下記「盲目の弁別」）。
 #   いずれの場合も exit 0（spawn を殺さない）。
+#
+# ── 盲目の弁別（reason=probe-blind・「0 件」と「見えていない」を分ける）────────────────
+#   probe は PID namespace の中（例: 呼出元の Bash が OS sandbox 下にある文脈）から走ると、**エラーではなく
+#   0 件**を返す。この 0 を額面どおり受け取ると「同一 account に live 0 → SILENT」となり、警告機能が無言で
+#   死ぬ（3 値の極性が壊れる）。そこで「本当に live 0」と「見えていない」を次の矛盾で弁別する:
+#     前提 … 呼出元が claude セッションの中で走っているなら、母集団には最低 1 本（呼出元自身のセッション）が
+#            現れるはずである（母数は host 全プロセス × CLAUDE_CONFIG_DIR）。
+#     (i)  母集団が 0 行            … claude プロセスが 1 本も見えない ＝ 前提と矛盾。
+#     (ii) self=1 かつ live=0       … 採用 account は呼出元自身の account なのに、その account の live が 0 ＝矛盾。
+#   矛盾が立つとき、数えた 0 は「居ない」ではなく「見えていない」ゆえ SILENT に畳まず UNKNOWN（loud）へ倒す。
+#   呼出元が claude セッションでない文脈（CLAUDECODE / CLAUDE_CODE_SESSION_ID が無い）は前提が置けないので
+#   矛盾を主張できず、従来どおり SILENT（＝偽の警告を出さない側に倒す）。exit 0 / spawn 非停止は不変。
 #
 # ── Phase2 へ倒す条件（warn → block・warn-only の恒久化を禁止するための codify・F10）──────────
 #   次の 3 条件が **すべて** 満たされたら Phase2（block or 別 account への自動退避）へ移行する:
@@ -44,6 +57,14 @@
 #   (5) live probe は本 host の同一 uid プロセスのみ＝**別 host の束ねは検出しない**。
 #   (6) warn は「同一 account に live session が存在する」ことだけを主張し、消費量 / burn / ETA は含意しない
 #       （elapsed 5〜6 日の idle session が実在するため、live 1 本 = 消費中とは限らない）。
+#   (7) **PID namespace の中（呼出元の Bash が OS sandbox 下にある文脈など）から呼ぶと probe は host の
+#       プロセスを 1 本も見られず「エラーではなく 0 件」を返す**。上の「盲目の弁別」はこれを UNKNOWN(loud) へ
+#       倒すが、倒せるのは矛盾が立つときだけで、**namespace を跨いだ計数そのものは原理的に不可**＝盲目な
+#       文脈では「束ねているか」を判定できない（UNKNOWN は「判定できなかった」以上を主張しない）。
+#       呼出元が claude セッションでない文脈では前提が置けず、盲目でも SILENT のままになりうる（下記 (8)）。
+#   (8) 弁別は「呼出元自身が母集団に現れるはず」という前提に依存する。呼出元の claude が別 uid で走る /
+#       実行ファイル名が claude でない / 呼出元が claude セッション外、といった文脈では前提が崩れ、
+#       盲目を弁別できない（Phase1 は偽警告を出さない側＝SILENT に倒す）。
 #
 # ── 入力 seam（2 段・selector と同型）────────────────────────────────────────────
 #   (1) env SCRIBE_LIVE_ACTORS       … set かつ非空なら **最優先**（生データ・1 行 1 プロセス）。
@@ -306,8 +327,10 @@ fi
 LIVE=0
 UNKNOWN_N=0
 PARSE_BAD=0
+TOTAL_ROWS=0
 while IFS= read -r _line; do
   [[ -n "$_line" ]] || continue
+  TOTAL_ROWS=$((TOTAL_ROWS + 1))
   if [[ "$_line" != *$'\t'* ]]; then PARSE_BAD=1; break; fi
   _pid="${_line%%$'\t'*}"
   _pdir="${_line#*$'\t'}"
@@ -321,6 +344,18 @@ done <<<"$DATA"
 
 if [[ "$PARSE_BAD" -eq 1 ]]; then
   emit_unknown "seam-parse" "$TARGET_LABEL" "$SELF_FLAG" "$RESETS5"
+  exit 0
+fi
+
+# --- 盲目の弁別（「0 件」と「見えていない」を分ける・上記ヘッダ「盲目の弁別」が SSOT）-----------
+# 呼出元が claude セッションの中で走っているなら母集団には最低 1 本（呼出元自身）が現れるはず、という
+# 前提が置ける文脈でのみ矛盾を主張する。矛盾は 2 形: (i) 母集団が 0 行 (ii) self=1 なのに live=0。
+# 前提が置けない文脈（claude セッション外）は従来どおり SILENT へ倒す（偽警告を出さない側）。
+CALLER_IN_CLAUDE=0
+[[ -n "${CLAUDECODE:-}" || -n "${CLAUDE_CODE_SESSION_ID:-}" ]] && CALLER_IN_CLAUDE=1
+if [[ "$CALLER_IN_CLAUDE" -eq 1 ]] \
+   && { [[ "$TOTAL_ROWS" -eq 0 ]] || [[ "$SELF_FLAG" -eq 1 && "$LIVE" -eq 0 ]]; }; then
+  emit_unknown "probe-blind" "$TARGET_LABEL" "$SELF_FLAG" "$RESETS5"
   exit 0
 fi
 

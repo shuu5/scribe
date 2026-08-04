@@ -26,14 +26,18 @@ setup() {
   HELPER="$SCRIPTS/scribe-account-bundle-warn"
 
   # host 側 env の漏れを落とす（hermetic）。
+  # CLAUDECODE / CLAUDE_CODE_SESSION_ID は「呼出元が claude セッション内か」の signal（盲目の弁別の前提）。
+  # bats 自身が claude セッション内から走るので、放置すると host 側 env に依存して非決定化する。既定は
+  # 落としておき、弁別を検証する test だけが per-test で明示的に与える。
   unset SCRIBE_USAGE_JSON SCRIBE_USAGE_NOW CLAUDE_CONFIG_DIR SCRIBE_WORKER_CONFIG_DIR \
         SCRIBE_ACCOUNTS_BASE SCRIBE_LIVE_ACTORS SCRIBE_LIVE_ACTORS_CMD \
-        SCRIBE_ACCOUNT_BUNDLE_DISABLE SCRIBE_ACCOUNT_BUNDLE_TIMEOUT 2>/dev/null || true
+        SCRIBE_ACCOUNT_BUNDLE_DISABLE SCRIBE_ACCOUNT_BUNDLE_TIMEOUT \
+        CLAUDECODE CLAUDE_CODE_SESSION_ID 2>/dev/null || true
   export SCRIBE_USAGE_CMD="$BATS_TEST_TMPDIR/scribe-no-usage-cmd"
 
   export SCRIBE_BD="$FIXTURES/bd-stub.sh"
   # 実起動（非 dry-run）で bd 実在検証を通すため、本 suite が使う id を全て ok にする。
-  export BD_STUB_OK_IDS="sc-auto-test zz-fire zz-quiet zz-self zz-unk zz-tmo zz-oddmirror zz-fbwarn zz-koff zz-kon zz-inv zz-attr"
+  export BD_STUB_OK_IDS="sc-auto-test zz-fire zz-quiet zz-self zz-unk zz-tmo zz-oddmirror zz-fbwarn zz-koff zz-kon zz-inv zz-attr zz-blind zz-bself zz-bneg zz-bneg2"
   chmod +x "$FIXTURES/bd-stub.sh" 2>/dev/null || true
 
   ANCHOR="$(cd "$(mktemp -d "$BATS_TEST_TMPDIR/anchor.XXXXXX")" && pwd -P)"
@@ -218,6 +222,54 @@ _untracked_deliverables() {
     "$SPAWN" --repo "$ANCHOR" --anchor "$ANCHOR" --account auto zz-fbwarn
   [ "$(_count_warn "$stderr")" -eq 1 ]
   [[ "$stderr" == *"account-bundle: chosen=black2 live=1 self=1 unknown=0 resets5=-"* ]]
+}
+
+# ============================================================================
+# 盲目の弁別（reason=probe-blind）— 「本当に live 0」と「見えていない」を分ける
+#   前提: 呼出元が claude セッション内なら母集団に最低 1 本（呼出元自身）が現れるはず。
+#   矛盾 (i) 母集団 0 行 / (ii) self=1 なのに live=0 → UNKNOWN(loud)。前提が置けない文脈は SILENT のまま。
+# ============================================================================
+
+@test "sc-zwzs T-BLIND-ZERO: claude セッション内なのに母集団 0 行 → probe-blind を loud に 1 行（SILENT へ畳まない）" {
+  mk_cfg "$ABASE/black4"
+  # 母集団 0 行 = probe が「エラーではなく 0 件」を返す形（PID namespace 下の実行文脈と同型）。
+  _run_spawn zz-blind SCRIBE_LIVE_ACTORS_CMD=true CLAUDECODE=1
+  [ "$status" -eq 0 ]                                   # fail-open（spawn を止めない）
+  [ "$(_count_unknown "$stderr")" -eq 1 ]
+  [ "$(_count_warn "$stderr")" -eq 0 ]
+  [[ "$stderr" == *"account-bundle-unknown: reason=probe-blind chosen=black4"* ]]
+  [[ "$stderr" == *"'black4' を採用"* ]]                # 採用 label は不変（warn-only 不変条件）
+}
+
+@test "sc-zwzs T-BLIND-SELF: 母集団は見えるのに self=1 かつ live=0 の自己矛盾 → probe-blind" {
+  mk_cfg "$ABASE/black4"
+  # 他 account は見えている（母集団 3 行）が、採用 = 呼出元自身の account なのにその live が 0 ＝矛盾。
+  _run_spawn zz-bself SCRIBE_LIVE_ACTORS="$(_live_quiet)" CLAUDE_CONFIG_DIR="$ABASE/black4" CLAUDECODE=1
+  [ "$status" -eq 0 ]
+  [ "$(_count_unknown "$stderr")" -eq 1 ]
+  [ "$(_count_warn "$stderr")" -eq 0 ]
+  [[ "$stderr" == *"reason=probe-blind"* ]]
+  [[ "$stderr" == *" self=1 "* ]]
+}
+
+@test "sc-zwzs T-BLIND-NEG: 弁別の対照（本当に live 0 / 前提が置けない文脈では SILENT のまま）" {
+  mk_cfg "$ABASE/black4"
+  # (a) claude セッション内でも、他 account が見えていて採用 account だけ live 0 = 本当に 0 → SILENT。
+  _run_spawn zz-bneg2 SCRIBE_LIVE_ACTORS="$(_live_quiet)" CLAUDECODE=1
+  [ "$status" -eq 0 ]
+  [ "$(_count_unknown "$stderr")" -eq 0 ]
+  [ "$(_count_warn "$stderr")" -eq 0 ]
+  # (b) 呼出元が claude セッション外なら「自分が母集団に現れるはず」の前提が置けない → 矛盾を主張しない。
+  #     env の -u は NAME=VALUE より前に置く（後置すると -u がコマンド名と解釈され偽の 0 行になる）。
+  run --separate-stderr env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID \
+    SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$GOLDEN")" \
+    SCRIBE_ACCOUNTS_BASE="$ABASE" BEADS_BDW="$BDW_STUB" SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$CAPT_STUB" \
+    SCRIBE_LIVE_ACTORS_CMD=true \
+    "$SPAWN" --repo "$ANCHOR" --anchor "$ANCHOR" --account auto zz-bneg
+  [ "$status" -eq 0 ]
+  [ "$(_count_unknown "$stderr")" -eq 0 ]
+  [ "$(_count_warn "$stderr")" -eq 0 ]
+  [[ "$stderr" == *"'black4' を採用"* ]]                # どちらの枝でも採用は不変
 }
 
 # ============================================================================

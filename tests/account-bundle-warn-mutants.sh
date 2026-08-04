@@ -79,11 +79,25 @@ fire_count() {
   grep -c '^account-bundle: ' "$err" || true
 }
 
+# <scripts-dir> <bd-id> → stderr に出た `account-bundle-unknown: reason=probe-blind` の物理行数を stdout へ。
+# 母集団 0 行（probe が「エラーではなく 0 件」を返す形＝PID namespace 下の実行文脈と同型）× claude セッション内。
+blind_count() {
+  local sdir="$1" id="$2" err="$TMP/errb.$2.txt"
+  env -u CLAUDE_CONFIG_DIR -u SCRIBE_ACCOUNT_BUNDLE_DISABLE -u SCRIBE_LIVE_ACTORS \
+      SCRIBE_USAGE_NOW="$NOW" SCRIBE_USAGE_JSON="$(cat "$TMP/golden.json")" \
+      SCRIBE_ACCOUNTS_BASE="$ABASE" SCRIBE_BD="$TMP/bd.sh" BEADS_BDW="$TMP/noop.sh" \
+      SCRIBE_SANDBOX=0 SCRIBE_CLD_SPAWN="$TMP/noop.sh" SCRIBE_LIVE_ACTORS_CMD=true CLAUDECODE=1 \
+      "$sdir/scribe-spawn.sh" --repo "$ANCHOR" --anchor "$ANCHOR" --account auto "$id" \
+      >/dev/null 2>"$err"
+  grep -c '^account-bundle-unknown: reason=probe-blind ' "$err" || true
+}
+
 # ---------------------------------------------------------------------------
 # 0) 原本（GREEN 対照）: 発火側 assert が実際に立っていること
 # ---------------------------------------------------------------------------
 note "[0] 原本（未変異）で発火側 assert が green であること"
 expect_eq "$(fire_count "$R/scripts" mut-orig)" "1" "原本: 行頭 account-bundle: が 1 物理行"
+expect_eq "$(blind_count "$R/scripts" mut-orig-b)" "1" "原本: 盲目の弁別が probe-blind を 1 物理行"
 
 # ---------------------------------------------------------------------------
 # 変異版の生成（temp 複製）
@@ -148,6 +162,20 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# M4: 盲目の弁別（probe-blind）を潰す — 「見えていない 0」が SILENT へ畳まれて戻ることを示す
+# ---------------------------------------------------------------------------
+note "[M4] 盲目の弁別（emit_unknown \"probe-blind\"）を潰す"
+if D4="$(mk_mutant m4 's|^  emit_unknown "probe-blind".*$|  :|')"; then
+  alive_check "$D4" m4
+  # 潰すと母集団 0 行は live=0 として SILENT へ落ちる＝警告機能が無言で死ぬ側へ戻る。
+  expect_eq "$(blind_count "$D4" mut-m4)" "0" "M4: 盲目側 assert が RED へ flip（1 → 0 行）"
+  # 対照: WARN 経路は M4 で壊れていない（変異が盲目判定だけに効いていることの弁別）。
+  expect_eq "$(fire_count "$D4" mut-m4f)" "1" "M4 の限局性: WARN 経路は依然 1 行（盲目判定だけを潰した）"
+else
+  FAIL=1
+fi
+
+# ---------------------------------------------------------------------------
 # 原本無改変の機械照合
 # ---------------------------------------------------------------------------
 note "[X] 原本無改変（変異は temp 複製にのみ入れた）"
@@ -160,7 +188,7 @@ note "  git diff --stat（原本側の一次出力）:"
 git -C "$R" diff --stat -- scripts/scribe-account-bundle-warn scripts/scribe-spawn.sh | sed 's/^/    /'
 
 if [[ "$FAIL" -eq 0 ]]; then
-  note "MUTANTS: PASS（原本 green / 3 変異とも発火側 assert が RED へ flip / 生存対照つき / 原本無改変）"
+  note "MUTANTS: PASS（原本 green / 4 変異とも該当 assert が RED へ flip / 生存対照つき / 原本無改変）"
   exit 0
 fi
 note "MUTANTS: FAIL"
