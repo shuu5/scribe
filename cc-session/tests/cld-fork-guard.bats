@@ -176,6 +176,9 @@ _refute_in_log() {
     # rationale SSOT は cld-spawn 側の comment。cld-fork は pointer に留める（二重化＝drift 源）。
     grep -Fq -e 'probe に list-windows を選んだ理由' -- "$CLD_SPAWN"
     _refute_fixed 'probe に list-windows を選んだ理由' "$CLD_FORK"
-    # pointer が実在すること（rationale の在処を失わない）。
-    grep -Fq -e 'cld-spawn' -- "$CLD_FORK"
+    # pointer が実在すること（rationale の在処を失わない）。粗く 'cld-spawn' を grep してはならない:
+    # cld-fork には pointer comment とは別に probe 配置理由の comment でも cld-spawn に言及する行が
+    # あり、pointer ブロックを丸ごと消しても hit して green のままになる（＝空虚な assert）。
+    # pointer 固有の literal を狙う。
+    grep -Fq -e 'rationale SSOT は cld-spawn 側の同名関数 comment' -- "$CLD_FORK"
 }
