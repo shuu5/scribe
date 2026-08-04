@@ -1,0 +1,331 @@
+#!/usr/bin/env bash
+# scribe-account-bundle-warn — 同一 account への「多重束ね」loud warn（Phase1 = warn-only・sc-zwzs / orch-c1df leg3）
+#
+# ★この計数器は sc-8zuu の「共有 actor 数」の将来の単一 SSOT 候補である。scoring への配線は sc-8zuu が行う。
+#   （本 script は数えて 1 行 warn するだけで、selector の score / tier / 並べ替え / TSV 列 / exit code /
+#   適格判定へは 1 byte も影響しない。ここで数えた値を selector へ渡してはならない＝二重実装の構造的防止）。
+#
+# 役割:
+#   `scribe-spawn.sh --account auto` が **採用を確定した** account に対し、その account へ既に帰属する live な
+#   claude main-loop プロセスが 1 本以上あれば「この spawn は 2 本目以降＝同一 5h 窓へ束ねている」と loud に
+#   1 行だけ警告する。spawn は止めない（Phase1 = warn-only・fail-open）。
+#
+# なぜ「admin 自身」を母数に含めるか（orch-c1df 実測・admin 裁定 F1）:
+#   事故は「admin + worker#1」の束ねから始まる。admin を母数から外すと第一歩が無警告になるため、N は
+#   「判定時点で live な、同一 account に帰属する claude プロセス数」と定義し、admin 自身も 1 本として数える。
+#   したがって発火条件は「採用予定 account の既存 live 本数 >= 1」（= その spawn が 2 本目以降）。
+#   `self=` は「その live のうち 1 本が呼出元自身か」の内訳で、「常に出る警告」に見せないための情報。
+#
+# ── 判定 3 値（極性・bdw-ledger-sep 前例形）──────────────────────────────────────
+#   WARN    … 同一 account に live >= 1     → 行頭 `account-bundle: ` を 1 物理行（stdout）。
+#   SILENT  … live 0                        → 出力なし。
+#   UNKNOWN … 判定不能                      → 行頭 `account-bundle-unknown: ` を 1 物理行（silent に畳まない）。
+#             不能の 4 事由: pgrep 不在 / /proc 読取不能（= probe が非 0 終了）/ seam 出力 parse 不能 /
+#             採用 account が確定できない（採用 dir が label へ写像できない・採用が空）。
+#   いずれの場合も exit 0（spawn を殺さない）。
+#
+# ── Phase2 へ倒す条件（warn → block・warn-only の恒久化を禁止するための codify・F10）──────────
+#   次の 3 条件が **すべて** 満たされたら Phase2（block or 別 account への自動退避）へ移行する:
+#     (P2-1) 本 warn の発火が「実際に束ねた spawn」を指していたことが、独立の観測（bd notes の
+#            account-select: snapshot 横断集計）で確認でき、かつ偽陽性（束ねていないのに発火）が 0 であること。
+#     (P2-2) 同時起動 race（下記 既知残余 4）を潰す排他機構が在ること＝ lease / 除外 seam（sc-9z9g）が land し、
+#            「2 本目」の判定が read-only probe の推測でなく予約の事実に基づくこと。
+#     (P2-3) block されたときの逃げ道（次点 account への退避 or 明示 override）が selector 側に在ること
+#            ＝ sc-8zuu の scoring 織り込み（③ 自己影響補正・④ 共有 actor 数）が land していること。
+#   3 つが揃う前に block へ倒すと「唯一使える account が枯渇 warn で塞がれ spawn 不能」になる（fail-closed 事故）。
+#   逆に 3 つが揃った後も warn-only のままにしてはならない（warn は読まれない前提で設計してはならない）。
+#
+# ── 既知残余（隠さない・主張しないことを主張しない・F14）────────────────────────────
+#   (1) transport=bg の worker は env carrier が REFUTED（sc-47l）で environ に CLAUDE_CONFIG_DIR が載らない
+#       可能性があり **undercount しうる**。Phase1 は undercount を許容し overcount による偽警告を避ける側に倒す。
+#   (2) admin spawn 経路（engine 側の別実装）は本 warn で **被覆されない**。
+#   (3) 終了済みだが同一 5h 窓を消費した spawn は **数えない**（live のみ＝窓内累積ではない）。
+#   (4) 同時起動 race では双方が「自分が 1 本目」と見て **両方 silent** になりうる。
+#   (5) live probe は本 host の同一 uid プロセスのみ＝**別 host の束ねは検出しない**。
+#   (6) warn は「同一 account に live session が存在する」ことだけを主張し、消費量 / burn / ETA は含意しない
+#       （elapsed 5〜6 日の idle session が実在するため、live 1 本 = 消費中とは限らない）。
+#
+# ── 入力 seam（2 段・selector と同型）────────────────────────────────────────────
+#   (1) env SCRIBE_LIVE_ACTORS       … set かつ非空なら **最優先**（生データ・1 行 1 プロセス）。
+#   (2) env SCRIBE_LIVE_ACTORS_CMD   … 実行して stdout を生データとする。**既定 = 本番の実 probe**
+#                                      （= LIVE_ACTORS_CMD_DEFAULT=("$SELF" --probe)。下の静的 source assert が pin）。
+#                                      値は IFS 空白で word-split して argv にする（テスト seam・空白入り path 非対応）。
+#   生データ形式: 1 行 1 プロセス `<pid> TAB <config-dir 絶対パス or '-'>`。
+#     `-` = environ 読取失敗（UNKNOWN 帰属）。TAB 無し行 / 非数値 pid = **parse 不能**（UNKNOWN へ倒す）。
+#   ★「既定が実 probe である」ことが本 seam の生命線: 既定を test-only 側（空出力など）にすると、本番で
+#     silent に no-op する経路が構造的に生まれる（seam が set されたときだけ動く機能になる）。
+#     前例 = tests/scribe-spawn-transport.bats:530 の静的 source assert。
+#
+# ── env（運用弁）─────────────────────────────────────────────────────────────
+#   SCRIBE_ACCOUNT_BUNDLE_DISABLE=1  … 完全 no-op（kill-switch）。~/.claude/plugins/scribe は anchor repo への
+#                                      symlink ＝ merge した瞬間に全 host の全 spawn へ live 化するため退避弁は必須。
+#   SCRIBE_ACCOUNT_BUNDLE_TIMEOUT    … probe の上限秒（既定 5・0 で無効）。超過は UNKNOWN（spawn は止めない）。
+#   SCRIBE_ACCOUNTS_BASE             … accounts base（既定 $HOME/.claude-accounts）。--accounts-base が優先。
+#
+# ── 帰属（admin 実測済み・F8）──────────────────────────────────────────────────
+#   プロセス選択は `pgrep -x claude`（実行ファイル名の完全一致）。**`pgrep -f` 系は使わない**
+#   （実測で -f は dashboard / science / socat / bwrap / apply-seccomp ラッパを誤 match する）。
+#   帰属は /proc/<pid>/environ の CLAUDE_CONFIG_DIR で決める（cmdline から取ると .claude-accounts/ を含む
+#   wrapper で誤帰属する）。3 値: LABEL（読取成功かつ非空）/ DEFAULT（読取成功かつ未設定 = $HOME/.claude）/
+#   UNKNOWN（environ 読取失敗）。**UNKNOWN を DEFAULT に足さない**（同一 uid でも environ が読めない pid が実在する）。
+#   比較は realpath 正規化 + 末尾スラッシュ除去の後に行う。label→dir 写像は scribe-spawn.sh の auto 枝と
+#   同一規約（default は $HOME/.claude・他は <accounts-base>/<label>）。<accounts-base> 配下でも $HOME/.claude
+#   でもない config dir は UNKNOWN 扱い（どの label にも帰属させない）。
+#   母数は **host 全プロセス × CLAUDE_CONFIG_DIR 正規化** で定義する。tmux window / worktree / cwd / bd notes の
+#   ような project-scoped な母集団は使わない（同一 account が複数 project に分散している実測がある）。
+#
+# ── 出力（marker 衛生・F12）──────────────────────────────────────────────────
+#   WARN    : `account-bundle: chosen=<label> live=<n> self=<0|1> unknown=<n> resets5=<iso|->`
+#   UNKNOWN : `account-bundle-unknown: reason=<slug> chosen=<label|-> live=- self=<0|1> unknown=- resets5=<iso|->`
+#   1 発火 = 1 物理行（外部由来文字列の改行 / TAB / `\` は可逆 escape）。stdout へ出し、呼出元が stderr へ回す。
+#   既存接頭辞（account-select: / monitor: / sandbox: / scribe: / scribe-spawn: / spawned:）と衝突させない。
+#   ★`account-select:` 名前空間は再利用しない（selector 側の書き手弁別と 10 列監査ブロックの契約を data 面で壊す）。
+#
+# ── resets5 の取り方（列位置を hardcode しない）────────────────────────────────
+#   `--snapshot -` で account-select: snapshot（`cols=` ヘッダ + データ行）を stdin から受け、**列名で引く**。
+#   sc-8zuu が TSV の additive 拡張を予約しているため、列位置の hardcode は将来の列追加で静かに壊れる。
+#   snapshot が無い / 該当行が無い / 空セルは `-`（窓の同一性は「併記するまで」＝窓内累積の追跡は本 leg 外・F6）。
+#
+# exit code: 常に 0（warn-only の不変条件。呼出元の `set -euo pipefail` 下で絶対に die させない）。
+# ---------------------------------------------------------------------------
+set -uo pipefail
+
+SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+SELF="$SELF_DIR/$(basename -- "${BASH_SOURCE[0]}")"
+
+# 既定 = 本番の実 probe（自己再入 --probe）。★この 1 行が「既定が実 probe」の静的 source assert 対象。
+LIVE_ACTORS_CMD_DEFAULT=("$SELF" --probe)
+
+usage() {
+  cat <<'USAGE'
+usage: scribe-account-bundle-warn [--chosen-label <label>] [--chosen-dir <dir>]
+                                  [--accounts-base <dir>] [--snapshot -]
+       scribe-account-bundle-warn --probe
+
+  既定モード: 採用 account への多重束ねを判定し、WARN / UNKNOWN のとき 1 行だけ stdout へ出す（常に exit 0）。
+  --probe   : 本番の実 probe。live な claude プロセスを `<pid> TAB <config-dir|->` で列挙する。
+USAGE
+}
+
+# ---------------------------------------------------------------------------
+# 実 probe（--probe）: pgrep -x claude × /proc/<pid>/environ
+# ---------------------------------------------------------------------------
+probe_live_actors() {
+  command -v pgrep >/dev/null 2>&1 || return 1     # pgrep 不在 → UNKNOWN
+  [[ -d /proc ]] || return 1                       # /proc 読取不能 → UNKNOWN
+  local _pids="" _rc=0
+  _pids="$(pgrep -x claude 2>/dev/null)" || _rc=$?
+  # pgrep: 0=マッチ有 / 1=無マッチ（正常な 0 件）/ それ以外=異常。
+  [[ "$_rc" -eq 0 || "$_rc" -eq 1 ]] || return 1
+  local _p _raw _dir _line
+  for _p in $_pids; do
+    [[ "$_p" =~ ^[0-9]+$ ]] || continue
+    # environ 読取成功かつ非空のときだけ帰属を決める。読めない / 空（既に消えた pid・zombie）は `-`＝UNKNOWN。
+    # 空を DEFAULT へ寄せると消えた pid が主アカへ overcount され偽警告になるため、undercount 側へ倒す。
+    if _raw="$(tr '\0' '\n' < "/proc/$_p/environ" 2>/dev/null)" && [[ -n "$_raw" ]]; then
+      _dir=""
+      while IFS= read -r _line; do
+        if [[ "$_line" == CLAUDE_CONFIG_DIR=* ]]; then _dir="${_line#CLAUDE_CONFIG_DIR=}"; break; fi
+      done <<<"$_raw"
+      [[ -n "$_dir" ]] || _dir="$HOME/.claude"     # 読取成功 × 未設定 = DEFAULT
+      printf '%s\t%s\n' "$_p" "$_dir"
+    else
+      printf '%s\t-\n' "$_p"                       # environ 読取失敗 = UNKNOWN（DEFAULT へ足さない）
+    fi
+  done
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# 小道具
+# ---------------------------------------------------------------------------
+# 1 物理行に畳むための可逆 escape（外部由来文字列用・純 bash＝subprocess も SIGPIPE も無し）。
+esc_line() {
+  local _s="${1-}"
+  _s="${_s//\\/\\\\}"
+  _s="${_s//$'\t'/\\t}"
+  _s="${_s//$'\r'/\\r}"
+  _s="${_s//$'\n'/\\n}"
+  printf '%s' "$_s"
+}
+
+# 絶対パス正準化 + 末尾スラッシュ除去（realpath 不在・非実在 path でも縮退して動く）。
+norm_dir() {
+  local _p="${1-}" _c=""
+  [[ -n "$_p" ]] || return 0
+  _c="$(realpath -m -- "$_p" 2>/dev/null)" || _c=""
+  [[ -n "$_c" ]] || _c="$_p"
+  _c="${_c%/}"; [[ -n "$_c" ]] || _c="/"
+  printf '%s' "$_c"
+}
+
+# label → dir（scribe-spawn.sh auto 枝と同一規約）。
+dir_for_label() {
+  if [[ "${1-}" == "default" ]]; then printf '%s' "$HOME_CLAUDE_N"; else printf '%s' "$ABASE_N/${1-}"; fi
+}
+
+# dir → label（逆写像）。空（= unset 意味論）と $HOME/.claude は default。<base>/<x> は x（1 成分のみ）。
+# それ以外（配下でも $HOME/.claude でもない）は空 = 写像外＝UNKNOWN 扱い。
+label_for_dir() {
+  local _d _rest
+  _d="$(norm_dir "${1-}")"
+  [[ -n "$_d" ]] || { printf 'default'; return 0; }
+  [[ "$_d" == "$HOME_CLAUDE_N" ]] && { printf 'default'; return 0; }
+  if [[ -n "$ABASE_N" && "$_d" == "$ABASE_N"/* ]]; then
+    _rest="${_d#"$ABASE_N"/}"
+    [[ -n "$_rest" && "$_rest" != */* ]] && { printf '%s' "$_rest"; return 0; }
+  fi
+  return 0
+}
+
+# account-select: snapshot（stdin で受けた全文）から **列名で** resets5 を引く（列位置は hardcode しない）。
+resets5_from_snapshot() {
+  local _lab="${1-}" _out=""
+  [[ -n "$SNAPSHOT_TEXT" && -n "$_lab" ]] || { printf '%s' '-'; return 0; }
+  _out="$(awk -v lab="$_lab" '
+    /^account-select: cols=/ {
+      sub(/^account-select: cols=/, "")
+      n = split($0, c, "|")
+      for (i = 1; i <= n; i++) { if (c[i] == "label") li = i; if (c[i] == "resets5") ri = i }
+      next
+    }
+    /^account-select:   / {
+      sub(/^account-select:   /, "")
+      m = split($0, f, "|")
+      if (li && ri && m >= ri && f[li] == lab) { print f[ri]; found = 1; exit }
+    }
+    END { if (!found) print "-" }
+  ' <<<"$SNAPSHOT_TEXT" 2>/dev/null)" || _out=""
+  [[ -n "$_out" ]] || _out='-'
+  printf '%s' "$_out"
+}
+
+emit_warn() {   # $1=label $2=live $3=self $4=unknown $5=resets5
+  printf 'account-bundle: chosen=%s live=%s self=%s unknown=%s resets5=%s\n' \
+    "$(esc_line "$1")" "$2" "$3" "$4" "$(esc_line "$5")"
+}
+
+emit_unknown() { # $1=reason slug $2=label|- $3=self $4=resets5
+  printf 'account-bundle-unknown: reason=%s chosen=%s live=- self=%s unknown=- resets5=%s\n' \
+    "$1" "$(esc_line "$2")" "$3" "$(esc_line "$4")"
+}
+
+# ---------------------------------------------------------------------------
+# 引数
+# ---------------------------------------------------------------------------
+MODE="decide"
+CHOSEN_LABEL=""
+CHOSEN_DIR=""
+ABASE_ARG=""
+READ_SNAPSHOT=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --probe)          MODE="probe"; shift ;;
+    --chosen-label)   CHOSEN_LABEL="${2-}"; shift; shift 2>/dev/null || true ;;
+    --chosen-dir)     CHOSEN_DIR="${2-}"; shift; shift 2>/dev/null || true ;;
+    --accounts-base)  ABASE_ARG="${2-}"; shift; shift 2>/dev/null || true ;;
+    --snapshot)       [[ "${2-}" == "-" ]] && READ_SNAPSHOT=1; shift; shift 2>/dev/null || true ;;
+    -h|--help)        usage; exit 0 ;;
+    *)                shift ;;   # 未知引数は無視（warn-only 経路を引数 typo で殺さない＝fail-open）
+  esac
+done
+
+if [[ "$MODE" == "probe" ]]; then
+  probe_live_actors
+  exit $?
+fi
+
+# kill-switch（完全 no-op）— probe の起動より前に倒す。
+[[ "${SCRIBE_ACCOUNT_BUNDLE_DISABLE:-0}" == "1" ]] && exit 0
+
+ABASE_N="$(norm_dir "${ABASE_ARG:-${SCRIBE_ACCOUNTS_BASE:-$HOME/.claude-accounts}}")"
+HOME_CLAUDE_N="$(norm_dir "$HOME/.claude")"
+
+SNAPSHOT_TEXT=""
+if [[ "$READ_SNAPSHOT" -eq 1 ]]; then
+  # stdin は必ず読み切る（呼出元 `producer | 本 script` を SIGPIPE で殺さない）。
+  SNAPSHOT_TEXT="$(cat)" || SNAPSHOT_TEXT=""
+fi
+
+# --- 採用 account の確定 ---------------------------------------------------
+TARGET_LABEL=""
+TARGET_DIR=""
+if [[ -n "$CHOSEN_LABEL" ]]; then
+  TARGET_LABEL="$CHOSEN_LABEL"
+  if [[ -n "$CHOSEN_DIR" ]]; then TARGET_DIR="$(norm_dir "$CHOSEN_DIR")"; else TARGET_DIR="$(dir_for_label "$CHOSEN_LABEL")"; fi
+elif [[ -n "$CHOSEN_DIR" ]]; then
+  TARGET_LABEL="$(label_for_dir "$CHOSEN_DIR")"
+  TARGET_DIR="$(norm_dir "$CHOSEN_DIR")"
+fi
+
+SELF_ACCT_DIR="$(norm_dir "${CLAUDE_CONFIG_DIR:-$HOME/.claude}")"
+SELF_FLAG=0
+[[ -n "$TARGET_DIR" && "$SELF_ACCT_DIR" == "$TARGET_DIR" ]] && SELF_FLAG=1
+
+if [[ -z "$TARGET_LABEL" ]]; then
+  # 採用が空 = 呼出元の null 安全違反 / 採用 dir が label へ写像できない（<base> 配下でも ~/.claude でもない）。
+  if [[ -z "$CHOSEN_DIR" ]]; then emit_unknown "chosen-undetermined" "-" "$SELF_FLAG" "-"
+  else                            emit_unknown "chosen-unmapped"     "-" "$SELF_FLAG" "-"; fi
+  exit 0
+fi
+
+RESETS5="$(resets5_from_snapshot "$TARGET_LABEL")"
+
+# --- live actors の取得（2 段 seam）----------------------------------------
+DATA=""
+DRC=0
+if [[ -n "${SCRIBE_LIVE_ACTORS:-}" ]]; then
+  DATA="$SCRIBE_LIVE_ACTORS"
+else
+  _cmd=()
+  if [[ -n "${SCRIBE_LIVE_ACTORS_CMD:-}" ]]; then
+    read -r -a _cmd <<<"$SCRIBE_LIVE_ACTORS_CMD"
+  else
+    _cmd=("${LIVE_ACTORS_CMD_DEFAULT[@]}")
+  fi
+  if [[ "${#_cmd[@]}" -eq 0 ]]; then
+    DRC=1
+  else
+    _t="${SCRIBE_ACCOUNT_BUNDLE_TIMEOUT:-5}"
+    [[ "$_t" =~ ^[0-9]+$ ]] || _t=5
+    if [[ "$_t" -gt 0 ]] && command -v timeout >/dev/null 2>&1; then
+      DATA="$(timeout "$_t" "${_cmd[@]}" 2>/dev/null)" || DRC=$?
+    else
+      DATA="$("${_cmd[@]}" 2>/dev/null)" || DRC=$?
+    fi
+  fi
+fi
+
+if [[ "$DRC" -ne 0 ]]; then
+  if [[ "$DRC" -eq 124 ]]; then emit_unknown "probe-timeout" "$TARGET_LABEL" "$SELF_FLAG" "$RESETS5"
+  else                          emit_unknown "probe-failed"  "$TARGET_LABEL" "$SELF_FLAG" "$RESETS5"; fi
+  exit 0
+fi
+
+# --- 計数 ------------------------------------------------------------------
+LIVE=0
+UNKNOWN_N=0
+PARSE_BAD=0
+while IFS= read -r _line; do
+  [[ -n "$_line" ]] || continue
+  if [[ "$_line" != *$'\t'* ]]; then PARSE_BAD=1; break; fi
+  _pid="${_line%%$'\t'*}"
+  _pdir="${_line#*$'\t'}"
+  if [[ ! "$_pid" =~ ^[0-9]+$ ]]; then PARSE_BAD=1; break; fi
+  if [[ -z "$_pdir" || "$_pdir" == "-" ]]; then UNKNOWN_N=$((UNKNOWN_N + 1)); continue; fi
+  _pn="$(norm_dir "$_pdir")"
+  if [[ "$_pn" == "$TARGET_DIR" ]]; then LIVE=$((LIVE + 1)); continue; fi
+  # 採用 account 以外: label へ写像できれば「他 account の live」（非計上）、できなければ帰属不能（unknown）。
+  if [[ -z "$(label_for_dir "$_pdir")" ]]; then UNKNOWN_N=$((UNKNOWN_N + 1)); fi
+done <<<"$DATA"
+
+if [[ "$PARSE_BAD" -eq 1 ]]; then
+  emit_unknown "seam-parse" "$TARGET_LABEL" "$SELF_FLAG" "$RESETS5"
+  exit 0
+fi
+
+# WARN = live >= 1（= この spawn が 2 本目以降。admin 自身も 1 本として数える・F1）/ それ以外は SILENT。
+if [[ "$LIVE" -ge 1 ]]; then
+  emit_warn "$TARGET_LABEL" "$LIVE" "$SELF_FLAG" "$UNKNOWN_N" "$RESETS5"
+fi
+exit 0

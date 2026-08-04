@@ -35,6 +35,13 @@ setup() {
   # 別の不在パスへ上書きするが効果は同一。
   export SCRIBE_USAGE_CMD="$BATS_TEST_TMPDIR/scribe-no-usage-cmd"
 
+  # sc-zwzs: 多重束ね warn（scripts/scribe-account-bundle-warn）の live actor seam を hermetic に固定する。
+  # 既定は **本番の実 probe**（pgrep -x claude × /proc environ）ゆえ、放置すると host の live claude session 数
+  # （実測で時点変動する）に依存して本 suite が非決定化する。空出力コマンドへ固定して SILENT 側へ倒す
+  # （発火を検証するのは新規 tests/account-bundle-warn.bats で、そこは per-test で SCRIBE_LIVE_ACTORS を与える）。
+  unset SCRIBE_LIVE_ACTORS SCRIBE_ACCOUNT_BUNDLE_DISABLE SCRIBE_ACCOUNT_BUNDLE_TIMEOUT 2>/dev/null || true
+  export SCRIBE_LIVE_ACTORS_CMD="true"
+
   # bd 実在検証スタブ（実 graph 不要）。dry-run 統合テストは実在 id が要るので sc-auto-test を ok に。
   export SCRIBE_BD="$FIXTURES/bd-stub.sh"
   export BD_STUB_OK_IDS="sc-auto-test"
