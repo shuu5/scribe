@@ -6,9 +6,20 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 # shellcheck source=./session-name.sh
 source "$SCRIPT_DIR/session-name.sh"
 
-# tmux check
-if [[ -z "${TMUX:-}" ]]; then
-    echo "Error: tmux内で実行してください" >&2
+# _tmux_server_alive
+#   tmux server が生きているかの read-only probe。旧「$TMUX 非空」guard の置き換え。
+#   判定 semantics の rationale SSOT は cld-spawn 側の同名関数 comment（$TMUX 非空が
+#   偽陰性/偽陽性の双方向に誤る理由・probe に list-windows を選んだ根拠）＝ここは pointer に
+#   留める（長文 rationale を二重化すると drift する）。本体は cld-spawn と同一 literal を保つ。
+_tmux_server_alive() {
+    tmux list-windows -a -F '#{window_id}' >/dev/null 2>&1
+}
+
+# tmux server 生存 probe。cld-fork は引数を全て `claude --continue --fork-session` へ透過するだけで
+# 自前の非実行経路（--help 等）を持たないため、probe より前に置くべき分岐は無い（cld-spawn 側は
+# scribe-spawn.sh の `--help` feature-detect を殺さぬよう help 判定を probe より前に置いている）。
+if ! _tmux_server_alive; then
+    echo "Error: tmux server に接続できません（server 不在／socket 不達／tmux コマンド不在）。tmux server が生きている環境で実行してください。" >&2
     exit 1
 fi
 
