@@ -1024,6 +1024,7 @@ build_prompt() {
 - \`bd create\` / \`bd dep\` / assignment / \`bd dolt push\` / **\`bd close\`（自 issue の close も admin 専有＝gate+merge 後）**（graph・同期点は admin の所有物）。
 - GitHub への push（admin が gate 後）/ admin window への tmux inject / 編集可スコープ外の編集。
 - **共有 \`.git/config\`（remotes / hooks / config 等）を mutate しない**: worktree は anchor と \`.git/config\` を **共有** するため、worker が origin/remote を書き換えると anchor+全 worktree の origin が壊れ admin の push が破綻する（un-1n1 実害）。remote 検証が要るなら **throwaway bare repo / 別 clone** を使う（\`remote.*\` は git が共有 config からのみ読むため \`git config --worktree\` でも隔離できない＝検証済み・物理隔離は →un-6nf）。
+- **background fan-out 禁止（folio-f060 incident の恒久化・sc-f6sw）**: 検証 suite 等を background shell（Bash tool の run_in_background / & / nohup / disown）で多数並走させる fan-out を禁止する。同時 background shell は 0 本を既定とし、長時間処理の完了待ちは**単一の blocking 実行**に限る。並列が要るときは **WF 骨格（Workflow tool）へ委譲**する（委譲は禁止対象ではなく正規経路＝cell-quality WF の直接呼出はこの禁止に当たらない）。機序: background の完了通知は 1 本ごとに turn を再起動させ会話全文を再送するため、コストは「本数 × 会話長」で発散する（実測: 33 本並走で 34 回 re-invoke し 5h 枠を 1 セッションで焼失）。
 - **follow-up の bd create**: 起票が要っても自分で起票せず自 issue の notes に「admin への起票候補」として書く。
 PROMPT
 }
