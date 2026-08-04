@@ -416,8 +416,12 @@ _untracked_deliverables() {
   # コメント行を落としてから見る（ヘッダの「pgrep -f 系は使わない」という**説明文**で偽 RED にしない）。
   run bash -c 'sed "s/#.*//" "$1" | grep -nE "pgrep[[:space:]]+-[^[:space:]]*f"' _ "$HELPER"
   [ "$status" -ne 0 ]
-  # 呼出は採用確定枝の 2 箇所のみ・helper 呼出は 1 箇所へ集約（判定の二重実装を作らない）。
-  [ "$(grep -c 'warn_account_bundle ' "$SPAWN" || true)" -eq 3 ]   # 定義 1 + 呼出 2（fallback 2 枝は排他）
+  # 発火点は acceptance(2) の 2 箇所（採用確定枝 / API 故障 fallback 枝）のみ・helper 呼出は 1 箇所へ集約
+  # （判定の二重実装を作らない）。★下の grep pattern は **末尾空白付き**ゆえ定義行 `warn_account_bundle() {`
+  # には一致しない＝3 hit は全て**呼出**（採用確定枝 1 + API 故障 fallback の排他 2 枝〔mirror / unset〕。
+  # 契約が言う「2 箇所」はこの 2 つの枝を指し、fallback 側が排他 2 行に割れている）。定義の本数は別 assert で pin。
+  [ "$(grep -c 'warn_account_bundle ' "$SPAWN" || true)" -eq 3 ]
+  [ "$(grep -c '^warn_account_bundle() {' "$SPAWN" || true)" -eq 1 ]
   [ "$(grep -cF '"$SCRIPT_DIR/scribe-account-bundle-warn"' "$SPAWN" || true)" -eq 1 ]
   # 出荷物の bash 構文。
   run bash -n "$HELPER"
