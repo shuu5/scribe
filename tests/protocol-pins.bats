@@ -64,7 +64,9 @@ setup() {
 
 @test "§6: 監視の正規経路小節が実在する（Monitor + read-only poll・cycle 後の再武装）" {
     grep -qF -- '### worker 監視の正規経路（block-until-done・courier orch-cp8g）' "$PROTOCOL"
-    grep -qF -- '**Monitor の command** に渡す' "$PROTOCOL"
+    # 中核 bullet は §6 新規行に一意な literal で掴む（『**Monitor の command** に渡す』は §7.1 既存行に
+    # cross-satisfy される fail-open pin だった＝gate F2。base 0 hit / HEAD 1 hit を実測済み）
+    grep -qF -- '待ち受けは harness の Monitor に read-only poll script を渡す' "$PROTOCOL"
     grep -qF -- '監視は context cycle で全消滅する' "$PROTOCOL"
 }
 
@@ -79,7 +81,11 @@ setup() {
 }
 
 @test "D5: §9 の危険域転写点裁定（§0 core 行のみ・二重化しない）が実在する" {
-    grep -qF -- '危険域の実測値（~240k）の転写点は §0 admin core 行のみ（sc-aprn D5）' "$PROTOCOL"
+    grep -qF -- '危険域の実測値（数値そのもの）の転写点は §0 admin core 行のみ（sc-aprn D5）' "$PROTOCOL"
+    # 転写点の一意性を機械で守る: 数値 literal は §0 core 行の 1 箇所だけ（gate F1・count は file-arg grep）
+    local n
+    n="$(grep -c -- '240k' "$PROTOCOL" || true)"
+    [ "$n" -eq 1 ]
 }
 
 @test "D7: §2 split-brain 行の追随注記と spec §2.2 の受領形注記が実在する" {
@@ -103,6 +109,14 @@ setup() {
     grep -vF -- 'WF 返り値を受けたら → §4' "$PROTOCOL" > "$mut"
     core="$(sed -n '/<!-- scribe-core-admin:begin -->/,/<!-- scribe-core-admin:end -->/p' "$mut")"
     run grep -qF -- 'WF 返り値を受けたら → §4' <<< "$core"
+    [ "$status" -ne 0 ]
+}
+
+@test "mutation: §6 正規経路の中核 bullet を削ると D3 pin が RED へ flip する（gate F2 の再発防止）" {
+    local mut="$BATS_TEST_TMPDIR/monitor-protocol.md"
+    grep -vF -- '待ち受けは harness の Monitor に read-only poll script を渡す' "$PROTOCOL" > "$mut"
+    grep -qF -- '待ち受けは harness の Monitor に read-only poll script を渡す' "$PROTOCOL"
+    run grep -qF -- '待ち受けは harness の Monitor に read-only poll script を渡す' "$mut"
     [ "$status" -ne 0 ]
 }
 
