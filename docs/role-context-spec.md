@@ -75,6 +75,8 @@ SessionStart hook には role 宣言機構が無いため、**実行時 guard** 
 
 **伝える**: 自 issue の write だけ（B/hybrid・`docs/protocol.md` §3）。
 
+> **受領形の追随注記（sc-aprn D7）**: 本節の項目が worker へ届く carrier は **protocol.md §0 内の boot core 区間（`scribe-core-worker`）+ trigger 表**である（SessionStart 注入は UTF-16 code unit cap で truncate されるため節全文は運べない・protocol.md 冒頭「注入 carrier の現況」注記と同一の読み替え）。本節は「何を伝えるか」の仕様 SSOT のままで、届く実体は boot core（規約そのものは不変・carrier だけが変わった）。
+
 - 自分が claim した issue の `bd update --claim` / `--append-notes` / `gate-pending` ラベル付与（`--add-label gate-pending`）。**自 issue の close はしない**（admin が gate+merge 後に close・§4 反転）。**write は必ず `bdw` 経由**（`cd <anchor> && scripts/bdw <subcmd>`・flock 直列化で lost-update 防止）。
 - worker prompt 規約（§2）: tests 同梱・selfTest fail-closed・cell-quality WF 直接呼出・報告に WF 返り値 JSON + `receivedArgs` 必須。
 - gate-pending → gate → close の順序（§4）: PR-up で `gate-pending` ラベル付与 + DONE 報告（**自己 close しない**）、admin が gate+merge 後に close する。
