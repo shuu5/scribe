@@ -20,6 +20,9 @@
 - **spawn する前 → §1**（命名 / 起動 / post-spawn 検証 / effort 判定 / sandbox）: `sed -n '/^## 1\./,/^## 2\./p' <path>`
 - **gate に入る前 → §5**（gate の 4 義務 / funnel 8 step / snapshot 照合）: `sed -n '/^## 5\./,/^## 6\./p' <path>`
 - **承認を取るか迷ったら → §5.4 の 3 クラス判定**（同 block は global CLAUDE.md にも verbatim）: 上と同じ §5 レンジを Read
+- **spawn 後・worker を待つ間 → §6**（監視の張り方＝block-until-done の正規経路・自前 poll 禁止）
+- **WF 返り値を受けたら → §4**（machinery 健全性の先判定・`blocking[]` は autoFix 前 round＝額面差し戻し禁止）
+- **relay / courier 便を受けたら → §8**（park-by-default・受信優先順位・整合返信）
 - **症状から引く**: worker 沈黙 / 0-commit / env 劣化 / OOM → **§6** ／ 人間判断・grill → **§7** ／ 他 project 台帳 → **§8** ／ context 肥大・cycle → **§9** ／ worker prompt を書く → **§2** ／ 完了申告と errata → **§4**
 
 ```
@@ -46,6 +49,8 @@
 - **transport**: 管理窓への生 tmux 送信は構造封鎖されている（`scribe-inject` 経由）。inject が運ぶのは**呼び鈴だけ**で、依頼・決定・報告の中身は必ず bead に置く（§6 / §8）。
 - **no-push（禁止・不可逆）**: 入力欄が非空 / 特定不能の窓へは **1 キーも送らない**（`scribe-inject.sh` が送信前 busy-check で exit 5 = `INJECT_DEFERRED` として defer・**5 を握りつぶして再送しない**・入力欄 wipe〔`C-u` 相当〕禁止・UNKNOWN も defer ＝ fail-closed）。co-submit（human の書きかけと注入が merge され 1 行で submit される事故）は**事後検知が原理的に不可能**で事前 gate だけが対策＝伝えたいことは durable な bead notes / mailbox へ置く（§6）。
 - **監視**: **bd が truth・pane は補助**。0-commit / idle 停滞 / env 劣化 / 全ツール死（zombie）は §6 の salvage 手順へ回す。事故 lore は observable（admin 実測）と mechanism（worker 自己申告＝弱い証拠）を必ず区別する（§6）。
+- **WF 返り値**: machinery 健全性（agents_error / snapshotFailed / journal 直読）を先に判定し、`blocking[]`（autoFix 前 round の findings）を額面で差し戻さない——autoFix 後の HEAD で再確認してから扱う（§4）。
+- **spawn preflight**: spawn 前に admin 自身の account を毎回実測する（`echo $CLAUDE_CONFIG_DIR`・過去 session の「admin=X」主張は stale でありうる）。worker 並走中は admin の大型 WF を控える（枠は同一 account から出る＝共食い・§1）。
 - **命名**: 窓 `wt-<完全bd id>` / branch・worktree `spawn/<完全bd id>-HHMMSS` は consumer 照合が依存する硬い契約＝**自作せず §1 に完全一致**させる（§1）。
 - **寿命(1) 危険域**: 長寿命 admin session は context 肥大で劣化する——**実測の危険域は ~240k**（fleet 共通核の実測値。本書 §9 の転写元＝orchestrator top-spec §1.1 側が一次 SSOT で、§9 本文はこの数値を持たない）。近づいたら「compaction で凌ぐ」のではなく**意図的に cycle する**（§9）。
 - **寿命(2) cycle の 2 経路**: 意図的 cycle は `/clear` と respawn の **2 経路のみ**（手動 `/compact` は廃止＝compact summary は検証不能な第三 narrative ゆえ truth 面に置かない）。ultracode / effort の状態は**推測せず** harness の system-reminder に従う（§9）。
