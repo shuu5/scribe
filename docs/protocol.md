@@ -134,6 +134,7 @@ worker を 1 issue = 1 worktree = 1 window で起動するときの命名・起�
   - `--bd-id` は window 名フォールバック（`--window-name` 未指定時 `wt-<id>` 採用）に使う。**非空で不正な `--bd-id` は警告なしで旧命名へ silent fallback する**文書化済み契約 → spawn ヘルパー（C3）側で `bd show <id>` による実在確認を行い fail-loud にする（un-it7 設計引き継ぎ）。
 - spawn-latency（sc-8g5 以降）= cld-spawn の confirm-receipt **2-3 秒/cell**（実測・pilot N=3）**＋ post-spawn submit 検証（下記）が worker の turn 開始＝`[SPAWNED--<id>]` marker 出現を待つ時間**。ゆえに `scribe-spawn` は **blocking**（happy-path は worker が起動直後の bd 書込みを終える数秒〜十数秒で return・不着時は既定 budget 90s まで待って exit 7）。fan-out 計画では「1 cell あたり 2-3 秒で撃ち終わる」前提を使わない（並列 spawn は逐次 90s 待ちを重ねうる）。
 - **アカウントと usage 枠（worker は新品の 5h 枠を持たない・folio 実測 2026-07-10）**: worker の usage 枠は**起動アカウント（config dir）に紐づく**。admin と同一アカウントで spawn した worker は admin と同じ 5h 枠を**共食い**する（spawn しても新品枠は生まれない＝folio 実測・handoff 7aoq 項6）。空き枠の確保はアカウント**分離**で行う——選定は `scribe-spawn --account auto`（claude-usage 残量 maximin・sc-1rq・選定 snapshot は bead notes へ自動追記される）。**sc-9954: worker はこの auto 選択が既定になった**（`--account` 省略時 worker=auto／admin と同居させたいときのみ `--account mirror` で opt-out・consult は従来どおり admin env mirror 据え置き）。fan-out の並列度を usage で見積もるときは「worker 数 × 新品 5h 枠」でなく「割当アカウントの残量合計」で数える。
+- **admin 自身の account preflight（spawn 前・毎回・sc-aprn D2/S3）**: spawn 前に `echo $CLAUDE_CONFIG_DIR` で **admin 自身の account を実測**する——Working Memory・過去 session の「admin=X」主張は stale でありうる（同一 account へ worker を重ねる共食い事故の実例あり）。`--account auto` は **admin account を除外しない**（残量 maximin が admin を top に選びうる）＝`--dry-run` でランキングを確認し、明示 `--account` で admin の account を外す。**worker 並走中は admin の大型 WF（gate / mandate-verify 級）を控える**——admin と worker の枠は同一 account から出るため共食いし、他 project の同居 session も巻き添えになる（§6 の監視と接続・quota 観測は claude-usage の非 stale 行で行う）。
 
 ### post-spawn submit 検証と exit 7（sc-8g5）
 
@@ -408,6 +409,14 @@ admin が worker 群の稼働を見るときの 3 規律。folio admin の停止
 - **長時間 worker は proactive に確認する（admin 自省）**: 想定所要を大きく超えた worker は monitor 任せにせず、admin が能動的に pane / commit を覗いて生死を確かめる。v0 の検知は受動（admin が気づく）ゆえ、自省が最後の砦。
 
 > `consult-`（grill-consult）window の沈黙を fleet-monitor が**自動検知**する拡張は **v1・sc-3pq**（fleet-monitor の degraded 検出拡張・所有は scriptorium）。本節の規律はその自動検知に依存せず v0 手動監視で成立する。fleet-monitor の「使用義務」を厳密文言化するのは sc-3pq の確定 contract と整合させてから（salvage 手順〔下記〕は incident+memory で実体確定済ゆえ先行・bd sc-ydg 注）。
+
+### worker 監視の正規経路（block-until-done・courier orch-cp8g）
+
+「自前の監視 poll を作らない」（上記規律）の**正規代替**を明文化する。従来 protocol 本文に正規経路が無く、実務が admin の Working Memory（context cycle で消える carrier）で穴埋めされ、respawn のたびに監視が張られなくなっていた欠落の解消（courier orch-cp8g の明示依頼＝「削るのではなく正規経路を同じ carrier へ足す」）:
+
+- **待ち受けは harness の Monitor に read-only poll script を渡す**: worker cell の完了/停止を block-until-done で待つときは、`grill-status-watch.sh`（§7.1）と同型の read-only poll script（bd を poll し、変化時のみ出力・終端条件で exit 0）を **Monitor の command** に渡す。時間 cap 付きの自前 bash ループ・野良 `run_in_background` poll は従来どおり禁止（silent cap 失効が folio 0264028f の構造原因＝上記規律の再掲でなく、その禁止の受け皿がここ）。
+- **終端判定は本節の既存規律に従う**: `gate-pending` は labels 配列の**完全一致**で判定し（bead 全文 grep 禁止・下記「監視トリガー衛生」）、独立信号の AND（commit 実在・§5 step1 Layer2）を併読する。poll script に定型トリガー語の部分文字列 grep を書かない。
+- **監視は context cycle で全消滅する**: `/clear`・respawn は background の Monitor / poll をすべて失う＝cycle 後の再開手順（rebrief・§9）では、稼働中 worker が居るなら**監視の再武装を最初に行う**。
 
 ### bd ラベル/notes ベース完了検知の作法（監視トリガー衛生）
 
