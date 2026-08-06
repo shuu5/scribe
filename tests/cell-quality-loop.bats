@@ -297,13 +297,16 @@ plant_driver_mutant() {
 
 # ── L-B3（否定対照 2）────────────────────────────────────────────────────────
 # inventory: invariant=最終 round が真にクリーン（blocking 0 ∧ unverified 0 ∧ machinery 健全）でも
-#            capExceeded=true なら系統A の昇格をしない＝終端は **escalate 網**（gatePrefix=ESCALATE）で
-#            確定する（cap 発火 run は「幅を落として走った」＝真にクリーンだと主張できない）
+#            **例外由来（quota/error）・blocking 関連の** capExceeded なら系統A の昇格をしない＝終端は
+#            **escalate 網**（gatePrefix=ESCALATE）で確定する（sc-spp1 errata-01 以降、tail-topK 由来の
+#            非 blocking drop のみの cap は capTailOnly 弁別で昇格対象＝本 tooth の scenario は quota 例外
+#            ゆえ従来どおり昇格しない側・弁別の例外側 pin は cap.bats T5/MU-T4）
 #          | polarity=negative / mutant-RED
-#          | mutant_fingerprint=昇格の連言から `!capExceeded && ` を削除 → 昇格が converged=true を立てて
-#            直下の escalate 網（zeroStreak < 2）を丸ごと skip し、capFinalize が converged だけを剥がすため
-#            converged=false ∧ escalate=false = **gatePrefix OPEN**（sc-k33c errata が封鎖した loop-mode
-#            fail-open）へ落ちる＝本 tooth が RED（実走で確認する）
+#          | mutant_fingerprint=昇格の連言 `(!capExceeded || capTailOnly()) && round` の cap-guard を
+#            `(!capExceeded || true) && round` へ潰す（pipe-free 等価形: `capTailOnly()) && round` →
+#            `true) && round`）→ 昇格が converged=true を立てて直下の escalate 網（zeroStreak < 2）を丸ごと
+#            skip し、capFinalize が converged だけを剥がすため converged=false ∧ escalate=false =
+#            **gatePrefix OPEN**（sc-k33c errata が封鎖した loop-mode fail-open）へ落ちる＝本 tooth が RED
 #
 # 【シナリオ選定の load-bearing な注意】throw を round 限定しない（CQ_THROW_AT_ROUND 未設定）と、全 round の
 # verify が落ちて毎 round が blocking 0 ∧ machineryFailed false になり zeroStreak が 2 に達して **rounds=2 で
@@ -337,7 +340,9 @@ plant_driver_mutant() {
   # 立て、直下の escalate 網を飛ばす。capFinalize が converged を false へ戻すので終端は
   # converged=false ∧ escalate=false = gatePrefix OPEN（fail-open）になる。
   local mut="$BATS_TEST_TMPDIR/mu-b3"
-  plant_wf_mutant "$mut" '!capExceeded \&\& ' ''
+  # (sc-spp1 errata-01 追随) 昇格連言は `(!capExceeded || capTailOnly()) &&` へ変わった。sed の | delimiter
+  # 制約で pipe を含む literal は書けないため、`(!capExceeded || true)` へ潰す等価変異で cap-guard を外す。
+  plant_wf_mutant "$mut" 'capTailOnly()) \&\& round' 'true) \&\& round'
   run env CQ_ARGS="$a" CQ_REVIEW_FINDINGS="$FINDING_BLOCKING" CQ_VERIFY_REFUTED=false \
       CQ_REVIEW_FINDINGS_BY_ROUND='{"3":[]}' CQ_THROW_AT_LABEL='verify:' CQ_THROW_AT_ROUND=1 \
       CQ_THROW_KIND=quota node "$mut/tests/driver.mjs" run
@@ -353,10 +358,10 @@ plant_driver_mutant() {
 #            確定する（＝系統A の昇格が escalate 分岐を飛び越していない）
 #            （churn 打切り run も land 時は同じ扱いにする＝連言へ churnTerminatedEarly を足すこと）
 #          | polarity=negative / mutant-RED
-#          | mutant_fingerprint=`!capExceeded && round >= effectiveCap && !capTerminatedEarly(round, effectiveCap) && zeroStreak >= 1`
-#            → `zeroStreak >= 1`（cap 網 + 自然到達の連言を外す過剰一般化）→ 昇格が escalate 分岐を飛ばし、終端文言が
-#            capFinalize 経由の 'cap 発火(reason=cap)で blocking 級 …' へ変わる（'cap 由来の早期打切り' が消える）
-#            ＝本 tooth が RED（実走で確認する）
+#          | mutant_fingerprint=`capTailOnly()) && round >= effectiveCap && !capTerminatedEarly(round, effectiveCap) && zeroStreak >= 1`
+#            → `true) && zeroStreak >= 1`（sc-spp1 errata-01 追随の pipe-free 等価形＝cap-guard + 自然到達の
+#            連言を外す過剰一般化）→ 昇格が escalate 分岐を飛ばし、終端文言が capFinalize 経由の
+#            'cap 発火(reason=cap)で blocking 級 …' へ変わる（'cap 由来の早期打切り' が消える）＝本 tooth が RED
 @test "sc-pyab L-B4: cap 由来の早期打切り run は 0 blocking でも converged を立てない" {
   # totalBudget を絞り round 頭 gate（層2-①）で打ち切らせる。findings は空＝各 round は真にクリーン。
   # 免除段下限（self-test 2 + round1 snapshot 1）+ review 4 + reserve 1 を跨ぐ値を掃引する。
@@ -380,7 +385,8 @@ plant_driver_mutant() {
   # 昇格が converged=true を立てて escalate 分岐を丸ごと飛ばす。capFinalize が converged を false へ戻すため
   # converged 値だけは同値に見えるが、escalateReason が capFinalize 経由の文言へ変わる＝そこで捕える。
   local mut="$BATS_TEST_TMPDIR/mu-b4"
-  plant_wf_mutant "$mut" '!capExceeded \&\& round >= effectiveCap \&\& !capTerminatedEarly(round, effectiveCap) \&\& zeroStreak >= 1' 'zeroStreak >= 1'
+  # (sc-spp1 errata-01 追随) cap-guard と自然到達連言の両方を外す等価変異（pipe-free 形）。
+  plant_wf_mutant "$mut" 'capTailOnly()) \&\& round >= effectiveCap \&\& !capTerminatedEarly(round, effectiveCap) \&\& zeroStreak >= 1' 'true) \&\& zeroStreak >= 1'
   for tb in 8 9 10; do
     echo "# mutant totalBudget=$tb"
     run env CQ_ARGS="$(lq_args "{\"totalBudget\":$tb}")" CQ_REVIEW_FINDINGS='[]' CQ_VERIFY_REFUTED=true node "$mut/tests/driver.mjs" run
@@ -454,8 +460,9 @@ plant_driver_mutant() {
 #            しか覆っていないので、blocking>0 側はこの tooth だけが守る）
 #          | polarity=negative / mutant-RED（現 main で既に GREEN ゆえ baseline-RED を要求しない）
 #          | mutant_fingerprint=昇格の連言
-#            `!capExceeded && round >= effectiveCap && !capTerminatedEarly(round, effectiveCap) && zeroStreak >= 1 && !(lastH.unverified > 0)`
-#            → `round >= effectiveCap`（最終 round を無条件 converged にする過剰一般化）
+#            `capTailOnly()) && round >= effectiveCap && !capTerminatedEarly(round, effectiveCap) && zeroStreak >= 1 && !(lastH.unverified > 0)`
+#            → `true) && round >= effectiveCap`（sc-spp1 errata-01 追随の pipe-free 等価形＝最終 round を
+#            実質無条件 converged にする過剰一般化）
 #            → converged=true / escalate=false / gatePrefix=CONVERGED で RED
 @test "sc-pyab L-B7: 最終 round に blocking が残る run は converged を立てず escalate（silent ship 禁止）" {
   local a
@@ -476,9 +483,10 @@ plant_driver_mutant() {
   # 変異: 系統A を「最終 round なら無条件 converged」へ過剰一般化する（＝連言をすべて外す）と、
   # confirmed blocking を抱えたまま CONVERGED が出る。
   local mut="$BATS_TEST_TMPDIR/mu-b7"
+  # (sc-spp1 errata-01 追随) 連言全外しの等価変異（pipe-free 形・結果は (…||true) && round>=effectiveCap）。
   plant_wf_mutant "$mut" \
-      '!capExceeded \&\& round >= effectiveCap \&\& !capTerminatedEarly(round, effectiveCap) \&\& zeroStreak >= 1 \&\& !(lastH.unverified > 0)' \
-      'round >= effectiveCap'
+      'capTailOnly()) \&\& round >= effectiveCap \&\& !capTerminatedEarly(round, effectiveCap) \&\& zeroStreak >= 1 \&\& !(lastH.unverified > 0)' \
+      'true) \&\& round >= effectiveCap'
   run env CQ_ARGS="$a" CQ_REVIEW_FINDINGS="$FINDING_BLOCKING" CQ_VERIFY_REFUTED=false node "$mut/tests/driver.mjs" run
   [ "$status" -eq 0 ]
   [ "$(kval "$output" converged)" = "true" ]
