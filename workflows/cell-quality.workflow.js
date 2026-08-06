@@ -504,26 +504,34 @@ let refinedAcceptance = acceptance // Plan で精緻化されたら更新(review
 //
 // 層1(args 正規化・L456 隣の maxConcurrency と同じ Number.isInteger イディオム): ただし maxConcurrency の
 //   「不正値は既定へ黙って倒す」ではなく **不正値は fail-fast(throw)** にする(silent fallback 禁止=「cap を
-//   頼んだのに無 cap で走る」fail-open を作らない)。未指定(undefined/null)だけが「無 cap=現状維持」で、これが
-//   cap 機構全体の opt-in 既定(数値既定を変えない fence)。この fail-fast は【全モード】で発火する
-//   (isWorkerCell 条件を付けない)。goal/acceptance の「いずれか」要件は従来どおり isWorkerCell ゲート側に残す。
+//   頼んだのに無 cap で走る」fail-open を作らない)。totalBudget は未指定(undefined/null)= 無 cap の opt-in
+//   既定を維持する(fail-fast 設計・sc-spp1 裁定(4))。perRoundVerifyTopK は **sc-spp1 で有限既定へ変更**
+//   (未指定 = CAP_TAIL_TOPK_DEFAULT・下の宣言コメント参照)＝「cap 機構全体が opt-in」だった旧契約は
+//   perRoundVerifyTopK に限り廃止(W8-a: opt-in 既定は実運用で一度も渡されず 0 本も減らなかった)。
+//   この fail-fast は【全モード】で発火する(isWorkerCell 条件を付けない)。goal/acceptance の「いずれか」
+//   要件は従来どおり isWorkerCell ゲート側に残す。
 // 層2(admission control 4 点): round 頭 / review 前 / verify 前 / fix 前。snapshot・self-test・classify は
 //   **免除**(監査面=落とすと gate が状態を直読できなくなる)。ただし総数保証のため消費は計上する(capAccount)。
-//   縮退順は「verify を critical/major に限定 → severity top-K(決定論 tie-break) → loud drop」。
-//   effort 降格と dimensions 削減は不採用(裁定済み)。
+//   予算(totalBudget)側の縮退順は「verify を critical/major に限定 → severity top-K(決定論 tie-break) →
+//   loud drop」。topK(perRoundVerifyTopK)側は sc-spp1 で severity ゲート化＝critical/major は floor(全数
+//   verify)・切るのは尾(minor/nit)の K 超過分のみ。effort 降格と dimensions 削減は不採用(裁定済み)。
 // 層3(cap 系例外の正規化): 無防備 call site の throw で run が result を返さず消える現状を解消する。
 //   判定は name **または** message の指紋(AND 禁止)。指紋は **未実測の保守的な列挙**であって実機文言の実測
 //   ではない(実機の cap 例外を観測できていない=K9 留保(5))。どちらにも非一致なら cap ではない=従来の失敗正規化/
 //   透過(machinery 失敗)へ倒す fail-closed。
 const CAP_SEVERITY_RANK = { critical: 0, major: 1, minor: 2, nit: 3 }
 const capIsBlocking = (f) => !!f && (f.severity === 'critical' || f.severity === 'major')
+// (sc-spp1) perRoundVerifyTopK の適用対象 = 尾(minor/nit)のみ。critical/major と severity 不明(欠落/非正規)
+// は floor(全数 verify)= fail-safe(不明を尾に混ぜて切ると、誤表記の critical が verify されないまま流れうる。
+// 観点単位 top-K が major 集中で major を落とす既知の罠〔sc-spp1 W8-b 留意点(3)〕もこの floor で構造解消)。
+const capIsTail = (f) => !!f && (f.severity === 'minor' || f.severity === 'nit')
 // 落とした対象のうち「blocking 級」= critical/major、および severity 不明(観点丸ごと欠落 / 例外停止)。
 // 不明を blocking 級に数えるのは fail-closed(欠落した観点に blocking が無かったと主張できないため)。
 const CAP_BLOCKING_DROP_SEVERITIES = new Set(['critical', 'major', 'unknown'])
 
 // ── 層1: 新 args の正規化 + fail-fast ────────────────────────────────────────────
 const __capIntArg = (raw, name) => {
-  if (raw === undefined || raw === null) return 0 // 未指定 = 無 cap(opt-in 既定=現状維持)
+  if (raw === undefined || raw === null) return 0 // 未指定 = 無 cap(totalBudget の opt-in 既定。perRoundVerifyTopK は呼出前に既定解決済み=sc-spp1)
   if (typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0) {
     throw new Error(
       `[cell-quality cap args fail-fast] ${name} は正整数(単位=agent 本数)で渡すこと。received=${JSON.stringify(raw)}(type=${Array.isArray(raw) ? 'array' : typeof raw})。` +
@@ -533,7 +541,16 @@ const __capIntArg = (raw, name) => {
   return raw
 }
 const totalBudget = __capIntArg(A.totalBudget, 'totalBudget') // 0 = 無 cap。単位 = agent 本数
-const perRoundVerifyTopK = __capIntArg(A.perRoundVerifyTopK, 'perRoundVerifyTopK') // 0 = 無 cap。観点(dimension)単位の top-K
+// (sc-spp1 裁定 2026-08-06) perRoundVerifyTopK の既定 = 有限(CAP_TAIL_TOPK_DEFAULT)。未指定でも尾(minor/nit)
+// を観点単位 K で切る(critical/major は floor=全数 verify・capIsTail 参照)。旧契約「未指定 = 無 cap」は W8-a
+// で廃止(opt-in 既定は実運用で一度も渡されず 0 本も減らなかった=orch-er5o 実測)。無 cap 相当が要る呼出しは
+// 想定 findings 数より大きい K を明示する。明示 0 は従来どおり fail-fast(「K=0 を頼んだのに無制限で走る」
+// silent fail-open を作らない=層1 の設計を維持)。K=4 の根拠と再較正条件(sc-8935 実分布)は bd sc-spp1 notes。
+const CAP_TAIL_TOPK_DEFAULT = 4
+const CAP_TAIL_TOPK_DEFAULTED = A.perRoundVerifyTopK === undefined || A.perRoundVerifyTopK === null
+const perRoundVerifyTopK = CAP_TAIL_TOPK_DEFAULTED
+  ? CAP_TAIL_TOPK_DEFAULT
+  : __capIntArg(A.perRoundVerifyTopK, 'perRoundVerifyTopK') // 観点(dimension)単位・尾(minor/nit)のみの top-K
 const CAP_ON = totalBudget > 0
 // 免除段(admission を通さない段)の最小本数: self-test baseline+final(selfTestCmd 供給時のみ 2)+ classify
 // (taskType 未指定時 1)+ plan(doPlan 時 1)+ implement(doImplement 時 1)+ round1 snapshot(1)。
@@ -598,8 +615,34 @@ const capDrop = (stage, dimension, title, severity, reason) => {
 }
 const capMarkExceeded = (reason) => {
   capExceeded = true
+  capReasonsSeen.add(reason) // (sc-spp1 errata-01) 初回 reason 以外も失わない(capTailOnly の弁別が first-wins に騙されないため)
   if (!capReason) capReason = reason
 }
+// (sc-spp1 errata-01 + errata-02・gate wf_edecc791-b3a / wf_03b7d715-cc1 の根本対処) cap 発火の種別弁別。
+// 「tail-topK 由来の非 blocking drop **のみ**で立った capExceeded」は、幅の劣化が merge 判定に関与しない
+// (落ちたのは minor/nit の尾だけ・blocking 級 0)ことが構造的に保証される＝系統A 昇格(loop 終端)を殺さない。
+// 判定は 3 重: (1) capReasonsSeen が {'cap'} のみ＝'quota'/'error'(例外由来)を一度も見ていない。
+//   【errata-02 訂正】capReasonsSeen の存在理由は「first-wins の capReason で例外が隠れる」ではない(事実は逆:
+//   capRecordException は capReason を無条件上書きするため scalar でも例外は検出できた)。真の理由は writer が
+//   2 種(first-wins の capMarkExceeded / 上書きの capRecordException)ある scalar 判定は writer 追加・順序変更に
+//   脆いこと＝「capExceeded を立てる全経路が自 reason を必ず add する」一本の規約に寄せ、集合で判定する。
+//   errata-01 時点では capRecordException 側に add が無く、tail cut 先行 run で例外が観測されないまま
+//   capTailOnly が真になる ESCALATE→OPEN の fail-open があった(gate wf_03b7d715-cc1 実測)＝errata-02 で封鎖。
+// (2) capDropped 全件が reason 'perRoundVerifyTopK'(totalBudget 系の severity-limited/severity-topk/
+//   budget-drop・round 丸ごと drop・例外 stage drop を除外)、(3) blocking 級(critical/major/unknown) drop ゼロ。
+//   (3) は post-errata-01 の実装では単独到達不能(topK cut は capIsTail=minor/nit のみ・round/budget/例外系は
+//   (1)(2) が先に落とす)＝defense-in-depth の帯として保持する(変異 tooth は (1)(2) 側が担う)。
+// これ以外の cap 発火は従来どおり昇格を殺す(sc-pyab L-B3 の「例外由来 cap は ESCALATE」fence 不変)。
+// converged=false の強制(capFinalize)も不変＝tail-only run の終端は契約どおり OPEN + capNote に落ち着く
+// (裁定(5) escalate 安売り防止・本 file の「escalate の安売り防止」コメント〔capFinalize 冒頭の不変条件・行番号でなく識別子で指す=行番号ポインタは編集のたび腐る〕)。
+const capReasonsSeen = new Set()
+const capTailOnly = () =>
+  capExceeded &&
+  capReasonsSeen.size === 1 &&
+  capReasonsSeen.has('cap') &&
+  capDropped.length > 0 &&
+  capDropped.every((d) => d.reason === 'perRoundVerifyTopK') &&
+  !capDropped.some((d) => CAP_BLOCKING_DROP_SEVERITIES.has(d.severity))
 // 帳簿を実測へ同期する。**in-flight の agent が 1 体も無い地点でだけ**呼んでよい(= admission の各点。
 // WF は段の間で必ず await するので、round 頭 / review 前 / fix 前では実呼出しが確定している)。これを入れないと
 // 「RO 解決前に 2 本で予約した免除段が、実際は 1 本で済んだ」分の過剰予約が恒久的に残り、予算が実質目減りする
@@ -704,12 +747,15 @@ const capOrderFindings = (findings, dimKey) =>
       return a.i - b.i // 第4キー: 元順(安定ソート)
     })
     .map((x) => x.f)
-// 層2-③ 縮退順の本体: (1) perRoundVerifyTopK(観点単位 top-K)→ (2) 予算枠で critical/major 限定 →
+// 層2-③ 縮退順の本体: (1) perRoundVerifyTopK(観点単位・尾(minor/nit)のみの top-K。critical/major は
+// floor=全数 verify・sc-spp1)→ (2) 予算枠で critical/major 限定 →
 // (3) severity top-K(決定論 tie-break)→ (4) loud drop(枠 0)。落とした分は capDropped[] へ列挙する。
 const capSelectVerify = (findings, dimKey, round, quota) => {
-  // 【後方互換の要】実際に 1 件も落とさない round では **並べ替えもしない** = 既定経路(cap 未指定)の verify
+  // 【後方互換の要】実際に 1 件も落とさない round では **並べ替えもしない** = 落とさない run の verify
   // 呼出し列が base 木と 1 mm も変わらない(severity 順への恒常ソートは呼出し列を変える退行だった=K2' 実測)。
-  const needTopK = perRoundVerifyTopK > 0 && findings.length > perRoundVerifyTopK
+  // sc-spp1 の既定有限化後も不変量そのものは維持: 尾(minor/nit)が K 以下の run では既定 cut が不発＝
+  // 呼出し列は base 木と同一(K2' の callSeq 比較は「不発域」でこの不変量を恒久 pin し続ける)。
+  const needTopK = perRoundVerifyTopK > 0 && findings.filter(capIsTail).length > perRoundVerifyTopK
   const needBudget = CAP_ON && findings.length > quota
   if (!needTopK && !needBudget) {
     capBooked += findings.length * capCallCost()
@@ -720,13 +766,19 @@ const capSelectVerify = (findings, dimKey, round, quota) => {
   const dropAll = (list, reason) => {
     for (const f of list) capDrop('verify', dimKey, f && f.title, f && f.severity, reason)
   }
-  if (perRoundVerifyTopK > 0 && admit.length > perRoundVerifyTopK) {
-    const cut = admit.slice(perRoundVerifyTopK)
+  if (needTopK) {
+    // (sc-spp1) severity ゲート: floor(critical/major/severity 不明)は K の対象外＝1 本も切らない。切るのは
+    // 尾(minor/nit)の K 超過分だけ。ordered は severity 第一キー済みゆえ tail.slice(K) が最下位側から落ちる
+    // (決定論 tie-break は capOrderFindings 側で担保)。この経路の drop は構造的に非 blocking のみ＝
+    // capDroppedBlocking を増やさず escalate を駆動しない(escalate 安売り防止が既定でも成立する)。
+    const tail = admit.filter(capIsTail)
+    const cut = tail.slice(perRoundVerifyTopK)
+    const cutSet = new Set(cut)
     dropAll(cut, 'perRoundVerifyTopK')
-    admit = admit.slice(0, perRoundVerifyTopK)
+    admit = admit.filter((f) => !cutSet.has(f))
     capMarkExceeded('cap')
     capStages.push({ round, stage: `verify:${dimKey}`, requested: ordered.length, admitted: admit.length, dropped: cut.length, reason: 'cap' })
-    log(`[cap] verify:${dimKey} r${round}: perRoundVerifyTopK=${perRoundVerifyTopK} で ${cut.length} 件を verify せず落とした(観点単位 top-K・決定論 tie-break)。capDropped[] を直読すること。`)
+    log(`[cap] verify:${dimKey} r${round}: perRoundVerifyTopK=${perRoundVerifyTopK} で尾(minor/nit) ${cut.length} 件を verify せず落とした(critical/major は floor=全数 verify・観点単位・決定論 tie-break)。capDropped[] を直読すること。`)
   }
   if (CAP_ON && admit.length > quota) {
     const before = admit.length
@@ -801,6 +853,7 @@ const capRecordException = (stage, reason, e, opts) => {
     return
   }
   capExceeded = true
+  capReasonsSeen.add(reason) // (sc-spp1 errata-02) 例外経路も reason を記録: capExceeded を立てる全経路が自 reason を capReasonsSeen へ必ず add する規約。記録しないと tail cut 先行 run で capTailOnly が例外を観測できず ESCALATE→OPEN の fail-open になる(gate wf_03b7d715-cc1 が 3 木対照実走で確認)。
   capReason = reason // 例外(実際に走れなかった)は自前 admission より強い事実ゆえ上書きする
   capStages.push({ round: 0, stage, requested: 1, admitted: 0, dropped: 1, reason })
   const alreadySurfaced = !!(opts && opts.alreadySurfaced === true)
@@ -870,8 +923,12 @@ const capFinalize = (state) => {
     `[cap-token] budget.total=${budgetTotal === null ? 'null(未設定)' : budgetTotal} spent-delta=${tokenDelta === null ? 'n/a' : tokenDelta} / cap 判定は agent 本数(limit=${totalBudget || '無 cap'} booked=${capBooked} spent=${capSpent})で行い、token は情報ログ併走のみ(判定に使わない)。`
   )
   const capReport = {
-    limit: totalBudget, // 0 = 無 cap(opt-in 既定)
+    limit: totalBudget, // 0 = 無 cap(totalBudget は opt-in 既定を維持・sc-spp1 裁定(4))
     unit: 'agent-calls', // 【単位契約】totalBudget の単位は agent 本数(token ではない)
+    // (sc-spp1) 実効の尾 top-K とその出所。orch 較正記録の様式〔K・dimension 数・findings 数・実 verify 数・
+    // drop 内訳〕の K を返り値から機械で取れるようにする(orch-er5o の適用記録が args 直読に頼らないため)。
+    tailTopK: perRoundVerifyTopK,
+    tailTopKDefaulted: CAP_TAIL_TOPK_DEFAULTED, // true = 既定値(未指定)・false = 呼出側の明示値
     spentEstimate: capSpent, // 免除段(classify/self-test/snapshot/plan/implement)も含む起動本数の見積り
     stages: capStages, // どの段でどれだけ落としたか([{round,stage,requested,admitted,dropped,reason}])
     reason: capReason || '', // 'quota'(harness token budget 例外)|'cap'(自前 admission)|'error'(harness agent cap 例外)
@@ -1890,7 +1947,13 @@ if (canAutoFix && !LIGHT_TYPES.has(taskType)) {
   //     **verify 段の失敗を含まない**。verify agent が非 cap 例外で全滅した round は verdict:null → unverified 行き
   //     ゆえ confirmed=0 になり、blocking 0 ∧ machineryFailed false で「真にクリーン」と誤読される。
   //     unverified が残る round は「反証機構が動いた結果の 0」ではないので昇格しない(fail-closed)。
-  if (!converged && !escalate && !capExceeded && round >= effectiveCap && !capTerminatedEarly(round, effectiveCap) && zeroStreak >= 1 && !(lastH.unverified > 0)) {
+  // (sc-spp1 errata-01) 連言 (A) を capTailOnly で緩める: 既定 tail-K の発火(尾 minor/nit の drop のみ)は
+  // 「幅を落とした」が「真にクリーンでない」を意味しない(blocking 級 0 が構造保証)。緩めないと通常の
+  // 系統A run(最終 round clean)が昇格を失い直下の escalate 網へ落ち、CONVERGED→ESCALATE の終端反転になる
+  // (gate wf_edecc791-b3a が base 対照実走で確認・契約 7「escalate は不変」違反)。昇格後も capFinalize が
+  // converged を false へ戻すため tail-only run の終端は OPEN + capNote(契約どおり)。例外由来(quota/error)・
+  // blocking 級 drop・totalBudget 系 drop の cap は従来どおり昇格対象外(L-B3 fence 不変)。
+  if (!converged && !escalate && (!capExceeded || capTailOnly()) && round >= effectiveCap && !capTerminatedEarly(round, effectiveCap) && zeroStreak >= 1 && !(lastH.unverified > 0)) {
     converged = true
     log(
       `収束(系統A): hard cap ${effectiveCap} 到達だが最終 round は真にクリーン(zeroStreak=${zeroStreak}・blocking=0・machinery 健全)` +
