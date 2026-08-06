@@ -610,9 +610,10 @@ plant_cap_mutant() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 @test "sc-spp1 T1: 未指定でも尾 > 4 なら既定 K=4 が発火し、drop は尾のみ・escalate しない" {
-  # maxRounds は既定のまま（1 に絞ると autoFix loop の hard cap escalate が立ち、cap 由来かどうかを
-  # 弁別できなくなる＝上の terminal(b) tooth と同じ理由）。既定 loop は zeroStreak で 2 round 走る＝
-  # 各観点 5 本/round × 2 round・NIT drop も round ごと（4 観点 × 2 round = 8 件）。
+  # maxRounds は既定のまま＝zeroStreak>=2 の正規収束路を踏む（既定 loop は 2 round 走る＝各観点 5 本/round ×
+  # 2 round・NIT drop も round ごと〔4 観点 × 2 round = 8 件〕）。旧コメント「maxRounds=1 だと cap 由来かどうか
+  # 弁別できない」は事実誤り（gate wf_edecc791-b3a 指摘）: K 明示大の対照 run が弁別子になる。maxRounds=1 ×
+  # 既定発火の昇格経路（errata-01 の回帰域）は T3 が pin する。
   run env CQ_ARGS="$(cq_args '{}')" CQ_REVIEW_FINDINGS="$FINDINGS_TAILY" \
       CQ_VERIFY_REFUTED=true node "$DRIVER" run
   [ "$status" -eq 0 ]
@@ -643,6 +644,72 @@ plant_cap_mutant() {
   [ "$(kval "$output" capDroppedTitles)" = "mm2;mm2;mm2;mm2;mm2;mm2;mm2;mm2" ]
   [ "$(kval "$output" capDroppedBlocking)" -eq 0 ]
   [ "$(kval "$output" escalate)" = "false" ]
+}
+
+@test "sc-spp1 T3 (errata-01): 系統A（hard cap 到達・最終 round clean）で既定 tail-K が発火しても終端は OPEN（ESCALATE へ反転しない）" {
+  # gate wf_edecc791-b3a blocking 4 件の回帰域: 既定 K=4 の tail cut が sticky capExceeded を立て、系統A 昇格の
+  # 連言 `!capExceeded` を殺して直下の escalate 網で CONVERGED→ESCALATE の終端反転を起こしていた（base 対照実走）。
+  # errata-01 = capTailOnly 弁別（尾 topK 由来・非 blocking のみの cap は昇格を殺さない）。昇格後も capFinalize が
+  # converged を落とすため終端は契約どおり OPEN + capNote（escalate 安売り防止＝裁定(5)）。
+  # 形B: r1/r2 dirty → r3 clean（実運用で最も普通の収束形・既定 maxRounds=3）。
+  run env CQ_ARGS="$(cq_args '{}')" \
+      CQ_REVIEW_FINDINGS_BY_ROUND="{\"1\":$FINDINGS_TAILY,\"2\":$FINDINGS_TAILY,\"3\":[]}" \
+      CQ_VERIFY_REFUTED=false node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" gatePrefix)" = "OPEN" ]
+  [ "$(kval "$output" escalate)" = "false" ]
+  [ "$(kval "$output" converged)" = "false" ]
+  [ "$(kval "$output" capExceeded)" = "true" ]
+  [ "$(kval "$output" capDroppedBlocking)" -eq 0 ]
+  # 対照（弁別子）: K 明示大＝cut 不発なら系統A はそのまま CONVERGED（cap 由来か否かは K 対照で弁別できる）。
+  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":9}')" \
+      CQ_REVIEW_FINDINGS_BY_ROUND="{\"1\":$FINDINGS_TAILY,\"2\":$FINDINGS_TAILY,\"3\":[]}" \
+      CQ_VERIFY_REFUTED=false node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" gatePrefix)" = "CONVERGED" ]
+  # 形A: maxRounds=1・全 refuted（zeroStreak=1 で cap 到達＝昇格必須経路）でも OPEN。
+  run env CQ_ARGS="$(cq_args '{"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_TAILY" \
+      CQ_VERIFY_REFUTED=true node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" gatePrefix)" = "OPEN" ]
+  [ "$(kval "$output" escalate)" = "false" ]
+}
+
+@test "sc-spp1 T4: 既定 tail-K の終端非互換 pin — base（公開祖先）=CONVERGED / HEAD=OPEN（ESCALATE ではない）" {
+  # 対照 ref pin 規律（sc-0dx9 / sc-jull）: 対照は公開祖先 SHA（origin/main 上・PR#176 base の fed52db と
+  # tree 同一を実測済み）+ cat-file preflight + 到達不能は loud fail（skip は fail-open）+ env override。
+  local SPP1_BASE_REF="${SC_SPP1_BASE_REF:-f4fc6ee693747b62a0ecb2656cd29862c84a0b32}"
+  local base="$BATS_TEST_TMPDIR/spp1base"
+  mkdir -p "$base/workflows" "$base/tests"
+  if ! git -C "$REPO_ROOT" cat-file -e "${SPP1_BASE_REF}:workflows/cell-quality.workflow.js" 2>/dev/null; then
+    echo "# FATAL: 対照 ref '${SPP1_BASE_REF}' から workflows/cell-quality.workflow.js を読めない（shallow clone / gc）。" >&2
+    echo "#        SC_SPP1_BASE_REF で sc-spp1 実装前の公開 commit を指定せよ。skip は fail-open ゆえ loud fail する。" >&2
+    return 1
+  fi
+  git -C "$REPO_ROOT" show "${SPP1_BASE_REF}:workflows/cell-quality.workflow.js" > "$base/workflows/cell-quality.workflow.js"
+  # 対照が sc-spp1 実装前であること（自己比較の空虚化防止）。
+  ! grep -qF 'CAP_TAIL_TOPK_DEFAULT' "$base/workflows/cell-quality.workflow.js"
+  cp "$DRIVER" "$base/tests/driver.mjs"
+  run env CQ_ARGS="$(cq_args '{"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_TAILY" \
+      CQ_VERIFY_REFUTED=true node "$base/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" gatePrefix)" = "CONVERGED" ]
+  [ "$(kval "$output" capDroppedCount)" -eq 0 ]
+  run env CQ_ARGS="$(cq_args '{"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_TAILY" \
+      CQ_VERIFY_REFUTED=true node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" gatePrefix)" = "OPEN" ]
+}
+
+@test "sc-spp1 MU-T3: capTailOnly の弁別を殺す変異で T3 の形A が ESCALATE へ戻る（errata-01 の非空虚性）" {
+  local mut="$BATS_TEST_TMPDIR/mu-spp1c"
+  plant_cap_mutant "$mut" "capReasonsSeen.size === 1" "capReasonsSeen.size === 2"
+  run env CQ_ARGS="$(cq_args '{"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_TAILY" \
+      CQ_VERIFY_REFUTED=true node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  # 変異後: tail-only 弁別が死に旧・反転挙動へ退行＝escalate 網が発火する（T3 が「元から OPEN」で受かっていない証拠）。
+  [ "$(kval "$output" gatePrefix)" = "ESCALATE" ]
+  [ "$(kval "$output" escalate)" = "true" ]
 }
 
 @test "sc-spp1 MU-T1: 既定値を 0 化する変異で既定 cut が死ぬ（T1 の非空虚性）" {

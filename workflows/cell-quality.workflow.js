@@ -615,8 +615,26 @@ const capDrop = (stage, dimension, title, severity, reason) => {
 }
 const capMarkExceeded = (reason) => {
   capExceeded = true
+  capReasonsSeen.add(reason) // (sc-spp1 errata-01) 初回 reason 以外も失わない(capTailOnly の弁別が first-wins に騙されないため)
   if (!capReason) capReason = reason
 }
+// (sc-spp1 errata-01・gate wf_edecc791-b3a blocking 4 件の根本対処) cap 発火の種別弁別。
+// 「tail-topK 由来の非 blocking drop **のみ**で立った capExceeded」は、幅の劣化が merge 判定に関与しない
+// (落ちたのは minor/nit の尾だけ・blocking 級 0)ことが構造的に保証される＝系統A 昇格(loop 終端)を殺さない。
+// 判定は 3 重: (1) capMarkExceeded が 'cap' 以外(quota/error=例外由来)を一度も見ていない(first-wins の
+// capReason だけ見ると tail cut が先行した run で例外由来が隠れる)、(2) capDropped 全件が reason
+// 'perRoundVerifyTopK'(totalBudget 系の severity-limited/severity-topk/budget-drop・round 丸ごと drop を除外)、
+// (3) blocking 級(critical/major/unknown) drop ゼロ。これ以外の cap 発火は従来どおり昇格を殺す
+// (sc-pyab L-B3 の「例外由来 cap は ESCALATE」fence 不変)。converged=false の強制(capFinalize)も不変＝
+// tail-only run の終端は契約どおり OPEN + capNote に落ち着く(裁定(5) escalate 安売り防止・WF 内 L874 コメント)。
+const capReasonsSeen = new Set()
+const capTailOnly = () =>
+  capExceeded &&
+  capReasonsSeen.size === 1 &&
+  capReasonsSeen.has('cap') &&
+  capDropped.length > 0 &&
+  capDropped.every((d) => d.reason === 'perRoundVerifyTopK') &&
+  !capDropped.some((d) => CAP_BLOCKING_DROP_SEVERITIES.has(d.severity))
 // 帳簿を実測へ同期する。**in-flight の agent が 1 体も無い地点でだけ**呼んでよい(= admission の各点。
 // WF は段の間で必ず await するので、round 頭 / review 前 / fix 前では実呼出しが確定している)。これを入れないと
 // 「RO 解決前に 2 本で予約した免除段が、実際は 1 本で済んだ」分の過剰予約が恒久的に残り、予算が実質目減りする
@@ -1920,7 +1938,13 @@ if (canAutoFix && !LIGHT_TYPES.has(taskType)) {
   //     **verify 段の失敗を含まない**。verify agent が非 cap 例外で全滅した round は verdict:null → unverified 行き
   //     ゆえ confirmed=0 になり、blocking 0 ∧ machineryFailed false で「真にクリーン」と誤読される。
   //     unverified が残る round は「反証機構が動いた結果の 0」ではないので昇格しない(fail-closed)。
-  if (!converged && !escalate && !capExceeded && round >= effectiveCap && !capTerminatedEarly(round, effectiveCap) && zeroStreak >= 1 && !(lastH.unverified > 0)) {
+  // (sc-spp1 errata-01) 連言 (A) を capTailOnly で緩める: 既定 tail-K の発火(尾 minor/nit の drop のみ)は
+  // 「幅を落とした」が「真にクリーンでない」を意味しない(blocking 級 0 が構造保証)。緩めないと通常の
+  // 系統A run(最終 round clean)が昇格を失い直下の escalate 網へ落ち、CONVERGED→ESCALATE の終端反転になる
+  // (gate wf_edecc791-b3a が base 対照実走で確認・契約 7「escalate は不変」違反)。昇格後も capFinalize が
+  // converged を false へ戻すため tail-only run の終端は OPEN + capNote(契約どおり)。例外由来(quota/error)・
+  // blocking 級 drop・totalBudget 系 drop の cap は従来どおり昇格対象外(L-B3 fence 不変)。
+  if (!converged && !escalate && (!capExceeded || capTailOnly()) && round >= effectiveCap && !capTerminatedEarly(round, effectiveCap) && zeroStreak >= 1 && !(lastH.unverified > 0)) {
     converged = true
     log(
       `収束(系統A): hard cap ${effectiveCap} 到達だが最終 round は真にクリーン(zeroStreak=${zeroStreak}・blocking=0・machinery 健全)` +

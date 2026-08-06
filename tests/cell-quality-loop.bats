@@ -337,7 +337,9 @@ plant_driver_mutant() {
   # 立て、直下の escalate 網を飛ばす。capFinalize が converged を false へ戻すので終端は
   # converged=false ∧ escalate=false = gatePrefix OPEN（fail-open）になる。
   local mut="$BATS_TEST_TMPDIR/mu-b3"
-  plant_wf_mutant "$mut" '!capExceeded \&\& ' ''
+  # (sc-spp1 errata-01 追随) 昇格連言は `(!capExceeded || capTailOnly()) &&` へ変わった。sed の | delimiter
+  # 制約で pipe を含む literal は書けないため、`(!capExceeded || true)` へ潰す等価変異で cap-guard を外す。
+  plant_wf_mutant "$mut" 'capTailOnly()) \&\& round' 'true) \&\& round'
   run env CQ_ARGS="$a" CQ_REVIEW_FINDINGS="$FINDING_BLOCKING" CQ_VERIFY_REFUTED=false \
       CQ_REVIEW_FINDINGS_BY_ROUND='{"3":[]}' CQ_THROW_AT_LABEL='verify:' CQ_THROW_AT_ROUND=1 \
       CQ_THROW_KIND=quota node "$mut/tests/driver.mjs" run
@@ -380,7 +382,8 @@ plant_driver_mutant() {
   # 昇格が converged=true を立てて escalate 分岐を丸ごと飛ばす。capFinalize が converged を false へ戻すため
   # converged 値だけは同値に見えるが、escalateReason が capFinalize 経由の文言へ変わる＝そこで捕える。
   local mut="$BATS_TEST_TMPDIR/mu-b4"
-  plant_wf_mutant "$mut" '!capExceeded \&\& round >= effectiveCap \&\& !capTerminatedEarly(round, effectiveCap) \&\& zeroStreak >= 1' 'zeroStreak >= 1'
+  # (sc-spp1 errata-01 追随) cap-guard と自然到達連言の両方を外す等価変異（pipe-free 形）。
+  plant_wf_mutant "$mut" 'capTailOnly()) \&\& round >= effectiveCap \&\& !capTerminatedEarly(round, effectiveCap) \&\& zeroStreak >= 1' 'true) \&\& zeroStreak >= 1'
   for tb in 8 9 10; do
     echo "# mutant totalBudget=$tb"
     run env CQ_ARGS="$(lq_args "{\"totalBudget\":$tb}")" CQ_REVIEW_FINDINGS='[]' CQ_VERIFY_REFUTED=true node "$mut/tests/driver.mjs" run
@@ -476,9 +479,10 @@ plant_driver_mutant() {
   # 変異: 系統A を「最終 round なら無条件 converged」へ過剰一般化する（＝連言をすべて外す）と、
   # confirmed blocking を抱えたまま CONVERGED が出る。
   local mut="$BATS_TEST_TMPDIR/mu-b7"
+  # (sc-spp1 errata-01 追随) 連言全外しの等価変異（pipe-free 形・結果は (…||true) && round>=effectiveCap）。
   plant_wf_mutant "$mut" \
-      '!capExceeded \&\& round >= effectiveCap \&\& !capTerminatedEarly(round, effectiveCap) \&\& zeroStreak >= 1 \&\& !(lastH.unverified > 0)' \
-      'round >= effectiveCap'
+      'capTailOnly()) \&\& round >= effectiveCap \&\& !capTerminatedEarly(round, effectiveCap) \&\& zeroStreak >= 1 \&\& !(lastH.unverified > 0)' \
+      'true) \&\& round >= effectiveCap'
   run env CQ_ARGS="$a" CQ_REVIEW_FINDINGS="$FINDING_BLOCKING" CQ_VERIFY_REFUTED=false node "$mut/tests/driver.mjs" run
   [ "$status" -eq 0 ]
   [ "$(kval "$output" converged)" = "true" ]
