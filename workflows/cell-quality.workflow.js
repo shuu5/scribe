@@ -634,7 +634,7 @@ const capMarkExceeded = (reason) => {
 //   (1)(2) が先に落とす)＝defense-in-depth の帯として保持する(変異 tooth は (1)(2) 側が担う)。
 // これ以外の cap 発火は従来どおり昇格を殺す(sc-pyab L-B3 の「例外由来 cap は ESCALATE」fence 不変)。
 // converged=false の強制(capFinalize)も不変＝tail-only run の終端は契約どおり OPEN + capNote に落ち着く
-// (裁定(5) escalate 安売り防止・WF 内 L874 コメント)。
+// (裁定(5) escalate 安売り防止・本 file の「escalate の安売り防止」コメント〔capFinalize 冒頭の不変条件・行番号でなく識別子で指す=行番号ポインタは編集のたび腐る〕)。
 const capReasonsSeen = new Set()
 const capTailOnly = () =>
   capExceeded &&
