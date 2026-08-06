@@ -123,6 +123,21 @@ const envStr = (name, dflt) => {
 // .catch が同じ集計器から DRIVER_AGENT_CALLS / DRIVER_CALLSEQ を stderr へ出す。
 const collected = { calls: [], logs: [], agentTypeCalls: [], promptCalls: [], effortCalls: [] }
 
+// ── (sc-foqe) stuck agent の模擬: CQ_STUCK_AT_LABEL(label 前方一致)。未設定 = 完全 no-op ──────────────
+// CQ_THROW_AT_LABEL と同じイディオム(label prefix 指定)に揃える。**素の未解決 Promise は使わない**:
+// この driver の entrypoint は runWorkflow().then().catch() の floating promise であり、素の
+// `new Promise(() => {})` を注入すると node は「やることが無い」と判断して rc=0 / stdout 0 byte /
+// 約 0.05 秒で終了する(実測 node v18.19.1)= 「WF が有限時間で返った」の空虚 green になる。
+// ゆえに keep-alive 付き(setTimeout で event loop を握る形・先例 tests/wf-args-lint.bats:643-685)で
+// **本当に居座らせる**。WF が per-agent timeout で見限って return したあとは、entrypoint が下の
+// clearStuckTimers() で handle を解放するので process は自然終了する(hang したまま終わらない)。
+const STUCK_AT_LABEL = process.env.CQ_STUCK_AT_LABEL || ''
+const STUCK_KEEPALIVE_MS = Number(process.env.CQ_STUCK_KEEPALIVE_MS || 3600000)
+const stuckTimers = []
+function clearStuckTimers() {
+  while (stuckTimers.length) clearTimeout(stuckTimers.pop())
+}
+
 async function runWorkflow() {
   // CQ_ARGS_STRING が設定されていれば「そのままの string」を args として渡す(WF の defensive parse 経路を踏む)。
   // 通常は CQ_ARGS(JSON)を object にして渡す。
@@ -205,6 +220,14 @@ async function runWorkflow() {
     // (sc-pyab) CQ_THROW_AT_ROUND 未設定なら短絡して従来と同一(既定不変)。設定時のみ round を突き合わせる。
     if (THROW_AT_LABEL && label.startsWith(THROW_AT_LABEL) && (!THROW_AT_ROUND || roundOf(label) === THROW_AT_ROUND))
       return Promise.reject(makeCapError(THROW_KIND))
+    // (sc-foqe) stuck 模擬: 返らない agent を 1 本(= label prefix 一致分)だけ作る。reject ではなく
+    // 「keep-alive 付きで居座る」= 即 settle する既存 reject seam(CQ_THROW_AT_LABEL / CQ_BUDGET_THROW_AT /
+    // CQ_AGENT_CAP)とは別種の事象であり、WF の per-agent timeout でしか解けない。
+    if (STUCK_AT_LABEL && label.startsWith(STUCK_AT_LABEL)) {
+      return new Promise((r) => {
+        stuckTimers.push(setTimeout(() => r(null), STUCK_KEEPALIVE_MS))
+      })
+    }
     if (BUDGET_THROW_AT > 0 && calls.length === BUDGET_THROW_AT) return Promise.reject(makeCapError('quota'))
     if (AGENT_CAP_AT > 0 && calls.length === AGENT_CAP_AT) return Promise.reject(makeCapError('error'))
     if (THROW_AT_STAGE === 'element-budget' && label.startsWith('verify:')) return Promise.reject(makeCapError('quota'))
@@ -433,9 +456,14 @@ if (mode === 'emit-wrapped') {
 } else if (mode === 'run') {
   runWorkflow()
     .then(({ result, calls, logs, agentTypeCalls, promptCalls, effortCalls }) => {
+      // (sc-foqe) WF が per-agent timeout で見限って return した後は、居座り模擬の timer handle を解放して
+      // process を自然終了させる(解放しないと keep-alive の残り時間だけ空回りし「WF は返ったのに process は
+      // 終わらない」= 呼出元から見た hang が残る)。未設定時は配列が空ゆえ完全 no-op。
+      clearStuckTimers()
       printResult(result, calls, logs, agentTypeCalls, promptCalls, effortCalls)
     })
     .catch((e) => {
+      clearStuckTimers()
       console.error(`DRIVER_ERROR: ${e && e.stack ? e.stack : e}`)
       // (sc-pfn4) throw 経路の観測面: 「agent が 1 体も起動していない」(=fail-fast より前に仕事を始めていない)
       // を bats が機械 assert できるようにする。成功経路の stdout(K 行 / RESULT 行)には一切足さない。
