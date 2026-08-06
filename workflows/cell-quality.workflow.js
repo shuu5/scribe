@@ -1036,6 +1036,105 @@ const fableLimiter = makeLimiter(FABLE_MAX_CONCURRENCY)
 // (stage1 review はスロット解放後に stage2 verify が走る=fableLimiter と同じ無デッドロック証明)。
 const opusLimiter = maxConcurrency > 0 ? makeLimiter(maxConcurrency) : null
 
+// ── (sc-foqe) per-agent timeout: fan-out agent の hang で run が terminal に達しなくなるのを塞ぐ ─────
+// 【塞ぐ失敗】orch-c1df (2) の incident = 33 agent 中 32 done のまま 1 本が約 2h 未返 → WF run 自体が
+// 完了せず、呼出元(worker cell)の待機が無限化した。per-agent の上限を張り、返らない 1 本を有限時間で
+// 見限って既存の失敗正規化へ合流させる(run は死なず result を返す)。
+// 【設計制約】WF script 内では clock / 乱数 API(Date の now・引数なしの Date 構築・Math の random)が harness に
+// 禁止されている(resume 決定性)ので **経過時間を読む実装は採れない**。vm context に露出している
+// setTimeout / clearTimeout だけを使い、Promise.race で「先に返ったほう」を採る(clock を一度も読まない)。
+// ※ この 3 つの literal が本 file に 0 hit であることは tests/cell-quality-hang.bats [H-F1] が静的に pin する
+//   (harness の静的 lint は inline script 経路でしか走らず、scriptPath 直指定経路では launch 前に弾かれない)。
+//   ゆえに **コメント中にも書かない**(guard は literal grep ゆえコメントでも hit する)。
+// 【適用範囲（意図した境界・sc-foqe fence）】timeout が掛かるのは runAgent 経由の **review / verify fan-out** だけ。
+// 逐次段(classify / plan / implement / snapshot / autofix / self-test)は agent()/roAgent() 直呼びで runAgent を
+// 通らないため対象外である。理由: fence が正規化先を定めたのは review 段(__reviewFailed へ合流)と verify 段
+// (verdict:null → unverified)の 2 つだけで、逐次段の timeout をどの失敗経路へ倒すかは未裁定だから
+// (無裁定で throw させると run ごと落ちる = 現状より悪い失敗様式になりうる)。一次事象(33 agent の fan-out で
+// 1 本が未返)は fan-out 側なので本 leg の acceptance はこの範囲で満たされる。逐次段の hang は残存リスクとして
+// bd sc-foqe notes に申し送り済み(呼出元側 stall 検知は別 bead sc-9yoc の scope)。
+// 【上限値は決め打ちしない】args.agentTimeoutMs(ms・非負整数)で上書きできる。0 は明示 opt-out(timeout 無効)。
+// 既定は下の AGENT_TIMEOUT_MS_DEFAULT = 「正常な review/verify agent を殺さず、incident の約 2h 未返よりは
+// 十分小さい」帯に置く(正常系を殺す側へ倒すと guard 段を落として空虚 green を作るため保守側へ寄せる)。
+const AGENT_TIMEOUT_MS_DEFAULT = 1800000 // 30 分
+const agentTimeoutMs = (() => {
+  const raw = A.agentTimeoutMs
+  if (raw === undefined || raw === null) return AGENT_TIMEOUT_MS_DEFAULT
+  if (!Number.isInteger(raw) || raw < 0) {
+    log(`警告: agentTimeoutMs=${JSON.stringify(raw)} は非負整数(ms)でない。既定 ${AGENT_TIMEOUT_MS_DEFAULT}ms へ倒す(sc-foqe)。0 を渡すと timeout 無効(明示 opt-out)。`)
+    return AGENT_TIMEOUT_MS_DEFAULT
+  }
+  return raw // 0 = 明示 opt-out
+})()
+// timeout した agent の台帳(返り値 field `timedOut` としてそのまま出す)。要素 = {label, stage, dimension, round, timeoutMs}。
+const timedOut = []
+const AGENT_TIMEOUT_ERROR_NAME = 'WorkflowAgentTimeoutError'
+// stage / dimension は **label から機械的に導く**(agent() の opts へ独自 key を足すと harness の opts schema を
+// 汚し、未知 key の扱いが tool 実装依存になるため)。label 形は `review:<dim> r<N>` / `verify:<dim>:<title> r<N>`。
+const parseAgentLabel = (label) => {
+  const s = String(label == null ? '' : label)
+  const seg = s.split(' ')[0].split(':')
+  const m = /\br(\d+)$/.exec(s)
+  return { stage: seg[0] || '', dimension: seg[1] || '', round: m ? Number(m[1]) : 0 }
+}
+// timeout の例外は **cap 指紋を 1 つも含まない**文言にする(CAP_MESSAGE_FINGERPRINTS = budget exceeded /
+// token budget / agent cap / agent limit / exceeded the agent)。含めると capClassify が cap と誤分類し、
+// capExceeded / capDropped[] 側へ正規化されて「幅を落として走った」と事実に反する記録になる。
+// 【label を message へ内挿しない(sc-foqe self-review 修正)】verify 段の label は
+// `verify:<dim>:<shortTitle(f)> r<N>` = **review agent が書いた finding title の先頭 32 字**を含む自由文であり、
+// WF が内容を制御できない。内挿すると title に cap 指紋語(例 'token budget' / 'agent cap')が入った run で
+// capClassify が timeout を cap と誤分類し、(a) capRoundGate の早期打切りで autoFix loop の round が削られ、
+// (b) capReport へ「budget 枯渇で blocking を落とした」という事実に反する記録が焼かれる
+// (= agent 生成テキストで制御フローが分岐する)。診断性は timedOut[]・log 行・非 message プロパティ
+// (e.agentLabel)で確保する(message は指紋語を構造的に含みえない固定文言のみ)。
+const makeAgentTimeoutError = (label, ms) => {
+  const e = new Error(`agent did not return within ${ms}ms — sc-foqe per-agent timeout`)
+  e.name = AGENT_TIMEOUT_ERROR_NAME
+  e.agentLabel = String(label == null ? '' : label) // 診断用(capClassify は message しか見ないので分類に影響しない)
+  return e
+}
+// withAgentTimeout(opts, thunk): thunk(= 1 agent 呼出し)に per-agent 上限を張る。
+// 勝敗確定で **必ず clearTimeout** し、敗者 promise には .catch(() => {}) を付ける(未処理 rejection と
+// timer handle の残置を作らない = run 終了後に process/vm が自然終了できる)。
+const withAgentTimeout = (opts, thunk) => {
+  if (!(agentTimeoutMs > 0)) return Promise.resolve().then(thunk) // 0 = opt-out(既存挙動と同一)
+  const label = (opts && opts.label) || ''
+  const p = Promise.resolve().then(thunk)
+  let timer = null
+  let settled = false
+  const timeoutP = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      if (settled) return
+      const meta = parseAgentLabel(label)
+      timedOut.push({ label, stage: meta.stage, dimension: meta.dimension, round: meta.round, timeoutMs: agentTimeoutMs })
+      log(
+        `[timeout] ${label}: ${agentTimeoutMs}ms 以内に返らないため打ち切る(sc-foqe per-agent timeout)。` +
+          '当該段の既存の失敗正規化へ合流させ(run は殺さない)、返り値 timedOut[] へ列挙する。timeout が 1 件でも立った run は converged を立てない(clean と区別する)。'
+      )
+      reject(makeAgentTimeoutError(label, agentTimeoutMs))
+    }, agentTimeoutMs)
+  })
+  p.catch(() => {}) // 敗者になった側の未処理 rejection を抑止(race の外へ漏らさない)
+  timeoutP.catch(() => {})
+  const done = () => {
+    settled = true
+    if (timer !== null) {
+      clearTimeout(timer)
+      timer = null
+    }
+  }
+  return Promise.race([p, timeoutP]).then(
+    (v) => {
+      done()
+      return v
+    },
+    (e) => {
+      done()
+      throw e
+    }
+  )
+}
+
 // agent() を model に応じてラップ: fable 指定のみ共有 limiter 経由(≤2 cap)、それ以外は素通し。
 // un-1kb 後は reviewModel/verifyModel が demoteFable で opus へ畳まれるため通常は fable 分岐に入らない(素通し)が、
 // 降格漏れの最終防壁として cap 分岐を残す(defense-in-depth)。返り値は agent() と同一の Promise(.then/.catch 互換)。
@@ -1045,10 +1144,14 @@ const opusLimiter = maxConcurrency > 0 ? makeLimiter(maxConcurrency) : null
 // 干渉しない。read-only 段ゆえ内部は roAgent 経由で RO agentType('scribe:explore')注入 + not found fallback を
 // 通す(sc-7bv)。roAgent の fallback(2 回目の agent 呼出)は同一 thunk 内で完結し limiter スロットを 1 個保持した
 // ままなのでデッドロックしない(スロット保持中に別スロット取得を待つ入れ子が無い)。
+// (sc-foqe) per-agent timeout は **limiter thunk の内側**に入れる。外側に掛けると makeLimiter の active-- は
+// thunk が settle したときにしか起きないため、返らない 1 本がスロットを恒久保持し(maxConcurrency=4 なら 25% を
+// 永久喪失・1 なら全 fan-out が停止)、timeout 後も後続 agent が起動できなくなる。内側なら timeout の reject が
+// thunk の settle になり、スロットは即解放されて後続 round が回る。
 function runAgent(prompt, opts) {
-  if (isFable(opts.model)) return fableLimiter(() => roAgent(prompt, opts))
-  if (opusLimiter) return opusLimiter(() => roAgent(prompt, opts))
-  return roAgent(prompt, opts)
+  if (isFable(opts.model)) return fableLimiter(() => withAgentTimeout(opts, () => roAgent(prompt, opts)))
+  if (opusLimiter) return opusLimiter(() => withAgentTimeout(opts, () => roAgent(prompt, opts)))
+  return withAgentTimeout(opts, () => roAgent(prompt, opts))
 }
 
 // dimensions は文字列配列でもオブジェクト配列でも受ける。既定 = perspective-diverse 4 観点。
@@ -2014,6 +2117,28 @@ if (canAutoFix && !LIGHT_TYPES.has(taskType)) {
   }
 }
 
+// ── (sc-foqe) per-agent timeout の terminal 正規化: timeout は clean ではなく machinery 失敗へ倒す ─────
+// review 段の timeout は既存の失敗正規化({findings:[], __reviewFailed:true})へ合流するので reviewFailedCount が
+// 増え、その round の machineryFailed が立って converged は既に否定されている。しかし **verify 段**の timeout は
+// verdict:null → unverified 行きであり、machineryFailed(= reviewFailed || snapshotFailed)には入らない。ゆえに
+// blocking=0 ∧ machinery 健全 = 「真にクリーン」と誤読され converged=true / gate=CONVERGED になりうる
+// (実測: CQ_THROW_AT_LABEL='verify:' で verify を全滅させると converged true / gatePrefix CONVERGED / blocking 0)。
+// → run 中に 1 本でも timeout が立ったら converged を立てず escalate へ倒す(false CONVERGED の封鎖)。
+// 【触らない境界】machineryFailed の定義・zeroStreak 昇格連言(sc-psuq 所有の未裁定束)には手を入れず、
+// capFinalize と同じ **terminal 側の追加 gate** として実装する(既存 field の意味を変えない・新規 field のみ追加)。
+// 位置は capFinalize 呼出しより前(後置すると capExceeded → converged=false の強制を上書きしうる)。
+if (timedOut.length > 0) {
+  converged = false
+  if (!escalate) {
+    escalate = true
+    escalateReason =
+      escalateReason ||
+      `per-agent timeout ${timedOut.length} 件(${timedOut.map((t) => t.label).join(' / ')})= agent が上限 ${agentTimeoutMs}ms 内に返らず打ち切った。` +
+        '見ていない観点/finding が在るので clean を主張しない(timeout は machinery 失敗であって収束ではない)。'
+  }
+  log(`[timeout] run 全体で ${timedOut.length} 件の per-agent timeout。converged を立てず escalate へ倒す(sc-foqe・false CONVERGED 封鎖)。`)
+}
+
 // ── (10) self-test final(sc-jx8): 終了時に selfTestCmd を再実行し「最終 green/red」を記録 ──────
 // autoFix loop 完了後(amend 反映後)の状態。baseline との差分で loop が self-test 状態を変えたかを gate が読める。
 // 情報ログ専用=converged/escalate を駆動しない(B4)。escalate/converged は上の判定で確定済み(不変)。
@@ -2078,6 +2203,12 @@ const result = {
   capExceeded,
   capReport,
   capDropped,
+  // (sc-foqe) per-agent timeout の fail-loud 表面【新規 field】。型 = [{label: string, stage: string,
+  // dimension: string, round: number, timeoutMs: number}]。空配列 = timeout 無し(既定路)。非空なら当該 agent は
+  // 上限内に返らず打ち切られた = 見ていない観点/finding が在るので converged は立たない(上の terminal 正規化)。
+  // capDropped[] とは別枠: capDropped は「そもそも起動しなかった」、timedOut は「起動したが返らなかった」。
+  timedOut,
+  agentTimeoutMs, // (sc-foqe) 実効の per-agent 上限(ms)。0 = 明示 opt-out。上限が決め打ちでないことの監査面
   roFallbackActive, // (sc-7bv/sc-xyw) read-only agentType fallback が最終的に発火したか(true=agentType 解決不能で降格した run)。receivedArgs.roAgentType は「解決した型」だけで発火有無は読めないため別途載せる。
 }
 
@@ -2099,11 +2230,17 @@ const schemaNote =
 // silent ship させない(unvNote/machNote/schemaNote と同じ思想)。連結位置は schemaNote の【直後・末尾】で、
 // CONVERGED/ESCALATE/OPEN の prefix と本文は不変。
 const capNote = capFinal.capNote
+// (sc-foqe) 5 つ目の note。timeout した agent が在る run は「見ていない観点/finding が在る」= 収束/escalate に
+// 関わらず注記して silent ship させない(unvNote/machNote/schemaNote/capNote と同じ思想)。連結位置は capNote の
+// 【直後・末尾】で、CONVERGED/ESCALATE/OPEN の prefix と既存本文は 1 mm も変えない。
+const timeoutNote = timedOut.length
+  ? ` ※per-agent timeout=${timedOut.length}(${timedOut.map((t) => t.label).join(' / ')})= 上限 ${agentTimeoutMs}ms 内に返らず打ち切った agent が在る run。timedOut[] を直読し、当該観点/finding を人手確認(網羅性を主張しない)。`
+  : ''
 result.gate = escalate
-  ? 'ESCALATE: 未収束/self-test 失敗/machinery 失敗。silent ship 禁止 — 人間が判断すること。' + unvNote + machNote + schemaNote + capNote
+  ? 'ESCALATE: 未収束/self-test 失敗/machinery 失敗。silent ship 禁止 — 人間が判断すること。' + unvNote + machNote + schemaNote + capNote + timeoutNote
   : converged
-    ? 'CONVERGED: 収束。人間 ratify が要るのは 3 クラス(消す/出す/使う)該当時のみ(＋ acceptance snapshot mismatch は protocol §5.4(c) の独立 fail-closed としてそのまま人間 ratify 昇格)、非該当は AI 敵対 gate 通過をもって AI 判断で merge。gate 分離は不変(worker は自己 merge しない)。収束証跡は呼出元が直読して一次監査。' + unvNote + machNote + schemaNote + capNote
-    : 'OPEN: 呼出元が confirmed を修正し再 invoke(single モードのループ駆動)。' + unvNote + machNote + schemaNote + capNote
+    ? 'CONVERGED: 収束。人間 ratify が要るのは 3 クラス(消す/出す/使う)該当時のみ(＋ acceptance snapshot mismatch は protocol §5.4(c) の独立 fail-closed としてそのまま人間 ratify 昇格)、非該当は AI 敵対 gate 通過をもって AI 判断で merge。gate 分離は不変(worker は自己 merge しない)。収束証跡は呼出元が直読して一次監査。' + unvNote + machNote + schemaNote + capNote + timeoutNote
+    : 'OPEN: 呼出元が confirmed を修正し再 invoke(single モードのループ駆動)。' + unvNote + machNote + schemaNote + capNote + timeoutNote
 
 log(`cell-quality done: ${result.gate}`)
 return result
