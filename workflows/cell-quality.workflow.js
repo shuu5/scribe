@@ -618,15 +618,23 @@ const capMarkExceeded = (reason) => {
   capReasonsSeen.add(reason) // (sc-spp1 errata-01) 初回 reason 以外も失わない(capTailOnly の弁別が first-wins に騙されないため)
   if (!capReason) capReason = reason
 }
-// (sc-spp1 errata-01・gate wf_edecc791-b3a blocking 4 件の根本対処) cap 発火の種別弁別。
+// (sc-spp1 errata-01 + errata-02・gate wf_edecc791-b3a / wf_03b7d715-cc1 の根本対処) cap 発火の種別弁別。
 // 「tail-topK 由来の非 blocking drop **のみ**で立った capExceeded」は、幅の劣化が merge 判定に関与しない
 // (落ちたのは minor/nit の尾だけ・blocking 級 0)ことが構造的に保証される＝系統A 昇格(loop 終端)を殺さない。
-// 判定は 3 重: (1) capMarkExceeded が 'cap' 以外(quota/error=例外由来)を一度も見ていない(first-wins の
-// capReason だけ見ると tail cut が先行した run で例外由来が隠れる)、(2) capDropped 全件が reason
-// 'perRoundVerifyTopK'(totalBudget 系の severity-limited/severity-topk/budget-drop・round 丸ごと drop を除外)、
-// (3) blocking 級(critical/major/unknown) drop ゼロ。これ以外の cap 発火は従来どおり昇格を殺す
-// (sc-pyab L-B3 の「例外由来 cap は ESCALATE」fence 不変)。converged=false の強制(capFinalize)も不変＝
-// tail-only run の終端は契約どおり OPEN + capNote に落ち着く(裁定(5) escalate 安売り防止・WF 内 L874 コメント)。
+// 判定は 3 重: (1) capReasonsSeen が {'cap'} のみ＝'quota'/'error'(例外由来)を一度も見ていない。
+//   【errata-02 訂正】capReasonsSeen の存在理由は「first-wins の capReason で例外が隠れる」ではない(事実は逆:
+//   capRecordException は capReason を無条件上書きするため scalar でも例外は検出できた)。真の理由は writer が
+//   2 種(first-wins の capMarkExceeded / 上書きの capRecordException)ある scalar 判定は writer 追加・順序変更に
+//   脆いこと＝「capExceeded を立てる全経路が自 reason を必ず add する」一本の規約に寄せ、集合で判定する。
+//   errata-01 時点では capRecordException 側に add が無く、tail cut 先行 run で例外が観測されないまま
+//   capTailOnly が真になる ESCALATE→OPEN の fail-open があった(gate wf_03b7d715-cc1 実測)＝errata-02 で封鎖。
+// (2) capDropped 全件が reason 'perRoundVerifyTopK'(totalBudget 系の severity-limited/severity-topk/
+//   budget-drop・round 丸ごと drop・例外 stage drop を除外)、(3) blocking 級(critical/major/unknown) drop ゼロ。
+//   (3) は post-errata-01 の実装では単独到達不能(topK cut は capIsTail=minor/nit のみ・round/budget/例外系は
+//   (1)(2) が先に落とす)＝defense-in-depth の帯として保持する(変異 tooth は (1)(2) 側が担う)。
+// これ以外の cap 発火は従来どおり昇格を殺す(sc-pyab L-B3 の「例外由来 cap は ESCALATE」fence 不変)。
+// converged=false の強制(capFinalize)も不変＝tail-only run の終端は契約どおり OPEN + capNote に落ち着く
+// (裁定(5) escalate 安売り防止・WF 内 L874 コメント)。
 const capReasonsSeen = new Set()
 const capTailOnly = () =>
   capExceeded &&
@@ -845,6 +853,7 @@ const capRecordException = (stage, reason, e, opts) => {
     return
   }
   capExceeded = true
+  capReasonsSeen.add(reason) // (sc-spp1 errata-02) 例外経路も reason を記録: capExceeded を立てる全経路が自 reason を capReasonsSeen へ必ず add する規約。記録しないと tail cut 先行 run で capTailOnly が例外を観測できず ESCALATE→OPEN の fail-open になる(gate wf_03b7d715-cc1 が 3 木対照実走で確認)。
   capReason = reason // 例外(実際に走れなかった)は自前 admission より強い事実ゆえ上書きする
   capStages.push({ round: 0, stage, requested: 1, admitted: 0, dropped: 1, reason })
   const alreadySurfaced = !!(opts && opts.alreadySurfaced === true)

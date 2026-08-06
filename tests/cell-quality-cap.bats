@@ -702,6 +702,9 @@ plant_cap_mutant() {
 }
 
 @test "sc-spp1 MU-T3: capTailOnly の弁別を殺す変異で T3 の形A が ESCALATE へ戻る（errata-01 の非空虚性）" {
+  # 注（gate wf_03b7d715-cc1 指摘の反映）: この変異は capTailOnly を恒偽化する＝「緩和が配線されている」ことの
+  # pin であって、弁別節 (1) の判別能力の pin ではない。弁別そのもの（例外由来 cap を昇格させない）は
+  # T5 / MU-T4 が pin する。連言 (2)（totalBudget 系 drop の除外）は T6 / MU-T5 が pin する。
   local mut="$BATS_TEST_TMPDIR/mu-spp1c"
   plant_cap_mutant "$mut" "capReasonsSeen.size === 1" "capReasonsSeen.size === 2"
   run env CQ_ARGS="$(cq_args '{"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_TAILY" \
@@ -710,6 +713,70 @@ plant_cap_mutant() {
   # 変異後: tail-only 弁別が死に旧・反転挙動へ退行＝escalate 網が発火する（T3 が「元から OPEN」で受かっていない証拠）。
   [ "$(kval "$output" gatePrefix)" = "ESCALATE" ]
   [ "$(kval "$output" escalate)" = "true" ]
+}
+
+@test "sc-spp1 T5 (errata-02): 既定 tail cut と例外由来 cap（quota/error）の共起では昇格しない（fail-open 封鎖・L-B3 fence）" {
+  # gate wf_03b7d715-cc1 blocking の回帰域: capRecordException が capReasonsSeen へ記録しなかったため、
+  # tail cut 先行 run で例外が観測されず capTailOnly が偽陽性 → 機構死亡 run が ESCALATE→OPEN へ fail-open。
+  # errata-02 = capExceeded を立てる全経路（capMarkExceeded + capRecordException）が reason を必ず add する規約。
+  local kind
+  for kind in quota error; do
+    echo "# CQ_THROW_KIND=$kind"
+    run env CQ_ARGS="$(cq_args '{}')" \
+        CQ_REVIEW_FINDINGS_BY_ROUND="{\"1\":$FINDINGS_TAILY,\"2\":$FINDINGS_TAILY,\"3\":[]}" \
+        CQ_VERIFY_REFUTED=false CQ_THROW_AT_LABEL='verify:' CQ_THROW_AT_ROUND=1 CQ_THROW_KIND="$kind" \
+        node "$DRIVER" run
+    [ "$status" -eq 0 ]
+    [ "$(kval "$output" gatePrefix)" = "ESCALATE" ]
+    [ "$(kval "$output" escalate)" = "true" ]
+    [ "$(kval "$output" capReason)" = "$kind" ]
+  done
+  # 弁別子: K 明示大（cut 不発）でも例外由来 cap 単独で ESCALATE＝cut の有無に依らず例外は昇格を殺す。
+  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":9}')" \
+      CQ_REVIEW_FINDINGS_BY_ROUND="{\"1\":$FINDINGS_TAILY,\"2\":$FINDINGS_TAILY,\"3\":[]}" \
+      CQ_VERIFY_REFUTED=false CQ_THROW_AT_LABEL='verify:' CQ_THROW_AT_ROUND=1 CQ_THROW_KIND=quota \
+      node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" gatePrefix)" = "ESCALATE" ]
+  [ "$(kval "$output" capDroppedCount)" -eq 0 ]
+}
+
+@test "sc-spp1 MU-T4: capRecordException の reason 記録を殺す変異で T5 が OPEN へ退行する（errata-02 の非空虚性）" {
+  local mut="$BATS_TEST_TMPDIR/mu-spp1d"
+  plant_cap_mutant "$mut" "capReasonsSeen.add(reason) // (sc-spp1 errata-02)" "void(reason) // (sc-spp1 errata-02)"
+  run env CQ_ARGS="$(cq_args '{}')" \
+      CQ_REVIEW_FINDINGS_BY_ROUND="{\"1\":$FINDINGS_TAILY,\"2\":$FINDINGS_TAILY,\"3\":[]}" \
+      CQ_VERIFY_REFUTED=false CQ_THROW_AT_LABEL='verify:' CQ_THROW_AT_ROUND=1 CQ_THROW_KIND=quota \
+      node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  # 変異後: 例外が capReasonsSeen から消え、tail cut の {'cap'} だけで capTailOnly が真 → fail-open の OPEN 退行。
+  [ "$(kval "$output" gatePrefix)" = "OPEN" ]
+  [ "$(kval "$output" escalate)" = "false" ]
+}
+
+@test "sc-spp1 T6 (errata-02): totalBudget 系 drop を含む run は既定 tail cut が同居しても昇格しない（連言 (2) の実効性）" {
+  # tb=44: severity-limited（totalBudget 系・minor）と perRoundVerifyTopK（尾）の drop が混在する帯
+  #（数値は決め打ちにせず reason 集合で「混在」を assert する）。連言 (2) が偽 → 昇格せず ESCALATE。
+  run env CQ_ARGS="$(cq_args '{"totalBudget":44}')" \
+      CQ_REVIEW_FINDINGS_BY_ROUND="{\"1\":$FINDINGS_TAILY,\"2\":$FINDINGS_TAILY,\"3\":[]}" \
+      CQ_VERIFY_REFUTED=false node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  grep -q 'severity-limited' <<< "$(kval "$output" capDroppedReasons)"
+  grep -q 'perRoundVerifyTopK' <<< "$(kval "$output" capDroppedReasons)"
+  [ "$(kval "$output" gatePrefix)" = "ESCALATE" ]
+  [ "$(kval "$output" escalate)" = "true" ]
+}
+
+@test "sc-spp1 MU-T5: 連言 (2) を外す変異で T6 が OPEN へ退行する（連言 (2) の非空虚性）" {
+  local mut="$BATS_TEST_TMPDIR/mu-spp1e"
+  plant_cap_mutant "$mut" "capDropped.every((d) => d.reason === 'perRoundVerifyTopK') &&" ""
+  run env CQ_ARGS="$(cq_args '{"totalBudget":44}')" \
+      CQ_REVIEW_FINDINGS_BY_ROUND="{\"1\":$FINDINGS_TAILY,\"2\":$FINDINGS_TAILY,\"3\":[]}" \
+      CQ_VERIFY_REFUTED=false node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  # 変異後: totalBudget 系 drop 混在でも capTailOnly が真 → 昇格が escalate 網を飛ばし OPEN 退行。
+  [ "$(kval "$output" gatePrefix)" = "OPEN" ]
+  [ "$(kval "$output" escalate)" = "false" ]
 }
 
 @test "sc-spp1 MU-T1: 既定値を 0 化する変異で既定 cut が死ぬ（T1 の非空虚性）" {
