@@ -504,26 +504,34 @@ let refinedAcceptance = acceptance // Plan で精緻化されたら更新(review
 //
 // 層1(args 正規化・L456 隣の maxConcurrency と同じ Number.isInteger イディオム): ただし maxConcurrency の
 //   「不正値は既定へ黙って倒す」ではなく **不正値は fail-fast(throw)** にする(silent fallback 禁止=「cap を
-//   頼んだのに無 cap で走る」fail-open を作らない)。未指定(undefined/null)だけが「無 cap=現状維持」で、これが
-//   cap 機構全体の opt-in 既定(数値既定を変えない fence)。この fail-fast は【全モード】で発火する
-//   (isWorkerCell 条件を付けない)。goal/acceptance の「いずれか」要件は従来どおり isWorkerCell ゲート側に残す。
+//   頼んだのに無 cap で走る」fail-open を作らない)。totalBudget は未指定(undefined/null)= 無 cap の opt-in
+//   既定を維持する(fail-fast 設計・sc-spp1 裁定(4))。perRoundVerifyTopK は **sc-spp1 で有限既定へ変更**
+//   (未指定 = CAP_TAIL_TOPK_DEFAULT・下の宣言コメント参照)＝「cap 機構全体が opt-in」だった旧契約は
+//   perRoundVerifyTopK に限り廃止(W8-a: opt-in 既定は実運用で一度も渡されず 0 本も減らなかった)。
+//   この fail-fast は【全モード】で発火する(isWorkerCell 条件を付けない)。goal/acceptance の「いずれか」
+//   要件は従来どおり isWorkerCell ゲート側に残す。
 // 層2(admission control 4 点): round 頭 / review 前 / verify 前 / fix 前。snapshot・self-test・classify は
 //   **免除**(監査面=落とすと gate が状態を直読できなくなる)。ただし総数保証のため消費は計上する(capAccount)。
-//   縮退順は「verify を critical/major に限定 → severity top-K(決定論 tie-break) → loud drop」。
-//   effort 降格と dimensions 削減は不採用(裁定済み)。
+//   予算(totalBudget)側の縮退順は「verify を critical/major に限定 → severity top-K(決定論 tie-break) →
+//   loud drop」。topK(perRoundVerifyTopK)側は sc-spp1 で severity ゲート化＝critical/major は floor(全数
+//   verify)・切るのは尾(minor/nit)の K 超過分のみ。effort 降格と dimensions 削減は不採用(裁定済み)。
 // 層3(cap 系例外の正規化): 無防備 call site の throw で run が result を返さず消える現状を解消する。
 //   判定は name **または** message の指紋(AND 禁止)。指紋は **未実測の保守的な列挙**であって実機文言の実測
 //   ではない(実機の cap 例外を観測できていない=K9 留保(5))。どちらにも非一致なら cap ではない=従来の失敗正規化/
 //   透過(machinery 失敗)へ倒す fail-closed。
 const CAP_SEVERITY_RANK = { critical: 0, major: 1, minor: 2, nit: 3 }
 const capIsBlocking = (f) => !!f && (f.severity === 'critical' || f.severity === 'major')
+// (sc-spp1) perRoundVerifyTopK の適用対象 = 尾(minor/nit)のみ。critical/major と severity 不明(欠落/非正規)
+// は floor(全数 verify)= fail-safe(不明を尾に混ぜて切ると、誤表記の critical が verify されないまま流れうる。
+// 観点単位 top-K が major 集中で major を落とす既知の罠〔sc-spp1 W8-b 留意点(3)〕もこの floor で構造解消)。
+const capIsTail = (f) => !!f && (f.severity === 'minor' || f.severity === 'nit')
 // 落とした対象のうち「blocking 級」= critical/major、および severity 不明(観点丸ごと欠落 / 例外停止)。
 // 不明を blocking 級に数えるのは fail-closed(欠落した観点に blocking が無かったと主張できないため)。
 const CAP_BLOCKING_DROP_SEVERITIES = new Set(['critical', 'major', 'unknown'])
 
 // ── 層1: 新 args の正規化 + fail-fast ────────────────────────────────────────────
 const __capIntArg = (raw, name) => {
-  if (raw === undefined || raw === null) return 0 // 未指定 = 無 cap(opt-in 既定=現状維持)
+  if (raw === undefined || raw === null) return 0 // 未指定 = 無 cap(totalBudget の opt-in 既定。perRoundVerifyTopK は呼出前に既定解決済み=sc-spp1)
   if (typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0) {
     throw new Error(
       `[cell-quality cap args fail-fast] ${name} は正整数(単位=agent 本数)で渡すこと。received=${JSON.stringify(raw)}(type=${Array.isArray(raw) ? 'array' : typeof raw})。` +
@@ -533,7 +541,16 @@ const __capIntArg = (raw, name) => {
   return raw
 }
 const totalBudget = __capIntArg(A.totalBudget, 'totalBudget') // 0 = 無 cap。単位 = agent 本数
-const perRoundVerifyTopK = __capIntArg(A.perRoundVerifyTopK, 'perRoundVerifyTopK') // 0 = 無 cap。観点(dimension)単位の top-K
+// (sc-spp1 裁定 2026-08-06) perRoundVerifyTopK の既定 = 有限(CAP_TAIL_TOPK_DEFAULT)。未指定でも尾(minor/nit)
+// を観点単位 K で切る(critical/major は floor=全数 verify・capIsTail 参照)。旧契約「未指定 = 無 cap」は W8-a
+// で廃止(opt-in 既定は実運用で一度も渡されず 0 本も減らなかった=orch-er5o 実測)。無 cap 相当が要る呼出しは
+// 想定 findings 数より大きい K を明示する。明示 0 は従来どおり fail-fast(「K=0 を頼んだのに無制限で走る」
+// silent fail-open を作らない=層1 の設計を維持)。K=4 の根拠と再較正条件(sc-8935 実分布)は bd sc-spp1 notes。
+const CAP_TAIL_TOPK_DEFAULT = 4
+const CAP_TAIL_TOPK_DEFAULTED = A.perRoundVerifyTopK === undefined || A.perRoundVerifyTopK === null
+const perRoundVerifyTopK = CAP_TAIL_TOPK_DEFAULTED
+  ? CAP_TAIL_TOPK_DEFAULT
+  : __capIntArg(A.perRoundVerifyTopK, 'perRoundVerifyTopK') // 観点(dimension)単位・尾(minor/nit)のみの top-K
 const CAP_ON = totalBudget > 0
 // 免除段(admission を通さない段)の最小本数: self-test baseline+final(selfTestCmd 供給時のみ 2)+ classify
 // (taskType 未指定時 1)+ plan(doPlan 時 1)+ implement(doImplement 時 1)+ round1 snapshot(1)。
@@ -704,12 +721,15 @@ const capOrderFindings = (findings, dimKey) =>
       return a.i - b.i // 第4キー: 元順(安定ソート)
     })
     .map((x) => x.f)
-// 層2-③ 縮退順の本体: (1) perRoundVerifyTopK(観点単位 top-K)→ (2) 予算枠で critical/major 限定 →
+// 層2-③ 縮退順の本体: (1) perRoundVerifyTopK(観点単位・尾(minor/nit)のみの top-K。critical/major は
+// floor=全数 verify・sc-spp1)→ (2) 予算枠で critical/major 限定 →
 // (3) severity top-K(決定論 tie-break)→ (4) loud drop(枠 0)。落とした分は capDropped[] へ列挙する。
 const capSelectVerify = (findings, dimKey, round, quota) => {
-  // 【後方互換の要】実際に 1 件も落とさない round では **並べ替えもしない** = 既定経路(cap 未指定)の verify
+  // 【後方互換の要】実際に 1 件も落とさない round では **並べ替えもしない** = 落とさない run の verify
   // 呼出し列が base 木と 1 mm も変わらない(severity 順への恒常ソートは呼出し列を変える退行だった=K2' 実測)。
-  const needTopK = perRoundVerifyTopK > 0 && findings.length > perRoundVerifyTopK
+  // sc-spp1 の既定有限化後も不変量そのものは維持: 尾(minor/nit)が K 以下の run では既定 cut が不発＝
+  // 呼出し列は base 木と同一(K2' の callSeq 比較は「不発域」でこの不変量を恒久 pin し続ける)。
+  const needTopK = perRoundVerifyTopK > 0 && findings.filter(capIsTail).length > perRoundVerifyTopK
   const needBudget = CAP_ON && findings.length > quota
   if (!needTopK && !needBudget) {
     capBooked += findings.length * capCallCost()
@@ -720,13 +740,19 @@ const capSelectVerify = (findings, dimKey, round, quota) => {
   const dropAll = (list, reason) => {
     for (const f of list) capDrop('verify', dimKey, f && f.title, f && f.severity, reason)
   }
-  if (perRoundVerifyTopK > 0 && admit.length > perRoundVerifyTopK) {
-    const cut = admit.slice(perRoundVerifyTopK)
+  if (needTopK) {
+    // (sc-spp1) severity ゲート: floor(critical/major/severity 不明)は K の対象外＝1 本も切らない。切るのは
+    // 尾(minor/nit)の K 超過分だけ。ordered は severity 第一キー済みゆえ tail.slice(K) が最下位側から落ちる
+    // (決定論 tie-break は capOrderFindings 側で担保)。この経路の drop は構造的に非 blocking のみ＝
+    // capDroppedBlocking を増やさず escalate を駆動しない(escalate 安売り防止が既定でも成立する)。
+    const tail = admit.filter(capIsTail)
+    const cut = tail.slice(perRoundVerifyTopK)
+    const cutSet = new Set(cut)
     dropAll(cut, 'perRoundVerifyTopK')
-    admit = admit.slice(0, perRoundVerifyTopK)
+    admit = admit.filter((f) => !cutSet.has(f))
     capMarkExceeded('cap')
     capStages.push({ round, stage: `verify:${dimKey}`, requested: ordered.length, admitted: admit.length, dropped: cut.length, reason: 'cap' })
-    log(`[cap] verify:${dimKey} r${round}: perRoundVerifyTopK=${perRoundVerifyTopK} で ${cut.length} 件を verify せず落とした(観点単位 top-K・決定論 tie-break)。capDropped[] を直読すること。`)
+    log(`[cap] verify:${dimKey} r${round}: perRoundVerifyTopK=${perRoundVerifyTopK} で尾(minor/nit) ${cut.length} 件を verify せず落とした(critical/major は floor=全数 verify・観点単位・決定論 tie-break)。capDropped[] を直読すること。`)
   }
   if (CAP_ON && admit.length > quota) {
     const before = admit.length
@@ -870,8 +896,12 @@ const capFinalize = (state) => {
     `[cap-token] budget.total=${budgetTotal === null ? 'null(未設定)' : budgetTotal} spent-delta=${tokenDelta === null ? 'n/a' : tokenDelta} / cap 判定は agent 本数(limit=${totalBudget || '無 cap'} booked=${capBooked} spent=${capSpent})で行い、token は情報ログ併走のみ(判定に使わない)。`
   )
   const capReport = {
-    limit: totalBudget, // 0 = 無 cap(opt-in 既定)
+    limit: totalBudget, // 0 = 無 cap(totalBudget は opt-in 既定を維持・sc-spp1 裁定(4))
     unit: 'agent-calls', // 【単位契約】totalBudget の単位は agent 本数(token ではない)
+    // (sc-spp1) 実効の尾 top-K とその出所。orch 較正記録の様式〔K・dimension 数・findings 数・実 verify 数・
+    // drop 内訳〕の K を返り値から機械で取れるようにする(orch-er5o の適用記録が args 直読に頼らないため)。
+    tailTopK: perRoundVerifyTopK,
+    tailTopKDefaulted: CAP_TAIL_TOPK_DEFAULTED, // true = 既定値(未指定)・false = 呼出側の明示値
     spentEstimate: capSpent, // 免除段(classify/self-test/snapshot/plan/implement)も含む起動本数の見積り
     stages: capStages, // どの段でどれだけ落としたか([{round,stage,requested,admitted,dropped,reason}])
     reason: capReason || '', // 'quota'(harness token budget 例外)|'cap'(自前 admission)|'error'(harness agent cap 例外)

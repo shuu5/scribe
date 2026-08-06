@@ -24,7 +24,10 @@
 #   [C] reason 3 値（'cap' / 'quota' / 'error'）がそれぞれ立つ経路 + capReport 最小 field
 #   [D] 層3 の 6 call site + parallel/pipeline 入口 + 非 cap 例外の fail-closed
 #   [E] 決定論（stage1 解決順を入れ替えても admit 集合が同一＝共有カウンタ先着順にしていない証拠）
-#   [F] 後方互換（cap 未指定時の agent 呼出し列が base 木と完全一致・minor/nit も全部 verify される）
+#   [F] 後方互換（K2'v2・sc-spp1 再契約: 既定 tail-K の不発域〔尾(minor/nit) ≤ K〕で agent 呼出し列が
+#       base 木と完全一致・minor/nit も全部 verify される。発火域の挙動は [B'] が pin する）
+#   [B'] sc-spp1 既定有限化 — perRoundVerifyTopK 未指定 = K=4・尾(minor/nit)のみ・critical/major は floor
+#       （T1/T2 正方向 + MU-T1/MU-T2 非空虚性）
 #   [G] 変異注入 8 種（6 call site の catch + K1b(i)(ii) の 2 catch）＝正方向 tooth の非空虚性
 #   [H] self-review errata（B4 不変条件 / round gate の escalate / 必須4観点 all-or-nothing /
 #       capCatch fail-closed の behavioral 面 / 例外経路の後方互換〔callSeq〕/ terminal 非互換の明示 pin /
@@ -49,6 +52,10 @@ setup() {
   FINDINGS_MINOR='[{"title":"MMM","severity":"minor","location":"m.js:1","rationale":"naming"},{"title":"NNN","severity":"nit","location":"n.js:2","rationale":"spacing"}]'
   # 非 blocking のみ 3 件（縮退順「critical/major 限定」段の適用条件〔blocking が在るときだけ限定する〕を踏む）。
   FINDINGS_NONBLOCKING='[{"title":"MMM","severity":"minor","location":"m.js:1","rationale":"naming"},{"title":"NNN","severity":"nit","location":"n.js:2","rationale":"spacing"},{"title":"OOO","severity":"minor","location":"o.js:3","rationale":"naming2"}]'
+  # (sc-spp1) 尾(minor/nit)が既定 K=4 を超える集合＝既定有限化の発火域を駆動する: floor 1(MAJ) + 尾 5(m1..m4,NIT)。
+  FINDINGS_TAILY='[{"title":"MAJ","severity":"major","location":"j.js:1","rationale":"fail-open"},{"title":"m1","severity":"minor","location":"t.js:1","rationale":"naming"},{"title":"m2","severity":"minor","location":"t.js:2","rationale":"naming"},{"title":"m3","severity":"minor","location":"t.js:3","rationale":"naming"},{"title":"m4","severity":"minor","location":"t.js:4","rationale":"naming"},{"title":"NIT","severity":"nit","location":"t.js:5","rationale":"spacing"}]'
+  # (sc-spp1) blocking 集中形＝floor の観測用: major 3 が K=1 を超えても major は 1 本も落ちないこと。
+  FINDINGS_MAJHEAVY='[{"title":"MJ1","severity":"major","location":"h.js:1","rationale":"r"},{"title":"MJ2","severity":"major","location":"h.js:2","rationale":"r"},{"title":"MJ3","severity":"major","location":"h.js:3","rationale":"r"},{"title":"mm1","severity":"minor","location":"h.js:4","rationale":"r"},{"title":"mm2","severity":"minor","location":"h.js:5","rationale":"r"}]'
 
   # ── base 木の指し先は【不変 SHA へ pin】する（可動 ref を使わない） ─────────────
   # 契約 K2' の literal は `git show origin/main:...` だが、origin/main は **可動 ref** である。本 diff が
@@ -98,6 +105,14 @@ cq_args() {
 kval() {
   local out="$1" key="$2"
   sed -n "s/^K ${key} //p" <<< "$out"
+}
+
+# (sc-spp1) capReport の field を RESULT JSON から直読する。driver へ新 K 行を足すと loop.bats L-C1
+# （knob 導入前 driver との byte 一致対照）を割るため、sc-spp1 の新規観測軸（tailTopK 等）は driver を
+# 変えずこの経路で取る。
+crval() {
+  local out="$1" key="$2"
+  node -e 'const m=process.argv[1].match(/RESULT (.*)$/m);const v=JSON.parse(m[1]).capReport[process.argv[2]];console.log(v===undefined?"<absent>":String(v))' "$out" "$key"
 }
 
 # 変異木を BATS_TEST_TMPDIR に作る: WF の literal を sed で置換し、driver は最終木のものを使う。
@@ -281,42 +296,48 @@ plant_cap_mutant() {
   [ "$(kval "$output" agentCallTotal)" -gt 16 ]
 }
 
-@test "sc-k33c K3-2: perRoundVerifyTopK=K で観点別 verify 数が min(K, 対象数) になる" {
-  # 観点(dimension)単位 top-K（共有カウンタ先着順ではない）。既定 4 観点 × 1 round 分を観点別に数える。
-  # K=2・対象 3 件 → 各観点 2 件、K=5・対象 3 件 → 各観点 3 件（min の両側）。
-  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":2,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_MIX" \
-      CQ_VERIFY_REFUTED=false node "$DRIVER" run
-  [ "$status" -eq 0 ]
-  [ "$(kval "$output" verifyByDim)" = "completeness-critic=2,correctness=2,integration-ops=2,robustness-security=2" ]
-  [ "$(kval "$output" verifyCallCount)" -eq 8 ]
-  # 落ちたのは severity 最下位（minor BBB）＝決定論 tie-break（severity 降順）の証跡。
-  [ "$(kval "$output" capDroppedTitles)" = "BBB;BBB;BBB;BBB" ]
-  [ "$(kval "$output" capDroppedReasons)" = "perRoundVerifyTopK" ]
-
-  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":5,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_MIX" \
+@test "sc-k33c K3-2 (sc-spp1 v2): perRoundVerifyTopK=K は尾(minor/nit)にのみ効き、観点別 verify 数が floor + min(K, 尾数) になる" {
+  # 観点(dimension)単位 top-K（共有カウンタ先着順ではない）。sc-spp1 severity ゲート: K が切るのは尾(minor/nit)
+  # だけで、critical/major は floor(全数 verify)。TAILY = floor 1(MAJ) + 尾 5(m1..m4,NIT)。
+  # K=2 → 各観点 1+2=3 本・尾の下位 3 件(m3/m4/NIT)が落ちる。
+  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":2,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_TAILY" \
       CQ_VERIFY_REFUTED=false node "$DRIVER" run
   [ "$status" -eq 0 ]
   [ "$(kval "$output" verifyByDim)" = "completeness-critic=3,correctness=3,integration-ops=3,robustness-security=3" ]
-  # K > 対象数 なら 1 件も落とさない（cap は発火しない）。
+  [ "$(kval "$output" verifyCallCount)" -eq 12 ]
+  # 落ちるのは尾の severity 最下位側（minor m3/m4 と nit NIT）＝決定論 tie-break の証跡。floor(MAJ)は落ちない。
+  [ "$(kval "$output" capDroppedTitles)" = "NIT;NIT;NIT;NIT;m3;m3;m3;m3;m4;m4;m4;m4" ]
+  [ "$(kval "$output" capDroppedReasons)" = "perRoundVerifyTopK" ]
+  [ "$(kval "$output" capDroppedBlocking)" -eq 0 ]
+
+  # K ≥ 尾数 なら 1 件も落とさない（cap は発火しない）＝明示大 K が「無 cap 相当」の opt-out 経路（sc-spp1）。
+  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":9,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_TAILY" \
+      CQ_VERIFY_REFUTED=false node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" verifyByDim)" = "completeness-critic=6,correctness=6,integration-ops=6,robustness-security=6" ]
   [ "$(kval "$output" capExceeded)" = "false" ]
   [ "$(kval "$output" capDroppedCount)" -eq 0 ]
+  [ "$(crval "$output" tailTopKDefaulted)" = "false" ]
 }
 
 @test "sc-k33c K3-3: 縮退分は capDropped[] に列挙され unverified と二重計上されない" {
-  # topK で BBB を落としつつ、残る AAA/CCC の verify agent は cap 例外で verdict:null（＝unverified）にする。
-  # 「verify を起動しなかった（capDropped）」と「verdict が取れなかった（unverified）」は別事象＝集合が交わらない。
-  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":2,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_MIX" \
+  # topK で尾の下位（m3/m4/NIT）を落としつつ、残る MAJ/m1/m2 の verify agent は cap 例外で verdict:null
+  # （＝unverified）にする。「verify を起動しなかった（capDropped）」と「verdict が取れなかった（unverified）」は
+  # 別事象＝集合が交わらない。(sc-spp1 v2: fixture を TAILY 化＝K=2 は尾のみ切るため MIX では cut が起きない)
+  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":2,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_TAILY" \
       CQ_THROW_AT_STAGE=element-budget node "$DRIVER" run
   [ "$status" -eq 0 ]
   local dropped unverified
   dropped="$(kval "$output" capDroppedTitles)"
   unverified="$(kval "$output" unverifiedTitles)"
-  # 落とした側には BBB（minor）だけ、unverified 側には AAA/CCC（起動したが verdict 不成立）。
-  grep -q 'BBB' <<< "$dropped"
-  [ "$unverified" = "AAA;CCC" ]
-  ! grep -q 'BBB' <<< "$unverified"
-  # unverified の件数（4 観点 × 2 件）と capDropped の件数が独立に立っている。
-  [ "$(kval "$output" unverifiedCount)" -eq 8 ]
+  # 落とした側には尾の下位（m3/m4/NIT）だけ、unverified 側には MAJ/m1/m2（起動したが verdict 不成立）。
+  grep -q 'm3' <<< "$dropped"
+  grep -q 'NIT' <<< "$dropped"
+  [ "$unverified" = "MAJ;m1;m2" ]
+  ! grep -q 'm3' <<< "$unverified"
+  ! grep -q 'NIT' <<< "$unverified"
+  # unverified の件数（4 観点 × 3 件）と capDropped の件数が独立に立っている。
+  [ "$(kval "$output" unverifiedCount)" -eq 12 ]
   [ "$(kval "$output" capDroppedCount)" -gt 0 ]
 }
 
@@ -533,6 +554,9 @@ plant_cap_mutant() {
   # golden を literal で焼かず、base 木の WF を driver で実走して生成する（＝現物対現物の比較）。
   # base の指し先は setup() の CAP_BASE_REF（不変 SHA）= 可動 ref を使わない理由は setup() のコメント参照
   # （land 後に base==HEAD となりこの比較が自己比較＝vacuous pass に化けるため）。
+  # (sc-spp1 v2) 既定 tail-K=4 が生きていても、本シナリオ群（MIX=尾 1/観点・空 findings）は不発域（尾 ≤ K）
+  # ＝「落とさない run は並べ替えもしない」不変量により呼出し列は base 木と同一のまま。この tooth は
+  # 不変量そのものを恒久 pin し続ける（発火域の挙動は [B'] sc-spp1 tooth 群が別途 pin）。
   local base="$BATS_TEST_TMPDIR/base"
   materialize_base_tree "$base"
 
@@ -561,7 +585,10 @@ plant_cap_mutant() {
   done
 }
 
-@test "sc-k33c K2': cap 未指定なら minor/nit を含む全 finding が verify される（D3 縮退を既定へ持ち込まない）" {
+@test "sc-k33c K2'v2 (sc-spp1): 既定 tail-K の不発域（尾 ≤ K）では minor/nit を含む全 finding が verify される" {
+  # 旧 pin「cap 未指定 = 無 cap（D3 縮退を既定へ持ち込まない）」は sc-spp1 で再契約: 未指定 = 既定 K=4
+  # （尾のみ・severity ゲート）。MIX は尾 1 ≤ 4 の不発域ゆえ全 finding verify は維持される＝この tooth は
+  # 「不発域では既定が挙動を変えない」ことを pin する（発火域は [B'] sc-spp1 T1 が pin）。
   run env CQ_ARGS="$(cq_args '{"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_MIX" \
       CQ_VERIFY_REFUTED=false node "$DRIVER" run
   [ "$status" -eq 0 ]
@@ -570,6 +597,75 @@ plant_cap_mutant() {
   grep -q 'BBB' <<< "$(kval "$output" verifyLabels)"
   [ "$(kval "$output" capDroppedCount)" -eq 0 ]
   [ "$(kval "$output" capExceeded)" = "false" ]
+  # 既定は「生きているが不発」＝実効 K=4・既定由来であることを表面で確認（既定が消えた退行と弁別する）。
+  [ "$(crval "$output" tailTopK)" = "4" ]
+  [ "$(crval "$output" tailTopKDefaulted)" = "true" ]
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [B'] sc-spp1: perRoundVerifyTopK の既定有限化（severity ゲート付き尾 top-K）
+#   契約: 未指定 = K=4（観点単位・尾(minor/nit)のみ）。critical/major/severity 不明 = floor（全数 verify）。
+#   明示 0 は従来どおり fail-fast（[A] の層1 tooth が pin＝「K=0 を頼んだのに無制限で走る」fail-open 防止）。
+#   無 cap 相当は「明示大 K」（K3-2 v2 第 2 分岐が pin）。数値既定(4)の根拠と再較正条件は bd sc-spp1 notes。
+# ─────────────────────────────────────────────────────────────────────────────
+
+@test "sc-spp1 T1: 未指定でも尾 > 4 なら既定 K=4 が発火し、drop は尾のみ・escalate しない" {
+  # maxRounds は既定のまま（1 に絞ると autoFix loop の hard cap escalate が立ち、cap 由来かどうかを
+  # 弁別できなくなる＝上の terminal(b) tooth と同じ理由）。既定 loop は zeroStreak で 2 round 走る＝
+  # 各観点 5 本/round × 2 round・NIT drop も round ごと（4 観点 × 2 round = 8 件）。
+  run env CQ_ARGS="$(cq_args '{}')" CQ_REVIEW_FINDINGS="$FINDINGS_TAILY" \
+      CQ_VERIFY_REFUTED=true node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  # floor 1(MAJ) + 尾 top-4(m1..m4) = 5 本/観点/round。NIT（尾の最下位）だけが落ちる。
+  [ "$(kval "$output" verifyByDim)" = "completeness-critic=10,correctness=10,integration-ops=10,robustness-security=10" ]
+  [ "$(kval "$output" capDroppedTitles)" = "NIT;NIT;NIT;NIT;NIT;NIT;NIT;NIT" ]
+  [ "$(kval "$output" capDroppedReasons)" = "perRoundVerifyTopK" ]
+  [ "$(crval "$output" tailTopK)" = "4" ]
+  [ "$(crval "$output" tailTopKDefaulted)" = "true" ]
+  # 既定 cut は構造的に非 blocking のみ＝escalate を駆動しない（安売り防止が既定でも成立）。
+  # converged は cap 発火ゆえ立てない（fail-loud 側＝「幅を落として走った run」を clean と混同させない。
+  # 既定発火 run の終端が OPEN+capNote になるのは sc-spp1 裁定で意図した非互換＝bd notes に記録済み）。
+  [ "$(kval "$output" capExceeded)" = "true" ]
+  [ "$(kval "$output" capDroppedBlocking)" -eq 0 ]
+  [ "$(kval "$output" escalate)" = "false" ]
+  [ "$(kval "$output" converged)" = "false" ]
+  [ "$(kval "$output" gateHasCapNote)" = "true" ]
+}
+
+@test "sc-spp1 T2: major は K を超えて集中しても floor で全数 verify される（blocking 級は K で落ちない）" {
+  # MAJHEAVY = major 3 + minor 2。K=1 → floor 3 + 尾 top-1(mm1) = 4 本/観点/round・落ちるのは mm2(minor)のみ。
+  # 旧実装（severity 混在 top-K）なら K=1 で major 2 本が落ちて escalate していた＝W8-b 留意点(3)の罠の弁別点。
+  # maxRounds は既定のまま（T1 と同じ理由＝hard cap escalate との弁別）。既定 loop は 2 round 走る。
+  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_MAJHEAVY" \
+      CQ_VERIFY_REFUTED=true node "$DRIVER" run
+  [ "$status" -eq 0 ]
+  [ "$(kval "$output" verifyByDim)" = "completeness-critic=8,correctness=8,integration-ops=8,robustness-security=8" ]
+  [ "$(kval "$output" capDroppedTitles)" = "mm2;mm2;mm2;mm2;mm2;mm2;mm2;mm2" ]
+  [ "$(kval "$output" capDroppedBlocking)" -eq 0 ]
+  [ "$(kval "$output" escalate)" = "false" ]
+}
+
+@test "sc-spp1 MU-T1: 既定値を 0 化する変異で既定 cut が死ぬ（T1 の非空虚性）" {
+  local mut="$BATS_TEST_TMPDIR/mu-spp1a"
+  plant_cap_mutant "$mut" "const CAP_TAIL_TOPK_DEFAULT = 4" "const CAP_TAIL_TOPK_DEFAULT = 0"
+  run env CQ_ARGS="$(cq_args '{"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_TAILY" \
+      CQ_VERIFY_REFUTED=true node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  # 変異後: 既定が死に旧 opt-in 挙動へ退行＝6 本すべて verify・drop なし（T1 が「元から不発」で受かっていない証拠）。
+  [ "$(kval "$output" verifyByDim)" = "completeness-critic=6,correctness=6,integration-ops=6,robustness-security=6" ]
+  [ "$(kval "$output" capDroppedCount)" -eq 0 ]
+  [ "$(kval "$output" capExceeded)" = "false" ]
+}
+
+@test "sc-spp1 MU-T2: 尾フィルタを外す変異で floor が死に blocking 級が K で落ちる（T2 の非空虚性）" {
+  local mut="$BATS_TEST_TMPDIR/mu-spp1b"
+  plant_cap_mutant "$mut" "const tail = admit.filter(capIsTail)" "const tail = admit"
+  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":1,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_MAJHEAVY" \
+      CQ_VERIFY_REFUTED=true node "$mut/tests/driver.mjs" run
+  [ "$status" -eq 0 ]
+  # 変異後: severity 混在 top-K に退化し K=1 で major(MJ2/MJ3) が落ちる＝droppedBlocking が立つ。
+  [ "$(kval "$output" verifyByDim)" = "completeness-critic=1,correctness=1,integration-ops=1,robustness-security=1" ]
+  [ "$(kval "$output" capDroppedBlocking)" -gt 0 ]
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1039,7 +1135,9 @@ plant_cap_mutant() {
 
   # behavioral: 同 severity で title が "B-item"(0x42) と "a-item"(0x61) のとき、code-unit 順なら "B-item" が
   # 先に admit される（en_US の照合順なら "a-item" が先＝旧実装との弁別点）。LC_ALL を振っても結果は不変。
-  local F='[{"title":"a-item","severity":"critical","location":"x:1","rationale":"r"},{"title":"B-item","severity":"critical","location":"x:2","rationale":"r"}]'
+  # (sc-spp1 v2) severity を minor 化: critical は floor（K の対象外）になったため、tie-break の観測は
+  # K が実際に切る尾(minor/nit)で行う（挙動の観測点は同一＝capOrderFindings の第 3 キー）。
+  local F='[{"title":"a-item","severity":"minor","location":"x:1","rationale":"r"},{"title":"B-item","severity":"minor","location":"x:2","rationale":"r"}]'
   local out_c out_en
   run env LC_ALL=C CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":1,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$F" \
       CQ_VERIFY_REFUTED=false node "$DRIVER" run
@@ -1258,29 +1356,28 @@ plant_cap_mutant() {
   done
 }
 
-@test "sc-k33c MU13 (B4): perRoundVerifyTopK の cut を無効化すると観点単位 top-K と capDropped が消える" {
-  # mutant_fingerprint: `if (perRoundVerifyTopK > 0 && admit.length > perRoundVerifyTopK) {` → `if (false) {`
+@test "sc-k33c MU13 (B4): perRoundVerifyTopK の cut を無効化すると尾 top-K と capDropped が消える" {
+  # mutant_fingerprint: `if (needTopK) {` → `if (false) {`（sc-spp1 v2 で cut 分岐の条件式が変わったため追随）
   #
   # (ERRATA-01 B4) 旧 note の「K3-2↔MU12 / K3-3↔MU11」は誤対応だった（gate 実測: MU12 は tooth 10 を、
-  # MU11 は tooth 11 を RED にしない）。K3-2 / K3-3 の実 catcher はこの変異で、変異木で cap.bats を全数
-  # 走らせると not ok 10 / 11 / 12 / 45 が立つ（本 worker も同一結果を実測）。ここでは同じ変異を driver
+  # MU11 は tooth 11 を RED にしない）。K3-2 / K3-3 の実 catcher はこの変異で、ここでは同じ変異を driver
   # 実走で behavioral に固定する（bats 全数の入れ子実行はしない）。
   local mut="$BATS_TEST_TMPDIR/mu13"
-  plant_cap_mutant "$mut" "if (perRoundVerifyTopK > 0 \&\& admit.length > perRoundVerifyTopK) {" "if (false) {"
+  plant_cap_mutant "$mut" "if (needTopK) {" "if (false) {"
 
-  # HEAD: perRoundVerifyTopK=2・対象 3 件 → 各観点 2 本・BBB が capDropped[] へ。
-  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":2,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_MIX" \
+  # HEAD: perRoundVerifyTopK=2・TAILY（floor 1 + 尾 5）→ 各観点 3 本・尾下位 3 件が capDropped[] へ。
+  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":2,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_TAILY" \
       CQ_VERIFY_REFUTED=false node "$DRIVER" run
   [ "$status" -eq 0 ]
-  [ "$(kval "$output" verifyByDim)" = "completeness-critic=2,correctness=2,integration-ops=2,robustness-security=2" ]
-  [ "$(kval "$output" capDroppedTitles)" = "BBB;BBB;BBB;BBB" ]
+  [ "$(kval "$output" verifyByDim)" = "completeness-critic=3,correctness=3,integration-ops=3,robustness-security=3" ]
+  [ "$(kval "$output" capDroppedTitles)" = "NIT;NIT;NIT;NIT;m3;m3;m3;m3;m4;m4;m4;m4" ]
   [ "$(kval "$output" capExceeded)" = "true" ]
 
-  # 変異後: cut が起きず 3 本すべて verify され、capDropped は空・cap も発火しない（top-K が死ぬ）。
-  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":2,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_MIX" \
+  # 変異後: cut が起きず 6 本すべて verify され、capDropped は空・cap も発火しない（尾 top-K が死ぬ）。
+  run env CQ_ARGS="$(cq_args '{"perRoundVerifyTopK":2,"maxRounds":1}')" CQ_REVIEW_FINDINGS="$FINDINGS_TAILY" \
       CQ_VERIFY_REFUTED=false node "$mut/tests/driver.mjs" run
   [ "$status" -eq 0 ]
-  [ "$(kval "$output" verifyByDim)" = "completeness-critic=3,correctness=3,integration-ops=3,robustness-security=3" ]
+  [ "$(kval "$output" verifyByDim)" = "completeness-critic=6,correctness=6,integration-ops=6,robustness-security=6" ]
   [ "$(kval "$output" capDroppedCount)" -eq 0 ]
   [ "$(kval "$output" capExceeded)" = "false" ]
 }
