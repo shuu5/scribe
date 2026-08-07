@@ -150,9 +150,11 @@ setup() {
   SKEL_CELL_QUALITY="$REPO_ROOT/workflows/cell-quality.workflow.js"
   SKEL_MANDATE_VERIFY="$REPO_ROOT/workflows/mandate-verify.workflow.js"
   SKEL_NEEDS_USER="$REPO_ROOT/workflows/needs-user-prebake.workflow.js"
+  SKEL_CELL_GATE="$REPO_ROOT/workflows/cell-gate.workflow.js"
   ARGS_CELL_QUALITY='{"doImplement":true}'
   ARGS_MANDATE_VERIFY='{}'
   ARGS_NEEDS_USER='{}'
+  ARGS_CELL_GATE='{}'
 
   FIX="$BATS_TEST_TMPDIR/fx"
   mkdir -p "$FIX"
@@ -360,7 +362,7 @@ EOF
 #              `if (isWorkerCell)` が `[cell-quality args fail-fast] …worktree / goal/acceptance のいずれか` で
 #              throw し、DRIVER_AGENT_CALLS 0 / CALLSEQ 空のまま死ぬ＝agentCalls=0 は保たれ legacy 面は rc=0）。
 #              「単一変異で足りる」と読んで green を見た者は T8 を空虚と誤結論するので、この 2 行を削らない。
-@test "sc-4t3t T8: 骨格 (A) legacy — 骨格別 verbatim probe args で 3 本とも agentCalls=0（rc=0）" {
+@test "sc-4t3t T8: 骨格 (A) legacy — 骨格別 verbatim probe args で 4 本とも agentCalls=0（rc=0）" {
   require_probe_env # 環境 skip の唯一の発火点（裁定-ENV 条件(i)）
   local pass=""
   run "$ENGINE" --mode skeleton --file "$SKEL_CELL_QUALITY" --expect legacy --probe-args "$ARGS_CELL_QUALITY" --label cell-quality
@@ -375,7 +377,11 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"agentCalls=0"* ]]
   pass="$pass needs-user-prebake"
-  [ "$pass" = " cell-quality mandate-verify needs-user-prebake" ]
+  run "$ENGINE" --mode skeleton --file "$SKEL_CELL_GATE" --expect legacy --probe-args "$ARGS_CELL_GATE" --label cell-gate
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"agentCalls=0"* ]]
+  pass="$pass cell-gate"
+  [ "$pass" = " cell-quality mandate-verify needs-user-prebake cell-gate" ]
 }
 
 # ── T9 ───────────────────────────────────────────────────────────────────────
@@ -388,7 +394,9 @@ EOF
   # 「置換が land した」ことの tripwire。RED になったら EXPECTED_CANONICAL_RED から当該骨格を外す。
   # (sc-pfn4 / L1a-A) cell-quality が canonical block へ cutover され throw 形になった＝tripwire が設計どおり
   # 発火したので集合から外す。残る 2 本（mandate-verify / needs-user-prebake）は未 cutover ゆえ RED が正。
-  local expected="mandate-verify needs-user-prebake"
+  # (sc-7xct) cell-gate は verbatim 搬入骨格で fail-fast が escalate return 形＝未 cutover として RED が正
+  # （canonical 化は骨格横断の波1 で一括・原本書き換えは acceptance の sha256 一致と衝突するため本 land では行わない）。
+  local expected="mandate-verify needs-user-prebake cell-gate"
   local red=""
   run "$ENGINE" --mode skeleton --file "$SKEL_CELL_QUALITY" --expect canonical --probe-args "$ARGS_CELL_QUALITY" --label cell-quality
   if [ "$status" -eq 1 ] && [[ "$output" == *"VIOLATION NO_THROW_ON_MISSING_ARGS"* ]]; then red="$red cell-quality"; fi
@@ -396,6 +404,8 @@ EOF
   if [ "$status" -eq 1 ] && [[ "$output" == *"VIOLATION NO_THROW_ON_MISSING_ARGS"* ]]; then red="$red mandate-verify"; fi
   run "$ENGINE" --mode skeleton --file "$SKEL_NEEDS_USER" --expect canonical --probe-args "$ARGS_NEEDS_USER" --label needs-user-prebake
   if [ "$status" -eq 1 ] && [[ "$output" == *"VIOLATION NO_THROW_ON_MISSING_ARGS"* ]]; then red="$red needs-user-prebake"; fi
+  run "$ENGINE" --mode skeleton --file "$SKEL_CELL_GATE" --expect canonical --probe-args "$ARGS_CELL_GATE" --label cell-gate
+  if [ "$status" -eq 1 ] && [[ "$output" == *"VIOLATION NO_THROW_ON_MISSING_ARGS"* ]]; then red="$red cell-gate"; fi
   [ "${red# }" = "$expected" ]
 }
 
@@ -503,14 +513,15 @@ EOF
 }
 
 # ── T14 ──────────────────────────────────────────────────────────────────────
-# inventory: invariant=骨格の本数 pin（3 本）。cell-gate land 時にここが RED になるのは**退行でなく
-#            設計上の tripwire**（新骨格に legacy allowlist / canonical 期待集合を足す合図）
+# inventory: invariant=骨格の本数 pin（4 本）。次の新骨格 land 時にここが RED になるのは**退行でなく
+#            設計上の tripwire**（新骨格に legacy allowlist / canonical 期待集合を足す合図。
+#            sc-7xct の cell-gate land で 3→4 へ消化済み＝tripwire が設計どおり発火した実績）
 #          | polarity=positive
 #          | mutant_fingerprint=workflows/ に .workflow.js を 1 本足す → 本 tooth RED
-@test "sc-4t3t T14: count pin — workflows/*.workflow.js は 3 本（新骨格 land の tripwire）" {
+@test "sc-4t3t T14: count pin — workflows/*.workflow.js は 4 本（新骨格 land の tripwire）" {
   run bash -c 'ls "$1"/workflows/*.workflow.js | wc -l' _ "$REPO_ROOT"
   [ "$status" -eq 0 ]
-  [ "$output" -eq 3 ]
+  [ "$output" -eq 4 ]
 }
 
 # ── T15 ──────────────────────────────────────────────────────────────────────
