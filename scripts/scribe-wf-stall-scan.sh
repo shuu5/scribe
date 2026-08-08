@@ -19,18 +19,18 @@
 #   scribe-wf-stall-scan.sh --dir TRANSCRIPT_DIR [--threshold SEC]
 #
 # 出力（行頭 marker・固定 arity 前置 + 自由文 label は末尾＝label 内の空白で parse が壊れない順）:
-#   [WF-STALL-SCAN v1] run=<runId> agent=<id> ageSec=<n> verdict=STALL|ACTIVE label=<prompt 先頭 hint>
-#   [WF-STALL-SCAN v1] run=<runId> total=<n> stalled=<m> threshold=<sec> verdict=STALL|OK|EMPTY
+#   [WF-STALL-SCAN v1] run=<runId> agent=<id> ageSec=<n> verdict=STALL|ACTIVE|DONE label=<prompt 先頭 hint>
+#   [WF-STALL-SCAN v1] run=<runId> total=<n> done=<k> stalled=<m> threshold=<sec> verdict=STALL|OK|EMPTY
+# 完了 agent の除外（gate wf_bd633def-65b MF-1）: 完了 agent / resume 前 invocation の jsonl は追記が
+# 止まる＝mtime 単独判定は健全 run の最終盤で誤 STALL を出す（実データ 1805 run 中 43% で再現）。
+# 同 dir の journal.jsonl（{"type":"result","agentId":…}）を完了判定に使い、result 済み agent は
+# verdict=DONE として stall 集計から除外する。journal 不在/読取不能は除外ゼロ＝過剰報告側（fail-closed）。
 # 終了コード（宣言 rc 空間 {0,2,3,4,5} の外へ漏らさない）:
-#   0=停滞なし / 3=停滞あり（1 agent 以上が threshold 超過）/ 2=判定不能（agent file 0 件 or dir 多重 hit）
-#   / 4=BAD_USAGE / 5=run dir 不在（NOT-FOUND・loud）
+#   0=停滞なし / 3=停滞あり（未完了 agent が threshold 超過）/ 2=判定不能（agent file 0 件・dir 多重
+#   hit・scan 中の stat 失敗）/ 4=BAD_USAGE / 5=run dir 不在（NOT-FOUND・loud）
 # threshold 既定 900 秒: tool 1 呼出しが数分走る agent（bats 実走 lens 等）の in-flight を停滞と
 # 誤検知しない側へ倒した値。露見した誤検知/見逃しは呼出し側が --threshold で較正する。
 set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=./lib/scribe-lib.sh
-source "$SCRIPT_DIR/lib/scribe-lib.sh"
 
 usage() {
   sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -93,24 +93,43 @@ AGENTS=( "$DIR"/agent-*.jsonl )
 shopt -u nullglob
 
 if [[ ${#AGENTS[@]} -eq 0 ]]; then
-  printf '[WF-STALL-SCAN v1] run=%s total=0 stalled=0 threshold=%s verdict=EMPTY\n' "$RUN_LABEL" "$THRESHOLD"
+  printf '[WF-STALL-SCAN v1] run=%s total=0 done=0 stalled=0 threshold=%s verdict=EMPTY\n' "$RUN_LABEL" "$THRESHOLD"
   echo "scribe-wf-stall-scan: EMPTY: agent jsonl が 0 件＝判定不能（起動直後 or 観測面の layout 変化。停滞なしと読まないこと）" >&2
   exit 2
 fi
 
+# 完了 agent 集合（MF-1）: journal.jsonl の result 行から agentId を拾う。jsonl は 1 event 1 行ゆえ
+# 同一行の "type":"result" と "agentId" の共起で判定できる（jq 非依存＝key 順にも依らない）。
+declare -A DONE_SET=()
+if [[ -f "$DIR/journal.jsonl" ]]; then
+  while IFS= read -r _aid; do [[ -n "$_aid" ]] && DONE_SET["$_aid"]=1; done < <(
+    grep -F '"type":"result"' "$DIR/journal.jsonl" 2>/dev/null \
+      | grep -oE '"agentId":"[A-Za-z0-9]+"' | cut -d'"' -f4 || true)
+fi
+
 NOW="$(date +%s)"
-STALLED=0
+STALLED=0; DONE=0
 for f in "${AGENTS[@]}"; do
-  mtime="$(stat -c %Y "$f")"
+  # scan 中に file が消える TOCTOU は宣言空間内の rc2 へ落とす（rc1 漏れ = MF-3）
+  mtime="$(stat -c %Y "$f" 2>/dev/null)" || {
+    echo "scribe-wf-stall-scan: INDETERMINATE: stat 失敗（scan 中に file が消えた等）: $f" >&2
+    exit 2
+  }
   age=$(( NOW - mtime )); (( age < 0 )) && age=0
   aid="$(basename "$f")"; aid="${aid#agent-}"; aid="${aid%.jsonl}"
-  if (( age > THRESHOLD )); then verdict="STALL"; STALLED=$(( STALLED + 1 )); else verdict="ACTIVE"; fi
+  if [[ -n "${DONE_SET[$aid]:-}" ]]; then
+    verdict="DONE"; DONE=$(( DONE + 1 ))
+  elif (( age > THRESHOLD )); then
+    verdict="STALL"; STALLED=$(( STALLED + 1 ))
+  else
+    verdict="ACTIVE"
+  fi
   printf '[WF-STALL-SCAN v1] run=%s agent=%s ageSec=%s verdict=%s label=%s\n' \
     "$RUN_LABEL" "$aid" "$age" "$verdict" "$(label_hint "$f")"
 done
 
 if (( STALLED > 0 )); then SUMMARY="STALL"; else SUMMARY="OK"; fi
-printf '[WF-STALL-SCAN v1] run=%s total=%s stalled=%s threshold=%s verdict=%s\n' \
-  "$RUN_LABEL" "${#AGENTS[@]}" "$STALLED" "$THRESHOLD" "$SUMMARY"
+printf '[WF-STALL-SCAN v1] run=%s total=%s done=%s stalled=%s threshold=%s verdict=%s\n' \
+  "$RUN_LABEL" "${#AGENTS[@]}" "$DONE" "$STALLED" "$THRESHOLD" "$SUMMARY"
 (( STALLED > 0 )) && exit 3
 exit 0

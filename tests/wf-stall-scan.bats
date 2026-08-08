@@ -24,6 +24,13 @@
 #       polarity=positive / mutant_fingerprint=出力形式変更で regex 不一致 RED
 #   T9: invariant=--run 解決の glob が symlink の projects dir を降りる（find -P 退行の pin）/
 #       polarity=positive / mutant_fingerprint=glob を find 化すると symlink 開始点で 0 件 rc5 化し RED
+#   T10: invariant=journal result 済み agent は mtime が古くても DONE・rc0（完了残留の誤検知抑止 =
+#        gate wf_bd633def-65b MF-1）/ polarity=negative(誤検知なし) /
+#        mutant_fingerprint=journal 除外 block の削除で STALL 化し RED
+#   T11: invariant=result 済み old は DONE・result 無し old は STALL（抑止が過剰でない＝検知面保持）/
+#        polarity=positive+negative / mutant_fingerprint=全 agent DONE 化（journal 無条件除外）で RED
+#   T12: invariant=scan 中の stat 失敗は rc2（宣言空間 {0,2,3,4,5} へ倒す・rc1 に漏らさない = MF-3）/
+#        polarity=negative / mutant_fingerprint=stat guard 削除で rc1 化し RED
 
 setup() {
     REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -39,6 +46,10 @@ mk_agent() { # $1 = id, $2 = touch 引数（mtime。省略なら now）
     if [ -n "${2:-}" ]; then touch -d "$2" "$f"; fi
 }
 
+mk_journal_result() { # $1 = agentId（journal.jsonl へ result 行を append・実 harness と同形の 1 行 JSON）
+    printf '{"type":"result","key":"v2:fixture","agentId":"%s","result":"ok"}\n' "$1" >> "$WFDIR/journal.jsonl"
+}
+
 @test "T1: script が実在し bash -n が通り実行可" {
     [ -f "$SCRIPT" ]
     [ -x "$SCRIPT" ]
@@ -50,7 +61,7 @@ mk_agent() { # $1 = id, $2 = touch 引数（mtime。省略なら now）
     run "$SCRIPT" --dir "$WFDIR" --threshold 900
     [ "$status" -eq 0 ]
     [ "$(grep -cF -- 'verdict=ACTIVE' <<< "$output")" -eq 2 ]
-    grep -qF -- 'total=2 stalled=0 threshold=900 verdict=OK' <<< "$output"
+    grep -qF -- 'total=2 done=0 stalled=0 threshold=900 verdict=OK' <<< "$output"
 }
 
 @test "T3: stale agent → STALL・verdict=STALL・rc3（検知）" {
@@ -59,7 +70,7 @@ mk_agent() { # $1 = id, $2 = touch 引数（mtime。省略なら now）
     [ "$status" -eq 3 ]
     grep -qF -- 'agent=old' <<< "$output"
     grep -qF -- 'verdict=STALL' <<< "$output"
-    grep -qF -- 'total=1 stalled=1 threshold=900 verdict=STALL' <<< "$output"
+    grep -qF -- 'total=1 done=0 stalled=1 threshold=900 verdict=STALL' <<< "$output"
 }
 
 @test "T4: 混在で停滞 agent のみ STALL（限局性）" {
@@ -69,7 +80,7 @@ mk_agent() { # $1 = id, $2 = touch 引数（mtime。省略なら now）
     # per-agent STALL 1 + summary STALL 1 = 2 / ACTIVE 1
     [ "$(grep -cF -- 'verdict=STALL' <<< "$output")" -eq 2 ]
     [ "$(grep -cF -- 'verdict=ACTIVE' <<< "$output")" -eq 1 ]
-    grep -qF -- 'total=2 stalled=1' <<< "$output"
+    grep -qF -- 'total=2 done=0 stalled=1' <<< "$output"
     # 停滞の帰属が正しい（fresh 側に STALL が付かない）
     ! grep -qE -- 'agent=fresh1 .*verdict=STALL' <<< "$output"
 }
@@ -110,4 +121,36 @@ mk_agent() { # $1 = id, $2 = touch 引数（mtime。省略なら now）
     run "$SCRIPT" --run wf_test01 --config-dir "$CFG2" --threshold 900
     [ "$status" -eq 0 ]
     grep -qF -- 'agent=viaLink' <<< "$output"
+}
+
+@test "T10: journal result 済み agent は mtime が古くても DONE・rc0（完了残留の誤検知抑止 = MF-1）" {
+    mk_agent finished '2 hours ago'
+    mk_agent working
+    mk_journal_result finished
+    run "$SCRIPT" --dir "$WFDIR" --threshold 900
+    [ "$status" -eq 0 ]
+    grep -qE -- 'agent=finished ageSec=[0-9]+ verdict=DONE' <<< "$output"
+    grep -qF -- 'total=2 done=1 stalled=0 threshold=900 verdict=OK' <<< "$output"
+}
+
+@test "T11: result 済み old は DONE・result 無し old は STALL（抑止が過剰でない＝検知面保持）" {
+    mk_agent finished2 '2 hours ago'
+    mk_agent stuck '2 hours ago'
+    mk_journal_result finished2
+    run "$SCRIPT" --dir "$WFDIR" --threshold 900
+    [ "$status" -eq 3 ]
+    grep -qE -- 'agent=finished2 ageSec=[0-9]+ verdict=DONE' <<< "$output"
+    grep -qE -- 'agent=stuck ageSec=[0-9]+ verdict=STALL' <<< "$output"
+    grep -qF -- 'total=2 done=1 stalled=1 threshold=900 verdict=STALL' <<< "$output"
+}
+
+@test "T12: scan 中の stat 失敗は rc2（宣言空間へ倒す・rc1 に漏らさない = MF-3）" {
+    mk_agent statfail
+    local SHIM="$BATS_TEST_TMPDIR/shim"
+    mkdir -p "$SHIM"
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$SHIM/stat"
+    chmod +x "$SHIM/stat"
+    PATH="$SHIM:$PATH" run "$SCRIPT" --dir "$WFDIR" --threshold 900
+    [ "$status" -eq 2 ]
+    grep -qF -- 'INDETERMINATE' <<< "$output"
 }
