@@ -5,7 +5,7 @@
 # 裁定-delivery-guarantee②）の **e2e（stdin JSON → stdout surface の実フック契約）** と
 # **hooks.json wire 検査** の hermetic bats。
 #
-# 役割: 毎 user prompt で軽量に orch 台帳を direct read し、**新着 `for:<self>` open bead だけ**を surface
+# 役割: 毎 user prompt で軽量に orch 台帳を direct read し、**新着 `for:<self>` open / in_progress bead だけ**を surface
 #   する滞留保険（SessionStart 配送点は bundle 境界でしか発火せず、長寿命 admin session で下り便が滞留する
 #   ＝for:sc 4 本が 2 日滞留した実 incident の恒久対策）。
 #
@@ -130,7 +130,7 @@ run_sessionstart() { # $1=cwd  他=env
     [ "$status" -eq 0 ]
 }
 
-@test "(a) admin + 新着あり → surface + exit0（direct read は label 完全一致/open/--limit 0/--readonly）" {
+@test "(a) admin + 新着あり → surface + exit0（direct read は label 完全一致/open,in_progress/--limit 0/--readonly）" {
     run run_hook "$SELF_CWD" MOCK_BD_MODE=ok
     [ "$status" -eq 0 ]
     [[ "$output" == *"下り mailbox 新着"* ]]

@@ -2,8 +2,9 @@
 # user-prompt-mailbox-scan.sh — 下り mailbox の **UserPromptSubmit 中間配送点**（sc-b6w / orch-0yof ①）
 #
 # 役割（裁定-delivery-guarantee② verbatim）: 「scribe へ UserPromptSubmit 中間配送点を courier 起票
-#   （毎 prompt の軽量 mailbox チェック・dedupe＋open,in_progress filter＋完全一致で noise 抑制・長時間対話 session の
-#   滞留保険）」。SessionStart 配送点（session-start-mailbox-scan.sh）は **bundle 境界でしか発火しない**ため、
+#   （毎 prompt の軽量 mailbox チェック・dedupe＋open-only＋完全一致で noise 抑制・長時間対話 session の
+#   滞留保険）」。※現行 filter は sc-7ry4 で open,in_progress へ拡張済み（本引用は裁定当時の文言＝原文保持・
+#   protocol.md §8 L656 と同じ supersession 註記作法）。SessionStart 配送点（session-start-mailbox-scan.sh）は **bundle 境界でしか発火しない**ため、
 #   長寿命 admin session では下り便が最大で **セッション寿命ぶん滞留する**（実 incident: for:sc 4 本が
 #   2 日滞留・orch-thgx 実測診断①「SessionStart のみ配送 × 長寿命 session」）。本 hook はその**滞留保険**で、
 #   毎 user prompt で軽量に mailbox を覗き、**新着だけ**を surface する。
@@ -11,7 +12,8 @@
 # 設計制約（裁定が規定した 3 点 + 軽量性）:
 #   - **dedupe**: 既報 bead を再通知しない。SessionStart で surface 済みの bead も既報として扱う
 #     （両配送点が session 単位の seen state を共有する・lib mbx_state_prefix）。
-#   - **open,in_progress filter（sc-7ry4）** / **ラベル完全一致（`for:<self>`）**: direct read の条件は SessionStart と同一（共有 lib）。
+#   - **status filter**（裁定原文は open-only・sc-7ry4 で open,in_progress へ拡張＝未配達 limbo 封鎖） /
+#     **ラベル完全一致（`for:<self>`）**: direct read の条件は SessionStart と同一（共有 lib）。
 #   - **軽量性**: bd direct read は **実測 0.74-0.89s**（embeddeddolt open 込み・ipatho-server-2 2026-07-13）で、
 #     毎 prompt 同期実行すると user 体感を確実に損なう。ゆえに **TTL staleness-gate** を噛ませ、
 #     最終 scan から `SCRIBE_MAILBOX_TTL_SEC`（既定 300 秒）未満の prompt では **bd を呼ばず即 exit 0**

@@ -173,9 +173,9 @@ run_hook() { # $1=cwd  他=env 前置(KEY=VAL...)
     [ "$status" -eq 0 ]
     [[ "$output" == *"orch-abc"* ]]
     [[ "$output" == *"下り mailbox"* ]]
-    # (sc-7ry4 gate M-2) else 分岐（timeout 不在経路）でも完全 invocation を pin（tooth (i) と同形）。
+    # (sc-7ry4 gate M-2 / round2 L-2) else 分岐（timeout 不在経路）でも完全 invocation を pin（tooth (i) と同形・-C anchor 込み）。
     # 緩い `*" list "*` だけだと else 分岐だけ --status open へ巻き戻す変異が素通りする。
-    [[ "$(cat "$BD_CALL_LOG")" == *"list --label for:sc --status open,in_progress --limit 0 --readonly --json"* ]]
+    [[ "$(cat "$BD_CALL_LOG")" == *"-C $ORCH_LEDGER list --label for:sc --status open,in_progress --limit 0 --readonly --json"* ]]
 }
 
 @test "(i-nojq) jq 不在・python3 存在 → python3 フォールバックで surface + exit0" {
