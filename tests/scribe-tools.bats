@@ -1652,6 +1652,26 @@ _mk_valid_cfgdir() {
   [[ "$output" != *"conversation_id"* ]]
 }
 
+# inventory: invariant=grill-consult prompt に第一声の冒頭ブリーフィング指示が焼かれる（user 裁定 2026-08-07・orch-yx42・sc-575t）
+#          | polarity=positive
+#          | mutant_fingerprint=build_consult_prompt の「第一声の冒頭ブリーフィング」節を削除 → 本 tooth RED
+@test "spawn(grill-consult): 第一声の冒頭ブリーフィング指示（タイトル/問題提起/概要の要約提示）が prompt に焼かれる（sc-575t）" {
+  ctx="$(mktemp "$BATS_TEST_TMPDIR/scribe-ctx-XXXXXX.md")"
+  printf 'x\n' > "$ctx"
+  run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
+  rm -f "$ctx"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"第一声の冒頭ブリーフィング"* ]]
+  [[ "$output" == *"どの bead で・誰が・何を困りごととして挙げたか"* ]]
+  [[ "$output" == *"AI がどう問題を理解したか"* ]]
+  # 全体地図「より前」の順序指示が実在（地図だけでは問題提起が伝わらない、の対策面）
+  [[ "$output" == *"全体地図へ入る**前に**"* ]]
+  # plain consult（--context 無し）には焼かれない
+  run "$SPAWN" --dry-run --consult un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"第一声の冒頭ブリーフィング"* ]]
+}
+
 # sc-3pq L3=A案(grill 確定 2026-06-24): grill-consult window は consult-<grill-issue> で id 紐付けし、
 # fleet-monitor / degraded watcher が「どの grill-issue の consult が沈黙したか」を完全一致で拾えるようにする。
 # plain consult(--context 無し)は consult-HHMMSS のまま(test 223/236 が保証)＝この id 命名は grill-consult 限定。
