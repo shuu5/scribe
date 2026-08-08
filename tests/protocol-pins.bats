@@ -126,3 +126,36 @@ setup() {
     run grep -qF -- '<config-dir>/projects/<encoded cwd>/<session-uuid>/workflows/wf_<runId>.json' "$mut"
     [ "$status" -ne 0 ]
 }
+
+# ---------- (3) sc-i2kc + sc-ugb8 codify 行（gate wf_a13b8143-b9a D1 裁定＝durable pin 化） ----------
+
+@test "sc-i2kc: §5 step1 WF 起動主張の実在照合 probe 本体行が実在する" {
+    grep -qF -- '両方不在 = 起動捏造' "$PROTOCOL"
+    grep -qF -- 'WF 起動主張の実在照合' "$PROTOCOL"
+}
+
+@test "sc-i2kc: §6 stall watchdog 小節と発報条件が実在する" {
+    grep -qF -- '### stall watchdog' "$PROTOCOL"
+    grep -qF -- '約 20 分継続' "$PROTOCOL"
+    grep -qF -- '張り方は §6「worker 監視の正規経路」に従う' "$PROTOCOL"
+}
+
+@test "sc-ugb8: §6 捏造応答→respawn 一択 playbook が実在する" {
+    grep -qF -- '追い inject せず respawn 一択' "$PROTOCOL"
+    grep -qF -- 'runId を突合してから' "$PROTOCOL"
+}
+
+@test "sc-i2kc: §5 step5 unresolved-hex 系統（序数呼称なし）が実在する" {
+    grep -qF -- 'unresolved-hex 系統' "$PROTOCOL"
+    # 序数呼称の再発を封じる（sc-pion ■4 裁定・「第 4 系統」が復活したら RED）
+    run grep -qF -- '第 4 系統' "$PROTOCOL"
+    [ "$status" -ne 0 ]
+}
+
+@test "mutation: §5 step1 probe 本体行を削ると sc-i2kc pin が RED へ flip する" {
+    local mut="$BATS_TEST_TMPDIR/i2kc-protocol.md"
+    grep -vF -- '両方不在 = 起動捏造' "$PROTOCOL" > "$mut"
+    grep -qF -- '両方不在 = 起動捏造' "$PROTOCOL"
+    run grep -qF -- '両方不在 = 起動捏造' "$mut"
+    [ "$status" -ne 0 ]
+}
