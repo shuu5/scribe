@@ -55,6 +55,40 @@
 #   **新規 cld session が必須**（`/reload-plugins` は起動引数 replay のみで hooks を再列挙しない）。既存 session
 #   では効かない＝新しい orchestrator session を建て直して初めて自動表示が効く。
 #
+# 実行予算（bd sc-dmmz・per-child bound + 総予算 deadline）: 本 hook は 6 子 script を **直列**に呼ぶため、子 1 本の
+#   hang が SessionStart を無制限にブロックしうる（支配項は lib/orch_slate.sh --surface＝admin 実測で hook 全体の
+#   67-70%）。よって ① 子 1 本ごとに上限（per-child bound）を掛け、② hook 起動時に deadline を取り残時間から各子の
+#   cap を算出する **総予算方式** を置く（per-child 上限 T だけでは 6 子直列で最悪 6T になり総予算を保証しない）。
+#   - 上界の形（実測に基づく拘束）: 子 stdout は **file sink** へ落とす。`_raw="$(子)"` 形は孫が stdout を保持する
+#     限り command substitution が解放されず上界が破れる（admin 実測 timeout 2 に対し real 20.004s / rc=0＝理由行
+#     すら出ない。本 cell 再実測でも 6.008s vs file sink 0.005s・いずれも rc=0）。打ち切りは `timeout -k`（SIGTERM →
+#     猶予 → SIGKILL）で行い `--foreground` は **付けない**——付けると timeout がプロセスグループを作らず、孫が
+#     完走する（本 cell 実測: 孫の marker が生成される / 非 --foreground では生成されない）。
+#   - 予算値は env knob で上書きできる（WIP_CHILD_TIMEOUT / WIP_TOTAL_BUDGET / WIP_KILL_GRACE）。ハードコードは
+#     hermetic test に実時間 sleep を強い、存在 grep の vacuous test へ退避する誘因になる。既定値の literal は下の
+#     定数行 1 箇所だけに置く（数値の二重持ちを作らない＝test はその行を SSOT として参照し算術で照合する）。
+#   - hooks.json の "timeout" は **秒**（CC 2.1.226 schema の "Timeout in seconds for this specific command" と
+#     実行経路 e.timeout?e.timeout*1000 / 公式 docs "Seconds before canceling. Defaults: 600 for command"）。
+#     wire の秒値は 総予算 × WIP_WIRE_FACTOR 以上を保つ（子を打ち切ってから節を組み hard-cap を掛ける後段の余裕）。
+#   - 打ち切りは **loud** にする: 既存の「非0終了・skip＝fail-open」とは **別文言** で、rank-A（_wip_is_rank_a）に
+#     載る marker を含む 1 行を出す。GNU timeout の kill は rc=124（-k 併用時 137）で既存の非0分岐へ吸収され、
+#     「子が壊れた」と「予算で打ち切った」が区別できなくなるため（かつ rank-B 止まりだと hard-cap 発火時に節 share
+#     の中で落ち、「その節が空＝仕掛かり無し」と誤読される）。
+#   - degrade は **上界を捨てない**、かつ **禁止形（`_raw="$(timeout N 子)"`）へは決して落ちない**。timeout を
+#     被せても command substitution で受ける限り上界は破れる（子が cap より前に exit すると timeout は何も
+#     送らずに終わり、本体は孫が保持する pipe の EOF を待つ＝rc は 0 のまま打ち切り行すら出ない。本 cell 実測:
+#     子=即 exit + 孫 6 秒 に `timeout -k 1 2` を command substitution で被せて 6.0s / rc=0 / 打ち切り行なし）。
+#     このとき per-child bound と総予算 deadline は **同時に** 失効する（deadline は実行前の cap 判定しか効かず
+#     実行中の延伸を切れない）＝目的 (β) の再現。よって sink は 2 段で確保する: ① mktemp ② 決定論 path を
+#     noclobber で作る（TMPFILE-SINK / SINK-FALLBACK）。① が落ちても ② が通れば正規経路（timeout + file sink）
+#     のみを通る。両方落ちた場合は timeout が在っても **その子を実行しない**（上界を保証できないため未実行）。
+#     `command -v timeout` 不在時だけは従来経路へ degrade する（precedent: scripts/fleet-monitor.sh:156-157）。
+#     いずれの degrade も **silent にしない**——打ち切り行と同格の rank-A 1 行で「どの上界が落ちたか」を出す。
+#     ★特に「timeout 不在 × sink 成功」（上界が実際に消える唯一の経路）を無言にしない: sink の可否と直交して
+#     timeout 不在は必ず degrade 行を出す（sink 在り=noto / sink 無し=bare の 2 文言。原因が違うので流用しない）。
+#   - データ取得は短縮しない（子 script の引数は不変＝全件契約・截断禁止の teeth を抜かない）。速度改善は本節の
+#     目的ではなく、目的は「子の hang が boot を無制限にブロックする経路を塞ぐ」ことに限る。
+#
 # --self-test（hermetic・fail-closed・orch-7py）: 引数 `--self-test` で自己完結テストを走らせる。temp に
 #   fixture plugin root（stub orch-dispatch.sh / orch-degraded-watch.sh が sentinel を echo）と台帳 fixture
 #   （orch anchor / orch worktree(.worktrees・.claude/worktrees) / foreign）を作り、各 cwd を stdin JSON で
@@ -130,6 +164,16 @@ WIP_FLOOR_MIN=5          # 予算不足時に限り下げてよい最小値（�
 WIP_RANKA_MAX=40         # hard-cap の rank-A 先取り上限（節あたり行数・優先行の無上界保持で cap が破れるのを防ぐ）
 WIP_TRIM=1               # 0 = 表示層 trim を外す（--full）
 _WIP_SELF="$_SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"   # 全件 pointer 用（絶対 path literal を書かない）
+
+# === 実行予算（bd sc-dmmz・per-child bound + 総予算 deadline）=========================================
+# ★既定値の literal は **この 3 行だけ** に置く（header は根拠を述べ数値を再掲しない・test はこの行を SSOT として
+#   参照する）。全て env knob で上書きでき、hermetic test を実時間 1 秒級で書けるようにする。単位は秒（hooks.json
+#   の "timeout" と同じ単位＝wire と内部予算を同一尺度で比較できる）。
+WIP_CHILD_TIMEOUT="${WIP_CHILD_TIMEOUT:-60}"   # 子 1 本の上限（秒）。admin 実測の最遅子 --surface 18.34/19.23/17.99s に対し余裕を取る
+WIP_TOTAL_BUDGET="${WIP_TOTAL_BUDGET:-150}"    # 6 子合計の総予算（秒）。admin 実測の hook end-to-end 28.28/27.11/26.04s と外れ値 58.49s を包む
+WIP_KILL_GRACE="${WIP_KILL_GRACE:-5}"          # SIGTERM → SIGKILL の猶予（秒）。SIGKILL 単独は使わない（■9(g)）
+WIP_WIRE_FACTOR=2                              # hooks.json の "timeout"（秒）は 総予算 × 本係数 以上であること（後段の節組立 + hard-cap の余裕）
+_WIP_DEADLINE_MS=0                             # hook 起動時に _emit_workinprogress が設定する総予算 deadline（0＝未設定＝per-child 上限のみ）
 
 # UTF-16 code unit 数（ハーネス cliff と同じ単位）。python3 不在時のみ codepoint 近似へ degrade（fail-open）。
 _wip_u16len() {  # $1=text → u16 数を stdout
@@ -243,17 +287,146 @@ _wip_trim_block() {  # $1=body $2=N $3=全件 pointer → trim 済み body を s
     return 0
 }
 
+# 現在時刻（ms）。EPOCHREALTIME（bash 5+）優先、無ければ date +%s へ degrade（秒精度・予算は秒単位ゆえ十分）。
+# ★壁時計で良い（測るのは「hook 起動からの経過が総予算を超えたか」だけで、区間の厳密性は要らない）。
+_wip_now_ms() {  # → epoch ms を stdout
+    local _t="${EPOCHREALTIME:-}" _sec _frac
+    case "$_t" in
+        *[.,]*)
+            _sec="${_t%%[.,]*}"; _frac="${_t#*[.,]}"
+            case "$_sec" in ''|*[!0-9]*) _sec="" ;; esac
+            case "$_frac" in ''|*[!0-9]*) _sec="" ;; esac
+            if [ -n "$_sec" ]; then printf '%s' "$(( _sec * 1000 + 10#$_frac / 1000 ))"; return 0; fi
+            ;;
+    esac
+    printf '%s' "$(( $(date +%s) * 1000 ))"
+}
+
+# 今回の子に与える上限秒 = min(per-child 上限, 総予算 deadline の残時間)。1 未満＝総予算枯渇（未実行で打ち切る）。
+# ★per-child だけでは総予算を保証しない（6 子直列ゆえ最悪 6T）。deadline から残時間を引いて cap を **その都度**
+#   算出することで、直列の総和が総予算を超えない（残時間は floor 秒で切るので常に保守側）。★厳密には上界は
+#   「総予算 + WIP_KILL_GRACE」: 最後に走った子が SIGTERM を無視すると SIGKILL までの猶予ぶんだけ超えうる
+#   （猶予を 0 にすると SIGKILL 単独になり ■9(g) に反するので、この 1 回ぶんの超過は意図した trade-off）。
+_wip_child_cap() {  # → 上限秒（<1 なら総予算枯渇）
+    local _rem="$WIP_CHILD_TIMEOUT"
+    if [ "${_WIP_DEADLINE_MS:-0}" -gt 0 ]; then
+        _rem=$(( ( _WIP_DEADLINE_MS - $(_wip_now_ms) ) / 1000 ))   # DEADLINE-DERIVED（総予算方式の核）
+        [ "$_rem" -gt "$WIP_CHILD_TIMEOUT" ] && _rem="$WIP_CHILD_TIMEOUT"
+    fi
+    printf '%s' "$_rem"
+}
+
+# 打ち切り行（loud・rank-A）。既存の「非0終了・skip＝fail-open」とは **別文言** で、rank-A marker（⚠ 警告）を
+# 必ず含む＝hard-cap 発火時も節予算に先立って先取りされ、「節が空＝仕掛かり無し」の誤読を作らない。
+# pointer は絶対 path literal でなく呼出側が実行時変数から組んだものを受け取る（leak battery の deploypath 系統）。
+# mode は 6 値: kill=per-child bound で打ち切った / skip=総予算枯渇で未実行 / sink=mktemp 不能だが決定論 path の
+# sink を確保して実行（上限は維持・延伸なし）/ nosink=sink を全く確保できず上界を保証できないため未実行（禁止形
+# へは落ちない）/ noto=timeout 不在（sink は在る）で上界なし実行 / bare=timeout 不在かつ一時 file 不能で上界なし
+# 実行。degrade 4 値も loud にする＝「静かに上界が落ちていた」を作らない（■6 の裏返し。silent degrade は打ち切り
+# 行が出ないので既存 assert では検知できない）。★noto と bare を分けるのは、sink が在る経路で bare の文言
+# （「一時 file 不能につき」）を流用すると運用者に事実と異なる原因を告げるため（原因の誤指示は loud 以下）。
+_wip_cut_line() {  # $1=表示名 $2=秒 $3=全件 pointer $4=mode(kill|skip|sink|nosink|noto|bare) → 1 行を stdout
+    case "$4" in
+        skip) printf '  ⚠ 警告: %s は総予算 %s 秒到達により打ち切り（未実行）＝表示は部分・全件: %s' "$1" "$2" "$3" ;;
+        sink) printf '  ⚠ 警告: %s は mktemp 不能につき決定論 path の sink へ劣化（上限 %s 秒は維持）＝全件: %s' "$1" "$2" "$3" ;;
+        nosink) printf '  ⚠ 警告: %s は sink（一時 file）を確保できず上界を保証できないため未実行（上限 %s 秒を適用できない）＝表示は部分・全件: %s' "$1" "$2" "$3" ;;
+        noto) printf '  ⚠ 警告: %s は timeout 不在につき上界なしの実行へ劣化（上限 %s 秒は無効）＝全件: %s' "$1" "$2" "$3" ;;
+        bare) printf '  ⚠ 警告: %s は timeout 不在かつ一時 file 不能につき上界なしの実行へ劣化（上限 %s 秒は無効）＝全件: %s' "$1" "$2" "$3" ;;
+        *)    printf '  ⚠ 警告: %s を %s 秒で打ち切り＝表示は部分・全件: %s' "$1" "$2" "$3" ;;
+    esac
+}
+
+# 子 stdout の sink（一時 file）を 2 段で確保する。結果は global（_WIP_SINK_F / _WIP_SINK_ALT）で返す
+# （command substitution で受けると subshell の代入が親へ伝わらず、どちらの経路で確保したかを失う）。
+#   ① mktemp ② 決定論 path を noclobber（set -C）で作る＝mktemp bin 不在 / -t 非対応 / mktemp 側の一時的な
+#   失敗でも sink を諦めない。★② が要るのは、sink を諦めた先に残る形が禁止形（command substitution + timeout）
+#   しかなく、そこでは per-child bound と総予算 deadline が同時に失効するため。② も落ちたら呼出側は子を実行
+#   しない（禁止形は取らない）。file は呼出側が読み終えたら rm する。
+_wip_sink_path() {  # → _WIP_SINK_F（作れなければ空・rc=1）/ _WIP_SINK_ALT=1 なら ② 経由
+    local _i=0
+    _WIP_SINK_F=""; _WIP_SINK_ALT=0
+    _WIP_SINK_F="$(mktemp -t wip-child-XXXXXX 2>/dev/null)" || _WIP_SINK_F=""
+    [ -n "$_WIP_SINK_F" ] && return 0
+    while [ "$_i" -lt 4 ]; do   # SINK-FALLBACK（決定論 path・noclobber で既存 file を掴まない）
+        _WIP_SINK_F="${TMPDIR:-/tmp}/wip-child-$$-$RANDOM-$_i"
+        if ( set -C; : >"$_WIP_SINK_F" ) 2>/dev/null; then _WIP_SINK_ALT=1; return 0; fi
+        _i=$(( _i + 1 ))
+    done
+    _WIP_SINK_F=""
+    return 1
+}
+
+# 子 1 本を上界付きで実行する。結果は global（_WIP_RAW / _WIP_RC / _WIP_CUT / _WIP_DEGRADE）で返す——`$(_wip_run_child …)` に
+# すると孫が stdout を保持する限り command substitution が解放されず、上界を掛けた意味が消えるため。
+#   - stdout は **file sink**（孫が保持しても本体は待たない・実測 6.008s → 0.005s）。hook 自身の stdout pipe を
+#     孫が掴む経路も同時に塞がる（子は fd1=file・fd2=/dev/null しか持たない）。
+#   - `timeout -k`（`--foreground` は付けない）＝プロセスグループごと SIGTERM → 猶予 → SIGKILL。
+#   - degrade しても **上界は捨てない**、かつ禁止形（command substitution で timeout を受ける形）へは落ちない。
+#     timeout を被せても `_raw="$(timeout N 子)"` では、子が cap より前に exit して孫が stdout を保持する型で
+#     bound が丸ごと失効する（timeout は何も送らず終了し bash は孫の EOF を待つ＝rc=0・打ち切り行も出ない）。
+#     よって sink は 2 段で確保し（mktemp → 決定論 path の noclobber 作成＝_wip_sink_path）、両方落ちたときは
+#     **その子を実行しない**（_WIP_DEGRADE=nosink）。上界が本当に消えるのは timeout 不在時だけで、その 1 点
+#     だけが fail-open。★その fail-open こそ最も loud にすべきなので、timeout 不在は sink の可否に関わらず必ず
+#     _WIP_DEGRADE を立てる（sink 在り＝noto / sink 無し＝bare）。いずれの degrade も呼出側が rank-A の 1 行で
+#     loud に出す（_WIP_DEGRADE）＝silent に上界が落ちる経路を作らない（degrade を立て損ねると「上界が消えた
+#     事実」だけが出力から欠落する）。
+_wip_run_child() {  # $1=上限秒 $2=script $3..=args
+    local _cap="$1" _script="$2"; shift 2
+    local _f="" _use_to=0
+    _WIP_RAW=""; _WIP_RC=0; _WIP_CUT=0; _WIP_DEGRADE=""
+    command -v timeout >/dev/null 2>&1 && _use_to=1   # TIMEOUT-PROBE
+    _wip_sink_path; _f="$_WIP_SINK_F"   # TMPFILE-SINK
+    if [ -z "$_f" ]; then
+        if [ "$_use_to" -eq 1 ]; then
+            # sink が全く作れない × timeout 在り: 禁止形（`$(timeout N 子)`）では孫が stdout を保持する型で
+            # per-child bound も総予算 deadline も同時に失効するため、走らせずに loud 1 行だけを返す。
+            _WIP_DEGRADE=nosink   # NOSINK-REFUSE
+        else
+            _WIP_RAW="$("$_script" "$@" 2>/dev/null)" || _WIP_RC=$?
+            _WIP_DEGRADE=bare
+        fi
+        return 0
+    fi
+    if [ "$_use_to" -eq 1 ]; then
+        timeout -k "$WIP_KILL_GRACE" "$_cap" "$_script" "$@" >"$_f" 2>/dev/null || _WIP_RC=$?
+        case "$_WIP_RC" in 124|137) _WIP_CUT=1 ;; esac
+        [ "$_WIP_SINK_ALT" -eq 1 ] && _WIP_DEGRADE=sink   # mktemp 不能だった事実は loud に残す（上限は維持）
+    else
+        "$_script" "$@" >"$_f" 2>/dev/null || _WIP_RC=$?
+        _WIP_DEGRADE=noto   # 上界喪失（timeout 不在）。sink は在るので原因は bare と別文言にする＝silent にしない
+    fi
+    _WIP_RAW="$(cat "$_f" 2>/dev/null)"
+    rm -f "$_f"
+}
+
 # 1 block を実行 → 全量変数受け → trim → _WIP_BODY へ append（予算の残りと残 block 数を更新）。
 # fail-open: 不在/非実行可能なら skip note、非0終了なら（部分出力は保持したまま）理由行を足して continue。
+# 予算（bd sc-dmmz）: 実行は per-child bound + 総予算 deadline の内側で行い、打ち切ったら専用の loud 行を足す
+# （部分出力は保持する＝打ち切られた節も本文を持つ）。総予算が尽きていれば **実行せず** 打ち切る。
 _wip_emit_block() {  # $1=表示名 $2=script $3..=args
     local _name="$1" _script="$2"; shift 2
-    local _raw _rc=0 _disp _blk _n
+    local _raw _rc=0 _disp _blk _n _cap _ptr
     _disp="$_name${*:+ $*}"
+    _ptr="$_script${*:+ $*}"
     if [ -x "$_script" ]; then
-        _raw="$("$_script" "$@" 2>/dev/null)" || _rc=$?
-        if [ "$_rc" -ne 0 ]; then
-            [ -n "$_raw" ] && _raw="$_raw"$'\n'
-            _raw="$_raw  （$_disp が非0終了・skip＝fail-open）"
+        _cap="$(_wip_child_cap)"
+        if [ "$_cap" -lt 1 ]; then
+            _raw="$(_wip_cut_line "$_disp" "$WIP_TOTAL_BUDGET" "$_ptr" skip)"
+        else
+            _wip_run_child "$_cap" "$_script" "$@"
+            _raw="$_WIP_RAW"; _rc="$_WIP_RC"
+            # degrade（sink 不能 / 上界喪失）は打ち切りと同格の rank-A 1 行で必ず出す＝silent degrade を作らない。
+            if [ -n "${_WIP_DEGRADE:-}" ]; then
+                [ -n "$_raw" ] && _raw="$_raw"$'\n'
+                _raw="$_raw$(_wip_cut_line "$_disp" "$_cap" "$_ptr" "$_WIP_DEGRADE")"
+            fi
+            if [ "$_WIP_CUT" -eq 1 ]; then
+                [ -n "$_raw" ] && _raw="$_raw"$'\n'
+                _raw="$_raw$(_wip_cut_line "$_disp" "$_cap" "$_ptr" kill)"
+            elif [ "$_rc" -ne 0 ]; then
+                [ -n "$_raw" ] && _raw="$_raw"$'\n'
+                _raw="$_raw  （$_disp が非0終了・skip＝fail-open）"
+            fi
         fi
     else
         _raw="  （$_name 不在/非実行可能: $_script・skip＝fail-open）"
@@ -262,7 +435,7 @@ _wip_emit_block() {  # $1=表示名 $2=script $3..=args
     [ -n "$_raw" ] || _raw="  （$_disp: 出力なし）"
     if [ "$WIP_TRIM" -eq 1 ]; then
         _n="$(_wip_plan_n "$(_wip_u16len "$_raw")" "$(_wip_count_lines "$_raw")")"
-        _blk="$(_wip_trim_block "$_raw" "$_n" "$_script${*:+ $*}")"
+        _blk="$(_wip_trim_block "$_raw" "$_n" "$_ptr")"
     else
         _blk="$_raw"
     fi
@@ -466,6 +639,8 @@ _emit_workinprogress() {
     cd "$anchor_cwd" 2>/dev/null || true
 
     _WIP_BODY=""; _WIP_LEFT=6; _WIP_REM="$WIP_PLAN_U16"; _WIP_OUT=""; _WIP_CAPPED=0
+    # 総予算 deadline（bd sc-dmmz）: hook 起動時に 1 度だけ取り、以後の各子の cap は残時間から算出する。
+    _WIP_DEADLINE_MS=$(( $(_wip_now_ms) + WIP_TOTAL_BUDGET * 1000 ))
 
     _WIP_BODY="$_WIP_BODY=== [orchestrator/SessionStart] 仕掛かり自動表示（gate-pending + degraded-watch・self-scope: orch anchor のみ） ==="$'\n\n'
 
@@ -656,7 +831,7 @@ TMUXEOF
     }
     # ★走査対象は本 script が定義する **全 top-level 関数**（sc-v0ao: 新設関数の編入漏れを塞ぐ）。_LK_FNS が
     #   明示列挙で、直下の coverage assert が「列挙 == 実定義集合」を機械照合する（列挙漏れ＝FAIL）。
-    _LK_FNS="_emit_workinprogress _wip_count_lines _wip_emit_block _wip_hardcap _wip_hc_build _wip_is_priority _wip_is_rank_a _wip_is_section_head _wip_line_costs _wip_plan_n _wip_trim_block _wip_u16len _wip_warn_line"
+    _LK_FNS="_emit_workinprogress _wip_child_cap _wip_count_lines _wip_cut_line _wip_emit_block _wip_hardcap _wip_hc_build _wip_is_priority _wip_is_rank_a _wip_is_section_head _wip_line_costs _wip_now_ms _wip_plan_n _wip_run_child _wip_sink_path _wip_trim_block _wip_u16len _wip_warn_line"
     _lk_sample=""
     for _lk_f in $_LK_FNS; do _lk_sample="$_lk_sample$(declare -f "$_lk_f")"$'\n'; done
     # 編入漏れ検知（新設関数を _LK_FNS へ足し忘れると RED）: 実定義集合 = 本 script の行頭 `name() {` 定義。
@@ -876,6 +1051,144 @@ TMUXEOF
     else
         echo "FAIL: hard-cap 件数整合: 1 節 2 block で申告件数が実省略行数と不一致（A: shown=$_2b_sa omit=$_2b_oa / B: shown=$_2b_sb omit=$_2b_ob / 未所有=$_2b_ox / capped=$_WIP_CAPPED）" >&2; st_fail=1
     fi
+
+    # ── 実行予算（bd sc-dmmz）: 打ち切り行の識別性 / rank-A 所属 / cap 算術 の単体 pin ────────────────
+    # ★bats 側（B1-B7）は実 stub を走らせる e2e だが、「打ち切り行が rank-A である」「既存 fail-open 文言と
+    #   区別可能である」「cap が per-child 上限と総予算残の min である」は関数単体でしか決定論的に踏めない。
+    _ct_kill="$(_wip_cut_line "stub.sh --x" 60 "CMD --x" kill)"
+    _ct_skip="$(_wip_cut_line "stub.sh --x" 150 "CMD --x" skip)"
+    _ct_fo='  （stub.sh --x が非0終了・skip＝fail-open）'
+    _ct_fail=0
+    _wip_is_rank_a "$_ct_kill" || { echo "FAIL: 打ち切り行(kill)が rank-A でない: [$_ct_kill]" >&2; st_fail=1; _ct_fail=1; }
+    _wip_is_rank_a "$_ct_skip" || { echo "FAIL: 打ち切り行(skip)が rank-A でない: [$_ct_skip]" >&2; st_fail=1; _ct_fail=1; }
+    case "$_ct_kill$_ct_skip" in *"打ち切り"*) ;; *) echo "FAIL: 打ち切り行に「打ち切り」語が無い" >&2; st_fail=1; _ct_fail=1 ;; esac
+    case "$_ct_kill$_ct_skip" in *"fail-open"*) echo "FAIL: 打ち切り行が fail-open 文言を再利用している（区別不能）" >&2; st_fail=1; _ct_fail=1 ;; esac
+    case "$_ct_fo" in *"打ち切り"*) echo "FAIL: 既存 fail-open 行に「打ち切り」語が混入（区別不能）" >&2; st_fail=1; _ct_fail=1 ;; esac
+    _wip_is_rank_a "$_ct_fo" && { echo "FAIL: 既存 fail-open 行が rank-A（打ち切りと同格になり区別が消える）" >&2; st_fail=1; _ct_fail=1; }
+    _wip_is_priority "$_ct_kill" || { echo "FAIL: 打ち切り行が優先クラスでない（N 枠に食われる）" >&2; st_fail=1; _ct_fail=1; }
+    [ "$_ct_fail" -eq 0 ] && echo "ok: 打ち切り行: rank-A かつ優先クラス・既存 fail-open 文言と相互に非衝突（kill/skip 両 mode）"
+    # teeth（非vacuity）: rank-A marker（⚠ 警告）を落とした変種は rank-A に載らない＝marker が load-bearing。
+    if _wip_is_rank_a "${_ct_kill#*警告: }"; then
+        echo "FAIL: rank-A marker 系統に歯が無い（marker を落としても rank-A 判定された）" >&2; st_fail=1
+    else
+        echo "ok: rank-A marker 系統に歯あり（⚠ 警告 を落とす mutation で打ち切り行が rank-A から外れる）"
+    fi
+    # degrade 行（sink / noto / bare）: 打ち切りと同格の rank-A で、かつ「打ち切った」とは区別できる文言であること。
+    # ★silent degrade（上界が落ちても出力に一切現れない）を塞ぐ側の pin。sink=上限維持 / noto・bare=上界喪失 を
+    #   明示し、原因（timeout 不在 か 一時 file 不能 か）も取り違えないことを pin する。
+    _ct_sink="$(_wip_cut_line "stub.sh --x" 60 "CMD --x" sink)"
+    _ct_noto="$(_wip_cut_line "stub.sh --x" 60 "CMD --x" noto)"
+    _ct_bare="$(_wip_cut_line "stub.sh --x" 60 "CMD --x" bare)"
+    _dg_fail=0
+    _wip_is_rank_a "$_ct_sink" || { echo "FAIL: degrade 行(sink)が rank-A でない: [$_ct_sink]" >&2; st_fail=1; _dg_fail=1; }
+    _wip_is_rank_a "$_ct_noto" || { echo "FAIL: degrade 行(noto)が rank-A でない: [$_ct_noto]" >&2; st_fail=1; _dg_fail=1; }
+    _wip_is_rank_a "$_ct_bare" || { echo "FAIL: degrade 行(bare)が rank-A でない: [$_ct_bare]" >&2; st_fail=1; _dg_fail=1; }
+    case "$_ct_sink$_ct_noto$_ct_bare" in *"打ち切り"*) echo "FAIL: degrade 行が打ち切り文言を再利用している（区別不能）" >&2; st_fail=1; _dg_fail=1 ;; esac
+    case "$_ct_sink" in *"劣化"*) ;; *) echo "FAIL: degrade 行(sink)に「劣化」語が無い" >&2; st_fail=1; _dg_fail=1 ;; esac
+    case "$_ct_noto" in *"劣化"*) ;; *) echo "FAIL: degrade 行(noto)に「劣化」語が無い" >&2; st_fail=1; _dg_fail=1 ;; esac
+    case "$_ct_bare" in *"劣化"*) ;; *) echo "FAIL: degrade 行(bare)に「劣化」語が無い" >&2; st_fail=1; _dg_fail=1 ;; esac
+    case "$_ct_sink" in *"維持"*) ;; *) echo "FAIL: degrade 行(sink)が「上限は維持」を明示しない" >&2; st_fail=1; _dg_fail=1 ;; esac
+    case "$_ct_noto" in *"無効"*) ;; *) echo "FAIL: degrade 行(noto)が「上界喪失」を明示しない" >&2; st_fail=1; _dg_fail=1 ;; esac
+    case "$_ct_bare" in *"無効"*) ;; *) echo "FAIL: degrade 行(bare)が「上界喪失」を明示しない" >&2; st_fail=1; _dg_fail=1 ;; esac
+    # 原因の取り違え禁止: sink が在る noto で「一時 file 不能」と告げない / noto と bare が同一文言でない。
+    case "$_ct_noto" in *"一時 file 不能"*) echo "FAIL: degrade 行(noto)が sink 在りなのに「一時 file 不能」を原因と告げる" >&2; st_fail=1; _dg_fail=1 ;; esac
+    [ "$_ct_noto" != "$_ct_bare" ] || { echo "FAIL: degrade 行 noto と bare が同一文言（原因が区別できない）" >&2; st_fail=1; _dg_fail=1; }
+    # nosink（sink 全滅で **未実行**）: 実行した sink 劣化（上限維持）と混同されない文言であること。
+    _ct_nosink="$(_wip_cut_line "stub.sh --x" 60 "CMD --x" nosink)"
+    _wip_is_rank_a "$_ct_nosink" || { echo "FAIL: degrade 行(nosink)が rank-A でない: [$_ct_nosink]" >&2; st_fail=1; _dg_fail=1; }
+    case "$_ct_nosink" in *"未実行"*) ;; *) echo "FAIL: degrade 行(nosink)が「未実行」を明示しない" >&2; st_fail=1; _dg_fail=1 ;; esac
+    case "$_ct_nosink" in *"上界を保証できない"*) ;; *) echo "FAIL: degrade 行(nosink)が「上界を保証できない」を明示しない" >&2; st_fail=1; _dg_fail=1 ;; esac
+    [ "$_ct_nosink" != "$_ct_sink" ] || { echo "FAIL: degrade 行 nosink と sink が同一文言（実行/未実行が区別できない）" >&2; st_fail=1; _dg_fail=1; }
+    case "$_ct_sink" in *"未実行"*) echo "FAIL: degrade 行(sink)が「未実行」と告げる（実際は実行して上限も維持している）" >&2; st_fail=1; _dg_fail=1 ;; esac
+    [ "$_dg_fail" -eq 0 ] && echo "ok: degrade 行: rank-A かつ打ち切り文言と非衝突・sink=上限維持 / nosink=未実行 / noto・bare=上界無効・原因の取り違え無し"
+    # 挙動 pin（self-review major）: mktemp 不能でも per-child bound を捨てない。fake mktemp（wip-child-* だけ
+    # 失敗）を関数で被せ、決定論 path の sink（SINK-FALLBACK）へ落ちてなお cap 1 秒に対し 6 秒 hang する子が
+    # cap 内で打ち切られ（_WIP_CUT=1）、mktemp 不能の事実が _WIP_DEGRADE=sink として loud に残ることを実測。
+    cat > "$st_tmp/hangchild.sh" <<'HANGEOF'
+#!/usr/bin/env bash
+echo "  HANG-CHILD 部分出力"
+sleep 6
+HANGEOF
+    chmod +x "$st_tmp/hangchild.sh"
+    mktemp() { case "$*" in *wip-child-*) return 1 ;; esac; command mktemp "$@"; }
+    _mk_t0=$SECONDS; _mk_kg="$WIP_KILL_GRACE"; WIP_KILL_GRACE=1
+    _wip_run_child 1 "$st_tmp/hangchild.sh"
+    WIP_KILL_GRACE="$_mk_kg"; _mk_el=$(( SECONDS - _mk_t0 ))
+    unset -f mktemp
+    if [ "$_mk_el" -le 4 ] && [ "$_WIP_CUT" -eq 1 ] && [ "${_WIP_DEGRADE:-}" = "sink" ] \
+        && case "$_WIP_RAW" in *"HANG-CHILD"*) true ;; *) false ;; esac; then
+        echo "ok: mktemp 不能でも決定論 path の sink で per-child bound は生存（cap 1 秒に対し ${_mk_el}s で打ち切り・部分出力保持・degrade=sink）"
+    else
+        echo "FAIL: mktemp 不能 degrade で上界が消えた（経過 ${_mk_el}s / CUT=$_WIP_CUT / degrade=${_WIP_DEGRADE:-} / raw=[$_WIP_RAW]）" >&2; st_fail=1
+    fi
+    # 挙動 pin（self-review major-2・禁止形の完全排除）: sink が **全く** 作れない（mktemp も決定論 path も不能）
+    # × timeout 在り でも禁止形 `$(timeout N 子)` へ落ちない。禁止形では「子が即 exit・孫が stdout を保持」型で
+    # per-child bound と総予算 deadline が同時に失効する（timeout は何も送らず終わり本体は孫の EOF を待つ）ため、
+    # ここは実行せず nosink を立てて即返るのが正。TMPDIR を不在 dir に向け mktemp shim と併せて両段を落とす。
+    cat > "$st_tmp/gcchild.sh" <<'GCEOF'
+#!/usr/bin/env bash
+( sleep 5 ) &
+echo "  GC-CHILD 部分出力"
+GCEOF
+    chmod +x "$st_tmp/gcchild.sh"
+    mktemp() { case "$*" in *wip-child-*) return 1 ;; esac; command mktemp "$@"; }
+    _ns_tsave="${TMPDIR:-}"; export TMPDIR="$st_tmp/absent-sink-dir"
+    _ns_t0=$SECONDS
+    _wip_run_child 2 "$st_tmp/gcchild.sh"
+    _ns_el=$(( SECONDS - _ns_t0 ))
+    if [ -n "$_ns_tsave" ]; then export TMPDIR="$_ns_tsave"; else unset TMPDIR; fi
+    unset -f mktemp
+    if [ "$_ns_el" -le 1 ] && [ "${_WIP_DEGRADE:-}" = "nosink" ] && [ "$_WIP_CUT" -eq 0 ] && [ -z "$_WIP_RAW" ]; then
+        echo "ok: sink 全滅（mktemp + 決定論 path とも不能）でも禁止形へ落ちず未実行で即返る（${_ns_el}s・degrade=nosink・孫の寿命に延伸しない）"
+    else
+        echo "FAIL: sink 全滅時に禁止形へ落ちた疑い（経過 ${_ns_el}s / CUT=$_WIP_CUT / degrade=${_WIP_DEGRADE:-} / raw=[$_WIP_RAW]）" >&2; st_fail=1
+    fi
+    # teeth（非vacuity）: 同じ条件で禁止形を **実際に** 走らせると孫の寿命ぶん延伸することを対照実測する
+    # （＝上の pin が「たまたま速い」のではなく形の違いが load-bearing であることの証明）。
+    _ns_t1=$SECONDS
+    _ns_raw="$(timeout -k 1 2 "$st_tmp/gcchild.sh" 2>/dev/null)" || true
+    _ns_el2=$(( SECONDS - _ns_t1 ))
+    if [ "$_ns_el2" -ge 3 ]; then
+        echo "ok: 禁止形の対照実測: \$(timeout -k 1 2 子) は孫が stdout を保持する型で ${_ns_el2}s へ延伸（上界が破れる＝本経路を採らない根拠）"
+    else
+        echo "FAIL: 禁止形の対照実測が延伸しなかった（${_ns_el2}s / raw=[$_ns_raw]）＝本 pin の前提が崩れている" >&2; st_fail=1
+    fi
+    # 挙動 pin（self-review major-1・silent degrade の閉塞）: **timeout 不在 × sink 成功** の経路（上界が実際に
+    # 消える唯一の経路）でも degrade を必ず立てる。`command -v timeout` だけを不在に見せる関数 shim を被せる
+    # （PATH symlink farm より局所的・他の外部 command は builtin へ素通し）。子は即時 stub＝実時間を食わない。
+    cat > "$st_tmp/fastchild.sh" <<'FASTEOF'
+#!/usr/bin/env bash
+echo "  FAST-CHILD 出力"
+FASTEOF
+    chmod +x "$st_tmp/fastchild.sh"
+    _wip_run_child 1 "$st_tmp/fastchild.sh"
+    _nt_base="${_WIP_DEGRADE:-}"                       # timeout 在り＝degrade を立てない（false-loud 防止）
+    command() { if [ "$1" = "-v" ] && [ "$2" = "timeout" ]; then return 1; fi; builtin command "$@"; }
+    _wip_run_child 1 "$st_tmp/fastchild.sh"
+    unset -f command
+    if [ -z "$_nt_base" ] && [ "${_WIP_DEGRADE:-}" = "noto" ] \
+        && case "$_WIP_RAW" in *"FAST-CHILD"*) true ;; *) false ;; esac; then
+        echo "ok: timeout 不在 × sink 成功 でも degrade=noto が立つ（上界喪失が silent にならない・timeout 在り時は degrade 無し）"
+    else
+        echo "FAIL: timeout 不在 × sink 成功 の degrade が立たない/誤発火（base=[${_nt_base}] / degrade=[${_WIP_DEGRADE:-}] / raw=[$_WIP_RAW]）" >&2; st_fail=1
+    fi
+    # cap 算術: (a) deadline が十分先 → per-child 上限で頭打ち / (b) 残 2 秒 → 残時間で頭打ち / (c) 期限切れ → <1。
+    _cap_save="$WIP_CHILD_TIMEOUT"; _cap_dsave="$_WIP_DEADLINE_MS"; _cap_fail=0
+    WIP_CHILD_TIMEOUT=7
+    _WIP_DEADLINE_MS=$(( $(_wip_now_ms) + 3600000 )); _cap_a="$(_wip_child_cap)"
+    _WIP_DEADLINE_MS=$(( $(_wip_now_ms) + 2000 ));    _cap_b="$(_wip_child_cap)"
+    _WIP_DEADLINE_MS=$(( $(_wip_now_ms) - 1000 ));    _cap_c="$(_wip_child_cap)"
+    _WIP_DEADLINE_MS=0;                               _cap_d="$(_wip_child_cap)"
+    [ "$_cap_a" -eq 7 ] || { echo "FAIL: cap: deadline が十分先でも per-child 上限にならない（$_cap_a != 7）" >&2; st_fail=1; _cap_fail=1; }
+    { [ "$_cap_b" -le 2 ] && [ "$_cap_b" -ge 1 ]; } || { echo "FAIL: cap: 残 2 秒で残時間頭打ちにならない（$_cap_b）" >&2; st_fail=1; _cap_fail=1; }
+    [ "$_cap_c" -lt 1 ] || { echo "FAIL: cap: 期限切れでも枯渇（<1）にならない（$_cap_c）" >&2; st_fail=1; _cap_fail=1; }
+    [ "$_cap_d" -eq 7 ] || { echo "FAIL: cap: deadline 未設定(0)は per-child 上限のみのはず（$_cap_d != 7）" >&2; st_fail=1; _cap_fail=1; }
+    WIP_CHILD_TIMEOUT="$_cap_save"; _WIP_DEADLINE_MS="$_cap_dsave"
+    [ "$_cap_fail" -eq 0 ] && echo "ok: cap 算術: min(per-child 上限, 総予算残)・期限切れ→枯渇・deadline 未設定→per-child のみ"
+    # _wip_now_ms の健全性（epoch ms 桁 + 単調非減少）。degrade 経路（date +%s）でも同じ性質を満たす。
+    _nm1="$(_wip_now_ms)"; _nm2="$(_wip_now_ms)"
+    if [ "$_nm1" -gt 1000000000000 ] && [ "$_nm2" -ge "$_nm1" ]; then echo "ok: _wip_now_ms: epoch ms 桁かつ単調非減少（$_nm1 → $_nm2）"
+    else echo "FAIL: _wip_now_ms: epoch ms として不正（$_nm1 → $_nm2）" >&2; st_fail=1; fi
 
     # ── 配線 assert（review major-2）: hard-cap が emit 経路へ実際に繋がっている ─────────────────────
     # ★bats（T1/T3）の合成負荷は per-block trim が畳み切るので hard-cap を発火させない＝配線を外した mutant

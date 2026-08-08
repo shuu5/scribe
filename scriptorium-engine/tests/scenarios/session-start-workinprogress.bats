@@ -190,6 +190,153 @@ make_all_stubs() {  # $1=maker(make_overload_stub|make_small_stub) $2=mode
     "$1" "$PLUGIN/scripts/lib/orch_slate.sh"        S6 "${2:-plain}"
 }
 
+# ── 実行予算（bd sc-dmmz・per-child bound + 総予算 deadline）用 stub 群 ───────────────────────────
+# ★予算の teeth は「速い/遅い」だけでは足りない。**孫が stdout を保持したまま子が即 exit する** 形（command
+#   substitution が解放されない）と、**孫が生き残って副作用を残す** 形（timeout --foreground でプロセスグループを
+#   作らない）を別 fixture として持つ＝実装形の拘束（子 stdout を file sink へ / --foreground 禁止）が load-bearing
+#   であることを、存在 grep でなく実挙動で示すため。
+# (1) 即時: 3 行出して即 exit（打ち切られない子）。
+make_budget_fast_stub() {  # $1=path $2=tag $3=無視
+    cat > "$1" <<'STUBEOF'
+#!/usr/bin/env bash
+tag="__TAG__"
+for i in 1 2 3; do printf '  %sREC%03d 即時に返る子の記録行\n' "$tag" "$i"; done
+STUBEOF
+    sed -i "s/__TAG__/$2/" "$1"; chmod +x "$1"
+}
+# (2) 遅い: 部分出力を出してから長時間 hang（per-child bound / 総予算 deadline の打ち切り対象）。
+make_budget_slow_stub() {  # $1=path $2=tag $3=hang 秒
+    cat > "$1" <<'STUBEOF'
+#!/usr/bin/env bash
+tag="__TAG__"
+for i in 1 2 3; do printf '  %sREC%03d 遅い子の部分出力行\n' "$tag" "$i"; done
+sleep __HANG__
+STUBEOF
+    sed -i "s/__TAG__/$2/; s/__HANG__/${3:-30}/" "$1"; chmod +x "$1"
+}
+# (3) 孫が stdout を保持: 本体は即 exit するが孫が生き残る（`_raw="$(子)"` 形だと本体が孫の寿命ぶん待たされる）。
+make_budget_gc_stub() {  # $1=path $2=tag $3=孫の寿命秒
+    cat > "$1" <<'STUBEOF'
+#!/usr/bin/env bash
+tag="__TAG__"
+( sleep __LIFE__ ) &
+for i in 1 2 3; do printf '  %sREC%03d 孫を残して即 exit する子の記録行\n' "$tag" "$i"; done
+STUBEOF
+    sed -i "s/__TAG__/$2/; s/__LIFE__/${3:-8}/" "$1"; chmod +x "$1"
+}
+# (4) 孫が marker を残す: 本体は hang し孫が N 秒後に marker を作る（--foreground を付ける mutation の teeth）。
+make_budget_marker_stub() {  # $1=path $2=tag $3=marker path $4=孫の待ち秒
+    cat > "$1" <<'STUBEOF'
+#!/usr/bin/env bash
+tag="__TAG__"
+( sleep __WAIT__; : > "__MARKER__" ) &
+printf '  %sREC001 孫つきの子\n' "$tag"
+sleep 30
+STUBEOF
+    sed -i "s/__TAG__/$2/; s|__MARKER__|$3|; s/__WAIT__/${4:-3}/" "$1"; chmod +x "$1"
+}
+# (5) 全行優先クラスの過負荷を出してから hang（打ち切り行が trim + hard-cap を通り抜けるかを見る regime）。
+make_budget_allprio_slow_stub() {  # $1=path $2=tag $3=hang 秒
+    cat > "$1" <<'STUBEOF'
+#!/usr/bin/env bash
+tag="__TAG__"
+pad='仕掛かり記録の詳細説明テキストであり表示予算を消費するための埋草である。'
+i=1
+while [ $i -le 200 ]; do
+    printf '  便 %sREC%03d [滞留] %s%s\n' "$tag" "$i" "$pad" "$pad"
+    i=$((i + 1))
+done
+sleep __HANG__
+STUBEOF
+    sed -i "s/__TAG__/$2/; s/__HANG__/${3:-30}/" "$1"; chmod +x "$1"
+}
+
+# 予算 knob 付きで hook を起動し stdout のみを返す（$1=script $2=per-child 秒 $3=総予算 秒 $4..=args）。
+# ★予算をハードコードしていたら hermetic test は実時間 60 秒級の sleep を強いられ、存在 grep の vacuous test へ
+#   退避せざるを得なくなる。env knob（WIP_CHILD_TIMEOUT / WIP_TOTAL_BUDGET / WIP_KILL_GRACE）で 1 秒級にする。
+hook_stdout_budget() {
+    local _s="$1" _c="$2" _t="$3"; shift 3
+    printf '{"cwd":"%s"}' "$ANCHOR" > "$TEST_TMPDIR/payload.json"
+    env -u TMUX -u TMUX_PANE CLAUDE_PLUGIN_ROOT="$PLUGIN" \
+        WIP_CHILD_TIMEOUT="$_c" WIP_TOTAL_BUDGET="$_t" WIP_KILL_GRACE=1 \
+        bash "$_s" "$@" < "$TEST_TMPDIR/payload.json" 2>/dev/null
+}
+
+# sink（一時 file）不能を模す PATH shim: wip-child-* の要求だけ失敗し、他は実 mktemp へ委譲する（bats 自身や
+# 子 stub の mktemp を巻き添えにしない）。TMPDIR が read-only / 容量枯渇 / sandbox 制限のときの現実経路。
+make_fake_mktemp_fail() {
+    MKBIN="$TEST_TMPDIR/mkbin"; mkdir -p "$MKBIN"
+    local _real; _real="$(command -v mktemp)"
+    cat > "$MKBIN/mktemp" <<'MKEOF'
+#!/usr/bin/env bash
+for a in "$@"; do case "$a" in wip-child-*) exit 1 ;; esac; done
+exec "__REAL__" "$@"
+MKEOF
+    sed -i "s|__REAL__|$_real|" "$MKBIN/mktemp"; chmod +x "$MKBIN/mktemp"
+}
+
+# 予算 knob 付き + mktemp 不能 shim 付きで hook を起動する（$1=script $2=per-child 秒 $3=総予算 秒）。
+# ここでは決定論 path の fallback（SINK-FALLBACK）が通る＝sink は確保できる（正規経路のまま degrade を出す）。
+hook_stdout_budget_nosink() {
+    local _s="$1" _c="$2" _t="$3"; shift 3
+    printf '{"cwd":"%s"}' "$ANCHOR" > "$TEST_TMPDIR/payload.json"
+    env -u TMUX -u TMUX_PANE CLAUDE_PLUGIN_ROOT="$PLUGIN" PATH="$MKBIN:$PATH" \
+        WIP_CHILD_TIMEOUT="$_c" WIP_TOTAL_BUDGET="$_t" WIP_KILL_GRACE=1 \
+        bash "$_s" "$@" < "$TEST_TMPDIR/payload.json" 2>/dev/null
+}
+
+# sink を **全滅** させて hook を起動する（mktemp shim ＋ TMPDIR を不在 dir へ向ける）＝mktemp も決定論 path も
+# 作れない現実経路（TMPDIR が消えている / 権限が無い / sandbox 制限）。ここが「禁止形へ落ちない」ことを実測する
+# 唯一の regime（sink が在る限り正規経路しか通らないため、他の helper では踏めない）。
+hook_stdout_budget_nosink_hard() {
+    local _s="$1" _c="$2" _t="$3"; shift 3
+    printf '{"cwd":"%s"}' "$ANCHOR" > "$TEST_TMPDIR/payload.json"
+    env -u TMUX -u TMUX_PANE CLAUDE_PLUGIN_ROOT="$PLUGIN" PATH="$MKBIN:$PATH" \
+        TMPDIR="$TEST_TMPDIR/absent-sink-dir" \
+        WIP_CHILD_TIMEOUT="$_c" WIP_TOTAL_BUDGET="$_t" WIP_KILL_GRACE=1 \
+        bash "$_s" "$@" < "$TEST_TMPDIR/payload.json" 2>/dev/null
+}
+
+# timeout **だけ** を除いた PATH farm（`command -v timeout` を実際に失敗させる唯一の hermetic 手段。shim では
+# 「在るが失敗する」しか作れず degrade 分岐へ入らない）。他の外部 bin（python3 / jq / sed / cat / rm / date …）は
+# 実体への symlink で保つ＝hook と共有 lib の依存を壊さない。
+make_no_timeout_path() {
+    NOTOBIN="$TEST_TMPDIR/notobin"; mkdir -p "$NOTOBIN"
+    local _d _f _b
+    while IFS= read -r _d; do
+        [ -d "$_d" ] || continue
+        for _f in "$_d"/*; do
+            _b="${_f##*/}"
+            [ "$_b" = "timeout" ] && continue
+            [ -e "$NOTOBIN/$_b" ] && continue
+            [ -x "$_f" ] || continue
+            ln -s "$_f" "$NOTOBIN/$_b" 2>/dev/null || true
+        done
+    done <<<"$(tr ':' '\n' <<<"$PATH")"
+}
+
+# timeout 不在 × sink 全滅（bare 経路）で hook を起動する。上界が本当に消える最悪の degrade で、それでも
+# 出力が続き（fail-open）degrade が loud に出ることを実測するための唯一の regime。
+hook_stdout_budget_bare() {  # $1=script $2=per-child 秒 $3=総予算 秒
+    local _s="$1" _c="$2" _t="$3"; shift 3
+    printf '{"cwd":"%s"}' "$ANCHOR" > "$TEST_TMPDIR/payload.json"
+    env -u TMUX -u TMUX_PANE CLAUDE_PLUGIN_ROOT="$PLUGIN" PATH="$MKBIN:$NOTOBIN" \
+        TMPDIR="$TEST_TMPDIR/absent-sink-dir" \
+        WIP_CHILD_TIMEOUT="$_c" WIP_TOTAL_BUDGET="$_t" WIP_KILL_GRACE=1 \
+        bash "$_s" "$@" < "$TEST_TMPDIR/payload.json" 2>/dev/null
+}
+
+# 部分出力を出してから非0で終わる子（「壊れた子」＝打ち切りではない fail-open 経路の fixture）。
+make_budget_rc_stub() {  # $1=path $2=tag $3=exit code
+    cat > "$1" <<'STUBEOF'
+#!/usr/bin/env bash
+tag="__TAG__"
+for i in 1 2 3; do printf '  %sREC%03d 途中まで出して壊れる子の記録行\n' "$tag" "$i"; done
+exit __RC__
+STUBEOF
+    sed -i "s/__TAG__/$2/; s/__RC__/${3:-3}/" "$1"; chmod +x "$1"
+}
+
 # mutant を作る（sed 式で本体を書き換えた copy）。lib も同梱して source を解決させる（_SCRIPT_DIR 相対）。
 make_mutant() {  # $1=sed 式 → mutant script path を echo
     local _d="$TEST_TMPDIR/mut-$2"
@@ -495,6 +642,291 @@ run_hook_consult() {  # $1=cwd $2=window-name
     out="$(hook_stdout_of "$mut")"
     [ -n "$out" ]                                     # mutant が死んでいない（構文破壊で空になる偽 RED を排除）
     [[ "$out" != *"行を省略・全件: "* ]]
+}
+
+# ══ 実行予算（bd sc-dmmz・per-child bound + 総予算 deadline）の teeth: B1-B7 ═══════════════════════
+# ★既存 24 test は即時 stub ゆえ予算経路を一切踏まない（24/24 green は新機能の証拠にならない）。よって
+#   「遅い子」「孫が stdout を保持する子」「孫が副作用を残す子」の 3 fixture を実走させ、上界・打ち切り表示・
+#   実装形の拘束（file sink / --foreground 禁止 / deadline 方式）を各 1 mutation で RED 化する。
+
+@test "(B1) 予算: 遅い子 1 本を per-child bound で打ち切り、専用 loud 行が出て他 5 節は完全（fail-open 文言 0 hit）" {
+    make_all_stubs make_budget_fast_stub
+    make_budget_slow_stub "$PLUGIN/scripts/orch-degraded-watch.sh" S2 30
+    local t0 out el
+    t0=$SECONDS; out="$(hook_stdout_budget "$SCRIPT" 2 60)"; el=$((SECONDS - t0))
+    [ "$el" -le 8 ]                                   # 子の hang(30s)へ引きずられない＝per-child bound が効いた
+    [[ "$out" == *"打ち切り"* ]]                       # 打ち切りは loud（専用行）
+    [[ "$out" == *"orch-degraded-watch.sh"* ]]         # 全件 pointer が実行時変数から組まれている
+    [[ "$out" != *"fail-open"* ]]                      # 既存の共通文言を再利用していない（「壊れた」と区別可能）
+    [[ "$out" == *"S2REC001"* ]]                       # 打ち切っても部分出力は保持する
+    # 打ち切られた節の外は完全（見出し + 本文）＝部分縮退しない
+    [[ "$out" == *"(1) gate-pending"* ]]
+    [[ "$out" == *"(2) degraded-watch"* ]]
+    [[ "$out" == *"(3) needs-orch handoff"* ]]
+    [[ "$out" == *"(4) 配送観測"* ]]
+    [[ "$out" == *"(5) re-ratify sweep"* ]]
+    local t
+    for t in S1 S3 S4 S5 S6; do
+        [[ "$out" == *"${t}REC001"* ]]
+        [[ "$out" == *"${t}REC003"* ]]
+    done
+}
+
+@test "(B2) 予算: 6 子とも hang でも総予算 deadline 内に完了し全節が生存 — deadline を外す mutation で RED" {
+    make_all_stubs make_budget_slow_stub 30
+    local t0 out el
+    t0=$SECONDS; out="$(hook_stdout_budget "$SCRIPT" 2 2)"; el=$((SECONDS - t0))
+    [ "$el" -le 8 ]                                   # 総予算 2 秒 + 組立の余裕（per-child のみなら 6×2=12s 級）
+    [[ "$out" == *"(1) gate-pending"* ]]
+    [[ "$out" == *"(2) degraded-watch"* ]]
+    [[ "$out" == *"(3) needs-orch handoff"* ]]
+    [[ "$out" == *"(4) 配送観測"* ]]
+    [[ "$out" == *"(5) re-ratify sweep"* ]]
+    [ "$(grep -c '打ち切り' <<<"$out")" -ge 2 ]        # per-child kill と 総予算枯渇 の両 mode が出る
+    [[ "$out" == *"総予算"* ]]                         # 予算が尽きた残 block は **実行せず** 打ち切っている
+    # mutation: cap を deadline 残時間から算出するのをやめる（per-child 上限のみ）→ 6 子直列で総予算を大幅超過。
+    local mut out2 t1 el2
+    mut="$(make_mutant 's|.*# DEADLINE-DERIVED.*|        _rem="$WIP_CHILD_TIMEOUT"|' D)"
+    t1=$SECONDS; out2="$(hook_stdout_budget "$mut" 2 2)"; el2=$((SECONDS - t1))
+    [ -n "$out2" ]                                    # mutant が死んでいない（構文破壊の偽 RED を排除）
+    [ "$el2" -ge 9 ]                                  # 総予算方式が load-bearing（per-child だけでは 6T になる）
+}
+
+@test "(B3) 予算: timeout 呼出を外す mutation で打ち切りが消え上界が破れる（degrade 自体は fail-open で出力継続）" {
+    make_all_stubs make_budget_fast_stub
+    make_budget_slow_stub "$PLUGIN/scripts/orch-dispatch.sh" S1 8
+    local t0 out el
+    t0=$SECONDS; out="$(hook_stdout_budget "$SCRIPT" 2 60)"; el=$((SECONDS - t0))
+    [ "$el" -le 6 ]
+    [[ "$out" == *"打ち切り"* ]]
+    local mut out2 t1 el2
+    mut="$(make_mutant 's|.*# TIMEOUT-PROBE.*|    _use_to=0|' T)"
+    t1=$SECONDS; out2="$(hook_stdout_budget "$mut" 2 60)"; el2=$((SECONDS - t1))
+    [[ "$out2" != *"打ち切り"* ]]                      # 上界が無い＝打ち切りが起きない
+    [ "$el2" -ge 7 ]                                  # 子の hang(8s)へ丸ごと引きずられる
+    [[ "$out2" == *"S2REC001"* ]]                     # timeout 不在 degrade でも他節は出る（fail-open）
+    # ★上界が実際に消える唯一の経路（timeout 不在 × sink 成功）が **silent にならない** ことを pin する。
+    #   これが無いと「打ち切りが消えた」だけを見て degrade 行の不在を PASS 扱いする vacuity になり、運用者には
+    #   『総予算到達により打ち切り』しか見えず per-child bound 無効化の因果が読めない（self-review major-1）。
+    [[ "$out2" == *"劣化"* ]]                          # degrade 自体が loud（noto mode の 1 行が出る）
+    [[ "$out2" == *"無効"* ]]                          # 「上限は無効」＝上界喪失を明示している
+    [[ "$out2" != *"一時 file 不能"* ]]                # sink は成功しているので bare の原因文言を流用しない
+}
+
+@test "(B4) 予算: --foreground を付ける mutation で孫が完走する（プロセスグループごとの終端が load-bearing）" {
+    local mk="$TEST_TMPDIR/gc-marker"
+    make_all_stubs make_budget_fast_stub
+    make_budget_marker_stub "$PLUGIN/scripts/orch-dispatch.sh" S1 "$mk" 3
+    rm -f "$mk"
+    hook_stdout_budget "$SCRIPT" 1 60 > /dev/null
+    sleep 5
+    [ ! -e "$mk" ]                                    # 健全形: 孫も終端され marker は作られない
+    local mut
+    mut="$(make_mutant 's|timeout -k|timeout --foreground -k|' F)"
+    rm -f "$mk"
+    hook_stdout_budget "$mut" 1 60 > /dev/null
+    sleep 5
+    [ -e "$mk" ]                                      # mutant: 孫が生き残り完走（■3(2) の禁止が load-bearing）
+    rm -f "$mk"
+}
+
+@test "(B5) 予算: 孫が stdout を保持しても本体は待たない（file sink）— sink を外す mutation で子が実行されなくなる" {
+    make_all_stubs make_budget_fast_stub
+    make_budget_gc_stub "$PLUGIN/scripts/orch-dispatch.sh" S1 8
+    local t0 out el
+    t0=$SECONDS; out="$(hook_stdout_budget "$SCRIPT" 30 120)"; el=$((SECONDS - t0))
+    [ "$el" -le 5 ]                                   # 孫(8s)へ引きずられない
+    [[ "$out" == *"S1REC001"* ]]
+    [[ "$out" != *"打ち切り"* ]]                       # 子は即 exit＝timeout は未発火（sink だけが効いている）
+    [[ "$out" != *"劣化"* ]]                           # 正規経路（mktemp 成功）＝degrade を false-loud に出さない
+    # mutation: sink 取得を丸ごと潰す → 子は「上界を保証できない」ため **実行されない**（禁止形へは落ちない）。
+    #   ★旧実装はここで `_raw="$(timeout N 子)"` へ落ち、孫が stdout を保持する型で per-child bound と総予算
+    #     deadline が同時に失効していた（＝上界喪失が silent）。その経路が消えたことを el2 で実測する。
+    local mut out2 t1 el2
+    mut="$(make_mutant 's|.*# TMPFILE-SINK.*|    _f=""|' S)"
+    t1=$SECONDS; out2="$(hook_stdout_budget "$mut" 30 120)"; el2=$((SECONDS - t1))
+    [ -n "$out2" ]                                    # mutant が死んでいない（sink 不能でも節は出る＝fail-open）
+    [ "$el2" -le 5 ]                                  # 禁止形へ落ちない（孫の寿命ぶん解放されない形を採らない）
+    [[ "$out2" == *"上界を保証できないため未実行"* ]]   # 未実行を loud に告げる
+    [[ "$out2" != *"S1REC001"* ]]                     # sink 無しでは子を走らせない＝sink が load-bearing
+}
+
+@test "(B6) 予算: 打ち切り行は過負荷 + hard-cap 下でも残る — 専用文言 / rank-A marker を外す mutation で RED" {
+    make_all_stubs make_allprio_stub
+    make_budget_allprio_slow_stub "$PLUGIN/scripts/orch-degraded-watch.sh" S2 30
+    local out
+    out="$(hook_stdout_budget "$SCRIPT" 1 60)"
+    [[ "$out" == *"打ち切り"* ]]                       # trim + hard-cap を通っても打ち切り行が残る
+    [ "$(u16_of "$out")" -le 9800 ]                   # 予算保証は維持
+    # mutation A: 専用文言を既存の共通文言へ戻す → 「打ち切った」と「壊れた」が区別できなくなる。
+    local mut out2
+    mut="$(make_mutant 's|秒で打ち切り＝表示は部分・全件|秒・skip＝fail-open・全件|' W)"
+    out2="$(hook_stdout_budget "$mut" 1 60)"
+    [ -n "$out2" ]
+    [[ "$out2" != *"打ち切り"* ]]
+    # mutation B: rank-A marker（⚠ 警告）を外す → 節予算の先取りから漏れ、過負荷下で打ち切り行が落ちる。
+    mut="$(make_mutant 's|  ⚠ 警告: %s を %s 秒で打ち切り|  %s を %s 秒で打ち切り|' R)"
+    out2="$(hook_stdout_budget "$mut" 1 60)"
+    [ -n "$out2" ]
+    [[ "$out2" != *"打ち切り"* ]]
+}
+
+@test "(B7) wire: workinprogress timeout が [120,600] の整数・他 entry 不変・総予算 × 係数 以上（値の SSOT は hook 定数行）" {
+    # ★数値の二重持ちを作らない: 総予算の既定値と係数は hook script の定数行 1 箇所が SSOT で、本 test はそこを
+    #   読んで **算術関係**（wire 秒値 >= 総予算 × 係数）を照合する。literal 一致 assert は置かない。
+    cat > "$TEST_TMPDIR/wirechk.py" <<'PY'
+import json, re, sys
+hooks_json, hook_path = sys.argv[1], sys.argv[2]
+d = json.load(open(hooks_json))                                  # valid JSON でなければ die
+ss = [h for g in d.get("hooks", {}).get("SessionStart", []) for h in g.get("hooks", [])]
+pre = [h for g in d.get("hooks", {}).get("PreToolUse", []) for h in g.get("hooks", [])]
+wip = [h for h in ss if "session-start-workinprogress.sh" in h.get("command", "")]
+if len(wip) != 1:
+    print("FAIL: SessionStart の workinprogress wire が 1 本でない:", len(wip)); sys.exit(1)
+t = wip[0].get("timeout")
+if not isinstance(t, int) or isinstance(t, bool):
+    print("FAIL: timeout が整数でない:", repr(t)); sys.exit(1)
+if not (120 <= t <= 600):
+    print("FAIL: timeout(秒) が [120,600] の外:", t); sys.exit(1)
+others = [h.get("timeout") for h in ss + pre if h is not wip[0]]
+if len(others) != 5 or any(x != 10000 for x in others):
+    print("FAIL: workinprogress 以外の 5 entry の timeout が不変でない:", others); sys.exit(1)
+src = open(hook_path, encoding="utf-8").read()
+mb = re.search(r'^WIP_TOTAL_BUDGET="\$\{WIP_TOTAL_BUDGET:-(\d+)\}"', src, re.M)
+mf = re.search(r'^WIP_WIRE_FACTOR=(\d+)', src, re.M)
+if not mb or not mf:
+    print("FAIL: hook script から 総予算既定 / 係数 を読めない（値の SSOT 行が消えた）"); sys.exit(1)
+budget, factor = int(mb.group(1)), int(mf.group(1))
+if t < budget * factor:
+    print("FAIL: wire 秒値 %d < 総予算 %d × 係数 %d" % (t, budget, factor)); sys.exit(1)
+print("OK: timeout=%ds ∈[120,600]・他 5 entry 不変・%d >= 総予算 %d × 係数 %d" % (t, t, budget, factor))
+PY
+    run python3 "$TEST_TMPDIR/wirechk.py" "$HOOKS_JSON" "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK:"* ]]
+    # mutation: wire 秒値を総予算未満へ落とす → RED（算術 assert が vacuous でない）。
+    python3 - "$HOOKS_JSON" "$TEST_TMPDIR/mut-hooks.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for g in d["hooks"]["SessionStart"]:
+    for h in g["hooks"]:
+        if "session-start-workinprogress.sh" in h.get("command", ""):
+            h["timeout"] = 100
+json.dump(d, open(sys.argv[2], "w"))
+PY
+    run python3 "$TEST_TMPDIR/wirechk.py" "$TEST_TMPDIR/mut-hooks.json" "$SCRIPT"
+    [ "$status" -ne 0 ]
+}
+
+@test "(B8) 予算: mktemp 不能でも決定論 path の sink で上界を保ち degrade を loud に出す — fallback を外す mutation で RED" {
+    # ★degrade 経路が「上界ごと捨てる」形だと、B1-B7 は全 green のまま per-child bound + 総予算 deadline が
+    #   同時に無効化される（deadline は実行前の cap 判定しか効かず、実行中の hang を切れない）。しかも従来形は
+    #   degrade したこと自体が出力に現れない＝silent。mktemp 不能は TMPDIR が read-only / 容量枯渇 / sandbox
+    #   制限のとき現実に踏む経路なので、fake mktemp fixture で実挙動として踏む。sink を諦めずに決定論 path で
+    #   再取得することで、この degrade クラスでも **正規経路（timeout + file sink）のまま** 上界を保つ。
+    make_all_stubs make_budget_fast_stub
+    make_budget_slow_stub "$PLUGIN/scripts/orch-degraded-watch.sh" S2 8
+    make_fake_mktemp_fail
+    local t0 out el
+    t0=$SECONDS; out="$(hook_stdout_budget_nosink "$SCRIPT" 2 60)"; el=$((SECONDS - t0))
+    [ "$el" -le 6 ]                                   # sink 不能でも per-child bound は生きている（8s hang へ引きずられない）
+    [[ "$out" == *"打ち切り"* ]]                       # 上界が効いた証拠（degrade しても打ち切りは起きる）
+    [[ "$out" == *"劣化"* ]]                           # degrade 自体が loud（silent に上界が落ちない）
+    [[ "$out" == *"S2REC001"* ]]                       # 打ち切っても部分出力は保持
+    [[ "$out" == *"S1REC001"* ]]                       # 他節は完全（fail-open）
+    [[ "$out" == *"(2) degraded-watch"* ]]
+    # mutation A: 決定論 path の fallback を潰す（mktemp 失敗だけで sink を諦める形）→ 上界を保証できず子は
+    #   未実行になり、部分出力も打ち切り行も消える＝fallback が load-bearing（「動いているのに出力が出る」を
+    #   保つのは fallback 側）。
+    local mut out2 t1 el2
+    mut="$(make_mutant 's|.*# SINK-FALLBACK.*|    while [ 0 -eq 1 ]; do|' K)"
+    t1=$SECONDS; out2="$(hook_stdout_budget_nosink "$mut" 2 60)"; el2=$((SECONDS - t1))
+    [ -n "$out2" ]                                    # mutant が死んでいない（構文破壊の偽 RED を排除）
+    [ "$el2" -le 6 ]                                  # 禁止形へは落ちない（上界は破らない側へ倒れる）
+    [[ "$out2" == *"上界を保証できないため未実行"* ]]
+    [[ "$out2" != *"S2REC001"* ]]
+    [[ "$out2" != *"打ち切り"* ]]
+    # mutation B: 正規経路から timeout を外す → sink は在るが上界が消え、子の hang(8s)へ丸ごと引きずられる。
+    local mut2 out3 t2 el3
+    mut2="$(make_mutant 's|timeout -k "$WIP_KILL_GRACE" "$_cap" "$_script" "$@" >"$_f" 2>/dev/null|"$_script" "$@" >"$_f" 2>/dev/null|' K2)"
+    t2=$SECONDS; out3="$(hook_stdout_budget_nosink "$mut2" 2 60)"; el3=$((SECONDS - t2))
+    [ -n "$out3" ]
+    [ "$el3" -ge 7 ]                                  # per-child bound が消えた（timeout が load-bearing）
+    [[ "$out3" != *"打ち切り"* ]]
+}
+
+@test "(B9) 予算: sink 全滅でも禁止形へ落ちない — 孫が stdout を保持する子でも総予算内に完了（禁止形へ戻す mutation で RED）" {
+    # ★本 case が要る理由（B8 では踏めない残余）: sink が作れないときに `_raw="$(timeout N 子)"` へ落ちると、
+    #   「子は cap より前に exit するが孫が stdout を保持する」型で timeout はシグナルを一切送らず、bash は孫が
+    #   持つ pipe の EOF を待ち続ける＝rc=0（_WIP_CUT=0・打ち切り行なし）で per-child bound と総予算 deadline が
+    #   **同時に** 失効する。B8 の fixture（子自身が hang）ではこの型を踏めないため、gc stub × sink 全滅の組を
+    #   独立 case として置く（fence A2 の第 3 種 fixture を予算 degrade 経路にも通す）。
+    make_all_stubs make_budget_fast_stub
+    make_budget_gc_stub "$PLUGIN/scripts/orch-dispatch.sh" S1 8
+    make_fake_mktemp_fail
+    local t0 out el
+    t0=$SECONDS; out="$(hook_stdout_budget_nosink_hard "$SCRIPT" 2 6)"; el=$((SECONDS - t0))
+    [ "$el" -le 5 ]                                   # 総予算 6 秒 + ε 内（孫 8s へ延伸しない）
+    [[ "$out" == *"上界を保証できないため未実行"* ]]   # 上界を保証できない子は走らせず loud に告げる
+    [[ "$out" != *"S1REC001"* ]]                      # 禁止形で走らせていない
+    [[ "$out" == *"(1) gate-pending"* ]]              # 節は全て生存（fail-open は保つ）
+    [[ "$out" == *"(2) degraded-watch"* ]]
+    [[ "$out" == *"(3) needs-orch handoff"* ]]
+    [[ "$out" == *"(4) 配送観測"* ]]
+    [[ "$out" == *"(5) re-ratify sweep"* ]]
+    # mutation: 未実行の判断を禁止形（command substitution + timeout）へ戻す → 孫が stdout を保持する型で
+    #   総予算が破れ、打ち切り行も出ないまま hook が孫の寿命ぶんブロックする。
+    local mut out2 t1 el2
+    mut="$(make_mutant 's%.*# NOSINK-REFUSE.*%            _WIP_RAW="$(timeout -k "$WIP_KILL_GRACE" "$_cap" "$_script" "$@" 2>/dev/null)" || _WIP_RC=$?%' N)"
+    t1=$SECONDS; out2="$(hook_stdout_budget_nosink_hard "$mut" 2 6)"; el2=$((SECONDS - t1))
+    [ -n "$out2" ]                                    # mutant が死んでいない（構文破壊の偽 RED を排除）
+    [ "$el2" -ge 7 ]                                  # 禁止形は孫の寿命ぶん解放されない＝総予算 6 秒を破る
+}
+
+@test "(B10) 予算: timeout 不在 × sink 全滅（bare）でも出力は続き degrade が loud — bare を潰す mutation で RED" {
+    # ★上界が本当に消える唯一の経路（fence ■3(3) が degrade を許す条件）を behavior として pin する。ここが
+    #   無いと `_WIP_DEGRADE=bare` を丸ごと潰しても全 test green のまま「静かに上界が落ちる」形へ退行できる
+    #   （self-review minor: 実測で mutation が生存していた）。bare は noto（sink は在る）と原因が違うので、
+    #   原因文言まで含めて pin する＝運用者に誤った原因を告げない。
+    make_all_stubs make_budget_fast_stub
+    make_fake_mktemp_fail
+    make_no_timeout_path
+    local out
+    out="$(hook_stdout_budget_bare "$SCRIPT" 2 60)"
+    [ -n "$out" ]                                     # 上界は無いが session は壊さない（fail-open）
+    [[ "$out" == *"S1REC001"* ]]                      # 子は実行され出力も出る
+    [[ "$out" == *"(5) re-ratify sweep"* ]]           # 全節が生存
+    [[ "$out" == *"劣化"* ]]                           # degrade が loud
+    [[ "$out" == *"一時 file 不能"* ]]                 # bare の原因文言（noto の「timeout 不在につき」と区別）
+    [[ "$out" == *"無効"* ]]                           # 上限が無効化された事実を明示
+    [[ "$out" != *"打ち切り"* ]]                       # 上界が無いので打ち切りは起きない（誤表示しない）
+    # mutation: bare を立てない（= 上界喪失が silent になる）→ degrade 行が消える。
+    local mut out2
+    mut="$(make_mutant 's|^            _WIP_DEGRADE=bare|            :|' Q)"
+    out2="$(hook_stdout_budget_bare "$mut" 2 60)"
+    [ -n "$out2" ]                                    # mutant が死んでいない（構文破壊の偽 RED を排除）
+    [[ "$out2" == *"S1REC001"* ]]                     # 出力は同じに出る＝差は degrade 行の有無だけ
+    [[ "$out2" != *"劣化"* ]]
+}
+
+@test "(B11) 予算: 壊れた子（rc≠0・非打ち切り）は既存 fail-open 理由行で報告される — 当該分岐を潰す mutation で RED" {
+    # ★「予算で打ち切った」と「子が壊れた」を区別する契約（fence ■6）は 2 方向で歯が要る。打ち切り側は
+    #   B1/B6 が見ているが、非0終了側は分岐を丸ごと潰しても全 test green だった（self-review minor）。
+    make_all_stubs make_budget_fast_stub
+    make_budget_rc_stub "$PLUGIN/scripts/orch-handoff-scan.sh" S3 3
+    local out
+    out="$(hook_stdout_budget "$SCRIPT" 2 60)"
+    [[ "$out" == *"S3REC001"* ]]                      # 部分出力は保持する
+    [[ "$out" == *"が非0終了・skip＝fail-open"* ]]     # 壊れた子は既存の共通文言で報告
+    [[ "$out" != *"打ち切り"* ]]                       # 予算で切ったわけではない（誤表示しない）
+    [[ "$out" != *"劣化"* ]]                           # degrade でもない
+    [[ "$out" == *"S1REC001"* ]]                      # 他節は継続（部分縮退しない）
+    local mut out2
+    mut="$(make_mutant 's|elif \[ "$_rc" -ne 0 \]; then|elif [ "$_rc" -ne 0 ] \&\& [ 0 -eq 1 ]; then|' V)"
+    out2="$(hook_stdout_budget "$mut" 2 60)"
+    [ -n "$out2" ]                                    # mutant が死んでいない
+    [[ "$out2" == *"S3REC001"* ]]                     # 出力は同じ＝差は理由行の有無だけ
+    [[ "$out2" != *"が非0終了・skip＝fail-open"* ]]
 }
 
 @test "(wire) hooks.json が workinprogress を spec-inject/guard-health と同形 fail-safe で SessionStart へ wire" {
