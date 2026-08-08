@@ -113,3 +113,25 @@ JS
   [ "$status" -eq 0 ]
   [ "$output" = '{"escalate":false,"agentCalls":3,"lensCount":2}' ]
 }
+
+@test "sc-60xu: Synthesize prompt に fence 自己整合 gate（両立可能性検査・期待値 data 化）が実到達する（behavioral pin）" {
+  # file grep でなく stub agent が受け取る実 prompt で pin する（comment 行への cross-satisfy を構造回避・
+  # hit=1 の exact 一致で「synthesize の 1 本だけに載り lens prompt へ漏れない」ことも同時に固定する）。
+  cat > "$BATS_TEST_TMPDIR/sc60xu-probe.js" <<'JS'
+const { readFileSync } = require("node:fs");
+const src = readFileSync(process.argv[2], "utf8").replace(/^export /m, "");
+const AsyncFunction = (async () => {}).constructor;
+const fn = new AsyncFunction("args","agent","parallel","pipeline","phase","log","budget","workflow", src);
+const prompts = [];
+const agent = async (p) => { prompts.push(String(p)); return "## [minor] probe\nverdict: OK"; };
+const parallel = async (thunks) => Promise.all(thunks.map((t) => t().catch(() => null)));
+const noop = () => {};
+fn(JSON.parse(process.argv[3]), agent, parallel, null, noop, noop, null, null).then(() => {
+  const hit = prompts.filter((p) => p.includes("fence 自己整合 gate") && p.includes("両立可能性") && p.includes("<対象>:<期待値>")).length;
+  console.log(JSON.stringify({ hit, calls: prompts.length }));
+});
+JS
+  run node "$BATS_TEST_TMPDIR/sc60xu-probe.js" "$WF" '{"anchor":"/tmp/x","targetBead":"sc-probe","lenses":[{"key":"a","q":"q1"},{"key":"b","q":"q2"}]}'
+  [ "$status" -eq 0 ]
+  [ "$output" = '{"hit":1,"calls":3}' ]
+}
