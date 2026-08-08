@@ -159,3 +159,71 @@ setup() {
     run grep -qF -- '両方不在 = 起動捏造' "$mut"
     [ "$status" -ne 0 ]
 }
+
+# ---------- sc-5yfi（courier orch-rejt: 受け bead 規約 = delivered+acked 2 段の受信側） ----------
+
+@test "sc-5yfi: §8 courier 受け bead 規約 bullet が §8 区間内に実在する（4 点 + open-bead 返信規律）" {
+    # §8 区間抽出（一次出典 blockquote の同語 cross-satisfy を避けるため bullet 固有の long literal で pin）
+    # ERRATA-1（gate r1 MED-1）: 契約①②の §8 本文 literal を追加＝「4 点」claim と assert を一致させる
+    local sec
+    sec="$(sed -n '/^## 8\./,/^## 9\./p' "$PROTOCOL")"
+    grep -qF -- 'courier 受け bead 規約（delivered+acked 2 段の受信側・grill E 裁定・courier orch-rejt）' <<< "$sec"
+    # 契約①: 受け bead + 便 id 明記
+    grep -qF -- '受け bead を立て、便 id（`orch-xxxx` 等）を description / notes に明記' <<< "$sec"
+    # 契約②: 初回整合返信 3 点
+    grep -qF -- '初回返信で自 backlog との整合を返す' <<< "$sec"
+    grep -qF -- '① 衝突する既存 task（serialize 集合・dup・依存）② 組み込み位置 ③ 見積り' <<< "$sec"
+    grep -qF -- '受け bead notes へ front-load' <<< "$sec"
+    # 契約③: 2 段機械保証 / 契約④: 射程明確化 / W7: open-bead 返信規律
+    grep -qF -- 'delivered（mailbox 配送・上記配送点）+ acked（受け bead の実在）の 2 段' <<< "$sec"
+    grep -qF -- '受信側の自台帳 ack（受け bead）は禁止対象外' <<< "$sec"
+    grep -qF -- 'open-scan から**構造的に不可視' <<< "$sec"
+    grep -qF -- 'open の epic / 集約 carrier bead へ再掲してから' <<< "$sec"
+}
+
+@test "sc-5yfi reach: admin core が受信会計 anchor 行と courier→§8 trigger を持つ（audience×unit 到達性・orch-wnt4 P0-1(B)）" {
+    # reach assertion: 本 unit（§8 受け bead 規約）の audience = admin。到達経路 = boot core の
+    # anchor 1 行（台帳境界 bullet 内）+ trigger 表の courier→§8 行 → 必要時 Read で §8 本文へ。
+    # SessionStart 注入 cap（約 10k）下では §8 本文は届かない＝この 2 点が機械照合できないと codify は空証明。
+    local core
+    core="$(sed -n '/<!-- scribe-core-admin:begin -->/,/<!-- scribe-core-admin:end -->/p' "$PROTOCOL")"
+    grep -qF -- '受け bead + 便 id 明記 + 初回整合返信' <<< "$core"
+    grep -qF -- 'orch への返信は open bead に置く' <<< "$core"
+    grep -qF -- 'relay / courier 便を受けたら → §8' <<< "$core"
+}
+
+@test "mutation: 受け bead 規約 bullet を削ると sc-5yfi pin が RED へ flip する（削除実効を確認してから読む）" {
+    local mut="$BATS_TEST_TMPDIR/sc5yfi-protocol.md"
+    grep -qF -- 'courier 受け bead 規約（delivered+acked 2 段の受信側・grill E 裁定・courier orch-rejt）' "$PROTOCOL"
+    grep -vF -- 'courier 受け bead 規約（delivered+acked 2 段の受信側・grill E 裁定・courier orch-rejt）' "$PROTOCOL" > "$mut"
+    # ERRATA-1（gate r1 LOW-4）: 削除量は「ちょうど 1 行」を assert（bullet literal は file 全体 1 行のみの不変量）
+    [ "$(( $(wc -l < "$PROTOCOL") - $(wc -l < "$mut") ))" -eq 1 ]
+    local sec
+    sec="$(sed -n '/^## 8\./,/^## 9\./p' "$mut")"
+    run grep -qF -- 'courier 受け bead 規約（delivered+acked 2 段の受信側・grill E 裁定・courier orch-rejt）' <<< "$sec"
+    [ "$status" -ne 0 ]
+}
+
+@test "mutation: 契約①②の substring を bullet 行内から削ると sc-5yfi pin が RED へ flip する（gate r1 MED-1 の teeth 化）" {
+    # bullet は 1 物理行ゆえ行削除では①②欠落を模倣できない＝行内 substring 削除 mutant で対照する。
+    # 各 mutant は byte 減少（削除実効）を先に確認してから flip を読む。
+    local mut="$BATS_TEST_TMPDIR/sc5yfi-sub-mut.md"
+    local doc_c mut_c sec
+    doc_c="$(wc -c < "$PROTOCOL")"
+
+    # mutant A: 契約①（受け bead + 便 id 明記）の除去
+    sed 's|受け bead を立て、便 id（`orch-xxxx` 等）を description / notes に明記||' "$PROTOCOL" > "$mut"
+    mut_c="$(wc -c < "$mut")"
+    [ "$mut_c" -lt "$doc_c" ]
+    sec="$(sed -n '/^## 8\./,/^## 9\./p' "$mut")"
+    run grep -qF -- '受け bead を立て、便 id（`orch-xxxx` 等）を description / notes に明記' <<< "$sec"
+    [ "$status" -ne 0 ]
+
+    # mutant B: 契約②（初回整合返信 3 点）の除去
+    sed 's|① 衝突する既存 task（serialize 集合・dup・依存）② 組み込み位置 ③ 見積り||' "$PROTOCOL" > "$mut"
+    mut_c="$(wc -c < "$mut")"
+    [ "$mut_c" -lt "$doc_c" ]
+    sec="$(sed -n '/^## 8\./,/^## 9\./p' "$mut")"
+    run grep -qF -- '① 衝突する既存 task（serialize 集合・dup・依存）② 組み込み位置 ③ 見積り' <<< "$sec"
+    [ "$status" -ne 0 ]
+}
