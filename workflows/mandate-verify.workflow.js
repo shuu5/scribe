@@ -179,10 +179,14 @@ if (valid.length === 0) {
   }
 }
 
+// (sc-60xu 受け courier orch-oo0v・実例 = orch-9mj6 gate followUp F2) Synthesize へ条項間矛盾（同一対象への
+// 相反要求・固定回数 pin × 構造的複数回発火の同時要求が実例）の生成時検出と数量制約の data 化語彙を焼込。
+// 由来 id はこのコメントが SSOT（prompt 側へ foreign 台帳 id を固定で入れない convention・agent に参照させない）。
 const synthesis = await roAgent(
   `あなたは mandate 敵対検証の統合 agent。以下は ${targetBead}${riderBead ? `（+rider ${riderBead}）` : ''} の ${valid.length}/${lenses.length} lens 検証結果である。read-only。
 重複を統合し severity 降順で単一 findings 文書（markdown）へ。各 finding に「notes へ追記可能な修正提案文」を必ず残せ。
 末尾に: (1) 総合 verdict（OK / NEEDS-FIX）と理由 (2) dispatch 前に bead notes へ追記すべき scope-fence 文案の完成形（■ 見出し形式・コードフェンス記号は使わない・そのまま --append-notes へ渡せる plain text）。per-leg 分割（実行主体の分離・acceptance の worker 到達不能部の切出し等）が必要なら fence でなく分割案として明示せよ。
+fence 自己整合 gate（生成時検出）: (2) の文案を出す前に、fence 節間の両立可能性を対象単位で検査せよ——同一対象（同じ file/test/tape/挙動）へ相反する要求を課す条項対（例: 構造的に複数回発火する挙動を要求しながら、同じ対象を「ちょうど 1 回」等の固定回数 pin へ登録させる）が無いか。矛盾は (i) 期待値の data 化＝<対象>:<期待値> の entry 列（prose の固定回数指定を避ける）へ書き換えて文案へ反映するか、(ii) 解消不能なら矛盾自体を finding として明記し verdict を NEEDS-FIX へ倒す。数量制約を fence に書くときは原則 data 化形（<対象>:<期待値>）を使う。
 ${missing > 0 ? `lens 欠損が ${missing} 件ある＝検証は不完全。欠損を明記し verdict を fail-closed（NEEDS-FIX 側）に倒せ。` : 'lens 欠損なし。'}
 
 ${valid.map((r, i) => `===== LENS ${i + 1} =====\n${r}`).join('\n\n')}`,
