@@ -1652,6 +1652,34 @@ _mk_valid_cfgdir() {
   [[ "$output" != *"conversation_id"* ]]
 }
 
+# inventory: invariant=grill-consult prompt に第一声の冒頭ブリーフィング「素材」節（skill 本文 SSOT への指し先 + brief/bead からの 3 点素材指定）が焼かれる（user 裁定 2026-08-07・orch-yx42・sc-575t・gate D1 裁定 B=指し先化）
+#          | polarity=positive
+#          | mutant_fingerprint=build_consult_prompt の「第一声の冒頭ブリーフィング」節を削除 → 本 tooth RED
+#          | 備考: assert は dry-run の prompt render 接頭辞「| 」込みで pin（gate D3: narration 区画への誤 hit で恒真化する経路の封鎖）。
+#            3 点素材（タイトル/出自 bead/概要）を全て pin（gate D2: 1 点のみ pin だと縮退変異が素通り）。
+@test "spawn(grill-consult): 第一声の冒頭ブリーフィング素材節（skill SSOT 指し先 + 3 点素材）が prompt 面に焼かれる（sc-575t）" {
+  ctx="$(mktemp "$BATS_TEST_TMPDIR/scribe-ctx-XXXXXX.md")"
+  printf 'x\n' > "$ctx"
+  run "$SPAWN" --dry-run --consult --context "$ctx" un-consult
+  rm -f "$ctx"
+  [ "$status" -eq 0 ]
+  # prompt 面 anchor（render 接頭辞込み・narration [plan] 行では偽装不能）
+  [[ "$output" == *"| ## 第一声の冒頭ブリーフィング"* ]]
+  # 方法論は skill 本文が SSOT（指し先化＝二重定義しない・sc-swc）
+  [[ "$output" == *"冒頭ブリーフィング — 地図より前に、必ず示す"* ]]
+  [[ "$output" == *"ここでは言い換えない"* ]]
+  # 順序 paraphrase 行の pin（round2 MED-A: L753 を旧形「全体地図を先に」へ戻す変異の封鎖）
+  [[ "$output" == *"（冒頭ブリーフィング → 全体地図 → "* ]]
+  # 3 点素材を全て pin（縮退変異の封鎖）
+  [[ "$output" == *"この grill のタイトル"* ]]
+  [[ "$output" == *"どの bead で"* && "$output" == *"困りごととして挙げたか"* ]]
+  [[ "$output" == *"問題点と概要"* ]]
+  # plain consult（--context 無し）には焼かれない
+  run "$SPAWN" --dry-run --consult un-consult
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"第一声の冒頭ブリーフィング"* ]]
+}
+
 # sc-3pq L3=A案(grill 確定 2026-06-24): grill-consult window は consult-<grill-issue> で id 紐付けし、
 # fleet-monitor / degraded watcher が「どの grill-issue の consult が沈黙したか」を完全一致で拾えるようにする。
 # plain consult(--context 無し)は consult-HHMMSS のまま(test 223/236 が保証)＝この id 命名は grill-consult 限定。
