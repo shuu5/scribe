@@ -139,12 +139,13 @@ worker を 1 issue = 1 worktree = 1 window で起動するときの命名・起�
 ### post-spawn submit 検証と exit 7（sc-8g5）
 
 - **なぜ**: cld-spawn の `prompt injected` は prompt が pane へ **到着** した証拠であって **submit（turn 開始）** の証拠ではない（sentinel-presence が input-waiting 救済 Enter 分岐より前に短絡評価される）。初回 Enter が swallow されると prompt が入力欄に残ったまま「spawn 成功」に見え、**silent no-op worker**（起動済みに見えて何もしない）になる。
-- **何をするか**: `scribe-spawn.sh` は tmux worker 経路でのみ、cld-spawn 成功直後に **turn 開始の積極証拠**（worker が起動直後に bd notes へ書く行頭 marker `[SPAWNED--<id>]` の **新規出現**）を待つ。未 submit（入力欄に prompt が残留＝RESIDUAL）を検知したときだけ Enter を冪等再送して回復する（prompt を再注入しない＝二重 submit なし）。bg 経路は positional prompt ゆえ原理免疫・consult は marker を書かないため scope 外（いずれも不発火）。
+- **何をするか**: `scribe-spawn.sh` は tmux worker 経路でのみ、cld-spawn 成功直後に **turn 開始の積極証拠**（worker が起動直後に bd notes へ書く行頭 marker `[SPAWNED--<id>]` の **新規出現**）を待つ。未 submit（入力欄に prompt が残留＝RESIDUAL）を検知したときだけ Enter を冪等再送して回復する（prompt を再注入しない＝二重 submit なし）。bg 経路は positional prompt ゆえ RESIDUAL/Enter 再送の submit 検証は原理免疫（不発火）だが、launch 直前に baseline を取り rc≠0 を marker 増分で裏取りする起動確認（下記の成功扱い modality）は bg にも適用される（sc-gvvr ①）・consult は marker を書かないため scope 外（不発火）。
 - **exit 7 = 「cld-spawn は成功したが turn 開始の積極証拠が budget 内に取れなかった」**（＝spawn 失敗そのものではない）。window / worktree / branch は **残る**（自動 teardown しない）。
+- **launch rc≠0 でも marker 陽性なら成功扱い exit 0（sc-gvvr ①・PR#166）**: cld-spawn / bg launch の rc≠0 が意味するのは read-back（送達確認）の失敗までで、worker が既に turn を始めていることがある。launch 前に取得した baseline 比で `[SPAWNED--<id>]` が新規出現していれば stderr の loud warn 付きで成功扱い exit 0 とし `spawned:`（bg 経路は `spawned(bg):`）/`monitor:` を emit する——倒す根拠は rc の意味論ではなく marker 増分のみ（fail-closed＝baseline 不明・生 marker 件数 > 0 では倒さない・独自 poll を新設しない single-shot）。適用経路は tmux と明示 `--transport bg` のみ（`--transport auto` の bg launch rc≠0 は marker 判定より前に tmux へ post-launch fallback する）。陰性は rc 素通し（非断定文言 + 下記 3. の条件付き cleanup 提示）。
 - **admin の応対（順序を守る）**:
   1. **同じ bd id を再 spawn しない**。window も worktree も生きている可能性が高く、再 spawn すると 1 bead に 2 worker / 2 bdw writer が並走する（graph 汚染・lost-update）。
   2. **一次観測する**: `tmux capture-pane -p -t wt-<id> | tail -n 20` と `cd <anchor> && bd show <id>`（`[SPAWNED--<id>]` の有無）。marker が出ていれば worker は起動済み＝**そのまま継続**してよい（遅い worker の誤検知＝loud-fail の安全側）。
-  3. marker も pane 活動も無ければ、`scripts/scribe-cleanup.sh --repo … --worktree … --branch … --window wt-<id> <id>`（exit 7 の stderr が完全形を印字する）で掃除してから再 spawn する。
+  3. marker も pane 活動も無く worker 不在が確定した場合のみ、`scripts/scribe-cleanup.sh --repo … --worktree … --branch … --window wt-<id> <id>` で掃除してから再 spawn する（sc-r43f + sc-zvom: stderr は一次観測手順を cleanup より先に印字し、cleanup 完全形は不在確定を条件に従属提示する＝無条件提示は live worker 破壊・断定文言は再 spawn 誘発のため）。
 - env（既定で十分・テスト/特殊環境用の seam）: `SCRIBE_SPAWN_CONFIRM_BUDGET`（秒・既定 90）/ `SCRIBE_SPAWN_CONFIRM_POLL` / `SCRIBE_SPAWN_CONFIRM_SETTLE` / `SCRIBE_SPAWN_CONFIRM_MAX_ENTER`（Enter 再送上限・既定 5）。**値の検証は launch より前**（worktree 作成・`cld-spawn` の前）に行う＝タイポで落ちても worker を孤児化しない。
 - **skip は「検証が構造的に不能」なときだけ**（tmux 不在等で window を解決できず capture 対象が無い）＝**loud に skip**（「未検証」と明示して spawn は成立）。window は在るのに `capture-pane` が一時的に失敗/空を返す場合は **検証を放棄せず** marker の出現を budget まで待つ（OK の oracle は bd notes の marker であって pane ではない＝capture 失敗で fail-open しない）。
 

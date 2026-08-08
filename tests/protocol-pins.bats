@@ -227,3 +227,52 @@ setup() {
     run grep -qF -- '① 衝突する既存 task（serialize 集合・dup・依存）② 組み込み位置 ③ 見積り' <<< "$sec"
     [ "$status" -ne 0 ]
 }
+
+# ---------- (5) sc-1ez3: spawn 新 modality 追随（PR#166 sc-gvvr ①・pin literal は base 0 / HEAD 1 実測済み） ----------
+
+@test "sc-1ez3: bg 経路の marker oracle 適用行が §1 区間内に実在し旧断定（いずれも不発火）は不在" {
+    local sec
+    sec="$(sed -n '/^## 1\./,/^## 2\./p' "$PROTOCOL")"
+    grep -qF -- 'rc≠0 を marker 増分で裏取りする起動確認（下記の成功扱い modality）は bg にも適用される' <<< "$sec"
+    # 負 pin: 旧断定「いずれも不発火」（marker 機構全体が bg に無縁と読める）が復活しないこと
+    run grep -qF -- 'いずれも不発火' "$PROTOCOL"
+    [ "$status" -ne 0 ]
+}
+
+@test "sc-1ez3: 成功扱い exit 0 の新 modality bullet が §1 区間内に実在する" {
+    local sec
+    sec="$(sed -n '/^## 1\./,/^## 2\./p' "$PROTOCOL")"
+    grep -qF -- 'launch rc≠0 でも marker 陽性なら成功扱い exit 0' <<< "$sec"
+    grep -qF -- '倒す根拠は rc の意味論ではなく marker 増分のみ' <<< "$sec"
+}
+
+@test "sc-1ez3: cleanup 提示の不在確定従属化が応対手順 3. に実在する" {
+    local sec
+    sec="$(sed -n '/^## 1\./,/^## 2\./p' "$PROTOCOL")"
+    grep -qF -- 'worker 不在が確定した場合のみ' <<< "$sec"
+    grep -qF -- 'cleanup 完全形は不在確定を条件に従属提示する' <<< "$sec"
+}
+
+@test "mutation: 成功扱い modality bullet を削ると sc-1ez3 pin が RED へ flip する" {
+    local mut="$BATS_TEST_TMPDIR/sc1ez3-protocol.md"
+    grep -vF -- 'launch rc≠0 でも marker 陽性なら成功扱い exit 0' "$PROTOCOL" > "$mut"
+    # 削除実効（bullet は 1 物理行）を確認してから flip を読む
+    [ "$(( $(wc -l < "$PROTOCOL") - $(wc -l < "$mut") ))" -eq 1 ]
+    local sec
+    sec="$(sed -n '/^## 1\./,/^## 2\./p' "$mut")"
+    run grep -qF -- 'launch rc≠0 でも marker 陽性なら成功扱い exit 0' <<< "$sec"
+    [ "$status" -ne 0 ]
+}
+
+@test "mutation: 不在確定従属化の substring を行内から削ると sc-1ez3 pin が RED へ flip する" {
+    # 応対手順 3. は 1 物理行に複数 pin を持つ＝行内 substring 削除 mutant で対照する。
+    local mut="$BATS_TEST_TMPDIR/sc1ez3-sub-mut.md"
+    local doc_c mut_c sec
+    doc_c="$(wc -c < "$PROTOCOL")"
+    sed 's|worker 不在が確定した場合のみ||' "$PROTOCOL" > "$mut"
+    mut_c="$(wc -c < "$mut")"
+    [ "$mut_c" -lt "$doc_c" ]
+    sec="$(sed -n '/^## 1\./,/^## 2\./p' "$mut")"
+    run grep -qF -- 'worker 不在が確定した場合のみ' <<< "$sec"
+    [ "$status" -ne 0 ]
+}
