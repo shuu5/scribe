@@ -212,7 +212,13 @@ async function roAgent(prompt, opts) {
 }
 
 // ── 共通 preamble(2 run 収束形の凍結・run 固有部は args から差し込み) ─────────
+// (sc-ezn1) rm 変数 path 規約: harness built-in の dangerous-rm 検知(binary 焼込・allowlist/bypass とも抑止不能)は
+// 「変数で始まり / の直後が〔* | 別変数 | / | 引用符 | 行末〕」形の rm/rmdir で permission picker を出し、無人 WF が
+// 構造 stall する(sc-8bhc gate の mutation 手順＝"$S/$name" への素の rm -rf で 30 分超停止の実測・orch-ypk9)。${VAR:?} 形は
+// brace 内の : ? が検知 regex に不一致=免除、かつ未設定/空で abort する bash 標準 guard=空展開事故も bash 層で封鎖。
+// literal 到達 tooth: tests/workflow-rm-var-guard.bats
 const common = `あなたは worker cell 成果物の独立敵対 gate agent。read-only 規律: ファイル編集・bd write・spawn・ホスト状態変更・git push は一切しない（Bash は読取り・grep・検証 suite/self-test の実行・git read のみ可）。
+Bash 規律(rm・厳守): rm / rm -rf / rmdir の対象に変数 path を使うときは必ず \${VAR:?} 形（未設定/空で abort する bash 標準 guard）で書く（例: rm -rf "\${S:?}/\${name:?}"）。素の \$VAR/\$VAR2・\$VAR/* 形は harness built-in の dangerous-rm 検知が permission picker を出し WF が無人 stall する（allowlist・bypass とも抑止不能）。\${VAR:?} 形は検知免除かつ空展開事故を bash 層で構造封鎖する（mutation 検証・一時複製の掃除も同様）。
 対象: bead ${targetBead} の成果物 = worktree ${worktree} の commit ${commit}${diffNote ? `（${diffNote}）` : ''}。
 まず (cd ${anchor} && bd show ${targetBead} | cat) で契約・DISPATCH SCOPE-FENCE（■ 節群${fenceNote ? `・${fenceNote}` : ''}）・worker 終端宣言を読み、git -C ${worktree} show ${commit} で diff 全文を読め。
 worker の宣言は信用せず実測で裏取りせよ。finding は severity(critical/high/med/low) + 根拠(verified/deduced/inferred) 付きで返せ。問題が無い軸は「問題なし(根拠)」と明記。`
