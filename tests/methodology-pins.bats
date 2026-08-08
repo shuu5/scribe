@@ -13,21 +13,29 @@
 #
 # assertion inventory（fsev P7・invariant / polarity / mutant_fingerprint）:
 #   T1: invariant=対象 doc と参照先実体が実在 / polarity=positive / mutant_fingerprint=path 削除で RED
-#   T2: invariant=3 要素 (a)(b)(c) と throw 中核句が全て実在 / polarity=positive /
-#       mutant_fingerprint=M1（(b) 行削除で T2 RED flip を実測）
-#   T3: invariant=snippet SSOT / 機械 gate の指す先が §2 に明示され path が repo に実在 / polarity=positive /
+#   T2: invariant=3 要素 (a)(b)(c) と throw 中核句が §2 区間内に全て実在（他節への移設は RED）/
+#       polarity=positive / mutant_fingerprint=M1（(b) 行削除で T2 RED flip を実測）+ block の §4 移設 mutant で RED
+#   T3: invariant=snippet SSOT / 機械 gate の指す先が §2 区間内に明示され path が repo に実在 / polarity=positive /
 #       mutant_fingerprint=M1 ループが該当 literal 行削除で RED flip を実測
-#   T4: invariant=呼出元規律（args 解決確認・resume args 再送・優先順位 3 段）が実在 / polarity=positive /
-#       mutant_fingerprint=M1 ループが該当 literal 行削除で RED flip を実測
-#   M1: invariant=全 pin が非空虚（対応行の削除で必ず RED へ flip する） / polarity=negative(mutation) /
-#       mutant_fingerprint=自身が変異対照（各 literal につき削除行数 ≥1 を確認してから flip を読む）
+#   T4: invariant=呼出元規律（args 解決確認・resume args 再送・優先順位 3 段）が §2 区間内に実在 /
+#       polarity=positive / mutant_fingerprint=M1 ループが該当 literal 行削除で RED flip を実測
+#   M1: invariant=全 pin が非空虚＝DOC に実在し・対応行の削除が実効（≥1 行）で・削除後に不一致へ落ちる /
+#       polarity=negative(mutation) / mutant_fingerprint=自身が変異対照（実在 + 削除実効が実効 teeth・
+#       flip assert は grep -v の意味論上必然ゆえ工程の自己記述）
 
 setup() {
     REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
     DOC="$REPO/docs/methodology.md"
 }
 
-# 全 pin literal の単一 SSOT（T2-T4 と M1 変異対照が同じ集合を読む＝pin 追加時はここへ足す）
+# §2 区間の抽出（pin の帰属節を機械で限定する＝block を他節へ移設すると T2-T4 が RED になる。
+# 区間抽出は sed・protocol-pins.bats の core 区間抽出と同経路）
+sec2() {
+    sed -n '/^## 2\. quality patterns/,/^## 3\./p' "$DOC"
+}
+
+# M1 変異対照が読む pin 集合（ERRATA-1: T2-T4 は失敗表示の可読性のため同じ literal を直書き複製する
+# 設計＝集合と直書きの drift はどちら向きでも T2-T4 か M1 の RED として fail-loud する。pin 追加時は両方へ足す）
 PINS=(
     'ad-hoc WF の args 必須プリアンブル'
     '(a) 防御的 args parse'
@@ -36,7 +44,7 @@ PINS=(
     'agent を 1 体も起動せず即 throw'
     'canonical snippet SSOT = `workflows/lib/args-preamble.snippet.js`'
     '機械 gate = `scripts/scribe-wf-args-lint.sh`'
-    'args 解決を確認'
+    '識別子と **args 解決を確認**'
     'resume（`resumeFromRunId`）は args を復元しない'
     '(1) 凍結骨格の再利用 → (2) args を渡さない'
 )
@@ -48,23 +56,29 @@ PINS=(
     [ -f "$REPO/tests/wf-args-lint.bats" ]
 }
 
-@test "T2: 3 要素 (a)(b)(c) と throw 中核句が実在する" {
-    grep -qF -- 'ad-hoc WF の args 必須プリアンブル' "$DOC"
-    grep -qF -- '(a) 防御的 args parse' "$DOC"
-    grep -qF -- '(b) 必須 args の fail-fast' "$DOC"
-    grep -qF -- '(c) receivedArgs（受領 args の要約）を返り値へ' "$DOC"
-    grep -qF -- 'agent を 1 体も起動せず即 throw' "$DOC"
+@test "T2: 3 要素 (a)(b)(c) と throw 中核句が §2 区間内に実在する" {
+    local sec
+    sec="$(sec2)"
+    grep -qF -- 'ad-hoc WF の args 必須プリアンブル' <<< "$sec"
+    grep -qF -- '(a) 防御的 args parse' <<< "$sec"
+    grep -qF -- '(b) 必須 args の fail-fast' <<< "$sec"
+    grep -qF -- '(c) receivedArgs（受領 args の要約）を返り値へ' <<< "$sec"
+    grep -qF -- 'agent を 1 体も起動せず即 throw' <<< "$sec"
 }
 
-@test "T3: snippet SSOT / 機械 gate の指す先が §2 に明示されている" {
-    grep -qF -- 'canonical snippet SSOT = `workflows/lib/args-preamble.snippet.js`' "$DOC"
-    grep -qF -- '機械 gate = `scripts/scribe-wf-args-lint.sh`' "$DOC"
+@test "T3: snippet SSOT / 機械 gate の指す先が §2 区間内に明示されている" {
+    local sec
+    sec="$(sec2)"
+    grep -qF -- 'canonical snippet SSOT = `workflows/lib/args-preamble.snippet.js`' <<< "$sec"
+    grep -qF -- '機械 gate = `scripts/scribe-wf-args-lint.sh`' <<< "$sec"
 }
 
-@test "T4: 呼出元規律（args 解決確認・resume 再送・優先順位 3 段）が実在する" {
-    grep -qF -- 'args 解決を確認' "$DOC"
-    grep -qF -- 'resume（`resumeFromRunId`）は args を復元しない' "$DOC"
-    grep -qF -- '(1) 凍結骨格の再利用 → (2) args を渡さない' "$DOC"
+@test "T4: 呼出元規律（args 解決確認・resume 再送・優先順位 3 段）が §2 区間内に実在する" {
+    local sec
+    sec="$(sec2)"
+    grep -qF -- '識別子と **args 解決を確認**' <<< "$sec"
+    grep -qF -- 'resume（`resumeFromRunId`）は args を復元しない' <<< "$sec"
+    grep -qF -- '(1) 凍結骨格の再利用 → (2) args を渡さない' <<< "$sec"
 }
 
 # ---------- 変異対照（pin の非空虚性を mutation で実測する） ----------
@@ -73,10 +87,14 @@ PINS=(
     local lit mut n_doc n_mut
     n_doc="$(wc -l < "$DOC")"
     for lit in "${PINS[@]}"; do
+        # pin が DOC に実在すること（per-pin 非空虚の一次条件。これが無いと下の削除実効 guard も空振りする）
+        grep -qF -- "$lit" "$DOC"
         mut="$BATS_TEST_TMPDIR/mut.md"
         grep -vF -- "$lit" "$DOC" > "$mut"
         n_mut="$(wc -l < "$mut")"
-        # 変異が当たったこと（≥1 行削除）を先に確認する（空振り mutation を green と誤読しない）
+        # 変異が当たったこと（≥1 行削除）を先に確認する（空振り mutation を green と誤読しない）。
+        # ERRATA-1: 実効 teeth はこの「実在 + 削除実効」の組（grep -v 後の flip assert は grep 意味論上
+        # 必然＝単独では teeth でない。下は工程の自己記述として残す）
         [ "$n_mut" -lt "$n_doc" ]
         # 削除後は pin が RED（grep 不一致）へ flip する
         run grep -qF -- "$lit" "$mut"
