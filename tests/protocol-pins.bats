@@ -301,3 +301,25 @@ setup() {
     run grep -qF -- 'baseline との差分（新規 untracked）のみを loud 列挙' <<< "$sec"
     [ "$status" -ne 0 ]
 }
+
+# ---------- (7) sc-9yoc: 呼出元側 WF stall 検知の §6 成文化（pin literal は base 0 / HEAD 1 実測済み） ----------
+
+@test "sc-9yoc: WF stall 検知 bullet が §6 区間内に実在する（別層宣言 + rc 契約 + 補完面）" {
+    local sec
+    sec="$(sed -n '/^## 6\./,/^## 7\./p' "$PROTOCOL")"
+    grep -qF -- 'scribe-wf-stall-scan.sh' <<< "$sec"
+    grep -qF -- '[WF-STALL-SCAN v1]' <<< "$sec"
+    grep -qF -- 'per-agent jsonl が唯一の live 観測面' <<< "$sec"
+    grep -qF -- 'tool in-flight 中に解除される' <<< "$sec"
+}
+
+@test "mutation: WF stall 検知 bullet を削ると sc-9yoc pin が RED へ flip する" {
+    local mut="$BATS_TEST_TMPDIR/sc9yoc-protocol.md"
+    grep -vF -- 'scribe-wf-stall-scan.sh' "$PROTOCOL" > "$mut"
+    # 削除実効（bullet は 1 物理行）を確認してから flip を読む
+    [ "$(( $(wc -l < "$PROTOCOL") - $(wc -l < "$mut") ))" -eq 1 ]
+    local sec
+    sec="$(sed -n '/^## 6\./,/^## 7\./p' "$mut")"
+    run grep -qF -- 'scribe-wf-stall-scan.sh' <<< "$sec"
+    [ "$status" -ne 0 ]
+}
