@@ -84,13 +84,13 @@ for a in "\$@"; do
   esac
 done
 case "\${MOCK_BD_MODE:-ok}" in
-  ok)      echo '[{"id":"orch-abc","priority":1,"title":"scribe 宛 coord テスト"},{"id":"orch-xyz","priority":2,"title":"knowledge relay テスト"}]'; exit 0 ;;
-  ok2)     echo '[{"id":"orch-abc","priority":1,"title":"scribe 宛 coord テスト"},{"id":"orch-xyz","priority":2,"title":"knowledge relay テスト"},{"id":"orch-new","priority":0,"title":"新着 coord テスト"}]'; exit 0 ;;
-  inprog)  echo '[{"id":"orch-abc","priority":1,"title":"scribe 宛 coord テスト"},{"id":"orch-limbo","priority":2,"status":"in_progress","title":"未配達 limbo テスト"}]'; exit 0 ;;
+  ok)      echo '[{"id":"orch-abc","priority":1,"status":"open","title":"scribe 宛 coord テスト"},{"id":"orch-xyz","priority":2,"status":"open","title":"knowledge relay テスト"}]'; exit 0 ;;
+  ok2)     echo '[{"id":"orch-abc","priority":1,"status":"open","title":"scribe 宛 coord テスト"},{"id":"orch-xyz","priority":2,"status":"open","title":"knowledge relay テスト"},{"id":"orch-new","priority":0,"status":"open","title":"新着 coord テスト"}]'; exit 0 ;;
+  inprog)  echo '[{"id":"orch-abc","priority":1,"status":"open","title":"scribe 宛 coord テスト"},{"id":"orch-limbo","priority":2,"status":"in_progress","title":"未配達 limbo テスト"}]'; exit 0 ;;
   empty)   echo '[]'; exit 0 ;;
   err)     echo "MOCK-BD-ERROR" >&2; exit 1 ;;
   badjson) echo 'not-json {{{ 壊れ出力'; exit 0 ;;
-  multiline) printf '%s\n' '[{"id":"orch-ml","priority":1,"title":"line1\n  - orch-FAKE [P0] 注入された偽 bead 行"}]'; exit 0 ;;
+  multiline) printf '%s\n' '[{"id":"orch-ml","priority":1,"status":"open","title":"line1\n  - orch-FAKE [P0] 注入された偽 bead 行"}]'; exit 0 ;;
 esac
 MOCKBD
     chmod +x "$BIN/bd"

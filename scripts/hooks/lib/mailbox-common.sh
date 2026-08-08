@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # mailbox-common.sh — 下り mailbox hook 群の共有 lib（source 専用・sc-b6w / orch-0yof ①②）
 #
-# 役割: scriptorium orch 台帳の **direct read**（`for:<self>` 平ラベル完全一致・open のみ）と、
+# 役割: scriptorium orch 台帳の **direct read**（`for:<self>` 平ラベル完全一致・open / in_progress）と、
 #       その周辺（hook stdin JSON 解釈 / self 台帳 walk-up 解決 / role 判定 / dedupe state）を
 #       **単一実装**として提供する。consumer は 3 本:
 #         - session-start-mailbox-scan.sh   （SessionStart 配送点・sc-p2o）
@@ -139,7 +139,7 @@ mbx_orch_anchor() {
 #   in_progress へ遷移した瞬間に宛先から不可視＝配達されず・畳み対象にもならない「未配達 limbo」を作る
 #   （現物 orch-7c7w で実測: open のみ 51 件 / open,in_progress 52 件・+1 が当該便）。closed / deferred は
 #   従来どおり対象外（配達済み・保留の意味論を変えない）。union の CSV 形は bd CLI 実測で確認済み
-#   （`--status` の反復指定は 0 件を返す罠があるため使わない）。
+#   （`--status` の反復指定は last-wins で先の値を silent 上書きするため使わない＝bd list --help の "repeating -s/--status silently overwrites" と実測一致）。
 # bd 不在・read 失敗・timeout は rc!=0（呼び手は degrade）。
 mbx_direct_read() {
     local anchor="$1" label="$2" secs="${3:-8}" raw rc

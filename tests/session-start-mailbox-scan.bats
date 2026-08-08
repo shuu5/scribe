@@ -75,8 +75,8 @@ for a in "\$@"; do
   esac
 done
 case "\${MOCK_BD_MODE:-ok}" in
-  ok)      echo '[{"id":"orch-abc","priority":1,"title":"scribe 宛 coord テスト"},{"id":"orch-xyz","priority":2,"title":"knowledge relay テスト"}]'; exit 0 ;;
-  inprog)  echo '[{"id":"orch-abc","priority":1,"title":"scribe 宛 coord テスト"},{"id":"orch-limbo","priority":2,"status":"in_progress","title":"未配達 limbo テスト"}]'; exit 0 ;;
+  ok)      echo '[{"id":"orch-abc","priority":1,"status":"open","title":"scribe 宛 coord テスト"},{"id":"orch-xyz","priority":2,"status":"open","title":"knowledge relay テスト"}]'; exit 0 ;;
+  inprog)  echo '[{"id":"orch-abc","priority":1,"status":"open","title":"scribe 宛 coord テスト"},{"id":"orch-limbo","priority":2,"status":"in_progress","title":"未配達 limbo テスト"}]'; exit 0 ;;
   empty)   echo '[]'; exit 0 ;;
   err)     echo "MOCK-BD-ERROR" >&2; exit 1 ;;
   badjson) echo 'not-json {{{ 壊れ出力'; exit 0 ;;   # rc0 だが JSON parse 不能 → _mbx_emit が 1 を返す想定
@@ -173,7 +173,9 @@ run_hook() { # $1=cwd  他=env 前置(KEY=VAL...)
     [ "$status" -eq 0 ]
     [[ "$output" == *"orch-abc"* ]]
     [[ "$output" == *"下り mailbox"* ]]
-    [[ "$(cat "$BD_CALL_LOG")" == *" list "* ]]        # bd に到達し read した
+    # (sc-7ry4 gate M-2) else 分岐（timeout 不在経路）でも完全 invocation を pin（tooth (i) と同形）。
+    # 緩い `*" list "*` だけだと else 分岐だけ --status open へ巻き戻す変異が素通りする。
+    [[ "$(cat "$BD_CALL_LOG")" == *"list --label for:sc --status open,in_progress --limit 0 --readonly --json"* ]]
 }
 
 @test "(i-nojq) jq 不在・python3 存在 → python3 フォールバックで surface + exit0" {
@@ -185,6 +187,18 @@ run_hook() { # $1=cwd  他=env 前置(KEY=VAL...)
     [[ "$output" == *"orch-abc"* ]]
     [[ "$output" == *"orch-xyz"* ]]
     [[ "$output" == *"scribe 宛 coord テスト"* ]]
+}
+
+# inventory: invariant=jq 不在（python3 フォールバック）経路でも in_progress タグが出る（sc-7ry4 gate M-1）
+#          | polarity=positive
+#          | mutant_fingerprint=mbx_emit の python3 分岐だけ tag = "" へ固定（jq 側は残す）→ 本 tooth RED
+#            （jq 経路の (i-inprog) では検出不能な python3 側単独退行の pin）。
+@test "(i-nojq-inprog) jq 不在 × in_progress 便 → python3 経路でも [in_progress] タグ付き surface（sc-7ry4）" {
+    run bash -c "printf '{\"cwd\":\"%s\"}' '$SELF_CWD' | env MOCK_BD_MODE=inprog PATH='$NOJQ_BIN' SCRIBE_ORCH_ANCHOR='$ORCH_LEDGER' bash '$HOOK'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"orch-limbo [P2][in_progress] 未配達 limbo テスト"* ]]
+    [[ "$output" == *"orch-abc [P1] scribe 宛 coord テスト"* ]]
+    [[ "$output" != *"orch-abc [P1]["* ]]
 }
 
 @test "(ii) 該当 bead 無し(空配列) → 無出力 exit0" {

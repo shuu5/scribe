@@ -2,7 +2,7 @@
 # session-start-mailbox-scan.sh — scriptorium 下り mailbox の direct read scan（sc-p2o / top-spec §5.3）
 #
 # 役割: SessionStart で scriptorium orch 台帳を **direct read** し、自 project 宛
-#       （`for:<self>` 平ラベル・完全一致）の open bead を surface する（pull 型・下り知識中継）。
+#       （`for:<self>` 平ラベル・完全一致）の open / in_progress bead を surface する（pull 型・下り知識中継・sc-7ry4）。
 #       orchestrator 側の workinprogress hook（orch-7py）の**対向形**（発信は orch 自台帳 write /
 #       受信は各 project 側 SessionStart の pull direct read）。正本 = scriptorium
 #       docs/scriptorium-top-spec.md §5.3 の mailbox-routing sentinel 区間（会計②）。
@@ -139,7 +139,7 @@ body="$(printf '%s' "$raw" | mbx_emit)" || exit 0
 _emit_body="$(
 echo "=== [scribe/SessionStart] 📬 下り mailbox（scriptorium → ${self_db}・direct read / hydrate せず） ==="
 echo ""
-echo "scriptorium orchestrator が \`${label}\` で宛先付けした open な coord/knowledge bead です（pull 型・top-spec §5.3）。"
+echo "scriptorium orchestrator が \`${label}\` で宛先付けした未 discharge（open / in_progress）の coord/knowledge bead です（pull 型・top-spec §5.3）。"
 echo "read-only surface（自台帳へ hydrate していません）。内容を triage し、必要なら admin が対応してください（下り知識中継＝情報の受け取り。作業 dispatch・foreign spawn は人間 go・§5.3）。"
 echo ""
 echo "$body"
