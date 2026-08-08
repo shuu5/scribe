@@ -22,6 +22,30 @@
 #   保留は当該 bead 単位＝orch-dispatch.sh の 'gate-pending in labels' per-bead 判定と同型）。needs-grill を
 #   含まない needs-orch bead は「triage 可能（actionable）」として surface する。
 #
+# 重複便 hold（bd orch-ygbz A 群・重複 ack 生成器の閉塞）─────────────────────────────
+#   needs-orch は **foreign 台帳の bead に付くラベル**であり、orchestrator は write-isolation により外せない。
+#   ゆえに ack 便を出しても当該 foreign bead は毎 session actionable として surface し続け、各 session が
+#   新しい ack 便を作る（実測: foreign bead 1 件に対し ack 便 5 本）。これは race ではなく恒常状態＝構造的な重複
+#   生成器。よって「自台帳に当該 foreign bead 宛の open な courier 便が既に在る」ものを **重複便 hold** として
+#   actionable から落とす（既存の needs-grill 由来 triage 保留とは別クラス＝集計の内訳で弁別する）。
+#
+#   hold 述語（orch-ygbz notes fence ■4 の 6 条件・**全て**満たすときに限る。silently-choose 禁止）:
+#     (1) 根拠便の id prefix が orch-（hydrate された foreign copy を根拠にしない）。
+#     (2) 根拠便の status != closed（open / in_progress / deferred / blocked を含む「非 closed」）。
+#     (3) 根拠便の labels に `for:<X>` があり X が対象 foreign id の prefix と **完全一致**（宛先は labels のみを
+#         truth にする＝title の [for:X] は実 label と食い違う実データがある）。
+#     (4) 根拠便の labels に `courier` を持つ（self-dev / 調査 bead を抑制器にしない）。
+#     (5) 対象 foreign id が根拠便の title / description / notes のいずれかに **語境界一致**で出現
+#         （dotted child id が実在するため素の substring 一致は禁止）。
+#     (6) 根拠便の created_at が対象 foreign bead の created_at より後（対象より古い言及を根拠にしない）。
+#
+#   fail 方向（不可逆性の非対称・fence ■4）: false-hold（intake 埋葬）は不可逆・false-actionable（重複 ack）は
+#   可逆ゆえ、判定に迷う枝は必ず **surface 側**へ倒す。自台帳の全文走査（`bd list --all`）が失敗・parse 不能・
+#   python3 不在なら hold にも actionable にも断定せず **判定不能**（語彙 SSOT = lib/orch_observe_vocab.sh）
+#   として従来どおり surface 側に残し、集計に `dup=判定不能` と出す（黙って落とさない・fence ■5）。
+#   hold 行は件数だけでなく `foreign-id ← 根拠便 id 群` を 1 行ずつ列挙する（件数のみは埋葬と等価）。
+#   ★取りこぼし（label 衛生の破れで for: 値が不一致な便など）は actionable のまま残るのが正しい fail 方向。
+#
 # 鮮度警告（acceptance e / orch-jmu notes p3）──────────────────────────────────────
 #   foreign copy は courier `bd repo sync`（hydrate）に構造依存する。sync が古い/未実行だと hydrate された
 #   foreign needs-orch を silent 取りこぼす。よって **standalone 実行時のみ**、orch 台帳の sync 専用マーカー
@@ -39,7 +63,8 @@
 #
 # 共有 lib consume（orch-jmu notes d・自前 walk-up を書かない）─────────────────────
 #   hooks/lib/orch_session.sh（_ledger_dolt_database＝self-scope walk-up・_json_is_valid gate 済み）と
-#   lib/orch_anchor.sh（_resolve_scriptorium＝鮮度 marker の SCRIPTORIUM anchor 動的解決・E2 検証付き）を
+#   lib/orch_anchor.sh（_resolve_scriptorium＝鮮度 marker の SCRIPTORIUM anchor 動的解決・E2 検証付き）と
+#   lib/orch_observe_vocab.sh（ORCH_OBSERVE_UNDECIDABLE＝「判定不能」の語彙 SSOT・orch-ygbz C1）を
 #   BASH_SOURCE 相対で source する（orch-t9z / orch-49g の dedup 方針維持）。
 #
 # モード ────────────────────────────────────────────────────────────────────────
@@ -66,6 +91,7 @@ set -uo pipefail
 SELF_PREFIX="orch"
 SCAN_LABEL="needs-orch"    # 検知する平ラベル（完全一致・orch-am1 §論点6）。
 GRILL_LABEL="needs-grill"  # triage 保留の gate ラベル（併存 per-bead 判定・論点3）。
+COURIER_LABEL="courier"    # 重複便 hold の根拠便に要求するラベル（fence ■4 条件(4)・orch-ygbz）。
 
 # --- 共有 self-scope lib を source（bd orch-t9z・SSOT = scripts/hooks/lib/orch_session.sh） ---
 # _ledger_dolt_database（_json_is_valid gate 済み walk-up）を提供する。★実 script 位置（BASH_SOURCE 相対）で
@@ -89,6 +115,18 @@ if [ -r "$_ORCH_ANCHOR_LIB" ]; then
     . "$_ORCH_ANCHOR_LIB"
 else
     echo "orch-handoff-scan: 共有 anchor lib 不在: $_ORCH_ANCHOR_LIB（anchor 解決不能・fail-closed）" >&2
+    exit 1
+fi
+
+# --- 共有 observe 語彙 lib を source（bd orch-ygbz C1・「判定不能」を 2 script 単一 SSOT で共有） ---
+# ORCH_OBSERVE_UNDECIDABLE を提供する。orch-delivery-observe.sh と同一定数を consume することで、observe 層の
+# 「観測していない」表示語が 2 script 間で drift するのを防ぐ（drift teeth = orch-delivery-observe.bats (vocab-drift)）。
+_ORCH_VOCAB_LIB="$_SCRIPT_DIR/lib/orch_observe_vocab.sh"
+if [ -r "$_ORCH_VOCAB_LIB" ]; then
+    # shellcheck source=lib/orch_observe_vocab.sh
+    . "$_ORCH_VOCAB_LIB"
+else
+    echo "orch-handoff-scan: 共有 observe 語彙 lib 不在: $_ORCH_VOCAB_LIB（状態語の SSOT 不明・fail-closed）" >&2
     exit 1
 fi
 
@@ -121,8 +159,9 @@ done
 # ヘルパ
 # ─────────────────────────────────────────────────────────────────────────────
 
-# scan JSON（$1）→ "<id>\t<title>\t<grill-flag>" 行。jq 主・python3 フォールバック（両者 labels を正しく解釈）。
+# scan JSON（$1）→ "<id>\t<title>\t<grill-flag>\t<created_at>" 行。jq 主・python3 フォールバック（両者 labels を正しく解釈）。
 #   grill-flag: labels 配列に needs-grill を含めば "1"・無ければ "0"（per-bead 保留判定に使う・p5）。
+#   created_at: 重複便 hold の条件(6)〔根拠便が対象より後〕に使う（欠落/不正は空欄＝hold しない側へ倒す・orch-ygbz）。
 #   title/notes 中の TAB/改行は列区切りを壊すため空白へ潰す（防御的）。どの parser も使えない/失敗は非 0。
 _parse_scan() {
     local json="$1" out rc
@@ -131,7 +170,8 @@ _parse_scan() {
             .[]? | [
               .id,
               ((.title // "") | gsub("[\t\n]"; " ")),
-              (if ((.labels // []) | index("'"$GRILL_LABEL"'")) != null then "1" else "0" end)
+              (if ((.labels // []) | index("'"$GRILL_LABEL"'")) != null then "1" else "0" end),
+              (.created_at // "")
             ] | @tsv' 2>/dev/null)"
         rc=$?
         if [ "$rc" -eq 0 ]; then printf '%s' "$out"; return 0; fi
@@ -151,7 +191,7 @@ for it in data:
         labels = it.get("labels")
         g = "1" if isinstance(labels, list) and grill in labels else "0"
         title = (it.get("title", "") or "").replace("\t", " ").replace("\n", " ")
-        print("%s\t%s\t%s" % (it.get("id", ""), title, g))
+        print("%s\t%s\t%s\t%s" % (it.get("id", ""), title, g, it.get("created_at", "") or ""))
 '
         return $?
     fi
@@ -189,6 +229,90 @@ _emit_freshness() {
     echo "    foreign needs-orch を silent 取りこぼしている可能性（上の一覧が full とは限らない）。\`scripts/orch-hydrate.sh\` で sync 後に再確認せよ（read-only＝sync は呼ばない）。"
 }
 
+# 重複便 hold の判定エンジン（orch-ygbz A 群・fence ■4 の 6 条件）。
+#   stdin  = 自台帳全文 JSON（bd list --all）。env TARGETS = "<foreign-id>\t<created_at>" 行。
+#   stdout = "<foreign-id>\t<根拠便 id 群（空白区切り・sort 済）>" 行（hold 対象のみ）。
+#   ★語境界一致（条件5）: dotted child id（orch-22jj.2 等）が実在するため素の substring 一致は禁止
+#     ＝前後が [0-9A-Za-z._-] でないことを lookaround で要求する（親 id が child id の部分文字列になる罠を封鎖）。
+#   ★fail 方向: 判定材料（created_at）が不正な側は hold しない＝surface 側へ倒す（false-hold は不可逆）。
+_DUP_PY='
+import sys, json, os, re
+self_prefix = os.environ.get("SELF_PREFIX", "orch")
+courier_label = os.environ.get("COURIER_LABEL", "courier")
+RFC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")   # RFC3339 Z 固定幅（lexical==chrono）
+
+def valid(ts):
+    return isinstance(ts, str) and bool(RFC.match(ts))
+
+targets = []
+for line in os.environ.get("TARGETS", "").split("\n"):
+    if not line.strip():
+        continue
+    cols = line.split("\t")
+    if len(cols) < 2:
+        continue
+    targets.append((cols[0], cols[1]))
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(3)
+if not isinstance(data, list):
+    sys.exit(3)
+
+holders = []   # (id, {for 値}, created_at, 全文)
+for it in data:
+    if not isinstance(it, dict):
+        continue
+    bid = it.get("id") or ""
+    if not bid.startswith(self_prefix + "-"):          # (1) 自台帳 bead のみ（foreign copy を根拠にしない）
+        continue
+    if (it.get("status") or "") == "closed":           # (2) 非 closed（open/in_progress/deferred/blocked）
+        continue
+    labels = it.get("labels")
+    if not isinstance(labels, list) or courier_label not in labels:   # (4) courier 便のみ
+        continue
+    fors = set(l[4:] for l in labels if isinstance(l, str) and l.startswith("for:") and len(l) > 4)
+    if not fors:                                       # (3) の材料（宛先は labels のみを truth にする）
+        continue
+    created = it.get("created_at") or ""
+    if not valid(created):                             # (6) の材料（不明なら hold しない＝surface 側）
+        continue
+    text = "\n".join([str(it.get(k) or "") for k in ("title", "description", "notes")])
+    holders.append((bid, fors, created, text))
+
+for (tid, tcreated) in targets:
+    if not valid(tcreated):                            # (6) 対象側が不明なら hold しない
+        continue
+    pfx = tid.split("-", 1)[0] if "-" in tid else tid
+    pat = re.compile(r"(?<![0-9A-Za-z._-])" + re.escape(tid) + r"(?![0-9A-Za-z._-])")
+    hits = sorted(b for (b, fors, c, text) in holders
+                  if pfx in fors and c > tcreated and pat.search(text))   # (3)(6)(5)
+    if hits:
+        sys.stdout.write("%s\t%s\n" % (tid, " ".join(hits)))
+'
+
+# 重複便 hold を引く（$1 = needs-orch TSV）。stdout は _DUP_PY と同形。
+#   rc=0 判定成功（0 件 hold なら空 stdout）/ rc=1 判定不能（python3 不在・bd 失敗・parse 不能）。
+#   ★rc=1 は「hold 0 件」ではない: 呼び元は判定不能として全件を surface 側へ残す（fence ■5）。
+_dup_holds() {
+    local tsv="$1" targets json rc out
+    command -v python3 >/dev/null 2>&1 || return 1
+    # 対象は "<id>\t<created_at>"（_parse_scan の 1,4 列目）。空 id 行は落とす。
+    targets="$(awk -F'\t' 'NF>=4 && $1!="" { print $1 "\t" $4 }' <<< "$tsv")"
+    [ -n "$targets" ] || return 1
+    # 自台帳の全文走査（title/description/notes を読むため --all の全件が要る・截断禁止 --limit 0）。
+    json="$("$BD" list --all --json --no-pager --limit 0 2>/dev/null)"; rc=$?
+    [ "$rc" -eq 0 ] || return 1
+    # ★producer は printf の command-substitution 経由（herestring は /tmp が RO の sandbox で落ちうる）。
+    #   python3 は stdin を全読するため SIGPIPE 早期 exit は起きない（_parse_scan と同型）。
+    out="$(printf '%s' "$json" | TARGETS="$targets" SELF_PREFIX="$SELF_PREFIX" COURIER_LABEL="$COURIER_LABEL" \
+           python3 -c "$_DUP_PY")"; rc=$?
+    [ "$rc" -eq 0 ] || return 1
+    printf '%s' "$out"
+    return 0
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # scan 本体（run_scan）: needs-orch bead を surface（read-only・observe のみ）
 # ─────────────────────────────────────────────────────────────────────────────
@@ -208,30 +332,56 @@ run_scan() {
         return 1
     }
 
-    # needs-orch 無 → no-op（正常）。
+    # needs-orch 無 → no-op（正常）。重複便 hold の走査も不要（対象 0 件＝bd 追加呼出しをしない）。
     if [ -z "${tsv//[$' \t\n']/}" ]; then
         echo "  needs-orch: なし（orchestrator が引き取るべき foreign bead はありません）"
         [ "$EMIT_FRESHNESS" -eq 1 ] && _emit_freshness
-        echo "  ── 集計: scanned=0 actionable=0 triage-hold=0"
+        echo "  ── 集計: scanned=0 actionable=0 triage-hold=0（grill=0 dup=0）"
         return 0
     fi
 
-    local scanned=0 actionable=0 hold=0 id title grill
-    while IFS=$'\t' read -r id title grill; do
+    # 重複便 hold（orch-ygbz A 群）: 自台帳に当該 foreign bead 宛の open な courier 便が既に在るかを引く。
+    #   dup_ok=0（判定不能）のときは hold を一切立てず、全件を従来どおり surface 側へ残す（fence ■5・fail-safe）。
+    local dup_tsv dup_ok=1
+    dup_tsv="$(_dup_holds "$tsv")" || dup_ok=0
+    local -A dup_of=()
+    if [ "$dup_ok" -eq 1 ] && [ -n "$dup_tsv" ]; then
+        local dtid dhits
+        while IFS=$'\t' read -r dtid dhits; do
+            [ -n "$dtid" ] || continue
+            dup_of["$dtid"]="$dhits"
+        done <<< "$dup_tsv"
+    fi
+
+    local scanned=0 actionable=0 hold=0 grill_hold=0 dup_hold=0 id title grill created
+    while IFS=$'\t' read -r id title grill created; do
         [ -n "$id" ] || continue
         scanned=$((scanned + 1))
         if [ "$grill" = "1" ]; then
             # needs-grill 併存 → triage 保留（per-bead・論点3）。orchestrator は grill 完了まで triage しない。
-            hold=$((hold + 1))
+            hold=$((hold + 1)); grill_hold=$((grill_hold + 1))
             printf '  [TRIAGE 保留] %-14s %s  （needs-grill 併存＝grill 完了まで orchestrator は triage しない）\n' "$id" "$title"
+        elif [ -n "${dup_of[$id]:-}" ]; then
+            # 自台帳に既存の open な courier 便あり → 重複便 hold（重複 ack 生成器の閉塞・orch-ygbz）。
+            # ★根拠便 id 群を必ず列挙する（件数のみは埋葬と等価・fence ■5）。行頭 【 は boot 表示の rank-B token。
+            hold=$((hold + 1)); dup_hold=$((dup_hold + 1))
+            printf '  【重複便 hold】%-14s ← %s  （自台帳に当該 foreign bead 宛の open な courier 便が既存＝新規 ack を起票しない）\n' "$id" "${dup_of[$id]}"
         else
             actionable=$((actionable + 1))
             printf '  [needs-orch]  %-14s %s\n' "$id" "$title"
         fi
     done <<< "$tsv"
 
+    # 判定不能（自台帳の全文走査が失敗・parse 不能・python3 不在）: hold にも actionable にも断定せず surface 側に残す。
+    local dup_field="$dup_hold"
+    if [ "$dup_ok" -ne 1 ]; then
+        dup_field="$ORCH_OBSERVE_UNDECIDABLE"
+        printf '  【重複便 %s】自台帳の全文走査（%s list --all）が失敗/parse 不能/python3 不在＝既存 ack 便の有無を断定できない。上の一覧は重複便を含みうる（hold せず全件 surface・false-hold は不可逆ゆえ surface 側へ倒す）。\n' \
+               "$ORCH_OBSERVE_UNDECIDABLE" "$BD"
+    fi
+
     [ "$EMIT_FRESHNESS" -eq 1 ] && _emit_freshness
-    echo "  ── 集計: scanned=$scanned actionable=$actionable triage-hold=$hold"
+    echo "  ── 集計: scanned=$scanned actionable=$actionable triage-hold=$hold（grill=$grill_hold dup=$dup_field）"
     return 0
 }
 
@@ -244,22 +394,34 @@ if [ "${1:-}" = "--self-test" ]; then
     _ok()   { echo "ok: $1"; }
     _fail() { echo "FAIL: $1" >&2; st_fail=1; }
 
-    # fake bd: `list -l needs-orch ...` 引数を記録し、固定 JSON を返す（needs-orch 正例2 + 併存 needs-grill 1 +
-    #   needs-orch 無しの負例1）。self-scope gate は SKIP env で無効化（cwd 非依存の hermetic）。
+    # fake bd: 引数を記録し **argv 分岐**で JSON を返す（実 bd の 2 経路を faithful に模写・orch-ygbz）:
+    #   `--all` あり  → 自台帳全文走査（重複便 hold の根拠便 fixture・$ALL_JSON_FILE の中身）
+    #   `--all` なし  → `-l needs-orch` の結果（needs-orch 正例2 + 併存 needs-grill 1）
+    #   ※argv 非分岐だと 2 本目の query を足した瞬間に hold 経路が空虚 PASS する（fence ■16(1)）。
+    # self-scope gate は SKIP env で無効化（cwd 非依存の hermetic）。
     mkdir -p "$st_tmp/bin"
     cat > "$st_tmp/bin/bd" <<'BDEOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$BD_ARGS_LOG"
-# needs-orch 3 件（うち1件 needs-grill 併存）+ needs-orch を持たない bead は返さない（bd の -l フィルタ相当）。
-cat <<'JSON'
+case "$*" in
+  *--all*)
+    cat "${ALL_JSON_FILE:-/dev/null}"
+    ;;
+  *)
+    cat <<'JSON'
 [
-  {"id":"un-aaa","title":"foreign A needs orch","labels":["needs-orch"]},
-  {"id":"sc-bbb","title":"foreign B needs orch and grill","labels":["needs-orch","needs-grill"]},
-  {"id":"pk-ccc","title":"foreign C needs orch","labels":["needs-orch"]}
+  {"id":"un-aaa","title":"foreign A needs orch","labels":["needs-orch"],"created_at":"2026-07-01T00:00:00Z"},
+  {"id":"sc-bbb","title":"foreign B needs orch and grill","labels":["needs-orch","needs-grill"],"created_at":"2026-07-01T00:00:00Z"},
+  {"id":"pk-ccc","title":"foreign C needs orch","labels":["needs-orch"],"created_at":"2026-07-01T00:00:00Z"}
 ]
 JSON
+    ;;
+esac
 BDEOF
     chmod +x "$st_tmp/bin/bd"
+
+    # 自台帳全文走査の既定 fixture = 空（＝重複便 hold 0 件。既存 assert を hold 経路から独立させる）。
+    export ALL_JSON_FILE="$st_tmp/all-empty.json"; printf '[]' > "$ALL_JSON_FILE"
 
     # 台帳 fixture（self-scope gate 用・skip する経路と gate する経路の両方を試す）。
     mkdir -p "$st_tmp/foreign/.beads"; printf '{"dolt_database":"un"}' > "$st_tmp/foreign/.beads/metadata.json"
@@ -335,6 +497,67 @@ BDEOF
         _ok "self-scope 肯定側: orch 台帳 cwd → gate 通過し scan 実行（scanned=3・always-refuse 回帰を捕捉）"
     else
         _fail "self-scope 肯定側: orch cwd → gate 通過 scan を期待したが不一致（rc=$rc_pos）: [$out_pos]"
+    fi
+
+    # (6) 重複便 hold（orch-ygbz A 群・fence ■4 の 6 条件）: un-aaa 宛の open な courier 便が 2 本あると
+    #     un-aaa は actionable から落ち、根拠便 2 本を列挙した hold 行になる。pk-ccc（根拠便なし）は actionable のまま。
+    dup_json="$st_tmp/all-dup.json"
+    cat > "$dup_json" <<'JSON'
+[
+  {"id":"orch-h1","title":"[for:un] ack 便 1","description":"un-aaa の受け","notes":"","labels":["courier","for:un"],"status":"open","created_at":"2026-07-02T00:00:00Z"},
+  {"id":"orch-h2","title":"[for:un] ack 便 2","description":"","notes":"根拠: un-aaa を引き取る","labels":["courier","for:un"],"status":"in_progress","created_at":"2026-07-03T00:00:00Z"},
+  {"id":"orch-x1","title":"self-dev 調査（for: なし）","description":"pk-ccc に言及するが courier 便ではない","notes":"","labels":["self-dev"],"status":"open","created_at":"2026-07-05T00:00:00Z"}
+]
+JSON
+    out_dup="$(ORCH_HANDOFF_SKIP_SESSION_GATE=1 ORCH_HANDOFF_BD="$st_tmp/bin/bd" ALL_JSON_FILE="$dup_json" \
+               bash "$_orch_hs_self" --no-freshness 2>&1)"; rc_dup=$?
+    _dupline="$(printf '%s\n' "$out_dup" | grep -F 'un-aaa')"
+    if [ "$rc_dup" -eq 0 ] \
+       && grep -qF "【重複便 hold】" <<< "$_dupline" \
+       && grep -qF "orch-h1 orch-h2" <<< "$_dupline" \
+       && grep -qF "[needs-orch]" <<< "$(printf '%s\n' "$out_dup" | grep -F 'pk-ccc')" \
+       && grep -qF "scanned=3 actionable=1 triage-hold=2（grill=1 dup=1）" <<< "$out_dup"; then
+        _ok "重複便 hold: 既存 open courier 便 2 本を根拠に un-aaa を hold・根拠便を列挙・pk-ccc は actionable のまま（dup=1）"
+    else
+        _fail "重複便 hold: un-aaa の hold（根拠 2 本列挙）と dup=1 を期待したが不一致（rc=$rc_dup）: [$out_dup]"
+    fi
+
+    # (6b) negative control（self-dev 便は抑制器にしない）: orch-x1 は for:* / courier を持たないので
+    #      pk-ccc を hold しない（本 bead 自身のような調査 bead が needs-orch を恒久 burial させる罠の封鎖）。
+    if ! grep -qF "orch-x1" <<< "$out_dup"; then
+        _ok "negative control: for:*/courier を持たない self-dev 便は根拠にならない（pk-ccc は surface 側）"
+    else
+        _fail "negative control: orch-x1 が根拠として現れてはならない: [$out_dup]"
+    fi
+
+    # (7) 判定不能（fence ■5 の fail 経路）: 自台帳全文走査（--all）が rc≠0 のとき hold を立てず全件を
+    #     surface 側に残し、集計に dup=判定不能 を出す（false-hold は不可逆ゆえ surface 側へ倒す）。
+    cat > "$st_tmp/bin/bd-allfail" <<'BDEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$BD_ARGS_LOG"
+case "$*" in
+  *--all*) exit 4 ;;
+  *)
+    cat <<'JSON'
+[
+  {"id":"un-aaa","title":"foreign A needs orch","labels":["needs-orch"],"created_at":"2026-07-01T00:00:00Z"},
+  {"id":"pk-ccc","title":"foreign C needs orch","labels":["needs-orch"],"created_at":"2026-07-01T00:00:00Z"}
+]
+JSON
+    ;;
+esac
+BDEOF
+    chmod +x "$st_tmp/bin/bd-allfail"
+    out_und="$(ORCH_HANDOFF_SKIP_SESSION_GATE=1 ORCH_HANDOFF_BD="$st_tmp/bin/bd-allfail" \
+               bash "$_orch_hs_self" --no-freshness 2>&1)"; rc_und=$?
+    if [ "$rc_und" -eq 0 ] \
+       && grep -qF "【重複便 判定不能】" <<< "$out_und" \
+       && grep -qF "dup=判定不能" <<< "$out_und" \
+       && grep -qF "scanned=2 actionable=2" <<< "$out_und" \
+       && grep -qF "[needs-orch]" <<< "$(printf '%s\n' "$out_und" | grep -F 'un-aaa')"; then
+        _ok "判定不能(fence ■5): 全文走査 rc≠0 → hold せず全件 surface・dup=判定不能（黙って落とさない）"
+    else
+        _fail "判定不能: dup=判定不能 と全件 surface を期待したが不一致（rc=$rc_und）: [$out_und]"
     fi
 
     if [ "$st_fail" -eq 0 ]; then echo "orch-handoff-scan --self-test: PASS"; exit 0

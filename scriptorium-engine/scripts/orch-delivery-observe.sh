@@ -60,10 +60,28 @@
 #   窓 live は共有 lib `lib/orch_liveness.sh` の `_liveness_windows`（session:window 正準形）を REUSE する
 #   （canonical form を素朴再実装しない・riz1 drift 再導入禁止）。宛先 X の live 判定は `<X>:admin` の **完全一致**
 #   （discovery-nudge 同型 fail-safe）。for:X の X（台帳 dolt_database 値 sc/ccs）→ session 名（scribe/cc-session）の
-#   mapping を発明しない＝現状 live 窓はフル名 session（`scribe:admin`）で `sc:admin` に一致しないため、非一致時は
-#   **呼び鈴を出さず**「滞留 age は surface + 宛先窓 live 未確認（topology write 側 orch-8rn8=for:ccs land 待ち・
-#   transitional gap）」へ縮退する（滞留 surface は抑止しない）。呼び鈴は **提案のみ**＝push 実行系（orch-relay/
-#   session-comm/tmux send-keys/inject-existing）を一切呼ばない（Tier2 push=人間 go・§1.2 ③）。
+#   mapping を発明しない。非一致時は **呼び鈴を出さず**「滞留 age は surface + 宛先窓 live 未確認」へ縮退する
+#   （滞留 surface は抑止しない）。呼び鈴は **提案のみ**＝push 実行系（orch-relay/session-comm/tmux send-keys/
+#   inject-existing）を一切呼ばない（Tier2 push=人間 go・§1.2 ③）。
+#
+# 縮退の 2 状態（bd orch-ygbz B 群・「観測していない」を「観測して不在」と潰さない）───────────────────
+#   本 script の live 判定は **local tmux のみ**を観測射程とする（宛先ホスト registry / ssh・ping 等の外部 probe
+#   は採らない＝宛先→ホストの機械データ源が repo に無く、作れば「X→session 名 mapping を発明しない」と同型の
+#   発明になる。将来 registry を持つ場合の唯一の許可形は下記 ★registry-fence を見よ）。ゆえに縮退は原因を
+#   断定せず、**観測できたか否か**で 2 状態に分けて表示する（語彙 SSOT = lib/orch_observe_vocab.sh）:
+#     (a) local-absent : local tmux の窓一覧は取得できたが `<X>:admin` が無い。当該窓が local に無いことは
+#                        観測事実だが、宛先 admin が **別ホストに在住**しうるため live 有無は **判定不能**
+#                        （観測射程外）。「窓が無い＝down」とは断定しない（fence5 の断定禁止と同旨）。
+#     (b) 観測不能     : local tmux 自体が観測できない（tmux 不在 / server 応答なし / list-panes 失敗）。
+#                        判定材料が 0＝**判定不能**。(a) と別文言で出す（材料の有無が違う）。
+#   ★cross-host の live 判定機構は **未実装**（本 script は local tmux の観測射程しか持たない）。他ホスト在住の
+#     宛先について「live である / でない」を本 script は決して主張しない。
+#   ★registry-fence（将来 registry を持つ場合の唯一の許可形）: 機構だけを script に置き、値は env seam か
+#     gitignored config から与える（host 名 literal を script へ焼かない＝engine 同期で PUBLIC repo へ運ばれる）。
+#     共有 anchor 解決器は使わない（本 script は供給対象外＝orch-supply.bats の CONSUMERS-8 が否定 assert で
+#     pin しており、当該 helper 名の literal を本 file に書くだけで RED になる）。registry に無い宛先は
+#     判定不能へ倒す。cross-machine の
+#     運用文脈は docs/orch-9yyn-cross-machine-transitional-runbook.md と top-spec §5.3 を参照（本 script に書かない）。
 #
 # self-scope gate（誤台帳 scan の防止・他 orch- script と同一機構）──────────────────────────────────
 #   `bd list` は cwd の台帳に作用する。非 orch 台帳から走らせると foreign DB を scan して誤 surface する。cwd から
@@ -118,6 +136,18 @@ if [ -r "$_ORCH_LIVENESS_LIB" ]; then
     . "$_ORCH_LIVENESS_LIB"
 else
     echo "orch-delivery-observe: 共有 liveness lib 不在: $_ORCH_LIVENESS_LIB（窓 live 判定不能・fail-closed）" >&2
+    exit 1
+fi
+
+# --- 共有 observe 語彙 lib を source（bd orch-ygbz C1・「判定不能」を 2 script 単一 SSOT で共有） ---
+# ORCH_OBSERVE_UNDECIDABLE を提供する。orch-handoff-scan.sh と同一定数を consume することで、observe 層の
+# 「観測していない」表示語が 2 script 間で drift するのを防ぐ（drift teeth = 本 script の bats (vocab-drift)）。
+_ORCH_VOCAB_LIB="$_SCRIPT_DIR/lib/orch_observe_vocab.sh"
+if [ -r "$_ORCH_VOCAB_LIB" ]; then
+    # shellcheck source=lib/orch_observe_vocab.sh
+    . "$_ORCH_VOCAB_LIB"
+else
+    echo "orch-delivery-observe: 共有 observe 語彙 lib 不在: $_ORCH_VOCAB_LIB（状態語の SSOT 不明・fail-closed）" >&2
     exit 1
 fi
 
@@ -284,6 +314,13 @@ run_observe() {
     # 窓 live 一覧を 1 回だけ取得（共有 lib・session:window 正準形）。
     local live_windows; live_windows="$(_liveness_windows "$TMUX_BIN")"
 
+    # local tmux が **観測できたか** を別に判定する（orch-ygbz B 群の 2 状態を弁別する唯一の材料）。
+    #   _liveness_windows は「窓 0 件」と「tmux 不在 / server 応答なし」を同じ空文字列へ潰す（lib は canonical
+    #   列挙だけを担う＝素朴再実装しない fence1 を守るため lib は変えない）。ゆえに consumer 側で read-only の
+    #   probe を 1 回撃ち、観測できたか否かだけを取る（list-panes は tmux server を mutate しない）。
+    local tmux_observable=1
+    "$TMUX_BIN" list-panes -a -F '#{session_name}' >/dev/null 2>&1 || tmux_observable=0
+
     # tsv を種別ごとに仕分けて surface する。
     local -A boundary_of=()
     local bead_lines="" compact_lines="" tag rest
@@ -316,7 +353,7 @@ run_observe() {
     fi
 
     # 各 for:X 便の推論配送 3 値 + 呼び鈴（proposal-only）。
-    local delivered=0 undelivered=0 unknown=0 bells=0 degraded=0
+    local delivered=0 undelivered=0 unknown=0 bells=0 degraded=0 local_absent=0 unobservable=0
     local bx bid state age stalled
     while IFS=$'\t' read -r bx bid state age stalled; do
         [ -n "$bid" ] || continue
@@ -333,9 +370,17 @@ run_observe() {
                         bells=$((bells + 1))
                         printf '    便 %-14s 宛先 %-6s [滞留] age %s 分(>閾値 %s)・宛先窓 %s:admin live\n' "$bid" "$bx" "$age" "$STALE_MIN" "$bx"
                         printf '      🔔 呼び鈴打ちますか？（提案のみ・push は人間 go＝§1.2 ③）｜根拠: 滞留 %s 分 > 閾値 %s 分 ∧ 宛先窓 %s:admin live\n' "$age" "$STALE_MIN" "$bx"
+                    elif [ "$tmux_observable" -eq 1 ]; then
+                        # (a) local-absent: 窓一覧は取得できたが <X>:admin が無い。local に不在なのは観測事実だが
+                        #     宛先 admin は別ホストに在住しうる＝live 有無は判定不能（観測射程外）。原因は断定しない。
+                        degraded=$((degraded + 1)); local_absent=$((local_absent + 1))
+                        printf '    便 %-14s 宛先 %-6s [滞留] age %s 分(>閾値 %s)・宛先窓 live 未確認（local 窓一覧に %s:admin 不在＝live 有無は%s: 宛先 admin が他ホスト在住なら local tmux の観測射程外）\n' \
+                               "$bid" "$bx" "$age" "$STALE_MIN" "$bx" "$ORCH_OBSERVE_UNDECIDABLE"
                     else
-                        degraded=$((degraded + 1))
-                        printf '    便 %-14s 宛先 %-6s [滞留] age %s 分(>閾値 %s)・宛先窓 live 未確認（%s:admin 非一致＝topology write 側 orch-8rn8 land 待ち・transitional gap）\n' "$bid" "$bx" "$age" "$STALE_MIN" "$bx"
+                        # (b) 観測不能: local tmux 自体を観測できない（tmux 不在 / server 応答なし）＝判定材料が 0。
+                        degraded=$((degraded + 1)); unobservable=$((unobservable + 1))
+                        printf '    便 %-14s 宛先 %-6s [滞留] age %s 分(>閾値 %s)・宛先窓 live 未確認（local tmux の窓一覧を取得できず＝live 有無は%s: tmux 不在/server 応答なし・判定材料が無い）\n' \
+                               "$bid" "$bx" "$age" "$STALE_MIN" "$ORCH_OBSERVE_UNDECIDABLE"
                     fi
                 else
                     printf '    便 %-14s 宛先 %-6s [滞留] age %s 分（閾値 %s 分 未満＝呼び鈴 point 未達）\n' "$bid" "$bx" "$age" "$STALE_MIN"
@@ -359,7 +404,9 @@ run_observe() {
         echo "  auto-compact marker: なし（label '$COMPACT_LABEL' 完全一致 0 件・producer=admin 焼き未 land ゆえ graceful）"
     fi
 
-    echo "  ── 集計: delivered(推論)=$delivered undelivered(滞留)=$undelivered unknown(未確認)=$unknown 呼び鈴提案=$bells live未確認縮退=$degraded auto-compact=$compact_count"
+    # ★内訳は既存 key（delivered/undelivered/unknown/呼び鈴提案/live未確認縮退/auto-compact）を保持したまま後置追加する
+    #   （consumer の rank-A 総覧行・既存 teeth と互換）。local不在 = 窓一覧は見えたが宛先窓が無い / 観測不能 = tmux 自体を見られない。
+    echo "  ── 集計: delivered(推論)=$delivered undelivered(滞留)=$undelivered unknown(未確認)=$unknown 呼び鈴提案=$bells live未確認縮退=$degraded（local不在=$local_absent 観測不能=$unobservable） auto-compact=$compact_count"
     return 0
 }
 
@@ -448,12 +495,38 @@ STUB
     else
         _fail "3値: delivered/undelivered/unknown の陽性を期待したが不一致: [$out]"
     fi
-    # 縮退 modality（fence1）: 窓が sc:admin に非一致（scribe:admin のみ）→ 呼び鈴出さず滞留 age は surface。
+    # 縮退 modality (a) local-absent（fence1 + orch-ygbz B1）: 窓一覧は取得できたが sc:admin が無い
+    #   → 呼び鈴は出さず滞留 age は surface し、live 有無は「判定不能」（観測射程外）と明示する（原因は断定しない）。
+    # ★新規 assert は herestring 形で書く（`producer | grep -q` は pipefail 下で SIGPIPE 偽 RED を招く hazard
+    #   ＝orch-sigpipe-hazard-lint が additive-strict で新規 signature を弾く。既存行の idiom は baseline 保持）。
     if printf '%s' "$out" | grep -q "宛先窓 live 未確認" \
+       && grep -qF "local 窓一覧に sc:admin 不在" <<< "$out" \
+       && grep -qF "$ORCH_OBSERVE_UNDECIDABLE" <<< "$out" \
+       && grep -qF "（local不在=1 観測不能=0）" <<< "$out" \
+       && ! grep -qF "transitional gap" <<< "$out" \
        && ! printf '%s' "$out" | grep -q "🔔 呼び鈴打ちますか"; then
-        _ok "縮退: フル名 session(scribe:admin)のみ live・sc:admin 非一致 → 呼び鈴出さず滞留 age は surface（fence1 transitional gap）"
+        _ok "縮退(a) local-absent: 窓一覧取得可 ∧ sc:admin 不在 → 呼び鈴抑止・滞留 surface・live は判定不能（原因断定しない）"
     else
-        _fail "縮退: sc:admin 非一致で呼び鈴抑止 + 滞留 surface を期待したが不一致: [$out]"
+        _fail "縮退(a): local不在 状態（判定不能・原因非断定）を期待したが不一致: [$out]"
+    fi
+
+    # 縮退 modality (b) 観測不能（orch-ygbz B1）: local tmux 自体が観測できない（list-panes 失敗）
+    #   → (a) と **別文言**で「窓一覧を取得できず＝判定不能」を出す（材料 0 と材料あり不在を融合しない）。
+    cat > "$st_tmp/bin/tmux-dead" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$st_tmp/bin/tmux-dead"
+    out_unobs="$(ORCH_DELIVERY_SKIP_SESSION_GATE=1 ORCH_DELIVERY_BD="$st_tmp/bin/bd" ORCH_DELIVERY_TMUX="$st_tmp/bin/tmux-dead" \
+                 ORCH_DELIVERY_NOW_EPOCH="$NOW" ORCH_DELIVERY_STALE_MIN=60 bash "$_orch_do_self" 2>&1)"
+    if grep -qF "local tmux の窓一覧を取得できず" <<< "$out_unobs" \
+       && grep -qF "$ORCH_OBSERVE_UNDECIDABLE" <<< "$out_unobs" \
+       && grep -qF "（local不在=0 観測不能=1）" <<< "$out_unobs" \
+       && ! grep -qF "local 窓一覧に sc:admin 不在" <<< "$out_unobs" \
+       && ! grep -qF "🔔 呼び鈴打ちますか" <<< "$out_unobs"; then
+        _ok "縮退(b) 観測不能: tmux 観測失敗 → (a) と別文言で『窓一覧を取得できず＝判定不能』（材料 0 を不在と融合しない）"
+    else
+        _fail "縮退(b): 観測不能 状態の別文言を期待したが不一致: [$out_unobs]"
     fi
 
     # (2) 呼び鈴点灯（acceptance(2)）: 宛先窓を sc:admin 完全一致にすると滞留超 STL で呼び鈴提案が点灯する。
