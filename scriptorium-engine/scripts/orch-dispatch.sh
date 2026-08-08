@@ -127,6 +127,14 @@
 #   ORCH_DISPATCH_BD           gate-pending/watch/spawn 入口 check で叩く bd 実体（既定: PATH 上の bd）。
 #   ORCH_DISPATCH_BDW          spawn 入口 gate の acceptance snapshot を自台帳 notes へ append する bdw 実体
 #                              （既定: <scriptorium>/scripts/bdw）。自台帳 write 直列化の正路（un-8p7）。self-test で stub 可。
+#   ORCH_DISPATCH_LEASE        容量 gate（bd orch-b38s）が叩く orch-lease.sh 実体（既定: 本 script と同 dir の
+#                              scripts/orch-lease.sh）。**ORCH_LEASE_CAPACITY_ENFORCE=1 のときだけ**呼ぶ
+#                              （既定 OFF では 1 回も呼ばない＝現行挙動を byte 単位で維持）。判定は read-only で
+#                              acquire/release は行わない（配線は bd orch-2khf 職掌）。
+#   ORCH_DISPATCH_LEASE_TIMEOUT 上記 lease 呼出の wall-clock 上限（秒・既定 10・provisional）。台帳 path が
+#                              FIFO 等の非通常 file だと lease 側 awk が open で永久ブロックしうるため
+#                              **必ず timeout で包む**（無応答は fail-open でも fail-closed でもない）。
+#                              満了（rc 124）/ timeout 不在（rc 127）はいずれも **deny 扱い**（fail-closed）。
 #   ORCH_DISPATCH_SKIP_SLATE_GATE  slate interlock（bd orch-vswk・spawn 実行経路のみ）を bypass する hermetic seam
 #                              （=1 で skip・既定 0=gate 有効）。bats の既存 spawn 回帰維持用＝production 既定は gate 有効
 #                              （後方互換を口実にした warn-only 化でない・fail-closed）。read-only mode〔gate-pending/watch/
@@ -1626,6 +1634,50 @@ run_spawn() {
         fi
     fi
 
+    # ── 容量 gate（bd orch-b38s・既定 OFF・read 判定 + deny のみ）─────────────────────────────────
+    # 『1 口座 1 cell』の段階解禁: 同一 account に載る projected burn の総和を lease 台帳から読み、容量超なら
+    # dispatch を拒否する。★判定は **orch-lease.sh へ委譲**し本 script では自前実装しない（account 実解決＝
+    # selector / claude-usage 呼出を orch-dispatch へ複製しないのが scope-fence・orch-vzmf）。
+    # ★acquire / release は 1 行も書かない（bd orch-2khf 職掌）＝ここは read 判定だけ。run_spawn 末尾の
+    #   `exec "${cmd[@]}"`（本便時点 :1768・行番号は編集で動くので字面で辿ること）で
+    #   run_spawn は終端し spawn 後コードが存在しない＝release 契機が構造的に無く、acquire を足すと TTL 満了
+    #   までの lease 漏れを作る（dry-run 副作用ゼロ不変量も壊す）。
+    # ★配置は下の G2 snapshot（自台帳 write）**より前**＝容量超は self-ledger write の前に副作用ゼロで弾く
+    #   （slate interlock と同層・同じ理由）。
+    # ★既定 OFF（ORCH_LEASE_CAPACITY_ENFORCE 未設定/0）では lease を **1 回も呼ばず** plan 行も足さない
+    #   ＝現行挙動を byte 単位で維持する（enforcement は opt-in・fail-safe 側既定）。
+    # ★判定 key は下の forward 行 `local _acct="${ORCH_DISPATCH_ACCOUNT:-auto}"`（本便時点 :1738・行番号は
+    #   編集で動くので字面で辿ること）と同一式を読むだけで、auto/mirror/空 の解決は
+    #   **行わない**。未解決のまま lease へ渡し lease 側が固有文言 + rc 11 で deny する（「auto なら素通し」は
+    #   arming 後に silent no-op 化する false-green 経路ゆえ採らない）。
+    # ★dry-run も read 判定を掛ける（read-only ゆえ副作用ゼロ・「dry-run では容量 skip」の逆解釈を封じる）。
+    local cap_action="skip（容量会計 OFF＝ORCH_LEASE_CAPACITY_ENFORCE 未設定/0・lease 呼出 0 回）"
+    if [ "${ORCH_LEASE_CAPACITY_ENFORCE:-0}" != 0 ]; then
+        local _lease_bin _cap_acct _cap_out _cap_rc _cap_to
+        _lease_bin="${ORCH_DISPATCH_LEASE:-$(cd "$(dirname "$_orch_dispatch_self")" 2>/dev/null && pwd)/orch-lease.sh}"
+        _cap_acct="${ORCH_DISPATCH_ACCOUNT:-auto}"
+        _cap_to="${ORCH_DISPATCH_LEASE_TIMEOUT:-10}"
+        if [ ! -x "$_lease_bin" ]; then
+            echo "[ORCH-CAPACITY-DENY] lease CLI 実行不可: $_lease_bin" >&2
+            die "容量会計 ON（ORCH_LEASE_CAPACITY_ENFORCE=${ORCH_LEASE_CAPACITY_ENFORCE}）だが lease CLI を実行できず容量を判定できません＝dispatch 中止（fail-closed・ORCH_DISPATCH_LEASE で差し替え可）"
+        fi
+        # ★必ず timeout で包む（自己 review orch-b38s）: 台帳 path が FIFO 等の非通常 file だと lease 側の
+        #   read が open で永久ブロックし、コマンド置換で待つ本経路は **無期限ハング**する（fail-open でも
+        #   fail-closed でもない無応答＝最悪の第 3 状態）。満了 rc 124 も timeout 不在 rc 127 も下の
+        #   `-ne 0` 分岐が拾って deny する（fail-closed）。
+        _cap_out="$(timeout "$_cap_to" "$_lease_bin" capacity "$_cap_acct" --purpose worker 2>&1)"; _cap_rc=$?
+        if [ "$_cap_rc" -ne 0 ]; then
+            echo "[ORCH-CAPACITY-DENY] account='$_cap_acct' lease-rc=$_cap_rc（判定行は下記）" >&2
+            if [ "$_cap_rc" -eq 124 ]; then
+                echo "[ORCH-CAPACITY-DENY] lease が ${_cap_to}s 以内に応答しませんでした（timeout・台帳 path が FIFO 等の非通常 file である疑い＝ORCH_DISPATCH_LEASE_TIMEOUT で調整可）" >&2
+            fi
+            printf '%s\n' "$_cap_out" >&2
+            die "同一口座の projected burn 合計が容量閾値を超える / 台帳判定不能 / lease 無応答 / account label 未解決のため dispatch 中止（fail-closed・orch-b38s）。上の判定行を確認し、枠が空くまで待つか ORCH_DISPATCH_ACCOUNT=<label> で明示せよ（容量 pass は host-local 会計ゆえ『安全の証明』ではない点も併せて読むこと）。"
+        fi
+        printf '%s\n' "$_cap_out" >&2
+        cap_action="pass（ORCH_LEASE_CAPACITY_ENFORCE=${ORCH_LEASE_CAPACITY_ENFORCE}・account=$_cap_acct・lease=$_lease_bin・read 判定のみ）"
+    fi
+
     # ── G2 snapshot: dispatch 時に acceptance snapshot を bead notes へ機械記録（tamper-evident）──────
     # write は自台帳（${SELF_PREFIX}-）bead のみ（write-isolation の不可侵の核・foreign は foreign admin の責務ゆえ skip）。
     # dry-run は副作用ゼロ＝write skip（上の read-only check は掛け済）。snapshot 失敗（bdw/python3）は fail-closed で中止
@@ -1688,6 +1740,10 @@ run_spawn() {
         echo "  spawn   : $SPAWN"
         echo "  gate    : acceptance/verification 入口 check=pass（G1+G7・fail-closed）"
         echo "  snapshot: $snap_action（G2 tamper-evident・gate が現 acceptance と sha256 照合）"
+        # ★OFF のときは plan 行を **1 行も足さない**（呼出 0 と併せて「既定 = 現行挙動の byte 維持」を守る）。
+        if [ "${ORCH_LEASE_CAPACITY_ENFORCE:-0}" != 0 ]; then
+            echo "  capacity: $cap_action（orch-b38s・read-only・acquire/release は orch-2khf 職掌ゆえ行わない）"
+        fi
         echo "  block   : worker 対話 tool 封鎖は scribe-spawn hardcode（orch-4dm）が担う＝orch-dispatch は forward しない"
         echo "  note    : bd-id 実在検証は上の contract read（bd -C anchor show）が兼ねる"
         echo "----------------------------------------------------------------------"
