@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # mailbox-common.sh — 下り mailbox hook 群の共有 lib（source 専用・sc-b6w / orch-0yof ①②）
 #
-# 役割: scriptorium orch 台帳の **direct read**（`for:<self>` 平ラベル完全一致・open のみ）と、
+# 役割: scriptorium orch 台帳の **direct read**（`for:<self>` 平ラベル完全一致・open / in_progress）と、
 #       その周辺（hook stdin JSON 解釈 / self 台帳 walk-up 解決 / role 判定 / dedupe state）を
 #       **単一実装**として提供する。consumer は 3 本:
 #         - session-start-mailbox-scan.sh   （SessionStart 配送点・sc-p2o）
@@ -132,18 +132,23 @@ mbx_orch_anchor() {
     return 0
 }
 
-# orch 台帳を direct read し `for:<self>` の open bead を JSON で返す（read-only・hydrate せず）。
+# orch 台帳を direct read し `for:<self>` の open / in_progress bead を JSON で返す（read-only・hydrate せず）。
 #   $1 = orch anchor / $2 = label（`for:<self>`）/ $3 = timeout 秒（既定 8）
 # --limit 0 = 全件（bd 既定の --limit 50 は mailbox を黙って上限打ち切りする＝silent cap 回避）。
+# --status open,in_progress（sc-7ry4・orch-9shx 論点3 裁定）: 旧 `--status open` 厳密は for:* 便が
+#   in_progress へ遷移した瞬間に宛先から不可視＝配達されず・畳み対象にもならない「未配達 limbo」を作る
+#   （現物 orch-7c7w で実測: open のみ 51 件 / open,in_progress 52 件・+1 が当該便）。closed / deferred は
+#   従来どおり対象外（配達済み・保留の意味論を変えない）。union の CSV 形は bd CLI 実測で確認済み
+#   （`--status` の反復指定は last-wins で先の値を silent 上書きするため使わない＝bd list --help の "repeating -s/--status silently overwrites" と実測一致）。
 # bd 不在・read 失敗・timeout は rc!=0（呼び手は degrade）。
 mbx_direct_read() {
     local anchor="$1" label="$2" secs="${3:-8}" raw rc
     command -v bd >/dev/null 2>&1 || return 1
     if command -v timeout >/dev/null 2>&1; then
-        raw="$(timeout "$secs" bd -C "$anchor" list --label "$label" --status open --limit 0 --readonly --json 2>/dev/null)"
+        raw="$(timeout "$secs" bd -C "$anchor" list --label "$label" --status open,in_progress --limit 0 --readonly --json 2>/dev/null)"
         rc=$?
     else
-        raw="$(bd -C "$anchor" list --label "$label" --status open --limit 0 --readonly --json 2>/dev/null)"
+        raw="$(bd -C "$anchor" list --label "$label" --status open,in_progress --limit 0 --readonly --json 2>/dev/null)"
         rc=$?
     fi
     [ "$rc" -eq 0 ] || return 1
@@ -163,10 +168,12 @@ mbx_direct_read() {
 #       stdout を注入するため露出が大きい）。行分割の禁止は「1 行 = 1 bead」に依存する下流全体の前提。
 mbx_emit() {
     if command -v jq >/dev/null 2>&1; then
+        # (sc-7ry4) 非 open（in_progress 等）の便は status タグを挿む＝「未配達 limbo だった可能性」を
+        # 読み手に可視化する（open は従来行フォーマット不変＝既存 consumer / dedupe の前提を壊さない）。
         jq -e -r '
             def flat: (. // "") | tostring | gsub("[\r\n]"; " ");
             if (type=="array" and length>0)
-            then (.[] | "  - \(.id|flat) [P\(.priority|flat)] \(.title|flat)")
+            then (.[] | "  - \(.id|flat) [P\(.priority|flat)]\(if ((.status // "open") | tostring) != "open" then "[\((.status)|flat)]" else "" end) \(.title|flat)")
             else empty end
         ' 2>/dev/null
         return $?
@@ -188,7 +195,9 @@ if not isinstance(d, list) or not d:
 for b in d:
     if not isinstance(b, dict):
         continue
-    print("  - %s [P%s] %s" % (flat(b.get("id"), "?"), flat(b.get("priority"), "?"), flat(b.get("title"), "")))
+    st = b.get("status") or "open"
+    tag = "" if str(st) == "open" else "[%s]" % flat(st)
+    print("  - %s [P%s]%s %s" % (flat(b.get("id"), "?"), flat(b.get("priority"), "?"), tag, flat(b.get("title"), "")))
 sys.exit(0)
 '
         return $?
