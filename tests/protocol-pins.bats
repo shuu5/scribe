@@ -276,3 +276,28 @@ setup() {
     run grep -qF -- 'worker 不在が確定した場合のみ' <<< "$sec"
     [ "$status" -ne 0 ]
 }
+
+# ---------- (6) sc-xrkl: worker cell clean 判定の canonical 形（orch-dsfv (a) 裁定・pin literal は base 0 / HEAD 1 実測済み） ----------
+
+@test "sc-xrkl: clean 判定 canonical 形 bullet が §2 区間内に実在する（tracked-only + baseline 差分 loud 列挙）" {
+    local sec
+    sec="$(sed -n '/^## 2\./,/^## 3\./p' "$PROTOCOL")"
+    grep -qF -- 'clean 判定の canonical 形' <<< "$sec"
+    grep -qF -- '--porcelain -uno' <<< "$sec"
+    grep -qF -- 'baseline との差分（新規 untracked）のみを loud 列挙' <<< "$sec"
+    grep -qF -- 'tracked 変更が空' <<< "$sec"
+}
+
+@test "mutation: clean 判定 bullet を削ると sc-xrkl pin が RED へ flip する" {
+    local mut="$BATS_TEST_TMPDIR/scxrkl-protocol.md"
+    grep -vF -- 'clean 判定の canonical 形' "$PROTOCOL" > "$mut"
+    # 削除実効（bullet は 1 物理行）を確認してから flip を読む
+    [ "$(( $(wc -l < "$PROTOCOL") - $(wc -l < "$mut") ))" -eq 1 ]
+    local sec
+    sec="$(sed -n '/^## 2\./,/^## 3\./p' "$mut")"
+    run grep -qF -- 'clean 判定の canonical 形' <<< "$sec"
+    [ "$status" -ne 0 ]
+    # 同一 bullet 上の従属 pin も同時に消えている（1 行 codify の一体性）
+    run grep -qF -- 'baseline との差分（新規 untracked）のみを loud 列挙' <<< "$sec"
+    [ "$status" -ne 0 ]
+}
