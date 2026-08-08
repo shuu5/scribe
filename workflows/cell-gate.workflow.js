@@ -218,7 +218,7 @@ async function roAgent(prompt, opts) {
 // brace 内の : ? が検知 regex に不一致=免除、かつ未設定/空で abort する bash 標準 guard=空展開事故も bash 層で封鎖。
 // literal 到達 tooth: tests/workflow-rm-var-guard.bats
 const common = `あなたは worker cell 成果物の独立敵対 gate agent。read-only 規律: ファイル編集・bd write・spawn・ホスト状態変更・git push は一切しない（Bash は読取り・grep・検証 suite/self-test の実行・git read のみ可）。
-Bash 規律(rm・厳守): rm / rm -rf / rmdir の対象に変数 path を使うときは必ず \${VAR:?} 形（未設定/空で abort する bash 標準 guard）で書く（例: rm -rf "\${S:?}/\${name:?}"）。素の \$VAR/\$VAR2・\$VAR/* 形は harness built-in の dangerous-rm 検知が permission picker を出し WF が無人 stall する（allowlist・bypass とも抑止不能）。\${VAR:?} 形は検知免除かつ空展開事故を bash 層で構造封鎖する（mutation 検証・一時複製の掃除も同様）。
+Bash 規律(rm・厳守): rm / rm -rf / rmdir の対象に変数 path を使うときは必ず \${VAR:?} 形（未設定/空で abort する bash 標準 guard）で書く（例: rm -rf "\${S:?}/\${name:?}"）。素の \$VAR/\$VAR2・\$VAR/* 形は harness built-in の dangerous-rm 検知が permission picker を出し WF が無人 stall する（allowlist・bypass とも抑止不能）。\${VAR:?} 形は検知免除かつ空展開事故を bash 層で構造封鎖する。ただし glob 掃除は \${VAR:?} でも別経路の AST 検知を免れない＝glob を使わず対象を列挙するか find "\${D:?}" -mindepth 1 -delete を使う（find は両検知の対象外）。本規律は read-only 規律を緩めない＝rm を使ってよいのは mktemp -d / \$BATS_TEST_TMPDIR 等の自作一時領域の掃除に限る。
 対象: bead ${targetBead} の成果物 = worktree ${worktree} の commit ${commit}${diffNote ? `（${diffNote}）` : ''}。
 まず (cd ${anchor} && bd show ${targetBead} | cat) で契約・DISPATCH SCOPE-FENCE（■ 節群${fenceNote ? `・${fenceNote}` : ''}）・worker 終端宣言を読み、git -C ${worktree} show ${commit} で diff 全文を読め。
 worker の宣言は信用せず実測で裏取りせよ。finding は severity(critical/high/med/low) + 根拠(verified/deduced/inferred) 付きで返せ。問題が無い軸は「問題なし(根拠)」と明記。`

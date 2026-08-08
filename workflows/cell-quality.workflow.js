@@ -1309,14 +1309,16 @@ const SEVERITY_RUBRIC = `【severity rubric(goal-anchored)】severity は accept
 
 // (sc-ezn1) rm 変数 path 規約: harness built-in の dangerous-rm 検知(binary 焼込・allowlist/bypass とも抑止不能)は
 // 「変数で始まり / の直後が〔* | 別変数 | / | 引用符 | 行末〕」形の rm/rmdir で permission picker を出し、無人 WF が
-// 構造 stall する(sc-dmmz cell の rm -f noto/* / sc-8bhc gate の "$S/$name" への素の rm -rf で実測・orch-ypk9)。${VAR:?} 形は
+// 構造 stall する(sc-8bhc gate の "$S/$name" への素の rm -rf で実測・orch-ypk9。sc-dmmz の rm -f noto/* 停止は
+// $ 非含有で本 detector 非該当=別原因の permission 停止)。${VAR:?} 形は
 // brace 内の : ? が検知 regex に不一致=免除、かつ未設定/空で abort する bash 標準 guard=空展開事故も bash 層で封鎖。
 // ctxBlock 経由で classify/plan/implement/review/fix の全段 prompt へ到達させる(mutation 検証・掃除 rm を生成しうる
 // 全 agent が対象)。literal 到達 tooth: tests/workflow-rm-var-guard.bats
 const RM_VAR_GUARD =
   'Bash 規律(rm・厳守): rm / rm -rf / rmdir の対象に変数 path を使うときは必ず ${VAR:?} 形(未設定/空で abort する bash 標準 guard)で書く(例: rm -rf "${S:?}/${name:?}")。' +
   '素の $VAR/$VAR2・$VAR/* 形は harness built-in の dangerous-rm 検知が permission picker を出し WF が無人 stall する(allowlist・bypass とも抑止不能)。' +
-  '${VAR:?} 形は検知免除かつ空展開事故を bash 層で構造封鎖する(mutation 検証・一時複製の掃除も同様)。'
+  '${VAR:?} 形は検知免除かつ空展開事故を bash 層で構造封鎖する(mutation 検証・一時複製の掃除も同様)。' +
+  'ただし glob 掃除は ${VAR:?} でも別経路の AST 検知を免れない=glob を使わず対象を列挙するか find "${D:?}" -mindepth 1 -delete を使う(find は両検知の対象外)。'
 
 function ctxBlock() {
   return [
