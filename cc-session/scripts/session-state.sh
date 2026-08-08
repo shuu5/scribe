@@ -32,8 +32,10 @@ THINKING_PROGRESS_PATTERN='[\p{Lu}][\p{Ll}]+(in'"'"'|ing)(…|\.{3}| for [0-9]| 
 # 行頭アンカーが要: transcript 本文・tool 出力はインデントされ、assistant 応答行（● + 文）は語直後に
 # … が来ず、agent 一覧行（◯ name  desc…  Ns · ↓ tokens）はタイマーが '(' に包まれない——いずれも
 # 一致しない（live 標本 3 種で検証・2026-07-15）。スピナー行は Tip 行の折返し等で tail -8 の外へ
-# 押し出されるため、この判定だけは capture 全域（-S -20）に適用する（tail -8 依存が「turn 走行中を
-# input-waiting と誤報する」偽陰性の機序だった＝orch-8rn8 evidence）。
+# 押し出されるため、この判定だけは可視 frame 全体（tail -8 ではなく pane 全高）に適用する（tail -8
+# 依存が「turn 走行中を input-waiting と誤報する」偽陰性の機序だった＝orch-8rn8 evidence）。
+# ただし可視 frame までに限る（sc-8bhc）: capture 全域（scrollback 込み）へ広げると、終了済み turn の
+# スピナー残骸に一致して「入力待ちなのに processing」を返し続ける偽陽性クラスを生む。
 TURN_SPINNER_PATTERN='^[^[:alnum:][:space:]] [\p{Lu}][\p{Ll}]+(…|\.{3}) \(([0-9]+h )?([0-9]+m )?[0-9]+s'
 # approval UI / AskUserQuestion パターン（tail -5 全体スキャン対象）
 INPUT_WAITING_PATTERNS=(
@@ -131,14 +133,17 @@ detect_state() {
     # pane情報を取得
     local pane_info
     pane_info=$(tmux list-panes -t "$target" \
-        -F '#{pane_current_command}	#{pane_dead}	#{pane_id}	#{pane_current_path}' \
+        -F '#{pane_current_command}	#{pane_dead}	#{pane_id}	#{pane_height}	#{pane_current_path}' \
         2>/dev/null | head -1) || {
         echo "Error: target '$target' not found" >&2
         return 1
     }
 
-    local pane_cmd pane_dead pane_id pane_path
-    IFS=$'\t' read -r pane_cmd pane_dead pane_id pane_path <<< "$pane_info"
+    # pane_height はスピナー判定の可視 frame 切出しに使う（capture-pane を 2 度叩かないため、
+    # pane 情報を取る既存の list-panes 呼び出しに 1 フィールド足して同時に取得する）。
+    # pane_current_path は「残り全部を吸う」最終フィールドのまま維持する（パス中のタブ防御）。
+    local pane_cmd pane_dead pane_id pane_height pane_path
+    IFS=$'\t' read -r pane_cmd pane_dead pane_id pane_height pane_path <<< "$pane_info"
     # TSVカラムずれ防御: タブ文字をスペースに置換
     pane_path="${pane_path//$'\t'/ }"
 
@@ -173,11 +178,30 @@ detect_state() {
     fi
 
     # capture-paneで末尾20行を取得
+    # 末尾の空行を保存する（sc-8bhc）: command substitution は末尾の改行を全て剥ぐため、素で
+    # 受けると「可視 pane 下端の空行」が消えて capture の行数が pane_height 分に足りなくなる。
+    # 番兵 X を付けてから剥ぎ、行終端の 1 個だけを落とすことで下端空行を保持する。
+    # 番兵は必ず `&&` で繋ぐ（`;` にすると substitution の status が printf の 0 になり、
+    # capture 失敗時の processing fallback が死ぬ）。
     local captured
-    captured=$(tmux capture-pane -p -t "$target" -S -20 2>/dev/null) || {
+    captured=$(tmux capture-pane -p -t "$target" -S -20 2>/dev/null && printf 'X') || {
         echo "processing"
         return
     }
+    captured="${captured%X}"
+    captured="${captured%$'\n'}"
+
+    # スピナー判定に使う可視 frame（sc-8bhc）。`-S -20` の capture は「scrollback 20 行 + 可視 pane
+    # 全高」なので、その末尾 pane_height 行が `-S 0`（可視のみ）に対応する＝capture-pane を 2 度
+    # 叩かずに同じ 1 回の capture から切り出せる。この対応が成り立つのは上の番兵で下端空行を
+    # 保持した後の値に限る（剥ぎ取ったままの値では行数が足りず、tail が scrollback 側の行まで
+    # 巻き込む＝残骸スピナーが最も居やすい位置を拾う）。pane_height が数値で取れないときは
+    # capture 全域へ倒す（= 従来挙動。偽陽性 side＝processing 寄りに倒すのが fail-safe: 偽陰性は
+    # 走行中セッションを idle 扱いさせる不可逆な誤りになる）。
+    local visible_frame="$captured"
+    if [[ "$pane_height" =~ ^[0-9]+$ ]] && (( pane_height > 0 )); then
+        visible_frame=$(printf '%s\n' "$captured" | tail -n "$pane_height")
+    fi
 
     # 末尾の空行を除去して最後の非空行を取得
     local last_lines
@@ -200,10 +224,13 @@ detect_state() {
             return
         fi
     done
-    # 現行 TUI のスピナー行（capture 全域）: Tip 行折返し等でスピナーが tail -8 の外へ押し出されると、
+    # 現行 TUI のスピナー行（可視 frame 全域）: Tip 行折返し等でスピナーが tail -8 の外へ押し出されると、
     # 上の 2 判定を素通りして下の ❯/bypass 判定が「turn 走行中なのに input-waiting」を返していた
-    # （実測 verified・ccs-pwr / orch-8rn8 偽陰性の機序）。行頭 glyph アンカーの厳格形状のみ全域を許す。
-    if echo "$captured" | grep -qP "$TURN_SPINNER_PATTERN"; then
+    # （実測 verified・ccs-pwr / orch-8rn8 偽陰性の機序）。行頭 glyph アンカーの厳格形状のみ許す。
+    # 走査範囲は可視 frame に限る（sc-8bhc）: 終了済み turn のスピナー行は再描画後も可視画面外の
+    # scrollback に残存しうるため、capture 全域へ掛けると「入力待ちなのにスピナー残骸だけを根拠に
+    # processing」を返し続ける偽陽性クラスになる（tail -8 依存の偽陰性を塞いだ代償だった）。
+    if echo "$visible_frame" | grep -qP "$TURN_SPINNER_PATTERN"; then
         echo "processing"
         return
     fi
