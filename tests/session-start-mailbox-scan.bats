@@ -5,7 +5,7 @@
 # **e2e（stdin JSON → stdout surface の実フック契約）** と **hooks.json wire 検査** の hermetic bats。
 #
 # 役割: SessionStart で scriptorium orch 台帳を direct read（`bd -C <orch-anchor> list --label for:<self>
-#   --status open --readonly`）し、自 project 宛 open bead を surface する下り知識中継（pull 型）。
+#   --status open,in_progress --readonly`）し、自 project 宛の未 discharge（open / in_progress）bead を surface する下り知識中継（pull 型）。
 #   orchestrator 側 workinprogress hook（orch-7py）の対向形。正本 = scriptorium top-spec §5.3 会計②。
 #
 # 方式（hermetic・実 plugin/DB 非依存）:
@@ -76,6 +76,7 @@ for a in "\$@"; do
 done
 case "\${MOCK_BD_MODE:-ok}" in
   ok)      echo '[{"id":"orch-abc","priority":1,"title":"scribe 宛 coord テスト"},{"id":"orch-xyz","priority":2,"title":"knowledge relay テスト"}]'; exit 0 ;;
+  inprog)  echo '[{"id":"orch-abc","priority":1,"title":"scribe 宛 coord テスト"},{"id":"orch-limbo","priority":2,"status":"in_progress","title":"未配達 limbo テスト"}]'; exit 0 ;;
   empty)   echo '[]'; exit 0 ;;
   err)     echo "MOCK-BD-ERROR" >&2; exit 1 ;;
   badjson) echo 'not-json {{{ 壊れ出力'; exit 0 ;;   # rc0 だが JSON parse 不能 → _mbx_emit が 1 を返す想定
@@ -142,8 +143,22 @@ run_hook() { # $1=cwd  他=env 前置(KEY=VAL...)
     [[ "$output" == *"scribe 宛 coord テスト"* ]]
     [[ "$output" == *"for:sc"* ]]          # self ラベルで scan した表記
     [[ "$output" == *"hydrate"* ]]         # hydrate 禁止の注意書き footer
-    # direct read は正しい label/--status open/--limit 0(全件)/--readonly で呼ばれる
-    [[ "$(cat "$BD_CALL_LOG")" == *"-C $ORCH_LEDGER list --label for:sc --status open --limit 0 --readonly --json"* ]]
+    # direct read は正しい label/--status open,in_progress（sc-7ry4: in_progress 便の silent non-delivery 封鎖）/--limit 0(全件)/--readonly で呼ばれる
+    [[ "$(cat "$BD_CALL_LOG")" == *"-C $ORCH_LEDGER list --label for:sc --status open,in_progress --limit 0 --readonly --json"* ]]
+}
+
+# inventory: invariant=in_progress 便が status タグ付きで surface される（未配達 limbo の封鎖・sc-7ry4）
+#          | polarity=positive
+#          | mutant_fingerprint=mbx_direct_read の `--status open,in_progress` → `--status open` へ戻すと
+#            本 tooth は（mock が status 非依存で応答するため）タグ面では落ちないが、pin tooth (i) の
+#            call-log 照合が RED になる＝2 tooth の AND で退行を検出する。emit 側の変異
+#            （status タグ分岐の除去）は本 tooth 単独で RED。
+@test "(i-inprog) in_progress 便は [in_progress] タグ付きで surface・open 便の行形式は不変（sc-7ry4）" {
+    run run_hook "$SELF_CWD" MOCK_BD_MODE=inprog
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"orch-limbo [P2][in_progress] 未配達 limbo テスト"* ]]
+    [[ "$output" == *"orch-abc [P1] scribe 宛 coord テスト"* ]]   # open はタグ無し＝既存行形式そのまま
+    [[ "$output" != *"orch-abc [P1]["* ]]                          # open 行へタグが混入しない
 }
 
 @test "(i-limit) direct read は --limit 0(全件) を渡す（bd 既定 --limit 50 の silent 打ち切り回避・sc-p2o minor）" {

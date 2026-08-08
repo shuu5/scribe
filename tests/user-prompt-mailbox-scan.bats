@@ -16,7 +16,7 @@
 #     （TTL gate 自体は (t-*) で別に pin する＝2 つの間引き機構を独立に検証する）。
 #
 # 検証する契約不変条件:
-#   (a)  admin + 新着あり → surface + exit0・direct read は label 完全一致 / --status open / --limit 0 / --readonly。
+#   (a)  admin + 新着あり → surface + exit0・direct read は label 完全一致 / --status open,in_progress（sc-7ry4）/ --limit 0 / --readonly。
 #   (b)  dedupe: 同一 session の 2 回目は既報を再通知しない（無出力 exit0）。
 #   (b2) SessionStart 既報との dedupe: SessionStart が seed した id は UserPromptSubmit で再通知されない
 #        （＝acceptance(1) の実証。両 hook が同じ state を共有する）。
@@ -86,6 +86,7 @@ done
 case "\${MOCK_BD_MODE:-ok}" in
   ok)      echo '[{"id":"orch-abc","priority":1,"title":"scribe 宛 coord テスト"},{"id":"orch-xyz","priority":2,"title":"knowledge relay テスト"}]'; exit 0 ;;
   ok2)     echo '[{"id":"orch-abc","priority":1,"title":"scribe 宛 coord テスト"},{"id":"orch-xyz","priority":2,"title":"knowledge relay テスト"},{"id":"orch-new","priority":0,"title":"新着 coord テスト"}]'; exit 0 ;;
+  inprog)  echo '[{"id":"orch-abc","priority":1,"title":"scribe 宛 coord テスト"},{"id":"orch-limbo","priority":2,"status":"in_progress","title":"未配達 limbo テスト"}]'; exit 0 ;;
   empty)   echo '[]'; exit 0 ;;
   err)     echo "MOCK-BD-ERROR" >&2; exit 1 ;;
   badjson) echo 'not-json {{{ 壊れ出力'; exit 0 ;;
@@ -137,7 +138,19 @@ run_sessionstart() { # $1=cwd  他=env
     [[ "$output" == *"orch-xyz"* ]]
     [[ "$output" == *"scribe 宛 coord テスト"* ]]
     [[ "$output" == *"park-by-default"* ]]          # triage 導線（protocol §8 受信優先順位）
-    [[ "$(cat "$BD_CALL_LOG")" == *"-C $ORCH_LEDGER list --label for:sc --status open --limit 0 --readonly --json"* ]]
+    [[ "$(cat "$BD_CALL_LOG")" == *"-C $ORCH_LEDGER list --label for:sc --status open,in_progress --limit 0 --readonly --json"* ]]
+}
+
+# inventory: invariant=in_progress 便が status タグ付きで surface される（未配達 limbo の封鎖・sc-7ry4）
+#          | polarity=positive
+#          | mutant_fingerprint=mbx_emit の status タグ分岐を除去 → 本 tooth RED（query 側の退行は
+#            pin tooth (a) の call-log 照合が受け持つ＝2 tooth の AND）。
+@test "(a-inprog) in_progress 便は [in_progress] タグ付きで surface・open 便の行形式は不変（sc-7ry4）" {
+    run run_hook "$SELF_CWD" MOCK_BD_MODE=inprog
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"orch-limbo [P2][in_progress] 未配達 limbo テスト"* ]]
+    [[ "$output" == *"orch-abc [P1] scribe 宛 coord テスト"* ]]
+    [[ "$output" != *"orch-abc [P1]["* ]]
 }
 
 @test "(b) dedupe: 同一 session の 2 回目は既報を再通知しない(無出力 exit0)" {
