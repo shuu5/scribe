@@ -154,6 +154,16 @@ multi-agent で「網羅性・確信度・スケール」を買うための組�
 
 **selftest の pipefail × 大出力 `producer | grep -q`（SIGPIPE 偽 RED・bd sc-65hg / courier orch-lcdu）**: `set -o pipefail` 下で「大出力／無界／slow な `producer | grep -q PAT`」を書くと、`grep -q` が最初のマッチで早期 exit した瞬間に producer が `SIGPIPE` 死し、pipefail が pipeline rc を 141 へ昇格させて**アサーション充足でも偽 RED**になる（入力サイズ依存 flaky＝31KB body で 5 回中 3 回 rc=141・herestring 形は 200KB で決定論 rc=0）。正形は producer 出力を先に確定する **herestring**（`grep -q PAT <<< "$out"`）か **file-arg grep**（`grep -q PAT "$file"`）。`grep -c`／`grep -n` は herestring 末尾改行で count／行番号がずれるため機械変換しない。規律本文の SSOT = `protocol.md` §2「selftest で pipefail 下の大出力 `producer | grep -q` を書かない」bullet（`scribe-spawn.sh build_prompt` の test-first bullet と平仄）。
 
+**ad-hoc WF の args 必須プリアンブル（silent 完走の構造的封鎖・規約本文 SSOT = 本項・bd sc-irkr ← courier orch-hoyj / un-qy6q）**: harness の `args` は object でも JSON 文字列でも到達しうる（非決定・上流課題側は本規約の射程外＝回避規律で吸収する側）。`args` を素朴に参照する script は必須 args が undefined のまま prompt へ文字列補間され、**agent 群が「undefined を読め」という指示のまま正常終了に見える silent 完走**をする——loud に死ぬより高くつく型（実測: 11 agent・subagent 1,435,749 token・54.9 分・error 0・成果物ほぼ破棄。同一クラス事故 5 project・6 週間 7 例＝人間規律のみでは破られる）。**`args` を参照する WF script（骨格・ad-hoc とも）は body 冒頭に次の 3 要素を必ず置く**:
+
+- **(a) 防御的 args parse（正規化）**: 文字列で到達したら `JSON.parse` で object へ正規化する。object でないもの（`'null'`・数値・配列）は空 object へ倒し、**parse 失敗は黙って `{}` にせず (b) の throw へ流す**。
+- **(b) 必須 args の fail-fast（throw 形・P0-2 裁定の 2 段）**: args 解決段（最初の `agent()` 呼出より前）で必須 args の欠落 / `undefined` / 空 / `"[undefined]"` を検知したら **agent を 1 体も起動せず即 throw して run を殺す**（escalate return 形は「undefined を掴んだまま完走」を構造的に止められない）。agent 起動後の in-run 失敗は従来どおり `{escalate:true,…}` 返却＝呼出元一次監査へ載せる（2 段目・従来設計の維持）。
+- **(c) receivedArgs（受領 args の要約）を返り値へ**: 生の型（`type`）・parse 失敗の有無（`parseFailed`）・key 一覧を返り値へ載せ、呼出元が args 解決の成否を机上でなく**値で**一次監査する（§3「呼び出しの2系統」の `receivedArgs` 一次監査と同じ流儀）。
+
+実装はここへ転記しない（転記でなく参照）: **canonical snippet SSOT = `workflows/lib/args-preamble.snippet.js`**（`//SCARGS_BLOCK_START〜END` を verbatim 複製・WF 固有の必須 args は block 直前 `REQUIRED_ARGS` + `meta.requiredArgs` の二面宣言）／ **機械 gate = `scripts/scribe-wf-args-lint.sh`**（挙動 probe〔病的 args で throw + `agentCalls=0`〕+ SCARGS block の sha256 byte-pin・rc 3 値〔0 合格 / 1 違反 / 2 判定不能〕・rc=2 を rc=0 へ丸めない・teeth = `tests/wf-args-lint.bats`。実体 = bd sc-4t3t・PR#153）。
+
+**呼出元規律（admin / orchestrator・既存規律「args 受け取り型 WF は起動直後に識別子を log する」への additive 接続）**: log を出させるだけで終えず**読む**——起動後 60 秒以内に最初の narrator 行で識別子と **args 解決を確認**し、`undefined` / `[undefined]` を検知したら**即停止**する（Workflow run は TaskStop か `/workflows` の stop・止まらなければ手段を探す前に script を直す）。**resume（`resumeFromRunId`）は args を復元しない**＝初回と同じ args を明示再送する（再送忘れは (b) の fail-fast が 0 agent・7ms で即死させ安価に露見する＝設計どおりの捕捉・folio 実測 2026-08-04・doobidoo `ca761464`）。args 経路の優先順位は 3 段: **(1) 凍結骨格の再利用 → (2) args を渡さない（固有物を script へ直接埋め込む） → (3) 渡すなら本プリアンブル必須**。
+
 **consult / needs-user pre-bake fan-out（session 級）**: 上表・上記は WF agent のパターン。これと別に、人間判断待ちの **needs-user タスクで相互独立な決定軸（facet）が複数（≥2）あるとき**、admin が回す dynamic Workflow（`workflows/needs-user-prebake.workflow.js`）が各 facet を **並列 read-only agent** で pre-bake 分析（現状調査〔read-only〕→ 決定木 → 選択肢 + トレードオフ → admin 起票候補）し、opus が単一の構造化 brief へ統合して admin に返す（WF は grill しない・graph を触らない・doobidoo 保存もしない）。grill〔対話〕は別主体 ＝ admin が brief を `--context` で渡して spawn する **grill-consult** が **ユーザーと対話 grill** し、確定した決定を own grill-issue の **bd notes** へ handoff する（**pre-bake〔生成〕= WF agent / grill〔対話〕= grill-consult** と別主体に分かれ、自己 pre-bake を誤帰属する主体が消えて旧 F2 が構造解消する）。いつ選ぶか = 1 つの needs-user issue 内に相互独立な決定軸（facet）が ≥2 あるとき（1 facet なら admin インラインで足り fan-out 不要）。手順 SSOT = `protocol.md` §7（dogfood 実証済み: sc-in9）。
 
 > 一次出典: Workflow tool 方法論（quality patterns / composing patterns / pipeline vs barrier）/ `~/.claude/workflows/cell-quality.workflow.js`（凍結された適用形）。
@@ -202,5 +212,6 @@ dynamic workflow の各 agent への model/effort 割り当ては **本書 §1.1
 | 本書 §1.1「effort ルーティング」 | WF agent 段別 model/effort 割り当ての**一次 SSOT**（sc-41b で確定・global 配布物側の縮退も land 済〔uns main `3b31bd0`〕・§4 はここへの内部 pointer） |
 | scribe-design.md §18 | D1-D7 の設計 why（本書は運用 how を担う） |
 | bd `sc-von0` / `protocol.md` §6 / `cc-session/scripts/cld` | §2「WF agent への出力 cap 規律」の出所（cgroup OOM で WF が痕跡なく消えた admin 実測・oom-kill oracle の**一次 SSOT は protocol §6**・上限導出の**実装 SSOT は cld の定数ブロック**） |
+| bd `sc-irkr` ← courier `orch-hoyj` / bd `sc-4t3t` | §2「args 必須プリアンブル」の出所（7 例目事故の実測・規約本文は本書 §2 が SSOT。実体 = snippet `workflows/lib/args-preamble.snippet.js`・lint `scripts/scribe-wf-args-lint.sh`・teeth `tests/wf-args-lint.bats`〔PR#153〕・呼出元規律の resume 実測 = doobidoo `ca761464`） |
 
 > 方法論の細部に疑義が出たら、本書ではなく上記の一次 SSOT（doobidoo 原典・Workflow tool・cell-quality.workflow.js・WF agent 段別 model/effort は本書 §1.1）を確認すること（本書は判断の方法論を蓄積する庫であって、実体の複製ではない）。
